@@ -8,9 +8,16 @@
   <strong>DeepSeek-V4-Flash inference for AMD Strix Halo</strong>
 </p>
 
-Ember is a C inference server for DeepSeek-V4-Flash on AMD Strix Halo
-(`gfx1151`). It provides OpenAI Chat Completions, OpenAI Responses, Anthropic
-Messages, and legacy Completions APIs on one local endpoint.
+> [!IMPORTANT]
+> **Ember is designed exclusively for AMD Strix Halo (`gfx1151`).** It is an
+> intentionally focused engine for one GPU architecture and one model family,
+> allowing the entire stack to be tuned for the best possible performance on
+> that platform. It is not a general-purpose inference engine and does not
+> support other GPUs.
+
+Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
+Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
+on one local endpoint.
 
 ## Requirements
 
