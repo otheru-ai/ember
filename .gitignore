@@ -1,0 +1,14 @@
+/build/
+*.o
+*.a
+compile_commands.json
+ember-dflash
+build-rocm/
+ember-dflash
+*.o
+__pycache__/
+*.py[cod]
+/models/
+/cache/
+/reports/
+.env

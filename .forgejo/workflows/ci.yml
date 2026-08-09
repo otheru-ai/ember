@@ -1,0 +1,162 @@
+# Ember CI — Forgejo Actions (GitHub Actions-compatible syntax).
+#
+# Scope: the GPU-free half of the project. Everything here runs on a plain
+# x86-64 container with no ROCm, no GPU and no model weights — which is exactly
+# what `cmake -S . -B build && ctest` covers locally. The separate container
+# workflow builds the ROCm `dev` stage and minimal `release` image without a
+# GPU. Runtime validation still needs a gfx1151 host and model weights.
+#
+# Runner: needs one Forgejo runner with the `docker` label. If yours registered
+# under a different label (e.g. `ubuntu-latest`), change `runs-on` below —
+# `forgejo-runner list` on the runner host shows the labels it offers.
+#
+# Jobs are ordered cheapest-first so an obvious break reports in seconds rather
+# than after a coverage run.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  invariants:
+    # Catches the two failure modes a compiler cannot: a src/ file added to
+    # only one of the two hand-maintained CMake source lists (cost one fix
+    # commit already, d8ace73 — the ROCm build is where it bites, and no runner
+    # can build that), and a test that compiles but was never registered with
+    # ctest, which reads as coverage that does not exist.
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check repo invariants
+        run: python3 ci/check_invariants.py
+
+  build-test:
+    # The gate for main: strict warnings as errors, both build types.
+    # Debug matters independently of Release — the assertions and the different
+    # inlining reach code paths -O3 folds away.
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake python3
+      - name: Configure (EMBER_STRICT=ON)
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DEMBER_STRICT=ON
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+  sanitizers:
+    # ASan + UBSan + LeakSanitizer over the whole suite. The server is a
+    # long-lived process holding a ~918 MB arena and lockless per-worker
+    # singletons; a leak or a use-after-free surfaces in production as slow
+    # drift rather than a crash, so this is the job that earns its keep.
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake python3
+      - name: Configure
+        run: |
+          cmake -S . -B build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build-asan -j"$(nproc)"
+      - name: Test under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-asan --output-on-failure --timeout 300
+
+  analyzer:
+    # Static analysis, REPORT-ONLY on purpose.
+    #
+    # -fanalyzer is GCC's symbolic-execution pass; it finds leak / null-deref
+    # paths the tests never reach. It currently reports 4 findings on src/
+    # (2 -Wanalyzer-null-argument in buf.h, 2 -Wanalyzer-malloc-leak in gguf.c
+    # and tool_memory.c). All 4 look like false positives — the analyzer cannot
+    # model ember_buf_fatal()'s abort-on-OOM contract, nor gguf_free()'s
+    # incremental population — but they have not been formally triaged, so
+    # gating here would make CI red on day one for no defect.
+    #
+    # Triage those 4, add inline suppressions with a reason, then flip both
+    # steps to gating by dropping `|| true` and restoring --error-exitcode=1.
+    # The step count is asserted so a NEW finding is visible in the log even
+    # while the job stays green.
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake python3 cppcheck
+      - name: GCC analyzer (report-only)
+        run: |
+          for f in src/common/*.c src/model/*.c src/server/*.c src/backend/backend_stub.c; do
+            gcc -fanalyzer -c -o /dev/null -std=c11 -Wall -Wextra \
+                -Isrc -D_GNU_SOURCE "$f" 2>&1 || true
+          done | tee analyzer.log
+          echo "::notice::gcc -fanalyzer findings: $(grep -c 'warning:' analyzer.log || true) (baseline 4)"
+      - name: cppcheck (report-only)
+        run: |
+          cppcheck --enable=warning,portability --inline-suppr --std=c11 \
+                   --suppress=missingIncludeSystem \
+                   -I src src/common src/model src/server \
+                   src/backend/backend_stub.c 2>&1 | tee cppcheck.log || true
+          echo "::notice::cppcheck findings: $(grep -c '\](error|warning)' cppcheck.log || true)"
+
+  coverage:
+    # Per-file line-coverage ratchet. An aggregate percentage would let a new
+    # untested 500-line module land unnoticed; ci/coverage_floors.json pins each
+    # file individually and the ratchet only moves up.
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake python3
+      - name: Configure with coverage
+        run: |
+          cmake -S . -B build-cov \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="--coverage -O0 -g" \
+            -DCMAKE_CXX_FLAGS="--coverage -O0 -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+      - name: Build
+        run: cmake --build build-cov -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build-cov --output-on-failure --timeout 300
+      - name: Enforce coverage floors
+        run: python3 ci/coverage.py --build build-cov

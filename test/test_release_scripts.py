@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""GPU-free contract tests for container and operator scripts."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
+COLLECT_RUNTIME = ROOT / "docker" / "collect-runtime.sh"
+DOCKERFILE = ROOT / "docker" / "Dockerfile"
+PREFLIGHT = ROOT / "scripts" / "preflight.sh"
+SMOKE = ROOT / "scripts" / "smoke_test.sh"
+
+
+class ReleaseScriptTests(unittest.TestCase):
+    def test_default_model_is_immutably_pinned(self) -> None:
+        script = ENTRYPOINT.read_text()
+        self.assertIn("/resolve/$revision/$file", script)
+        self.assertNotIn("/resolve/main/$file", script)
+        self.assertIn(
+            "18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed",
+            script,
+        )
+
+    def test_shell_syntax(self) -> None:
+        for script in (ENTRYPOINT, COLLECT_RUNTIME, PREFLIGHT, SMOKE):
+            subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_container_targets_separate_toolchain_from_runtime(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn("AS dev", dockerfile)
+        self.assertIn("AS release", dockerfile)
+        self.assertGreaterEqual(dockerfile.count("@sha256:"), 2)
+        release = dockerfile.split("AS release", 1)[1]
+        self.assertNotIn("build-essential", release)
+        self.assertNotIn("cmake --build", release)
+        self.assertIn("COPY --from=dev /ember-runtime/ /", release)
+
+    def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(
+                ["bash", str(COLLECT_RUNTIME), directory, "/bin/echo"],
+                check=True,
+            )
+            self.assertTrue((pathlib.Path(directory) / "bin" / "echo").is_file())
+            copied = [path for path in pathlib.Path(directory).rglob("*") if path.is_file()]
+            self.assertGreater(len(copied), 1)
+
+    def test_entrypoint_verifies_model_and_forwards_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = pathlib.Path(directory) / "model.gguf"
+            model.write_bytes(b"release-test-model")
+            digest = hashlib.sha256(model.read_bytes()).hexdigest()
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL": str(model),
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_MODEL_SHA256": digest,
+                "EMBER_SERVER_BIN": "/bin/echo",
+                "EMBER_KV_CACHE_DIR": directory,
+                "EMBER_PORT": "18080",
+            }
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT), "--ctx", "42"],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("-m " + str(model), result.stdout)
+            self.assertIn("--port 18080 --ctx 42", result.stdout)
+
+    def test_entrypoint_rejects_wrong_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = pathlib.Path(directory) / "model.gguf"
+            model.write_bytes(b"tampered")
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL": str(model),
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_MODEL_SHA256": "0" * 64,
+                "EMBER_SERVER_BIN": "/bin/true",
+            }
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 78)
+            self.assertIn("SHA-256 mismatch", result.stderr)
+
+    def test_custom_model_can_explicitly_disable_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = pathlib.Path(directory) / "local.gguf"
+            model.write_bytes(b"local-development-model")
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL": str(model),
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_MODEL_SHA256": "",
+                "EMBER_SERVER_BIN": "/bin/true",
+            }
+            subprocess.run(["bash", str(ENTRYPOINT)], env=env, check=True)
+
+    def test_entrypoint_preflight_mode_needs_no_model(self) -> None:
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT)],
+            env=os.environ
+            | {"EMBER_SKIP_DEVICE_CHECK": "1", "EMBER_PREFLIGHT_ONLY": "1"},
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn("preflight passed", result.stdout)
+
+    def test_smoke_test_checks_read_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fake_curl = pathlib.Path(directory) / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"${*: -1}\" in\n"
+                "  */health) printf '{\"status\":\"ok\"}\\n' ;;\n"
+                "  */status) printf '{\"busy\":false}\\n' ;;\n"
+                "  */v1/models) printf '{\"object\":\"list\",\"data\":[{\"id\":\"deepseek-v4-flash\"}]}\\n' ;;\n"
+                "  *) exit 22 ;;\n"
+                "esac\n"
+            )
+            fake_curl.chmod(0o755)
+            env = os.environ | {"PATH": directory + os.pathsep + os.environ["PATH"]}
+            result = subprocess.run(
+                ["bash", str(SMOKE)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("smoke test passed", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,78 @@
+# Build and publish Ember's minimal release image. The `release` target builds
+# through the full-toolchain `dev` stage, so this one job validates both image
+# contracts without requiring a GPU. Use a dedicated high-disk host runner;
+# target-hardware certification is a separate gfx1151 gate.
+name: Container
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  release-image:
+    runs-on: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate registry configuration
+        env:
+          REGISTRY: ${{ vars.EMBER_REGISTRY }}
+          IMAGE_NAME: ${{ vars.EMBER_IMAGE }}
+        run: |
+          test -n "$REGISTRY" || { echo 'Set repository variable EMBER_REGISTRY'; exit 1; }
+          test -n "$IMAGE_NAME" || { echo 'Set repository variable EMBER_IMAGE'; exit 1; }
+
+      - name: Log in to registry
+        env:
+          REGISTRY: ${{ vars.EMBER_REGISTRY }}
+          USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: echo "$TOKEN" | docker login "$REGISTRY" --username "$USERNAME" --password-stdin
+
+      - name: Create Buildx builder
+        run: |
+          docker buildx inspect ember-release >/dev/null 2>&1 || \
+            docker buildx create --name ember-release --driver docker-container
+          docker buildx use ember-release
+          docker buildx inspect --bootstrap
+
+      - name: Build and publish minimal release image
+        env:
+          REGISTRY: ${{ vars.EMBER_REGISTRY }}
+          IMAGE_NAME: ${{ vars.EMBER_IMAGE }}
+        run: |
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          project_version="$(tr -d '\n' < VERSION)"
+          printf '%s\n' "$project_version" | grep -Eq \
+            '^[0-9]{4}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])$' || {
+              echo "VERSION must use unpadded YEAR.MONTH.DAY: $project_version"
+              exit 1
+            }
+          case "${GITHUB_REF:-}" in
+            refs/tags/*)
+              expected_tag="v$project_version"
+              test "$GITHUB_REF_NAME" = "$expected_tag" || {
+                echo "Release tag $GITHUB_REF_NAME does not match VERSION ($expected_tag)"
+                exit 1
+              }
+              version="$project_version"
+              ;;
+            *) version="dev-$short_sha" ;;
+          esac
+          image="$REGISTRY/$IMAGE_NAME"
+          docker buildx build \
+            --platform linux/amd64 \
+            --target release \
+            --build-arg EMBER_VERSION="$version" \
+            --build-arg EMBER_VCS_REF="$GITHUB_SHA" \
+            --tag "$image:$version" \
+            --tag "$image:sha-$short_sha" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file image-metadata.json \
+            --output type=registry,compression=gzip,compression-level=9,force-compression=true \
+            -f docker/Dockerfile .
+
+      - name: Report immutable digest
+        run: python3 -c 'import json; d=json.load(open("image-metadata.json")); print(d.get("containerimage.digest", d))'

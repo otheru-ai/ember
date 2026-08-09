@@ -1,0 +1,73 @@
+{
+  "title": "DeepSeek V4 Flash 0731 ROCMFP2 quantization report",
+  "upstream": {
+    "name": "deepseek-ai/DeepSeek-V4-Flash",
+    "fixture": "Dwarfstar data/flash official continuations"
+  },
+  "reference": {
+    "name": "0731 abliterated native-MXFP4/BF16 quantization source",
+    "artifact": "models/DeepSeek-V4-Flash-source.gguf",
+    "sha256": "replace-after-hashing"
+  },
+  "quant": {
+    "name": "ROCMFP2 routed experts with Q8/F16 sensitive tensors",
+    "artifact": "/models/model.gguf",
+    "sha256": "replace-after-hashing",
+    "importance_matrix": "DeepSeek-V4-Flash-0731-chat-v2-routed-moe-ds4-online-ox-ox.dat",
+    "importance_matrix_sha256": "replace-after-hashing"
+  },
+  "evaluation": {
+    "chat_template": "Unsloth improved DeepSeek V4 template",
+    "sampling": "temperature=0 for deterministic replay",
+    "continuation_corpus": "100 frozen official DeepSeek V4 Flash continuations",
+    "behavioral_cases": 15,
+    "logit_context_tokens": 64,
+    "logit_chunks": 8,
+    "engine": "record exact scorer, quantizer, and Ember revisions here"
+  },
+  "gates": [
+    {
+      "label": "Mean full-logit KL divergence",
+      "metric": "distribution.mean_kld",
+      "op": "<=",
+      "value": 0.2
+    },
+    {
+      "label": "99.9th-percentile KL divergence",
+      "metric": "distribution.p99_9_kld",
+      "op": "<=",
+      "value": 2.0
+    },
+    {
+      "label": "Same top-token probability",
+      "metric": "distribution.same_top_probability_pct",
+      "op": ">=",
+      "value": 80.0
+    },
+    {
+      "label": "Quant behavior replay pass rate",
+      "metric": "behavior.quant.success_rate",
+      "op": ">=",
+      "value": 0.9
+    },
+    {
+      "label": "Quant raw-DSML leak rate",
+      "metric": "behavior.quant.dsml_leak_detected_rate",
+      "op": "<=",
+      "value": 0.0
+    },
+    {
+      "label": "Quant repetition detection rate",
+      "metric": "behavior.quant.repetition_detected_rate",
+      "op": "<=",
+      "value": 0.05
+    }
+  ],
+  "limitations": [
+    "The quantization source is abliterated, so upstream-to-source changes are not quantization loss.",
+    "A short frozen suite cannot prove reliability over every multi-hour agent trajectory."
+  ],
+  "notes": [
+    "Replace every placeholder and record artifact hashes before publishing."
+  ]
+}

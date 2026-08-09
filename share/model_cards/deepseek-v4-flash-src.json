@@ -1,0 +1,25 @@
+{
+  "name": "DeepSeek V4 Flash",
+  "source": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash",
+  "verified_at": "2026-07-24",
+  "max_tokens": 16384,
+  "complex_problem_max_tokens": 32768,
+  "hard_limit_reply_budget": 1024,
+  "thinking_terminator_hint": "Considering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n",
+  "sampling": {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 40,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "repetition_penalty": 1.0
+  },
+  "reasoning_effort_tiers": {
+    "low": 768,
+    "medium": 8192,
+    "high": 16384,
+    "x-high": 24576,
+    "max": 32768
+  },
+  "notes": "hard_limit_reply_budget raised 512->1024 and thinking_terminator_hint ADDED (2026-07-24): with an empty hint the force-close injected only a bare </think>, and DeepSeek-V4-Flash frequently emitted EOS with empty content afterward, so agent gateway surfaced the reasoning_content to the channel (thinking leaked to Telegram). The Qwen3-style directive + </think>\\n\\n reliably induces a visible answer after force-close. reasoning_effort_tiers.low lowered 4096->768 (2026-07-29): the model spends its whole tier allowance every turn, so low otherwise costs several minutes for a short useful answer; raise reasoning_effort per request when a task earns it. temp 0.6/top_p 0.95 are the DeepSeek-recommended values and production now uses them: immediate tool-result continuations force target AR, and contexts above the DSpark verification ceiling cannot speculate, so greedy paid a repetition/coherence cost without receiving a speculative benefit on the failing agent gateway path."
+}

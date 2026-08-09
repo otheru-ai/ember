@@ -1,0 +1,9 @@
+.git
+build
+build-*
+models
+cache
+reports
+*.gguf
+*.dat
+__pycache__

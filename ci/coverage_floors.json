@@ -1,0 +1,23 @@
+{
+  "src/backend/backend_stub.c": 74.2,
+  "src/common/buf.h": 84.0,
+  "src/common/json.c": 92.3,
+  "src/common/json_util.h": 75.7,
+  "src/common/utf8.h": 94.5,
+  "src/model/chat_template.c": 90.5,
+  "src/model/continuation.c": 86.6,
+  "src/model/dsml_decode.c": 90.3,
+  "src/model/gguf.c": 30.4,
+  "src/model/kv_cache.c": 89.4,
+  "src/model/model_card.c": 99.5,
+  "src/model/tool_memory.c": 84.0,
+  "src/model/tool_parser.c": 86.3,
+  "src/model/tool_schema.c": 87.2,
+  "src/server/api_adapters.c": 86.0,
+  "src/server/background_gate.c": 99.5,
+  "src/server/chat_api.c": 91.6,
+  "src/server/compaction.c": 88.5,
+  "src/server/http.c": 82.6,
+  "src/server/main.c": 63.0,
+  "src/server/sse.c": 94.6
+}
