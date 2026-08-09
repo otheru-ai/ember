@@ -206,15 +206,30 @@ static int loop_calls_for(const char *body, const char **tool) {
     return calls;
 }
 
-// The repeated call and the message SHAPE below are the production loop of
-// 2026-08-08, captured as /tmp/capture/live-{20,23,24,25,26}-req.json on the
-// a production capture: the model re-emitted this byte-identical web_search call on nine
+static int lease_for(const char *body, const char **tool) {
+    ember_json *v = ember_json_parse(body);
+    ember_chat_request req;
+    if (!v || !ember_chat_request_parse(v, &req)) {
+        if (v) ember_json_free(v);
+        return -1;
+    }
+    const char *name = NULL;
+    int lease = ember_chat_request_progress_lease(&req, &name);
+    if (tool) *tool = name ? strdup(name) : NULL;
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+    return lease;
+}
+
+// The repeated call and the message SHAPE below are the deployed loop of
+// represented by an internal regression corpus: the model re-emitted this
+// byte-identical web_search call on nine
 // consecutive tool-calling turns. Result CONTENTS are representative rather
 // than verbatim -- the real ones ran to 26,301 bytes and two of them shared a
 // 26,107-character prefix, so committing them would add ~100 KB of search
 // output whose text is irrelevant. What is reproduced exactly is the property
 // under test: which results are byte-identical to each other and which are not,
-// and where the two user turns fall. Measured against the real captures, the
+// and where the two user turns fall. Measured against the regression fixtures, the
 // strict signal reported 0/3/0/0/0 and this one reports 5/6/7/8/9.
 // Leading commas, and every body opens with HEAD's user turn: a trailing comma
 // before "]}" is invalid JSON and makes ember_chat_request_parse fail, which
@@ -229,11 +244,207 @@ static int loop_calls_for(const char *body, const char **tool) {
 #define RES(id, body)                                                         \
     ",{\"role\":\"tool\",\"tool_call_id\":\"" id "\",\"content\":\"" body "\"}"
 
+// Progress lease. The shape is a captured regression: the model
+// re-emitted a DIFFERENT terminal command every round and the harness answered
+// each one with a byte-identical refusal, twelve times, with two injected
+// "continue" turns in the middle. Both call-keyed signals are near-blind to it
+// (measured on the regression fixture: rounds=0, calls=2), which is why this exists.
+#define WALL "{\\\"error\\\": \\\"Background review denied non-whitelisted "  \
+             "tool: terminal. Only memory/skill tools are allowed.\\\"}"
+#define VCALL(id, cmd)                                                        \
+    ",{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"" id "\","            \
+      "\"type\":\"function\",\"function\":{\"name\":\"terminal\","            \
+      "\"arguments\":\"{\\\"command\\\":\\\"" cmd "\\\"}\"}}]}"
+#define WALLED(id, cmd) VCALL(id, cmd) RES(id, WALL)
+
+static void test_progress_lease(void) {
+    const char *deployment_wall =
+        HEAD
+        WALLED("w1",  "python3 sync.py")
+        WALLED("w2",  "python3 sync.py --retry")
+        ",{\"role\":\"user\",\"content\":\"[System] continue\"}"
+        WALLED("w3",  "python3 sync2.py")
+        WALLED("w4",  "# corrected node names\\\\nsync3.py")
+        WALLED("w5",  "# corrected node names v2")
+        WALLED("w6",  "# corrected node names v3")
+        WALLED("w7",  "# corrected node names v4")
+        WALLED("w8",  "# corrected node names v5")
+        WALLED("w9",  "# corrected node names v6")
+        WALLED("w10", "# corrected node names v7")
+        ",{\"role\":\"user\",\"content\":\"[System] continue\"}"
+        WALLED("w11", "# corrected node names v8")
+        WALLED("w12", "# corrected node names v9")
+        WALLED("w13", "# corrected node names v10")
+        TAIL;
+    const char *tool = NULL;
+    // Thirteen rounds, the first of which introduced the refusal: twelve
+    // rounds after it returned nothing new.
+    CHECK(lease_for(deployment_wall, &tool) == 12,
+          "progress lease counts the twelve rounds that returned nothing new");
+    CHECK(tool && !strcmp(tool, "terminal"),
+          "progress lease is labelled with the tool behind the stale result");
+    free((void *)tool);
+    // The point of the signal: the call-keyed pair cannot see this history.
+    CHECK(loop_calls_for(deployment_wall, NULL) == 0,
+          "call-signature signal is blind to a wall reached by varying calls");
+    CHECK(loop_rounds_for(deployment_wall, NULL) == 0,
+          "strict round signal is blind to a wall reached by varying calls");
+
+    // A novel result is progress and clears the lease outright.
+    CHECK(lease_for(HEAD WALLED("a", "one") WALLED("b", "two")
+                    VCALL("c", "three") RES("c", "actual output")
+                    TAIL, NULL) == 0,
+          "one novel result resets the lease to zero");
+
+    // Renewal rules, each isolated so a regression names its own cause.
+    CHECK(lease_for(HEAD WALLED("a", "one") WALLED("b", "two")
+                    ",{\"role\":\"assistant\",\"content\":\"Here is why.\"}"
+                    WALLED("c", "three")
+                    TAIL, NULL) == 1,
+          "an assistant turn that spoke to the client renews the lease");
+    CHECK(lease_for(HEAD WALLED("a", "one")
+                    ",{\"role\":\"assistant\",\"content\":\"   \\\\n \"}"
+                    WALLED("b", "two")
+                    TAIL, NULL) == 1,
+          "a whitespace-only assistant turn does not renew");
+    CHECK(lease_for(HEAD WALLED("a", "one") WALLED("b", "two")
+                    ",{\"role\":\"user\",\"content\":\"continue\"}"
+                    WALLED("c", "three")
+                    TAIL, NULL) == 2,
+          "a user turn does not renew: deployed loops survive one");
+    CHECK(lease_for(HEAD WALLED("a", "one")
+                    ",{\"role\":\"assistant\",\"content\":\"Let me retry.\","
+                      "\"tool_calls\":[{\"id\":\"b\",\"type\":\"function\","
+                      "\"function\":{\"name\":\"terminal\","
+                      "\"arguments\":\"{\\\"command\\\":\\\"two\\\"}\"}}]}"
+                    RES("b", WALL)
+                    TAIL, NULL) == 1,
+          "prose alongside a call is narration, not a completion, and does "
+          "not renew");
+
+    // An open trailing round -- the turn being served right now -- has no
+    // result to judge and must neither count nor clear.
+    CHECK(lease_for(HEAD WALLED("a", "one") WALLED("b", "two")
+                    VCALL("c", "three")
+                    TAIL, NULL) == 1,
+          "a call still awaiting its result is not evaluable");
+
+    // The key is (tool, bytes): the same bytes from a different tool is a new
+    // effect, and different bytes from the same tool is a new effect.
+    CHECK(lease_for(HEAD WALLED("a", "one")
+                    ",{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"b\","
+                      "\"type\":\"function\",\"function\":{\"name\":\"patch\","
+                      "\"arguments\":\"{}\"}}]}"
+                    RES("b", WALL)
+                    TAIL, NULL) == 0,
+          "identical bytes from a different tool are a novel effect");
+    // A result carrying its own repeat counter is byte-novel every round. This
+    // is a KNOWN limitation, measured on a captured regression: pinned by a test so
+    // it cannot be mistaken for a regression later.
+    CHECK(lease_for(HEAD
+                    VCALL("a", "read") RES("a", "BLOCKED: called 3 times")
+                    VCALL("b", "read") RES("b", "BLOCKED: called 4 times")
+                    VCALL("c", "read") RES("c", "BLOCKED: called 5 times")
+                    TAIL, NULL) == 0,
+          "a counter inside the result defeats the lease (known limitation)");
+
+    // Multi-round cycles, which both call-keyed signals document as out of
+    // scope: the lease compares against the WHOLE history, not the tail run.
+    const char *abab =
+        HEAD
+        VCALL("a1", "A") RES("a1", "resA")
+        VCALL("b1", "B") RES("b1", "resB")
+        VCALL("a2", "A") RES("a2", "resA")
+        VCALL("b2", "B") RES("b2", "resB")
+        VCALL("a3", "A") RES("a3", "resA")
+        TAIL;
+    CHECK(lease_for(abab, NULL) == 3, "an A/B/A/B cycle accrues lease");
+    CHECK(loop_calls_for(abab, NULL) == 0,
+          "the call-signature signal still does not cover A/B/A/B");
+
+    // Parallel calls in one round: novel if ANY leg brought something back.
+    CHECK(lease_for(HEAD WALLED("a", "one")
+                    ",{\"role\":\"assistant\",\"tool_calls\":["
+                      "{\"id\":\"p1\",\"type\":\"function\",\"function\":"
+                        "{\"name\":\"terminal\",\"arguments\":\"{}\"}},"
+                      "{\"id\":\"p2\",\"type\":\"function\",\"function\":"
+                        "{\"name\":\"terminal\",\"arguments\":\"{}\"}}]}"
+                    RES("p1", WALL) RES("p2", "something new")
+                    TAIL, NULL) == 0,
+          "a round is novel when any one of its parallel legs is");
+
+    // A result identified by `name` rather than by tool_call_id: legacy
+    // function-role histories carry no ids at all.
+    CHECK(lease_for("{\"messages\":[{\"role\":\"user\",\"content\":\"go\"}"
+                    ",{\"role\":\"assistant\",\"tool_calls\":[{\"function\":"
+                      "{\"name\":\"terminal\",\"arguments\":\"{}\"}}]}"
+                    ",{\"role\":\"tool\",\"name\":\"terminal\","
+                      "\"content\":\"same\"}"
+                    ",{\"role\":\"assistant\",\"tool_calls\":[{\"function\":"
+                      "{\"name\":\"terminal\",\"arguments\":\"{}\"}}]}"
+                    ",{\"role\":\"tool\",\"name\":\"terminal\","
+                      "\"content\":\"same\"}"
+                    TAIL, NULL) == 1,
+          "results are keyed by name when the history carries no call ids");
+
+    // Nothing to say about a history with no completed tool round.
+    CHECK(lease_for(HEAD ",{\"role\":\"assistant\",\"content\":\"hello\"}"
+                    TAIL, NULL) == 0,
+          "a conversation with no tool rounds has no lease");
+
+    // ── trailing harness annotations ────────────────────────────────────
+    // A captured regression. The tool
+    // PAYLOAD is byte-identical across three rounds; what differs is the loop
+    // warning an agent harness appends to it, which carries an incrementing counter. The
+    // client detects the repeat and destroys the evidence in the act of
+    // reporting it. 43.7% of deployment tool results carry one of these.
+#define WARN(n) "\\n\\n[Tool loop warning: exact_success_no_progress_warning; " \
+                "count=" #n "; terminal returned the same successful result "   \
+                #n " time(s).]"
+    const char *annotated =
+        HEAD
+        VCALL("a", "curl invoices/0004") RES("a", "{invoice 0004}" WARN(1))
+        VCALL("b", "curl invoices/0004") RES("b", "{invoice 0004}" WARN(2))
+        VCALL("c", "curl invoices/0004") RES("c", "{invoice 0004}" WARN(3))
+        TAIL;
+    CHECK(lease_for(annotated, NULL) == 2,
+          "a trailing loop-warning counter does not make a result novel");
+
+    // The marker must start its own block. Inline text that happens to contain
+    // it is the tool's own output and may not truncate the payload.
+    CHECK(lease_for(HEAD
+                    VCALL("a", "grep") RES("a", "saw [Tool loop warning: x] in log A")
+                    VCALL("b", "grep") RES("b", "saw [Tool loop warning: x] in log B")
+                    TAIL, NULL) == 0,
+          "an inline annotation marker does not truncate the payload");
+
+    // Both inline (own block) AND appended: the LAST occurrence is the real
+    // annotation. Taking the first would truncate the payload and make two
+    // genuinely different results compare equal.
+    CHECK(lease_for(HEAD
+                    VCALL("a", "cat")
+                      RES("a", "log:\\n\\n[Tool loop warning: quoted] alpha" WARN(1))
+                    VCALL("b", "cat")
+                      RES("b", "log:\\n\\n[Tool loop warning: quoted] beta" WARN(2))
+                    TAIL, NULL) == 0,
+          "the LAST annotation is trimmed, not the first");
+
+    // Out-of-band user messages ride on a tool result too, but they are new
+    // INPUT rather than metadata about a repeat. Trimming them would erase a
+    // real difference, so they are deliberately not in the table.
+    CHECK(lease_for(HEAD
+                    VCALL("a", "poll") RES("a", "idle\\n\\n[OUT-OF-BAND USER MESSAGE: ship it]")
+                    VCALL("b", "poll") RES("b", "idle\\n\\n[OUT-OF-BAND USER MESSAGE: stop]")
+                    TAIL, NULL) == 0,
+          "an out-of-band user message is payload, not a trimmed annotation");
+#undef WARN
+}
+
 static void test_tool_loop_call_signature_detector(void) {
     // Exactly the captured shape: three repeats, assistant prose, a user turn,
     // four more repeats ending in the guardrail blocker, prose, a second user
     // turn, then two more against results that differ only at their tail.
-    const char *production_loop =
+    const char *deployment_loop =
         HEAD
         // A DIFFERENT, earlier query -- the walk must stop here, not run away.
         ",{\"role\":\"assistant\",\"tool_calls\":["
@@ -260,8 +471,8 @@ static void test_tool_loop_call_signature_detector(void) {
         TAIL;
 
     const char *tool = NULL;
-    CHECK(loop_calls_for(production_loop, &tool) == 9,
-          "call-signature signal counts the nine repeated production calls");
+    CHECK(loop_calls_for(deployment_loop, &tool) == 9,
+          "call-signature signal counts the nine repeated deployment calls");
     CHECK(tool && !strcmp(tool, "web_search"),
           "call-signature signal is labelled with the repeated tool");
     free((void *)tool);
@@ -269,7 +480,7 @@ static void test_tool_loop_call_signature_detector(void) {
     // The regression guard. The strict signal must stay exactly as blind as it
     // was: this is the history it could not see, and widening it was NOT the
     // fix. Its final round pair has differing results, so it reports nothing.
-    CHECK(loop_rounds_for(production_loop, NULL) == 0,
+    CHECK(loop_rounds_for(deployment_loop, NULL) == 0,
           "strict round signal is unchanged by the call-signature signal");
 
     // Each suppressor in isolation, so a regression names its own cause.
@@ -459,6 +670,7 @@ int main(void) {
     test_continuation_only_requires_target_decode();
     test_tool_loop_detector();
     test_tool_loop_call_signature_detector();
+    test_progress_lease();
     test_reject_no_messages();
     test_reject_invalid_sampler_ranges();
     test_explicit_zero_penalty_overrides();

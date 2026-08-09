@@ -173,12 +173,15 @@ also checked for unambiguous markup, duplicate keys, tool-choice/parallel-call
 constraints, and recursive JSON-Schema conformance before any frame is emitted.
 
 Ember also deliberately has no fixed tool-round ceiling, matching ds4's
-`ds4_agent.c:8448`. `ember_chat_request_tool_loop_rounds()` derives only an
-additive full-history diagnostic from identical trailing ordered call sets and
-byte-identical results. It ignores call ids, never changes `tool_calls`/
-`tool_use`, never refuses generation, and never uses `/status` telemetry as
-cross-request detection state. Continuation-only histories and multi-round
-cycles are documented limitations.
+`ds4_agent.c:8448`. It derives additive full-history diagnostics from repeated
+call signatures, identical call/result rounds, and trailing tool rounds with no
+novel `(tool name, exact result)` effect. Reporting ignores call ids, never
+changes `tool_calls`/`tool_use`, never refuses generation, and never uses
+`/status` telemetry as cross-request detection state. The explicit exception is
+the opt-in `--auto-answer-after-loop`: it suppresses optional tools for one turn
+and adds a private plain-prose recovery instruction, but never overrides
+required tool choice. Continuation-only histories and multi-round cycles are
+documented limitations.
 
 ### `engine/` is a vendored fork — treat it as such
 

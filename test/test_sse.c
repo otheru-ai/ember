@@ -41,6 +41,27 @@ static char *stream_in_chunks(const char *full, size_t chunk_sz, bool has_tools,
     return ember_buf_take(&out);  // caller frees
 }
 
+// Same drive loop, but reports whether tool markup reached the client as
+// CONTENT instead of returning the wire bytes.
+static bool stream_markup_verdict(const char *full, size_t chunk_sz,
+                                  bool has_tools) {
+    ember_sse_stream st;
+    ember_sse_init(&st, "cc", "m", 1700000000, has_tools, false, false);
+    ember_buf out = {0}, acc = {0};
+    size_t total = strlen(full);
+    for (size_t i = 0; i < total; i += chunk_sz) {
+        size_t n = chunk_sz < total - i ? chunk_sz : total - i;
+        ember_buf_append(&acc, full + i, n);
+        ember_sse_update(&st, acc.ptr, acc.len, false, &out);
+    }
+    ember_sse_update(&st, acc.ptr, acc.len, true, &out);
+    const bool leaked = ember_sse_delivered_tool_markup(&st);
+    ember_sse_free(&st);
+    ember_buf_free(&acc);
+    ember_buf_free(&out);
+    return leaked;
+}
+
 // Extract the concatenated value of every delta.<field> from an SSE dump.
 // Crude but sufficient: finds "field":"…" and unescapes \n \" \\.
 static void collect_field(const char *sse, const char *field, ember_buf *dst) {
@@ -190,6 +211,7 @@ static void test_native_tool_id_is_registered(void);
 static void test_stop_precedes_tool(void);
 static void test_more_than_sixteen_tool_ids(void);
 static void test_usage_reports_prefill_policy(void);
+static void test_holdback_ignores_has_tools(void);
 static void test_tool_loop_terminal_report(void);
 
 
@@ -197,7 +219,7 @@ static void test_tool_loop_terminal_report(void);
 // sse.c buffers and re-splits precisely because a marker or codepoint split
 // across ANY number of chunks broke five different ways in the incremental
 // design it replaced. The strongest input for that is not a hand-written
-// marker but bytes production actually emitted: corrupted DSML lookalikes
+// marker but bytes deployment actually emitted: corrupted DSML lookalikes
 // (U+003F where U+FF5C belongs, names like tool_cards / tool_alls), a
 // fragmented shell string, and a genuine repetition loop.
 //
@@ -208,10 +230,10 @@ static void test_tool_loop_terminal_report(void);
 // text should be, reaches the user.
 static void test_real_degraded_output_survives_every_chunk_size(void) {
     const struct { const char *name; const char *text; } specimens[] = {
-        { "seq=1297 pseudo-marker",   REAL_PSEUDO_MARKER_1297 },
-        { "seq=136 pseudo-marker",    REAL_PSEUDO_MARKER_136  },
-        { "seq=130 fragmentation",    REAL_FRAGMENTATION_130  },
-        { "seq=81 repetition loop",   REAL_REPETITION_81      },
+        { "pseudo-marker A",   REAL_PSEUDO_MARKER_1297 },
+        { "pseudo-marker B",    REAL_PSEUDO_MARKER_136  },
+        { "fragmentation",    REAL_FRAGMENTATION_130  },
+        { "repetition loop",   REAL_REPETITION_81      },
     };
     for (size_t i = 0; i < sizeof(specimens) / sizeof(specimens[0]); i++) {
         const char *want = specimens[i].text;
@@ -231,8 +253,55 @@ static void test_real_degraded_output_survives_every_chunk_size(void) {
     }
 }
 
+// The tool-markup leak counter must describe what was SENT, not what was
+// generated. Before the fix it scanned the caller's raw accumulator, which
+// still holds the tool block that ember_text_safe_limit() correctly withheld
+// and the parser then consumed -- so it fired on every ordinary tool call:
+// Held-back parsed calls must not be counted as visible markup leaks.
+static void test_delivered_tool_markup_verdict(void) {
+    const char *real_call =
+        "Let me check.\n"
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"terminal\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"command\" string=\"true\">pwd"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+    // A malformed imitation with NO tool_calls opener: nothing recognises it,
+    // so it streams as text. This is the shape of a regression where repeated
+    // markers and sensitive tool arguments reached the user.
+    const char *orphan_markup =
+        "Here is the call I would make:\n"
+        "<?DSML?invoke name=\"skill_manage\">\n"
+        "<?DSML?parameter name=\"action\" string=\"true\">create</?DSML?parameter>";
+    const char *prose = "DSML is the markup this server parses. No markers here.";
+
+    const size_t sizes[] = {1, 2, 3, 5, 7, 11, 64};
+    bool call_clean = true, orphan_seen = true, prose_clean = true;
+    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        if (stream_markup_verdict(real_call, sizes[k], true))  call_clean = false;
+        if (!stream_markup_verdict(orphan_markup, sizes[k], true)) orphan_seen = false;
+        if (stream_markup_verdict(prose, sizes[k], true))      prose_clean = false;
+    }
+    CHECK(call_clean,
+          "an ordinary tool call does not count as delivered markup (#24)");
+    CHECK(orphan_seen,
+          "markup with no recognised opener IS delivered, and is counted");
+    CHECK(prose_clean, "prose that merely mentions DSML is not counted");
+
+    // has_tools must not change the verdict -- that gate was the #15 bug.
+    CHECK(stream_markup_verdict(orphan_markup, 5, false),
+          "delivered markup is counted whether or not tools were advertised");
+
+    // The shared predicate the buffered path uses must agree.
+    CHECK(!ember_text_has_tool_markup(prose) &&
+          ember_text_has_tool_markup(orphan_markup),
+          "ember_text_has_tool_markup agrees with the streaming verdict");
+}
+
 int main(void) {
     test_real_degraded_output_survives_every_chunk_size();
+    test_delivered_tool_markup_verdict();
     printf("ember sse tests\n");
     test_plain_content();
     test_split_emoji();
@@ -249,6 +318,7 @@ int main(void) {
     test_stop_precedes_tool();
     test_more_than_sixteen_tool_ids();
     test_usage_reports_prefill_policy();
+    test_holdback_ignores_has_tools();
     test_tool_loop_terminal_report();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
@@ -319,6 +389,36 @@ static void check_tool_loop_terminal_report(bool identical, const char *expect,
         ember_buf_free(&out);
         ember_buf_free(&acc);
         ember_sse_free(&st);
+    }
+}
+
+// A complete tool-start marker must never stream as content, EVEN when the
+// request advertised no tools. ember_text_safe_limit used to skip the search
+// when has_tools was false, on the assumption that no tools means no markers.
+// A turn whose tools had been withdrawn emitted a complete <?DSML?tool_calls>
+// block -- a supported syntax family -- with sensitive arguments. The
+// end-of-turn parse recognised and rejected the call, but the bytes were gone.
+static void test_holdback_ignores_has_tools(void) {
+    static const char *const MARKERS[] = {
+        "<?DSML?tool_calls>",                      // the deployment spelling
+        "<" PIPE "DSML" PIPE "tool_calls>",         // real U+FF5C
+        "<tool_calls>",                            // plain-XML degradation
+    };
+    for (size_t m = 0; m < sizeof(MARKERS) / sizeof(MARKERS[0]); ++m) {
+        char raw[512];
+        snprintf(raw, sizeof raw, "here you go:\n\n%s\n<invoke name=\"x\">",
+                 MARKERS[m]);
+        const size_t raw_len = strlen(raw);
+        const char *marker = strstr(raw, MARKERS[m]);
+        const size_t marker_at = (size_t)(marker - raw);
+        for (int has_tools = 0; has_tools <= 1; ++has_tools) {
+            for (int final = 0; final <= 1; ++final) {
+                size_t n = ember_text_safe_limit(raw, 0, raw_len,
+                                                 has_tools != 0, final != 0);
+                CHECK(n <= marker_at,
+                      "tool marker withheld from content regardless of has_tools");
+            }
+        }
     }
 }
 

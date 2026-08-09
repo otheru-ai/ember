@@ -119,11 +119,53 @@ const char *ember_find_tool_end(const char *s) {
 }
 
 // ─── content holdback (ds4 text_stream_safe_limit) ──────────────────────
+// Scanned per emitted slice. A marker split ACROSS two slices is not sought:
+// ember_text_safe_limit() never cuts inside a partial marker, test_sse.c fuzzes
+// every chunk size from 1 to prove it, and an overlap guarding that case was
+// removed after mutation testing showed nothing could exercise it.
+static bool slice_has_tool_markup(const char *s, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (s[i] != '<') continue;
+        size_t p = i + 1;
+        if (p < n && s[p] == '/') ++p;
+        if (p >= n || isalnum((unsigned char)s[p])) continue;
+        ++p;                                              // the delimiter byte
+        while (p < n && !isalnum((unsigned char)s[p])) ++p;   // multi-byte U+FF5C
+        if (n - p >= 4 && !memcmp(s + p, "DSML", 4)) return true;
+    }
+    return false;
+}
+
+bool ember_text_has_tool_markup(const char *s) {
+    return s && slice_has_tool_markup(s, strlen(s));
+}
+
+bool ember_sse_delivered_tool_markup(const ember_sse_stream *st) {
+    return st && st->delivered_tool_markup;
+}
+
 size_t ember_text_safe_limit(const char *raw, size_t start, size_t raw_len,
                              bool has_tools, bool final) {
     if (raw_len <= start) return raw_len;
     size_t limit = raw_len;
-    if (has_tools) {
+    // NOT gated on has_tools, deliberately. It used to be, on the assumption
+    // that a request advertising no tools cannot produce tool markup. That is
+    // false: a turn whose tools had been withdrawn mid-request emitted a complete
+    // <?DSML?tool_calls> block -- an explicitly supported syntax family, not a
+    // malformed imitation -- and because this holdback was skipped, its
+    // sensitive tool arguments streamed to the user as ordinary content.
+    //
+    // The end-of-turn parse (parse_executable_tool_calls) has never been gated
+    // on has_tools, so it DID recognise the call and reject it -- but by then
+    // the bytes were sent, and ember_sse_discard_tool_block had no tool_start
+    // to discard because this function never set one. Detection and parsing
+    // must agree on when markup is possible: always.
+    //
+    // Cost when no tools are advertised: one strstr per update over the
+    // trailing window, and up to 80 bytes of tail held until the final update.
+    // (void) on the parameter keeps the ABI and callers unchanged.
+    (void)has_tools;
+    {
         const char *tool = ember_find_tool_start(raw + start);
         if (tool) {
             limit = (size_t)(tool - raw);
@@ -247,6 +289,7 @@ void ember_sse_reset_attempt(ember_sse_stream *st,
         started_in_thinking ? EMBER_SSE_THINKING : EMBER_SSE_TEXT;
     st->emit_pos = 0;
     st->checked_think_prefix = false;
+    st->delivered_tool_markup = false;
     st->tool_start = 0;
     st->tool_idx = -1;
     st->tool_nparams = 0;
@@ -530,6 +573,10 @@ void ember_sse_update(ember_sse_stream *st, const char *raw, size_t raw_len,
             if (!st->sent_visible_content)
                 st->sent_visible_content =
                     slice_has_visible(raw + st->emit_pos, limit - st->emit_pos);
+            if (!st->delivered_tool_markup)
+                st->delivered_tool_markup =
+                    slice_has_tool_markup(raw + st->emit_pos,
+                                          limit - st->emit_pos);
             st->emit_pos = limit;
         }
         if (stop_complete) {
@@ -570,7 +617,7 @@ bool ember_sse_discard_tool_block(ember_sse_stream *st, size_t raw_len) {
     // Ember deliberately follows the chat path rather than ds4's Responses path
     // (responses_sse_finish_live:7192-7215), which flushes the suppressed bytes
     // as text. A rejected block can be contaminated -- ASCII-degraded DSML
-    // nested inside another call's argument is a real production shape, covered
+    // nested inside another call's argument is a real deployment shape, covered
     // by test_tool_safety_server -- and replaying it as assistant text would
     // hand a text-scanning consumer an executable-looking payload. Dropping it
     // keeps the validation guarantee while still not killing the turn.

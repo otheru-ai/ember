@@ -81,6 +81,11 @@ typedef struct {
     bool         sent_visible_content;  // a non-whitespace content byte reached
                                         // the client; see
                                         // ember_sse_delivered_visible()
+    bool         delivered_tool_markup; // a tool marker reached the client as
+                                        // CONTENT. Set at the emit site, so it
+                                        // describes what was sent rather than
+                                        // what was generated; see
+                                        // ember_sse_delivered_tool_markup()
     size_t       tool_start;      // offset in raw where a tool marker began
     // validation-gated tool-call emission state
     int          tool_idx;        // highest tool_call index started (-1 = none)
@@ -178,6 +183,28 @@ const char *ember_tool_parse_failure_finish(const char *finish);
 // valid call, which stays coherent. Whitespace-only content does not count
 // either: it renders as nothing.
 bool ember_sse_delivered_visible(const ember_sse_stream *st);
+
+// True when tool markup was emitted to the client as visible content.
+//
+// This must come from the stream, not from the caller's accumulator. The
+// accumulator holds everything the MODEL produced, including the tool block
+// that ember_text_safe_limit() deliberately held back and the parser then
+// consumed -- so scanning it reports a leak on every ordinary tool call.
+// A regression test verifies that held-back, parsed calls do not count as
+// markup delivered to the client.
+//
+// Set inside the content-emit path, which is the only place that knows what
+// actually went out. Reimplementing the holdback at the call site would
+// duplicate the state machine whose divergence caused the original leak.
+bool ember_sse_delivered_tool_markup(const ember_sse_stream *st);
+
+// True when `s` contains a DSML tool marker. DSML markers are special tokens
+// that get parsed, never detokenized, so what reaches a client as text is an
+// ASCII imitation (`<?DSML?...>`). Matches "<", an optional "/", one non-alnum
+// delimiter, then "DSML" -- which catches the pseudo spellings and the real
+// U+FF5C one without firing on prose that merely mentions DSML.
+// Exposed for the buffered response path, which holds the delivered string.
+bool ember_text_has_tool_markup(const char *s);
 
 // Emit the terminal chunk (finish_reason) + optional usage + `data: [DONE]`.
 void ember_sse_finish(ember_sse_stream *st, const char *finish_reason,

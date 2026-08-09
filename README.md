@@ -146,17 +146,21 @@ the prior Q3-down build, which is what closed the memory gap on a 128 GB box.
   ceiling retain their replay identity.
   ID-only post-tool continuations therefore survive restarts without allowing a
   tool id to replay a hidden or force-closed assistant trajectory.
-- **Agent progress signals** — long streaming prefills emit `: prefill`
+- **Agent progress and recovery** — long streaming prefills emit `: prefill`
   keepalives, responses report `cached_tokens`/`restored_prefix`, and the
   visible-output cycle guard reports `usage.backend.degenerate:true`. Ember does
   not impose a fixed tool-round ceiling: long-running agents may legitimately
   repeat polling or iterative actions, so cross-turn progress policy remains the
-  harness's responsibility. Instead, Ember derives a stateless trailing-history
-  diagnostic: after three repeats of the same ordered tool-call set (name +
-  normalized arguments) with byte-identical corresponding results, round four
-  carries additive `ember_tool_loop` metadata while retaining
-  `finish_reason:"tool_calls"` / `stop_reason:"tool_use"`. The same observation
-  is logged and retained under `/status.tool_loop`; it never refuses a call.
+  harness's responsibility. Instead, Ember derives stateless trailing-history
+  diagnostics for repeated call signatures, repeated call-and-result rounds,
+  and tool rounds that produce no novel `(tool name, exact result)` effect.
+  Reports retain `finish_reason:"tool_calls"` / `stop_reason:"tool_use"` and
+  appear in logs, response metadata, and `/status`. Empty visible turns,
+  backend-flagged degenerate turns, and tool markup delivered as text are also
+  counted. Optional `--auto-answer-after-loop` can suppress tools for one turn
+  after repeated calls and inject a plain-prose recovery instruction; it is
+  behavior-changing, stateless, never overrides required tool choice, and is
+  disabled by default.
 - **Sampling** — full surface threaded to the backend: `temperature`, `top_p`,
   `top_k`, **`min_p`** (added to lucebox's `SamplerCfg`), `seed`,
   `repetition_penalty` (+ window), `frequency_penalty`, `presence_penalty`.
@@ -292,8 +296,15 @@ the client sent, not the compacted size.
 --ds4-expert-top-k <n>    routed experts (default 4 — measured production
                           override; model/drafter metadata use 6)
 --default-temperature <t> override the model-card temperature (card/fallback 0.6)
---tool-loop-report <n> report after N identical call+result repeats (default 3;
+--tool-loop-report <n> report after N repeated call signatures or identical
+                       call+result rounds (default 8;
                        0 disables; reporting never stops a tool call)
+--no-progress-report <n>
+                       report after N tool rounds return no novel effect
+                       (default 8; 0 disables)
+--auto-answer-after-loop <n>
+                       suppress tools for one turn after >N identical trailing
+                       calls (default 0/off; never overrides required tools)
 --prefix-cache-slots <n>  in-memory KV snapshot slots (default 8 —
                           each holds live compressed rows plus fixed rolling state)
 --batch-sessions <n>      resident concurrent sessions (default 1; max 64).
@@ -322,6 +333,8 @@ corpus workflow, behavioral suite, provenance requirements, and release gates.
 
 Runtime env: `DFLASH_DS4_SPEC=1` + `DFLASH_DS4_DRAFT=<draft.gguf>` enable DSpark;
 `DFLASH_DS4_SPEC_SCHEDULER=0` disables its adaptive profitability scheduler.
+Compose users may set `EMBER_TOOL_LOOP_REPORT`, `EMBER_NO_PROGRESS_REPORT`, and
+`EMBER_AUTO_ANSWER_AFTER_LOOP` for the corresponding server flags.
 `--ds4-prefill exact` selects tokenwise reference prefill for quality evaluation;
 `sparse` remains the faster default and may change generated tokens.
 `dense` has a context ceiling of roughly 50k tokens (~53.5k at a 2048-token

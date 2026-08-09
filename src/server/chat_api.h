@@ -126,13 +126,12 @@ int ember_chat_request_tool_loop_rounds(const ember_chat_request *r);
 // the scan looks THROUGH intervening tool results, assistant prose and user
 // turns rather than stopping at the first one.
 //
-// Both relaxations come from a production loop the strict signal could not see
-// (2026-08-08): the model re-emitted a byte-identical web_search call on eleven
+// Both relaxations come from a regression the strict signal could not see: the
+// model re-emitted a byte-identical web_search call on eleven
 // consecutive turns while the tool returned 112, 923, 26426 and 30033 bytes in
 // turn, and a user message sat in the middle of the run. Requiring identical
 // results, and refusing to look past a user turn, each independently reduced
-// that to "no loop". Result-size changes are expected when an external agent
-// compacts or truncates tool output between otherwise identical calls.
+// that to "no loop".
 //
 // Same contract as the strict signal: a pure diagnostic with no server-side
 // state, which never rejects a request, never alters tool_calls/tool_use, and
@@ -143,6 +142,44 @@ int ember_chat_request_tool_loop_calls(const ember_chat_request *r);
 // First tool name in the newest complete trailing round, borrowed from r. This
 // is intended only to label a nonzero tool-loop report.
 const char *ember_chat_request_tool_loop_tool(const ember_chat_request *r);
+
+// Count the trailing tool rounds that produced NO NOVEL EFFECT, where an effect
+// is the pair (tool name, exact result bytes) and "novel" means that pair does
+// not appear anywhere earlier in the conversation. Progress is defined
+// positively by a new effect, rather than negatively by a repeated call.
+// `*stalled_tool`,
+// when non-NULL, receives the tool that produced the newest stale result,
+// borrowed from r; it is set only for a nonzero return.
+//
+// Both tool-loop signals above key on the CALL, so both are blind to the
+// dominant real-world stall: the model varies its arguments every round and an
+// invariant wall returns the identical answer regardless. Representative
+// regressions include:
+//
+//   - twelve consecutive `terminal` calls, each a different command,
+//             each answered {"error": "Background review denied non-whitelisted
+//             tool: terminal..."}. Lease 12. tool_loop_calls 2, rounds 0 --
+//             below any report threshold, so nothing was logged.
+//   - the same shape on execute_code, over nine rounds.
+//
+// A user turn does NOT renew the lease: deployed loops demonstrably survive
+// one. An assistant turn carrying visible
+// text does renew it -- the model told the client something.
+//
+// Same contract as the two signals above, and it is additive to them rather
+// than a replacement: a pure request-derived diagnostic with no server-side
+// state, which never rejects a request, never alters tool_calls/tool_use, and
+// imposes no tool-round ceiling. At threshold 3 over the corpus the two keys
+// agree on only 7 of 114 firing requests -- they see different failures.
+//
+// Two known limitations:
+//  * A result whose bytes carry a counter ("...called this 3 times", "...4
+//    times") is novel every round and resets the lease.
+//  * A mutation whose receipt is constant ("wrote file") cannot be told from a
+//    no-op; unlike Reasonix, ember sees the transcript and not the executor.
+//    No firing in the corpus was driven by one, but the risk is structural.
+int ember_chat_request_progress_lease(const ember_chat_request *r,
+                                      const char **stalled_tool);
 void ember_chat_request_free(ember_chat_request *r);
 
 #endif  // EMBER_CHAT_API_H

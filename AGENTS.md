@@ -227,17 +227,21 @@ in `src/model/tool_memory.h` and
 `src/model/continuation.h`. Call-id/frontier arrays are dynamic; do not
 reintroduce a silent fixed parallel-call ceiling.
 
-### Tool-loop observability is not a ceiling
+### Progress signals are request-local; recovery is opt-in
 
 Ember deliberately has no fixed tool-round cap, matching ds4's
 `ds4_agent.c:8448`: round count cannot distinguish a legitimate long agent run
-from a loop. `ember_chat_request_tool_loop_rounds()` instead derives an additive
-diagnostic from the full request history when the trailing ordered call sets
-(name + normalized arguments, ignoring call ids) and their corresponding result
-bytes are identical. It may add `ember_tool_loop` metadata, a log line, and
-`/status` telemetry, but must never change `finish_reason:"tool_calls"`, refuse
-the request, or become cross-request detection state. Continuation-only histories
-and multi-round cycles are documented non-goals of the simple detector.
+from a loop. Ember derives additive diagnostics from full request history:
+`ember_chat_request_tool_loop_rounds()` compares call/result rounds,
+`ember_chat_request_tool_loop_calls()` compares call signatures, and
+`ember_chat_request_progress_lease()` counts trailing rounds with no novel
+`(tool name, exact result)` effect. Reporting may add metadata, logs, and
+`/status` telemetry, but must not change `finish_reason:"tool_calls"`, refuse a
+request, or become cross-request detection state. `--auto-answer-after-loop` is
+the explicit, behavior-changing exception: it is off by default, suppresses
+optional tools for one turn, adds a private recovery instruction, and never
+overrides required tool choice. Continuation-only histories and multi-round
+cycles remain documented limitations.
 
 ### `engine/` is a vendored fork — treat it as such
 

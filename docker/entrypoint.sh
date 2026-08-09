@@ -123,8 +123,20 @@ if [[ -n "$segvtrace" && -r "$segvtrace" ]]; then
   export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$segvtrace"
 fi
 
+server_args=()
+if [[ -n "${EMBER_TOOL_LOOP_REPORT:-}" ]]; then
+  server_args+=(--tool-loop-report "$EMBER_TOOL_LOOP_REPORT")
+fi
+if [[ -n "${EMBER_NO_PROGRESS_REPORT:-}" ]]; then
+  server_args+=(--no-progress-report "$EMBER_NO_PROGRESS_REPORT")
+fi
+if [[ -n "${EMBER_AUTO_ANSWER_AFTER_LOOP:-}" ]]; then
+  server_args+=(--auto-answer-after-loop "$EMBER_AUTO_ANSWER_AFTER_LOOP")
+fi
+
 exec "$server_bin" \
   -m "$model" \
   --kv-cache-dir "${EMBER_KV_CACHE_DIR:-/cache}" \
   --port "${EMBER_PORT:-8080}" \
+  "${server_args[@]}" \
   "$@"

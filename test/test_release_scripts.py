@@ -66,6 +66,9 @@ class ReleaseScriptTests(unittest.TestCase):
                 "EMBER_SERVER_BIN": "/bin/echo",
                 "EMBER_KV_CACHE_DIR": directory,
                 "EMBER_PORT": "18080",
+                "EMBER_TOOL_LOOP_REPORT": "9",
+                "EMBER_NO_PROGRESS_REPORT": "10",
+                "EMBER_AUTO_ANSWER_AFTER_LOOP": "11",
             }
             result = subprocess.run(
                 ["bash", str(ENTRYPOINT), "--ctx", "42"],
@@ -75,7 +78,11 @@ class ReleaseScriptTests(unittest.TestCase):
                 check=True,
             )
             self.assertIn("-m " + str(model), result.stdout)
-            self.assertIn("--port 18080 --ctx 42", result.stdout)
+            self.assertIn("--port 18080", result.stdout)
+            self.assertIn("--tool-loop-report 9", result.stdout)
+            self.assertIn("--no-progress-report 10", result.stdout)
+            self.assertIn("--auto-answer-after-loop 11", result.stdout)
+            self.assertIn("--ctx 42", result.stdout)
 
     def test_entrypoint_rejects_wrong_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

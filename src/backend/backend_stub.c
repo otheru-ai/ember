@@ -138,6 +138,14 @@ ember_gen_result ember_backend_generate(ember_backend *b,
         const char *continued = getenv("EMBER_STUB_THINK_TOOL_REPLY");
         if (continued) reply = continued;
     }
+    // Lets a test prove the auto-answer INSTRUCTION actually reached the
+    // prompt, not merely that the tools were removed. Without this the primary
+    // fix is unverifiable and the v1 failure repeats: the model never learns
+    // why its tools vanished and improvises markup as text.
+    if (prompt_contains(req, "[Automatic recovery]")) {
+        const char *aa = getenv("EMBER_STUB_AUTOANSWER_REPLY");
+        if (aa && aa[0]) reply = aa;
+    }
     if (prompt_contains(req, "Tool error: invalid DSML tool call")) {
         const char *recovery_error = getenv("EMBER_STUB_RECOVERY_ERROR");
         if (recovery_error && recovery_error[0]) {

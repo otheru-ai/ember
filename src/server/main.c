@@ -109,10 +109,38 @@ typedef struct ember_server {
     // Latest request-derived tool-loop alert, guarded by state_lock. This is
     // telemetry only: detection never reads it and has no cross-request state.
     int               tool_loop_report;
+    // > 0 arms automatic loop recovery: see auto_answer_suppresses_tools().
+    int               auto_answer_after_loop;
+    long              auto_answer_count;
+    long              tool_markup_leak_count;   // visible tool markup delivered
+    long              last_tool_markup_leak_at;
+    long              last_auto_answer_at;
+    char              last_auto_answer_tool[128];
     int               last_tool_loop_rounds;
     bool              last_tool_loop_identical;  // strict signal, not call-only
     long              last_tool_loop_at;
     char              last_tool_loop_tool[128];
+    // Progress lease (ember_chat_request_progress_lease): trailing tool rounds
+    // that returned nothing new. Keys on the RESULT, so it sees the stalls both
+    // tool-loop signals miss -- they key on the call. Telemetry only.
+    int               no_progress_report;
+    long              no_progress_count;
+    long              last_no_progress_at;
+    int               last_no_progress_rounds;
+    char              last_no_progress_tool[128];
+    // Latest non-progress turn, guarded by state_lock. Telemetry only, exactly
+    // like the tool-loop fields above: nothing reads these to make a decision.
+    long              nonprogress_count;
+    long              last_nonprogress_at;
+    int               last_nonprogress_tokens;
+    bool              last_nonprogress_degenerate;
+    // Every backend-flagged degenerate decode, whether or not it produced
+    // output. Strictly wider than nonprogress_count above: the two overlap.
+    long              degenerate_count;
+    long              last_degenerate_at;
+    int               last_degenerate_tokens;
+    bool              last_degenerate_had_output;
+    char              last_degenerate_reason[32];
     int32_t          *close_ids;  // Level-2 force-close token sequence (owned)
     int               n_close_ids;
     int32_t          *natural_close_ids; // bare </think> disarm sequence (owned)
@@ -1468,7 +1496,7 @@ static bool continue_tool_started_in_think(
 //
 // Returning that turn empty is itself a failure mode: an agent that sees an
 // empty response re-sends a byte-identical request, and a deterministic model
-// reproduces the same malformed call. Production showed exactly that — four
+// reproduces the same malformed call. Deployment showed exactly that — four
 // md5-identical requests in ninety seconds, each dropping a call missing a
 // required property. Recovering in-stream breaks the cycle at the source.
 //
@@ -1480,6 +1508,154 @@ static bool stream_tool_retry_enabled(void) {
         cached = (e && e[0] == '0') ? 0 : 1;
     }
     return cached != 0;
+}
+
+// A generation that finished cleanly, emitted no tool call and delivered no
+// visible text is pure non-progress: the turn is spent and the agent advances
+// nothing. The backend already flags the underlying conditions
+// (degenerate_decode_close, empty_visible_output), but nothing surfaced them --
+// no log line and no /status field -- so in deployment these turns were
+// invisible unless someone parsed an individual response body.
+//
+// This can occur after context compaction when earlier tool results have been
+// reduced to placeholders. Tool-loop signals cannot see the failure because
+// there are no calls to compare.
+//
+// Diagnostic only, same contract as the tool-loop signals: it never changes
+// finish_reason, never refuses a request, and keeps no cross-request state that
+// detection reads back.
+// The buffered counterpart of ember_sse_delivered_visible(): a turn has
+// delivered something only if a NON-WHITESPACE byte reached the client. The two
+// paths must agree, or the same turn is non-progress on one and fine on the
+// other -- which is what a whitespace-only stub reply exposed.
+static bool buffered_delivered_visible(const char *s) {
+    for (; s && *s; ++s)
+        if (*s != ' ' && *s != '\t' && *s != '\n' && *s != '\r') return true;
+    return false;
+}
+
+static void note_nonprogress_turn(ember_server *srv,
+                                  const ember_gen_result *res,
+                                  bool had_tools, bool delivered_visible,
+                                  const char *path) {
+    if (!srv || !res || !res->ok || had_tools || delivered_visible) return;
+    // A generation that never DECODED is not the model refusing to act -- it
+    // is a request that asked for no tokens, stopped immediately, or was
+    // abandoned. Requiring n_generated > 0 excludes those cases.
+    if (res->n_generated <= 0) return;
+    // ...and the model must have stopped of its OWN ACCORD. "length" means the
+    // token cap cut it off mid-thought, which is a budget outcome, not a
+    // refusal to act. Count only voluntary stops; token-budget exhaustion is a
+    // different outcome and must not be classified as non-progress.
+    if (strcmp(res->finish_reason, "stop") != 0) return;
+    fprintf(stderr,
+            "[ember] non-progress turn: %d completion tokens, no visible "
+            "output, no tool call (%s%s%s, %s)\n",
+            res->n_generated,
+            res->degenerate_decode_close ? "degenerate" : "clean",
+            res->empty_visible_output ? "+empty_visible" : "",
+            res->termination_reason[0] ? "+watchdog" : "",
+            path);
+    pthread_mutex_lock(&srv->state_lock);
+    srv->nonprogress_count++;
+    srv->last_nonprogress_at = now_unix();
+    srv->last_nonprogress_tokens = res->n_generated;
+    srv->last_nonprogress_degenerate = res->degenerate_decode_close;
+    pthread_mutex_unlock(&srv->state_lock);
+}
+
+// Wider than note_nonprogress_turn(): every degenerate decode the backend
+// flags, including ones that DID produce output. That case was unsurfaced and
+// it is the more damaging of the two.
+//
+// A degenerate compaction response can still contain visible output and thus
+// evade the narrower non-progress signal. Recording all backend-flagged
+// degeneracy makes that damaging case observable.
+//
+// The empty-output case is already named in the non-progress line, so only the
+// with-output case logs here; the counter covers both.
+//
+// Diagnostic only: never changes finish_reason, never refuses a request.
+static void note_degenerate_turn(ember_server *srv,
+                                 const ember_gen_result *res,
+                                 bool produced_output, const char *path) {
+    if (!srv || !res || !res->ok || !res->degenerate_decode_close) return;
+    if (produced_output)
+        fprintf(stderr,
+                "[ember] degenerate turn WITH output: %d completion tokens "
+                "(%s, %s)\n",
+                res->n_generated,
+                res->termination_reason[0] ? res->termination_reason
+                                           : "n-gram repetition",
+                path);
+    pthread_mutex_lock(&srv->state_lock);
+    srv->degenerate_count++;
+    srv->last_degenerate_at = now_unix();
+    srv->last_degenerate_tokens = res->n_generated;
+    srv->last_degenerate_had_output = produced_output;
+    snprintf(srv->last_degenerate_reason, sizeof(srv->last_degenerate_reason),
+             "%s", res->termination_reason);
+    pthread_mutex_unlock(&srv->state_lock);
+}
+
+// The instruction that makes suppression comprehensible to the model.
+//
+// v1 of this feature removed the tools and said nothing. The model, mid-plan
+// and conditioned by ~90 messages of tool calls, still intended to call one --
+// so it improvised ASCII tool markup into VISIBLE output: <?DSML?tool_calls>,
+// U+003F rather than U+FF5C. A call rendered as text may expose sensitive tool
+// arguments, so removing tools must also explain the recovery to the model.
+// Removing a capability does not discard the payload, it relocates it.
+//
+// Precedent for injecting a private instruction: compaction does exactly this
+// (compaction.c builds an augmented view with a trailing user-role
+// instruction). Role "user" matches that proven path for this template.
+#define EMBER_AUTO_ANSWER_INSTRUCTION                                         \
+    "[Automatic recovery] The tools are unavailable for this turn because "   \
+    "the same call was repeated without making progress. Answer now, in "     \
+    "plain prose, using only what is already in this conversation. Do NOT "   \
+    "write tool-call markup as text -- it will not be executed and will be "  \
+    "shown to the user verbatim. If something is genuinely unknown, say so "  \
+    "and state what you would need to find it."
+
+// Append it as a trailing message so the normal render path picks it up.
+// strdup both fields: ember_chat_request_free() frees them.
+static bool append_auto_answer_instruction(ember_chat_request *req) {
+    if (!req || req->n_messages >= INT_MAX - 1) return false;
+    ember_chat_msg *grown = (ember_chat_msg *)realloc(
+        req->messages, (size_t)(req->n_messages + 1) * sizeof(*grown));
+    if (!grown) return false;
+    req->messages = grown;
+    ember_chat_msg *m = &req->messages[req->n_messages];
+    memset(m, 0, sizeof(*m));
+    m->role = strdup("user");
+    m->content = strdup(EMBER_AUTO_ANSWER_INSTRUCTION);
+    if (!m->role || !m->content) { free(m->role); free(m->content); return false; }
+    req->n_messages++;
+    return true;
+}
+
+// Report tool markup that reached the client as text. Diagnostic only: the
+// content has already been streamed by the time we can see all of it, so this
+// makes the defect visible rather than preventing it. Blocking would need a
+// decision about what to send instead, which is a separate change.
+//
+// Takes the VERDICT, not the text, because the two response paths know it in
+// different ways: the stream records it at its emit site
+// (ember_sse_delivered_tool_markup) and the buffered path holds the delivered
+// string outright. Passing the caller's raw accumulator here is what made this
+// counter fire on 66 of 98 deployment requests -- the accumulator contains the
+// tool block that was correctly held back and parsed, never sent.
+static void note_tool_markup_leak(ember_server *srv, bool leaked,
+                                  const char *path) {
+    if (!srv || !leaked) return;
+    fprintf(stderr,
+            "[ember] tool markup leaked into visible output (%s) -- the model "
+            "wrote a call as text; it was NOT executed\n", path);
+    pthread_mutex_lock(&srv->state_lock);
+    srv->tool_markup_leak_count++;
+    srv->last_tool_markup_leak_at = now_unix();
+    pthread_mutex_unlock(&srv->state_lock);
 }
 
 static bool stream_retry_forbidden(const ember_chat_request *req,
@@ -1494,7 +1670,7 @@ static bool stream_retry_forbidden(const ember_chat_request *req,
 
 // Constrained tool-call decoding. Off by default: it changes what the model is
 // able to emit, which is exactly the class of change this repo ships dark and
-// enables in production explicitly (see CLAUDE.md). tool_schema.c still
+// enables in deployment explicitly (see CLAUDE.md). tool_schema.c still
 // validates every call afterwards either way, so this is defence in depth
 // rather than a replacement for the validator.
 static bool tool_grammar_enabled(void) {
@@ -1921,7 +2097,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // false and gen_lock is bypassed. The worker-thread-only lockless singletons
     // (ember_kv_cache, ember_tool_memory, the DSML decode tracker) then rely on
     // run_chat still being funneled through the single gen_worker. Verify that
-    // invariant holds before enabling --batch-sessions>1 in production; the
+    // invariant holds before enabling --batch-sessions>1 in deployment; the
     // engine supports native mixed batches (deepseek4_backend.h supports_native_
     // mixed) but the server currently executes sessions serially.
     const bool serialize = !ember_backend_batch_enabled(be);
@@ -1935,10 +2111,54 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_chat_request_tool_loop_tool(req);
     // Two signals, one report. The strict one (identical calls AND identical
     // results) is the stronger claim, so it wins when both fire; the weaker
-    // call-signature one exists because the 2026-08-08 production loop showed
+    // call-signature one exists because regression testing showed
     // identical results are not a precondition for a loop -- see
     // ember_chat_request_tool_loop_calls(). `identical_results` tells a reader
     // which of the two produced the number.
+    // ── automatic loop recovery (opt-in, off by default) ────────────────
+    // Every other mechanism in this system is ADVISORY and the model ignores
+    // all of them. Regression testing includes loops that survived an inline
+    // warning, a user turn, context compaction, and the model's own promise to
+    // change strategy.
+    //
+    // Suppressing the tools makes the repeat UNREPRESENTABLE rather than
+    // discouraged: with has_tools unset the tools are never rendered into the
+    // prompt and the DSML grammar is gated off, so the model cannot emit a
+    // call it was never shown. This is the same mechanism tool_choice:"none"
+    // already uses (chat_api.c:402-406).
+    //
+    // DELIBERATE EXCEPTION to the diagnostic-only contract the tool-loop
+    // signals otherwise keep, hence off by default per the repo's rule for
+    // risky parity features. It stays STATELESS: the evidence is the trailing
+    // call run in the history the client just sent, never server-side memory,
+    // so the same request always produces the same decision.
+    //
+    // Never overrides an explicit client demand for a tool call -- that would
+    // break the caller's contract rather than the model's loop.
+    const bool auto_answer =
+        srv->auto_answer_after_loop > 0 &&
+        observed_tool_loop_calls > srv->auto_answer_after_loop &&
+        req->has_tools && !req->tool_choice_required;
+    if (auto_answer) {
+        fprintf(stderr,
+                "[ember] auto-answer: %d identical \"%s\" calls > %d; "
+                "suppressing tools for this turn\n",
+                observed_tool_loop_calls,
+                observed_tool_loop_tool ? observed_tool_loop_tool : "",
+                srv->auto_answer_after_loop);
+        req->has_tools = false;      // before any render; grammar gates on this
+        if (!append_auto_answer_instruction(req))
+            fprintf(stderr, "[ember] auto-answer: instruction not appended; "
+                            "the model may improvise tool markup as text\n");
+        pthread_mutex_lock(&srv->state_lock);
+        srv->auto_answer_count++;
+        srv->last_auto_answer_at = now_unix();
+        snprintf(srv->last_auto_answer_tool,
+                 sizeof(srv->last_auto_answer_tool), "%s",
+                 observed_tool_loop_tool ? observed_tool_loop_tool : "");
+        pthread_mutex_unlock(&srv->state_lock);
+    }
+
     const bool strict_tool_loop = srv->tool_loop_report > 0 &&
         observed_tool_loop_rounds > srv->tool_loop_report;
     const bool loose_tool_loop = srv->tool_loop_report > 0 &&
@@ -1963,6 +2183,29 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         snprintf(srv->last_tool_loop_tool,
                  sizeof(srv->last_tool_loop_tool), "%s",
                  observed_tool_loop_tool ? observed_tool_loop_tool : "");
+        pthread_mutex_unlock(&srv->state_lock);
+    }
+
+    // Third signal, a SIBLING of the two above rather than part of the same
+    // report: both of those key on the call, and a common deployed stall
+    // varies the call while an invariant wall returns the identical answer.
+    // See ember_chat_request_progress_lease() for the measured cases.
+    const char *stalled_tool = NULL;
+    const int observed_no_progress =
+        ember_chat_request_progress_lease(req, &stalled_tool);
+    if (srv->no_progress_report > 0 &&
+        observed_no_progress > srv->no_progress_report) {
+        fprintf(stderr,
+                "[ember] no progress: %d tool rounds returned nothing new "
+                "(newest stale result from \"%s\")\n",
+                observed_no_progress, stalled_tool ? stalled_tool : "");
+        pthread_mutex_lock(&srv->state_lock);
+        srv->no_progress_count++;
+        srv->last_no_progress_at = now_unix();
+        srv->last_no_progress_rounds = observed_no_progress;
+        snprintf(srv->last_no_progress_tool,
+                 sizeof(srv->last_no_progress_tool), "%s",
+                 stalled_tool ? stalled_tool : "");
         pthread_mutex_unlock(&srv->state_lock);
     }
     bool enable_thinking = req->thinking_enabled;
@@ -2116,7 +2359,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
 
     // Lucebox parity: an omitted output limit uses the model-card default,
     // never the entire remaining context. The former ds4-compatible behavior
-    // turned a small auxiliary request (agent gateway session compression) into a
+    // turned a small auxiliary request (an agent harness session compression) into a
     // ~130k-token permission slip when the client omitted max_tokens. Explicit
     // client limits remain supported for deliberate long generations; both
     // paths are still capped by the actual context room.
@@ -2414,7 +2657,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // because a reasoning-phase stop is now exactly reasoning_cycle /
         // repetition (the echo rule is visible-only), and the tool branch is
         // reachable whenever EMBER_STREAM_TOOL_ERROR=1, which would report a
-        // stall as invalid_tool_call: the 2026-08-02 misattribution that
+        // stall as invalid_tool_call: the misattribution that
         // test_tool_safety_server.py pins as "must never".
         const bool stalled_stream = generation_stalled(&res) && !g.disconnected;
         if (!res.ok && !g.disconnected) {
@@ -2469,8 +2712,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             // A TYPED watchdog stop must NOT: "length" is precisely the signal
             // that tells a harness the reply was cut off and invites it to ask
             // for a continuation, which re-enters the same degenerate decode.
-            // That is the 2026-08-08 07:49 failure -- 4 continuations, 79 model
-            // calls, 92 characters. Report "stop": the turn is over, and the
+            // This can trigger repeated, useless continuations. Report "stop":
+            // the turn is over, and the
             // reason is already in the log and in /status telemetry.
             const char *finish =
                 g.disconnected || stalled_stream ? "stop"
@@ -2480,6 +2723,14 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                 : res.finish_reason;
             if (!stream_tools_valid && !g.disconnected)
                 finish = ember_tool_parse_failure_finish(finish);
+            // Disconnects are not the model's failure to progress.
+            if (!g.disconnected) {
+                const bool vis = ember_sse_delivered_visible(&st);
+                note_tool_markup_leak(srv, ember_sse_delivered_tool_markup(&st),
+                                      "stream");
+                note_nonprogress_turn(srv, &res, had_tools, vis, "stream");
+                note_degenerate_turn(srv, &res, had_tools || vis, "stream");
+            }
             // client_prompt_tokens, not n_prompt: when compaction ran these
             // differ, and both response paths must agree on prompt_tokens
             // meaning "what the client sent". The compacted size is reported
@@ -3011,6 +3262,17 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             emit_content = content_trimmed;
             finish = "tool_calls";
         }
+        // Same exclusion as the streaming path: a vanished client is not the
+        // model failing to progress. The streaming site had this guard from
+        // the start and the buffered one did not -- an asymmetry, not a
+        // decision.
+        if (!g.disconnected) {
+            note_tool_markup_leak(srv, ember_text_has_tool_markup(emit_content),
+                                  "buffered");
+            const bool vis = buffered_delivered_visible(emit_content);
+            note_nonprogress_turn(srv, &res, tc.len > 0, vis, "buffered");
+            note_degenerate_turn(srv, &res, tc.len > 0 || vis, "buffered");
+        }
 
         if (req->api != EMBER_API_CHAT) {
             ember_protocol_result pr = {
@@ -3469,11 +3731,41 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         int last_loop_rounds;
         bool last_loop_identical;
         long last_loop_at;
+        long aa_count, aa_at, leak_count, leak_at;
+        char aa_tool[sizeof(srv->last_auto_answer_tool)];
+        long np_count, np_at;
+        int np_tokens;
+        bool np_degenerate;
+        long lease_count, lease_at;
+        int lease_rounds;
+        char lease_tool[sizeof(srv->last_no_progress_tool)];
+        long dg_count, dg_at;
+        int dg_tokens;
+        bool dg_output;
+        char dg_reason[sizeof(srv->last_degenerate_reason)];
         char last_loop_tool[sizeof(srv->last_tool_loop_tool)];
         pthread_mutex_lock(&srv->state_lock);
         last_loop_rounds = srv->last_tool_loop_rounds;
         last_loop_identical = srv->last_tool_loop_identical;
         last_loop_at = srv->last_tool_loop_at;
+        aa_count = srv->auto_answer_count;
+        leak_count = srv->tool_markup_leak_count;
+        leak_at = srv->last_tool_markup_leak_at;
+        aa_at = srv->last_auto_answer_at;
+        snprintf(aa_tool, sizeof(aa_tool), "%s", srv->last_auto_answer_tool);
+        np_count = srv->nonprogress_count;
+        np_at = srv->last_nonprogress_at;
+        np_tokens = srv->last_nonprogress_tokens;
+        np_degenerate = srv->last_nonprogress_degenerate;
+        lease_count = srv->no_progress_count;
+        lease_at = srv->last_no_progress_at;
+        lease_rounds = srv->last_no_progress_rounds;
+        snprintf(lease_tool, sizeof(lease_tool), "%s", srv->last_no_progress_tool);
+        dg_count = srv->degenerate_count;
+        dg_at = srv->last_degenerate_at;
+        dg_tokens = srv->last_degenerate_tokens;
+        dg_output = srv->last_degenerate_had_output;
+        snprintf(dg_reason, sizeof(dg_reason), "%s", srv->last_degenerate_reason);
         snprintf(last_loop_tool, sizeof(last_loop_tool), "%s",
                  srv->last_tool_loop_tool);
         pthread_mutex_unlock(&srv->state_lock);
@@ -3500,8 +3792,66 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         } else {
             ember_buf_puts(&b, "null");
         }
+        ember_buf_putc(&b, '}');            // close tool_loop
+        // Automatic loop recovery. armed_after mirrors the flag so an operator
+        // can tell "never fired" from "not enabled".
         ember_buf_printf(&b,
-            "},\"continuous_batching\":{\"enabled\":%s,\"capacity\":%d,"
+            ",\"auto_answer\":{\"armed_after\":%d,\"count\":%ld,\"last\":",
+            srv->auto_answer_after_loop, aa_count);
+        if (aa_count > 0) {
+            ember_buf_printf(&b, "{\"at\":%ld,\"tool\":", aa_at);
+            ember_json_escape(&b, aa_tool);
+            ember_buf_putc(&b, '}');
+        } else {
+            ember_buf_puts(&b, "null");
+        }
+        ember_buf_putc(&b, '}');            // close auto_answer
+        ember_buf_printf(&b,
+            ",\"tool_markup_leak\":{\"count\":%ld,\"last_at\":%ld}",
+            leak_count, leak_count > 0 ? leak_at : 0L);
+        // Turns that finished cleanly having emitted nothing at all: no visible
+        // text and no tool call. Leading indicator of an agent losing the
+        // ability to act -- see note_nonprogress_turn(). A SIBLING of
+        // tool_loop, not a member of it.
+        ember_buf_printf(&b, ",\"nonprogress\":{\"count\":%ld,\"last\":", np_count);
+        if (np_count > 0)
+            ember_buf_printf(&b,
+                "{\"at\":%ld,\"completion_tokens\":%d,\"degenerate\":%s}",
+                np_at, np_tokens, np_degenerate ? "true" : "false");
+        else
+            ember_buf_puts(&b, "null");
+        ember_buf_putc(&b, '}');            // close nonprogress
+        // Trailing tool rounds that returned nothing new. Orthogonal to
+        // tool_loop, which keys on the call rather than the result: over the
+        // regression corpus the two agree on 7 of 114 firing requests.
+        // report_after mirrors the flag so "never fired" reads differently
+        // from "not enabled".
+        ember_buf_printf(&b,
+            ",\"no_progress\":{\"report_after\":%d,\"count\":%ld,\"last\":",
+            srv->no_progress_report, lease_count);
+        if (lease_count > 0) {
+            ember_buf_printf(&b, "{\"at\":%ld,\"rounds\":%d,\"tool\":",
+                             lease_at, lease_rounds);
+            ember_json_escape(&b, lease_tool);
+            ember_buf_putc(&b, '}');
+        } else {
+            ember_buf_puts(&b, "null");
+        }
+        ember_buf_putc(&b, '}');            // close no_progress
+        // Wider than nonprogress: every degenerate decode, output or not.
+        ember_buf_printf(&b, ",\"degenerate\":{\"count\":%ld,\"last\":", dg_count);
+        if (dg_count > 0) {
+            ember_buf_printf(&b,
+                "{\"at\":%ld,\"completion_tokens\":%d,\"produced_output\":%s,"
+                "\"reason\":", dg_at, dg_tokens, dg_output ? "true" : "false");
+            ember_json_escape(&b, dg_reason);
+            ember_buf_putc(&b, '}');
+        } else {
+            ember_buf_puts(&b, "null");
+        }
+        ember_buf_putc(&b, '}');            // close degenerate
+        ember_buf_printf(&b,
+            ",\"continuous_batching\":{\"enabled\":%s,\"capacity\":%d,"
             "\"pending\":%d,\"resident\":%d,\"prefill_ready\":%d,"
             "\"decode_ready\":%d,\"in_flight\":%d,\"terminal\":%d,"
             "\"admissions\":%llu,\"releases\":%llu,"
@@ -3549,8 +3899,11 @@ static void print_usage(FILE *out, const char *argv0) {
         "                              sparse path bounds flash-attention shared\n"
         "                              memory by the indexer top-k\n"
         "  --default-temperature T     override model-card temperature\n"
-        "  --tool-loop-report N        report after N identical call+result repeats\n"
-        "                              (default 3; 0 disables; never stops a call)\n"
+        "  --tool-loop-report N        report after N identical call+result repeats (default 8)\n"
+        "  --no-progress-report N      report after N tool rounds return nothing new (default 8)\n"
+        "  --auto-answer-after-loop N  suppress tools for one turn once a request's\n"
+        "                              history shows >N identical trailing calls\n"
+        "                              (0=off; BEHAVIOURAL, not diagnostic)\n"
         "  --prefix-cache-slots N      resident prefix snapshots (default 8)\n"
         "  --batch-sessions N          resident concurrent sessions (default 1,\n"
         "                              max 64; >1 enables continuous batching)\n"
@@ -3719,7 +4072,7 @@ int main(int argc, char **argv) {
     double idle_reclaim_secs = 300.0;
     const char *validate_prompt = NULL;
     int validate_tokens = 32;
-    // Preserve the measured lucebox production override: its older DSpark
+    // Preserve the measured lucebox deployment override: its older DSpark
     // pairing accepted substantially better with target top-k=4 (~0.95 vs
     // ~0.68) and avoided two expert evaluations per layer. The model and the
     // current drafter both advertise 6, so this is a performance calibration,
@@ -3736,9 +4089,16 @@ int main(int argc, char **argv) {
     // lower this further on memory-tight UMA systems.
     int prefix_slots = 8;
     int batch_sessions = 1;
-    // A value of 3 reports the fourth identical round: three repeats after the
-    // first observation. Reporting is additive and never caps tool rounds.
-    int tool_loop_report = 3;
+    // A value of 8 reports the ninth identical round. Lower thresholds produced
+    // noisy reports for loops that resolved when the model changed strategy.
+    // Reporting is additive and never caps tool rounds.
+    int tool_loop_report = 8;
+    // The progress lease has its own threshold: it keys on results rather than
+    // calls, so its distribution differs and tuning one must not move the
+    // other. Its default is also 8 so operators see the two advisory thresholds
+    // at a consistent severity level.
+    int no_progress_report = 8;
+    int auto_answer_after_loop = 0;      // off: this one changes behaviour
     int max_ctx = 65536;  // KV cache context; each snapshot is a full-KV buffer
     double bg_idle_secs = 5.0, bg_max_wait_secs = 60.0;
     bool options_ok = true;
@@ -3815,10 +4175,18 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_double_range(v, opt, 0.0, 100.0, &default_temp);
             default_temp_set = options_ok;
+        } else if (strcmp(opt, "--auto-answer-after-loop") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v &&
+                parse_int_range(v, opt, 0, INT_MAX, &auto_answer_after_loop);
         } else if (strcmp(opt, "--tool-loop-report") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
                 parse_int_range(v, opt, 0, INT_MAX, &tool_loop_report);
+        } else if (strcmp(opt, "--no-progress-report") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v &&
+                parse_int_range(v, opt, 0, INT_MAX, &no_progress_report);
         } else if (strcmp(opt, "--prefix-cache-slots") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1,
@@ -3887,6 +4255,8 @@ int main(int argc, char **argv) {
     srv.be = be;
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
+    srv.no_progress_report = no_progress_report;
+    srv.auto_answer_after_loop = auto_answer_after_loop;
     if (pthread_mutex_init(&srv.gen_lock, NULL) != 0) {
         fprintf(stderr, "[ember] failed to initialize generation lock\n");
         ember_backend_free(be);
@@ -3952,6 +4322,7 @@ int main(int argc, char **argv) {
             "close_seq=%d tok, natural_close_seq=%d tok, "
             "sampler={temp=%.3g,top_p=%.3g,top_k=%d,min_p=%.3g,"
             "rep_pen=%.3g,pres_pen=%.3g}, tool_loop_report=%d, "
+            "no_progress_report=%d, "
             "batch_sessions=%d, bg_idle=%.1fs, "
             "bg_max_wait=%.1fs)\n",
             ember_backend_model_name(be), ember_backend_n_ctx(be),
@@ -3959,7 +4330,7 @@ int main(int argc, char **argv) {
             srv.n_natural_close_ids, srv.default_temp, srv.card.top_p,
             srv.card.top_k, srv.card.min_p, srv.card.repetition_penalty,
             srv.card.presence_penalty, srv.tool_loop_report,
-            batch_sessions,
+            srv.no_progress_report, batch_sessions,
             bg_idle_secs, bg_max_wait_secs);
     // Start the persistent generation worker before accepting connections: all
     // backend forward passes run on it so the thread_local graph caches build

@@ -1,5 +1,6 @@
 #include "chat_api.h"
 
+#include <ctype.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
@@ -627,6 +628,145 @@ const char *ember_chat_request_tool_loop_tool(const ember_chat_request *r) {
     // additive: this returns a name only where NULL was returned before.
     const int i = assistant_calls_at_or_before(r, r->n_messages - 1);
     return i >= 0 ? r->messages[i].calls.calls[0].name : NULL;
+}
+
+static bool is_tool_result(const ember_chat_msg *m) {
+    return m->role && !strcmp(m->role, "tool");
+}
+
+// The tool that produced result message `idx`: the explicit `name` field when
+// the client sends one, else the call whose id it answers. Never NULL, so the
+// effect key stays well-defined for legacy histories that carry neither.
+static const char *result_tool_name(const ember_chat_request *r, int idx) {
+    const ember_chat_msg *m = &r->messages[idx];
+    if (m->name && m->name[0]) return m->name;
+    if (m->tool_call_id && m->tool_call_id[0]) {
+        for (int i = idx - 1; i >= 0; --i) {
+            const ember_tool_calls *c = &r->messages[i].calls;
+            for (int k = 0; k < c->len; ++k)
+                if (c->calls[k].id && !strcmp(c->calls[k].id, m->tool_call_id))
+                    return c->calls[k].name ? c->calls[k].name : "";
+        }
+    }
+    return "";
+}
+
+// Trailing harness annotations: text a client appends to a tool RESULT after
+// the tool's own payload. Excluded from the effect key, because a client that
+// appends a repetition COUNTER to the very result it is warning about destroys
+// the byte identity every downstream consumer needs -- including this one.
+//
+// Regression analysis showed that treating these annotations as part of the
+// result hides stalled rounds even though the underlying payload is unchanged.
+//
+// DELIBERATELY NARROW, in the shape of tool_parser.c's SYNTAX[] table: only
+// annotations that describe the repetition itself belong here. Some clients
+// also append "[OUT-OF-BAND USER MESSAGE ...]", which is new input rather than
+// metadata about a repeat -- trimming that would erase a real difference, so
+// it is excluded on purpose. The real fix is upstream: a harness should report
+// a repeat beside the result, not inside it.
+static const char *const RESULT_ANNOTATIONS[] = {
+    "[Tool loop warning:",      // common client annotation; carries "count=N"
+};
+
+// Length of `s` up to the last trailing annotation, or its full length. The
+// annotation must start its own block (blank line before it) so the marker
+// appearing inside a tool's own output cannot truncate the payload.
+static size_t result_payload_len(const char *s) {
+    if (!s) return 0;
+    size_t len = strlen(s);
+    for (size_t k = 0; k < sizeof RESULT_ANNOTATIONS / sizeof *RESULT_ANNOTATIONS; ++k) {
+        const char *hit = NULL;
+        for (const char *p = s; (p = strstr(p, RESULT_ANNOTATIONS[k])) != NULL; ++p)
+            hit = p;                                  // last wins
+        if (!hit) continue;
+        size_t i = (size_t)(hit - s), newlines = 0;
+        while (i > 0 && isspace((unsigned char)s[i - 1])) {
+            if (s[i - 1] == '\n') ++newlines;
+            --i;
+        }
+        if (newlines >= 2 && i < len) len = i;
+    }
+    return len;
+}
+
+// True when (tool, payload) already appeared as a tool result before `before`.
+// `plen` is the per-request payload length of every message, computed once:
+// recomputing it per comparison would make this quadratic in result BYTES.
+static bool effect_seen_before(const ember_chat_request *r, const size_t *plen,
+                               int before, const char *name, int probe) {
+    for (int i = 0; i < before; ++i) {
+        if (!is_tool_result(&r->messages[i])) continue;
+        if (plen[i] != plen[probe]) continue;
+        if (memcmp(r->messages[i].content ? r->messages[i].content : "",
+                   r->messages[probe].content ? r->messages[probe].content : "",
+                   plen[probe]))
+            continue;
+        if (!strcmp(result_tool_name(r, i), name)) return true;
+    }
+    return false;
+}
+
+static bool has_visible_text(const char *s) {
+    for (; s && *s; ++s)
+        if (!isspace((unsigned char)*s)) return true;
+    return false;
+}
+
+int ember_chat_request_progress_lease(const ember_chat_request *r,
+                                      const char **stalled_tool) {
+    if (stalled_tool) *stalled_tool = NULL;
+    if (!r || r->continuation_only || r->n_messages < 2) return 0;
+    int lease = 0;
+    const char *stalled = NULL;
+    size_t *plen = calloc((size_t)r->n_messages, sizeof(*plen));
+    if (!plen) ember_buf_fatal("out of memory measuring tool-result payloads");
+    for (int i = 0; i < r->n_messages; ++i)
+        if (is_tool_result(&r->messages[i]))
+            plen[i] = result_payload_len(r->messages[i].content);
+    for (int i = 0; i < r->n_messages; ++i) {
+        const ember_chat_msg *m = &r->messages[i];
+        if (!m->role || strcmp(m->role, "assistant")) continue;
+        if (m->calls.len <= 0) {
+            // A turn that spoke to the client is progress by definition.
+            if (has_visible_text(m->content)) {
+                lease = 0;
+                stalled = NULL;
+            }
+            continue;
+        }
+        // Prose ALONGSIDE a call deliberately does not renew: a stalling model
+        // narrates every round ("let me try that again"), and counting that as
+        // a completion would neuter the signal. The corpus could not separate
+        // the two rules -- both produce an identical distribution -- so this
+        // picks the one that cannot be talked out of firing.
+        bool novel = false, evaluable = false;
+        const char *stale_name = NULL;
+        for (int j = i + 1; j < r->n_messages; ++j) {
+            const ember_chat_msg *t = &r->messages[j];
+            if (t->role && !strcmp(t->role, "assistant")) break;
+            if (!is_tool_result(t)) continue;
+            evaluable = true;
+            const char *name = result_tool_name(r, j);
+            if (effect_seen_before(r, plen, j, name, j))
+                stale_name = name;
+            else
+                novel = true;
+        }
+        // An open round -- calls emitted, results not back yet -- is the turn
+        // being served right now. It has produced no effect to judge.
+        if (!evaluable) continue;
+        if (novel) {
+            lease = 0;
+            stalled = NULL;
+        } else {
+            ++lease;
+            stalled = stale_name;
+        }
+    }
+    free(plen);
+    if (stalled_tool && lease > 0) *stalled_tool = stalled;
+    return lease;
 }
 
 void ember_chat_request_free(ember_chat_request *r) {

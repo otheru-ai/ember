@@ -80,7 +80,8 @@ license on its Hugging Face card and is not included in the Ember image.
 ## Runtime state and observability
 
 - `GET /health` is the readiness/liveness probe.
-- `GET /status` exposes queue, worker, batching, cache, and tool-loop state.
+- `GET /status` exposes queue, worker, batching, cache, tool-loop, progress,
+  degenerate-output, visible-markup, and automatic-recovery state.
 - `GET /v1/models` confirms the client-visible model identifier.
 - Container logs go to stdout/stderr; use `docker compose logs` or the host's
   configured Docker log driver for retention.

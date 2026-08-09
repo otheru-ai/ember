@@ -34,6 +34,9 @@ services:
       EMBER_MODEL_SIZE_BYTES: ${EMBER_MODEL_SIZE_BYTES:-91547243104}
       EMBER_PORT: ${EMBER_PORT:-8080}
       EMBER_DRY_MULTIPLIER: ${EMBER_DRY_MULTIPLIER:-0}
+      EMBER_TOOL_LOOP_REPORT: ${EMBER_TOOL_LOOP_REPORT:-}
+      EMBER_NO_PROGRESS_REPORT: ${EMBER_NO_PROGRESS_REPORT:-}
+      EMBER_AUTO_ANSWER_AFTER_LOOP: ${EMBER_AUTO_ANSWER_AFTER_LOOP:-}
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:$${EMBER_PORT:-8080}/health >/dev/null"]
       interval: 30s

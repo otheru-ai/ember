@@ -205,8 +205,11 @@ def run_tool_loop_observability_case(server: str, reply: str) -> None:
     base = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env["EMBER_STUB_REPLY"] = reply
+    # Explicit --tool-loop-report 3: this case exercises the REPORT MECHANISM
+    # with a 4-round history, not the shipped default of 8.
     proc = subprocess.Popen(
-        [server, "-m", "stub", "--port", str(port), "--ds4-prefill", "exact"],
+        [server, "-m", "stub", "--port", str(port), "--ds4-prefill", "exact",
+         "--tool-loop-report", "3"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -281,6 +284,625 @@ def run_tool_loop_observability_case(server: str, reply: str) -> None:
     ), log
 
 
+def run_nonprogress_case(server: str) -> None:
+    """A turn that finishes clean but emits nothing at all must be reported.
+
+    A model can produce reasoning tokens and then no visible text or tool call.
+    Backend flags alone are insufficient; the condition must appear in logs and
+    status telemetry.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    # Whitespace-only: the model DOES decode tokens but delivers no visible
+    # byte and no tool call -- the real deployment shape (~700 tokens of
+    # reasoning, then silence). An earlier version of this test used "" which
+    # decodes ZERO tokens; that is a different thing entirely (a request that
+    # asked for no output), and building the test on it is what let the
+    # too-loose n_generated==0 case ship. sse.h defines sent_visible_content
+    # as "a non-whitespace content byte reached", so whitespace stays invisible.
+    env["EMBER_STUB_REPLY"] = "   \n  \t "
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        code, status = request(base + "/status")
+        assert code == 200, status
+        assert status["nonprogress"]["count"] == 0, status
+        assert status["nonprogress"]["last"] is None, status
+
+        # buffered path
+        payload = tool_request(stream=False)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["message"]["content"].strip() == "", body
+        code, status = request(base + "/status")
+        assert status["nonprogress"]["count"] == 1, status
+        assert status["nonprogress"]["last"] is not None, status
+
+        # streaming path counts independently
+        payload["stream"] = True
+        code, _ = request(base + "/v1/chat/completions", payload)
+        assert code == 200
+        code, status = request(base + "/status")
+        assert status["nonprogress"]["count"] == 2, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] non-progress turn:" in log, log
+
+
+def run_zero_token_not_counted_case(server: str) -> None:
+    """A request that decoded NOTHING is not the model refusing to act.
+
+    A generation that never decoded is not a non-progress turn; it is a
+    separate no-output condition caused by a zero budget, immediate stop, or
+    abandonment.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = ""          # decodes ZERO tokens
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        payload["stream"] = True
+        request(base + "/v1/chat/completions", payload)
+        code, status = request(base + "/status")
+        assert status["nonprogress"]["count"] == 0, status
+        assert status["nonprogress"]["last"] is None, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "non-progress turn" not in log, log
+
+
+def run_length_truncated_not_counted_case(server: str) -> None:
+    """A turn cut off by the token cap is a budget outcome, not a refusal.
+
+    A capped request may produce reasoning tokens without visible output or a
+    tool call. Only a voluntary stop should count as non-progress.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "   \n  \t "     # invisible, but decodes tokens
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        payload["max_tokens"] = 2               # force finish_reason "length"
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["finish_reason"] == "length", body
+        code, status = request(base + "/status")
+        assert status["nonprogress"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "non-progress turn" not in log, log
+
+
+def _loop_messages(n: int, name: str = "write_file") -> list:
+    """n identical assistant tool calls, each with a DIFFERENT result.
+
+    Differing results are invisible to a strict call-and-result signal, so the
+    call-signature diagnostic must cover them separately.
+    """
+    msgs = [{"role": "user", "content": "do the thing"}]
+    for i in range(1, n + 1):
+        msgs.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{
+                "id": f"c{i}", "type": "function",
+                "function": {"name": name,
+                             "arguments": '{"path":"/tmp/x","content":"same"}'},
+            }],
+        })
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}",
+                     "content": f"result number {i}"})   # differs each round
+    return msgs
+
+
+def run_ordinary_tool_call_is_not_a_leak_case(server: str) -> None:
+    """An ordinary STREAMING tool call must not count as a markup leak (#24).
+
+    The counter used to scan the caller's raw accumulator, which still holds
+    the tool block that ember_text_safe_limit() correctly withheld and the
+    parser then consumed. That incorrectly counted ordinary tool calls as leaks.
+
+    The existing prose case asserts count==0 for a BUFFERED, tool-free reply,
+    which never exercised the defect. This one does: streaming, with tools,
+    emitting a real DSML call.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = dsml_write(path="/tmp/safe.py", content="print(1)\n")
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        code, body = request(base + "/v1/chat/completions", tool_request(stream=True))
+        assert code == 200, body
+        assert "tool_calls" in body, body       # the call really was emitted
+        code, status = request(base + "/status")
+        assert status["tool_markup_leak"]["count"] == 0, status
+
+        # and again buffered, so neither path regresses
+        code, body = request(base + "/v1/chat/completions", tool_request(stream=False))
+        assert code == 200, body
+        assert body["choices"][0]["message"].get("tool_calls"), body
+        code, status = request(base + "/status")
+        assert status["tool_markup_leak"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "tool markup leaked" not in log, log
+
+
+def run_loop_report_defaults_case(server: str) -> None:
+    """Both loop thresholds default to 8.
+
+    Lower thresholds were noisy for loops that resolved when the model changed
+    strategy. Pin the default here because this test passes neither flag.
+    """
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        wait_ready(base, proc)
+        code, status = request(base + "/status")
+        assert status["tool_loop"]["report_after_repeats"] == 8, status
+        assert status["no_progress"]["report_after"] == 8, status
+
+        # A six-round wall -- the shape that self-resolved in deployment -- is
+        # now BELOW the threshold and must stay silent on both signals.
+        payload = tool_request(stream=False)
+        payload["messages"] = _wall_messages(6)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["no_progress"]["count"] == 0, status
+        assert status["tool_loop"]["last"] is None, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def _wall_messages(n: int, name: str = "terminal") -> list:
+    """n tool rounds with a DIFFERENT call each time and one invariant answer.
+
+    A captured regression showed: the model varied its
+    terminal command every round and the harness returned a byte-identical
+    "Background review denied non-whitelisted tool" refusal twelve times. Both
+    call-keyed signals are near-blind to this (measured on the regression fixture:
+    rounds=0, calls=2) because they ask whether the CALL repeated. The lease
+    asks whether anything came back that had not come back before.
+    """
+    wall = ('{"error": "Background review denied non-whitelisted tool: '
+            f'{name}. Only memory/skill tools are allowed."}}')
+    msgs = [{"role": "user", "content": "do the thing"}]
+    for i in range(1, n + 1):
+        msgs.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{
+                "id": f"w{i}", "type": "function",
+                "function": {"name": name,
+                             "arguments": '{"command":"attempt %d"}' % i},
+            }],
+        })
+        msgs.append({"role": "tool", "tool_call_id": f"w{i}", "content": wall})
+    return msgs
+
+
+def run_progress_lease_case(server: str) -> None:
+    """Trailing tool rounds that return nothing new must be reported.
+
+    This is a sibling of tool_loop rather than part of it because result-keyed
+    and call-keyed signals detect different failure modes.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "plain answer"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port), "--no-progress-report", "3"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        code, status = request(base + "/status")
+        assert status["no_progress"]["report_after"] == 3, status
+        assert status["no_progress"]["count"] == 0, status
+        assert status["no_progress"]["last"] is None, status
+
+        # Four rounds == a lease of 3 (the first introduced the refusal), which
+        # is the threshold and not above it. Must stay silent.
+        payload = tool_request(stream=False)
+        payload["messages"] = _wall_messages(4)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["no_progress"]["count"] == 0, status
+
+        # Five rounds -> lease 4 -> above the threshold.
+        payload["messages"] = _wall_messages(5)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["no_progress"]["count"] == 1, status
+        assert status["no_progress"]["last"]["rounds"] == 4, status
+        assert status["no_progress"]["last"]["tool"] == "terminal", status
+
+        # The signal must not change generation: the turn is served normally.
+        assert body["choices"][0]["finish_reason"] in ("stop", "tool_calls"), body
+
+        # Genuine progress -- every round brings back something new -- must not
+        # fire however long the run is. This is _loop_messages: an IDENTICAL
+        # call each round with a DIFFERENT result, i.e. exactly the history the
+        # call-keyed signal fires on and the lease must not.
+        payload["messages"] = _loop_messages(9)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["no_progress"]["count"] == 1, status   # unchanged
+        assert status["tool_loop"]["last"]["rounds"] > 3, status  # the other did
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] no progress: 4 tool rounds returned nothing new" in log, log
+
+
+def run_progress_lease_off_case(server: str) -> None:
+    """--no-progress-report 0 disables the signal entirely."""
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "plain answer"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port), "--no-progress-report", "0"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        payload["messages"] = _wall_messages(12)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["no_progress"]["report_after"] == 0, status
+        assert status["no_progress"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] no progress:" not in log, log
+
+
+def run_auto_answer_case(server: str) -> None:
+    """--auto-answer-after-loop suppresses tools once the run exceeds N."""
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = dsml_write(path="/tmp/safe.py", content="x")
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port),
+         "--auto-answer-after-loop", "3"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["armed_after"] == 3, status
+        assert status["auto_answer"]["count"] == 0, status
+
+        # 3 identical calls == the threshold, NOT above it -> must not fire
+        payload = tool_request(stream=False)
+        payload["messages"] = _loop_messages(3)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["message"].get("tool_calls"), body
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["count"] == 0, status
+
+        # 4 identical calls -> above the threshold -> tools suppressed.
+        # Assert on what EMBER did, not on what the stub emitted: the stub
+        # replays its canned DSML reply regardless of suppression, so ember
+        # rightly rejects "a tool call was generated when no tools were
+        # available". A real model cannot emit a call for tools it was never
+        # shown -- has_tools gates both the prompt render and the grammar.
+        # What matters here is that no tool call reaches the CLIENT.
+        payload["messages"] = _loop_messages(4)
+        code, body = request(base + "/v1/chat/completions", payload)
+        if "choices" in body:
+            assert not body["choices"][0]["message"].get("tool_calls"), body
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["count"] == 1, status
+        assert status["auto_answer"]["last"]["tool"] == "write_file", status
+
+        # an explicit client demand for a tool must NEVER be overridden
+        payload["messages"] = _loop_messages(6)
+        payload["tool_choice"] = "required"
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["count"] == 1, status   # unchanged
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] auto-answer:" in log, log
+
+
+def run_auto_answer_instruction_case(server: str) -> None:
+    """The suppressed turn must TELL the model why its tools vanished.
+
+    Removing tools silently can make a model improvise ASCII tool markup into
+    visible output (<?DSML?tool_calls>, U+003F not U+FF5C). The
+    instruction is what makes suppression comprehensible rather than merely
+    obstructive.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "plain answer"
+    # The stub swaps its reply only when the instruction is present in the
+    # rendered prompt, so seeing this text back PROVES the instruction was
+    # injected -- not merely that the tools were removed.
+    env["EMBER_STUB_AUTOANSWER_REPLY"] = "INSTRUCTION-REACHED-THE-MODEL"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port),
+         "--auto-answer-after-loop", "3"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        payload["messages"] = _loop_messages(4)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["message"]["content"] == \
+            "INSTRUCTION-REACHED-THE-MODEL", body
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["count"] == 1, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] auto-answer:" in log, log
+    assert "instruction not appended" not in log, log
+
+
+def run_clean_output_not_flagged_case(server: str) -> None:
+    """Prose that merely MENTIONS DSML must not be flagged.
+
+    Only the NEGATIVE case is covered. The positive one -- markup actually
+    reaching the client as text -- could not be faithfully reproduced with the
+    stub: with tools advertised ember rejects it as invalid_tool_call, with no
+    tools on the buffered path likewise, and on the streaming path the stub's
+    block is dropped entirely rather than delivered. Deployment (a regression fixture,
+    streaming, tools suppressed mid-request by auto-answer) DID deliver it, so
+    that path differs from anything the stub can construct. Shipping a
+    positive test built on an unfaithful redeployment is the same mistake that
+    produced the v1 failure, so it is left uncovered and stated instead.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = (
+        "The DSML markers are special tokens. A DSML tool call is parsed, "
+        "never shown. See docs for DSML details."
+    )
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = {
+            "model": "stub", "stream": False, "max_tokens": 4096,
+            "reasoning_effort": "none",
+            "messages": [{"role": "user", "content": "explain DSML"}],
+        }
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        code, status = request(base + "/status")
+        assert status["tool_markup_leak"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "tool markup leaked" not in log, log
+
+
+def run_auto_answer_off_by_default_case(server: str) -> None:
+    """Without the flag it must never fire, however long the loop runs."""
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = dsml_write(path="/tmp/safe.py", content="x")
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],      # no flag
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        payload["messages"] = _loop_messages(9)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["message"].get("tool_calls"), body
+        code, status = request(base + "/status")
+        assert status["auto_answer"]["armed_after"] == 0, status
+        assert status["auto_answer"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "auto-answer" not in log, log
+
+
+def run_degenerate_with_output_case(server: str) -> None:
+    """A degenerate turn that DID produce output must still be counted.
+
+    A compaction summarizer can degenerate while still emitting visible text,
+    so the narrower non-progress signal correctly stays silent while the wider
+    degenerate counter fires.
+    """
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "a real answer the model did emit"
+    env["EMBER_STUB_TERMINATION_REASON"] = "prompt_echo_detected"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        code, status = request(base + "/status")
+        assert status["degenerate"]["count"] == 0, status
+
+        # STREAMING path only. On the buffered path a watchdog-stopped turn
+        # returns a typed model_output_error by design, so it never reaches the
+        # normal response path -- and it is already visible as an error. The
+        # deployment case (the compaction summarizer) was streaming, where the
+        # turn finishes normally and the degeneracy would otherwise be silent.
+        payload = tool_request(stream=True)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert '"content"' in str(body), body          # output WAS produced
+        code, status = request(base + "/status")
+        assert status["degenerate"]["count"] == 1, status
+        last = status["degenerate"]["last"]
+        assert last["produced_output"] is True, status
+        assert last["reason"] == "prompt_echo_detected", status
+        # and it must NOT be counted as non-progress -- it emitted.
+        assert status["nonprogress"]["count"] == 0, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "[ember] degenerate turn WITH output:" in log, log
+
+
+def run_progress_not_flagged_case(server: str) -> None:
+    """The negative half: a turn that DOES emit must never be counted."""
+    port = free_port()
+    base = f"http://{'127.0.0.1'}:{port}"
+    env = os.environ.copy()
+    env["EMBER_STUB_REPLY"] = "here is the answer"
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        wait_ready(base, proc)
+        payload = tool_request(stream=False)
+        code, body = request(base + "/v1/chat/completions", payload)
+        assert code == 200, body
+        assert body["choices"][0]["message"]["content"], body
+        payload["stream"] = True
+        request(base + "/v1/chat/completions", payload)
+        code, status = request(base + "/status")
+        assert status["nonprogress"]["count"] == 0, status
+        assert status["nonprogress"]["last"] is None, status
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    log = proc.stderr.read()
+    assert "non-progress turn" not in log, log
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: test_tool_safety_server.py EMBER_SERVER", file=sys.stderr)
@@ -288,8 +910,21 @@ def main() -> int:
     server = sys.argv[1]
     valid = dsml_write(path="/tmp/safe.py", content="print('safe')\n")
     run_tool_loop_observability_case(server, valid)
+    run_ordinary_tool_call_is_not_a_leak_case(server)
+    run_loop_report_defaults_case(server)
+    run_progress_lease_case(server)
+    run_progress_lease_off_case(server)
+    run_auto_answer_case(server)
+    run_auto_answer_instruction_case(server)
+    run_clean_output_not_flagged_case(server)
+    run_auto_answer_off_by_default_case(server)
+    run_nonprogress_case(server)
+    run_zero_token_not_counted_case(server)
+    run_length_truncated_not_counted_case(server)
+    run_degenerate_with_output_case(server)
+    run_progress_not_flagged_case(server)
 
-    # Reproduce the production failure shape: ASCII-degraded DSML embedded in a
+    # Reproduce the deployment failure shape: ASCII-degraded DSML embedded in a
     # write_file string. The outer call must be rejected, and only the clean
     # replacement turn may be exposed.
     nested = dsml_write(
@@ -360,7 +995,7 @@ def main() -> int:
     assert "print('unsafe')" not in stream, stream
 
     # EMBER_STREAM_TOOL_RETRY=0 restores ds4's blanket refusal without a
-    # rebuild, if in-stream recovery ever misbehaves in production.
+    # rebuild, if in-stream recovery ever misbehaves in deployment.
     code, stream = run_case(
         server, nested, valid, stream=True,
         extra_env={"EMBER_STREAM_TOOL_RETRY": "0"},
@@ -407,12 +1042,10 @@ def main() -> int:
 
     # A malformed streaming attempt fails once, explicitly, without running the
     # configured replacement or emitting a tool-call header.
-    # This is the exact production shape: a complete call missing a required
+    # A complete call missing a required
     # property ("$ is missing required property ..."), which ember's schema
-    # validator refuses (tool_schema.c). Captured live from the agent gateway gateway
-    # on 2026-08-05, where it killed four consecutive turns because the agent
-    # streams and the retry is gated off for streams. It must now finish the
-    # turn normally with no tool call rather than erroring.
+    # validator refuses (tool_schema.c), must finish the streaming turn
+    # normally with no tool call rather than erroring.
     code, stream = run_case(
         server, missing_path, missing_path, stream=True
     )
@@ -429,14 +1062,13 @@ def main() -> int:
     # output, not a server failure, and a streaming client cannot retry.
     #
     # It must still never be misread as a malformed-tool retry merely because the
-    # partial/echoed prompt contains a DSML example (the 2026-08-02 shape), and
+    # partial/echoed prompt contains a DSML example, and
     # the reason must remain visible to a client that cares -- carried in
     # finish_details.type rather than a typed error.
     #
     # finish_reason MUST be "stop", never "length": "length" is what invites a
     # harness to request a continuation, which re-enters the same degenerate
-    # decode. That cost 4 continuations / 79 model calls / 92 delivered
-    # characters in production on 2026-08-08.
+    # decode repeatedly.
     code, stream = run_case(
         server,
         nested,
@@ -457,13 +1089,12 @@ def main() -> int:
     # ── the two fallthrough paths a watchdog stop must CLAIM ─────────────────
     # A stall does not merely choose a rendering; it must own the case, or a
     # later branch handles it and emits the typed error the finish-normally
-    # path exists to remove. Both branches below are reachable in production
+    # path exists to remove. Both branches below are reachable in deployment
     # and neither was covered when the gate was first written.
     #
     # (1) EMBER_STREAM_TOOL_ERROR=1 is a supported knob. With it set and the
     # payload carrying invalid tools, an unclaimed stall lands in the tool
-    # branch and is reported as invalid_tool_call — the 2026-08-02
-    # misattribution asserted against above.
+    # branch and is misreported as invalid_tool_call.
     code, stream = run_case(
         server,
         nested,
@@ -734,7 +1365,7 @@ def main() -> int:
     assert code == 500, body
     assert body["error"]["code"] == "backend_retry_failed", body
 
-    # Stub and production agree that zero is a literal output budget.
+    # Stub and deployment agree that zero is a literal output budget.
     zero_payload = {
         "model": "stub",
         "messages": [{"role": "user", "content": "prewarm"}],

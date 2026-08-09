@@ -21,3 +21,8 @@ using an ambiguous same-day suffix.
 - Split the container into a full-toolchain `dev` target and a minimal
   dependency-closure `release` target used by Compose.
 - Added licensing, vendor provenance, security, support, and contribution policy.
+- Synced the latest agent-progress work: repeated-call diagnostics, a
+  result-based progress lease, empty/degenerate-turn telemetry, and detection
+  of tool markup delivered as visible text.
+- Added opt-in stateless automatic loop recovery and Compose environment
+  controls for progress reporting and recovery thresholds.

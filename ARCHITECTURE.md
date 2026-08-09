@@ -392,11 +392,15 @@ and degrades gracefully where model output is merely unusable:
 - client disconnects cancel prefill/decode through callbacks;
 - the server binds to loopback and provides no built-in authentication.
 
-Tool-loop detection is observability, not policy. Ember derives a diagnostic
-from repeated calls and results and reports it in response metadata, logs, and
-`/status`, but it does not impose a fixed tool-round ceiling. The external agent
-harness owns decisions about whether a long-running workflow is making useful
-progress.
+Tool-loop detection is observability by default, not a ceiling. Ember derives
+request-local diagnostics from repeated call signatures, identical call/result
+rounds, and a progress lease keyed by novel tool-result effects. It reports
+them in response metadata, logs, and `/status`; non-progress output,
+degeneracy, and visible tool-markup leaks are recorded separately. The optional
+`--auto-answer-after-loop` policy is deliberately off by default. When enabled,
+it suppresses optional tools for one turn and adds a private recovery
+instruction, but never overrides a client-required tool choice or creates
+cross-request state.
 
 ## Testing the architecture
 
