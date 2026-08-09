@@ -104,6 +104,37 @@ serial autoregressive baseline; its JSON `batch` object records the rows and
 tokens compared. Repeating that oracle across ragged prompts, cancellation, slot
 reuse, and mixed plans remains the hardware acceptance gate.
 
+The first gfx1151 acceptance run passed on 2026-08-09 using exact prefill and
+two resident sessions. A 3,926-token prompt produced 32 baseline tokens and 64
+resident-session tokens; both resident streams and the disk snapshot round trip
+were token-for-token identical to serial autoregressive generation. This proves
+the engine coordinator path for that shape. The GPU-free server test separately
+exercises overlapping HTTP requests, while broader ragged/cancellation coverage
+remains part of the release hardware gate.
+
+Server bookkeeping does not rely on a single `run_chat()` thread. With
+`--batch-sessions N`, N persistent generation workers may overlap and bypass
+`gen_lock`. KV, continuation, and tool-memory access is serialized by
+`state_lock`; the DSML tracker is request-local. Tool-memory getters return
+borrowed interior pointers, so their callers must retain `state_lock` until the
+pointer is no longer used.
+
+## Measured HIP GEMM batch limit
+
+The gfx1151 sweep added as `--validate-gemm-batch N` was run through batch count
+64 on ROCm 7.14. Three representative decode projections were bit-identical to
+the one-row baseline at every count, with no HIP fault. This removes the need to
+copy Dwarfstar's CUDA-specific four-row ceiling, but it does not by itself prove
+that the full attention, MoE, and ROCmFP decode path can combine independent
+sessions. The differential validator remains authoritative.
+
+The sweep uses deterministic synthetic FP16 inputs, `HIPBLAS_COMPUTE_32F`, and
+`HIPBLAS_GEMM_DEFAULT`. It needs no model weights and can be rerun with:
+
+```bash
+./build-rocm/ember-dflash --validate-gemm-batch 64
+```
+
 ## Remaining performance work
 
 The scheduler already forms one logical decode batch containing every ready

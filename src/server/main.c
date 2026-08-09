@@ -2096,13 +2096,17 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // The legacy backend owns one mutable KV frontier and must stay serialized.
     // Resident batching isolates that frontier per session, so worker requests
     // may overlap while the engine coordinator serializes actual submissions.
-    // CAUTION (DSpark/batching audit): when batching is enabled `serialize` is
-    // false and gen_lock is bypassed. The worker-thread-only lockless singletons
-    // (ember_kv_cache, ember_tool_memory, the DSML decode tracker) then rely on
-    // run_chat still being funneled through the single gen_worker. Verify that
-    // invariant holds before enabling --batch-sessions>1 in deployment; the
-    // engine supports native mixed batches (deepseek4_backend.h supports_native_
-    // mixed) but the server currently executes sessions serially.
+    // CONCURRENCY (audited 2026-08-09). When batching is enabled `serialize` is
+    // false and gen_lock is bypassed: gen_worker_start() creates
+    // `batch_sessions` threads, all running gen_worker_main() -> run_chat().
+    // Shared server state stays safe because every access is serialized by
+    // state_lock:
+    //   ember_kv_cache            all srv->kv accesses
+    //   ember_continuation_store  all continuation accesses
+    //   ember_tool_memory         writers and both borrowed-pointer readers
+    // The DSML tracker is request-local in gen_ctx, not shared. Tool-memory
+    // getters return interior pointers that eviction can free, so callers must
+    // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
     atomic_fetch_add(&srv->busy, 1);
@@ -2466,8 +2470,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
 
     // KV reuse: restore the longest cached prefix (backend prefills only the
-    // suffix), and reserve a slot to snapshot this prompt for next turn. Under
-    // gen_lock, so the cache is accessed single-threaded.
+    // suffix), and reserve a slot to snapshot this prompt for next turn.
+    // Serialized by state_lock, not gen_lock: batching bypasses gen_lock and
+    // runs run_chat() concurrently on several generation workers.
     int restore_slot = -1, restore_len = 0;
     bool restore_pinned = false;
     pthread_mutex_lock(&srv->state_lock);
@@ -3910,6 +3915,9 @@ static void print_usage(FILE *out, const char *argv0) {
         "                              max 64; >1 enables continuous batching)\n"
         "  --max-ctx N                 context length (default 65536)\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
+        "  --validate-gemm-batch N     sweep HIP strided-batched GEMM counts 2..N\n"
+        "                              against the one-row baseline, then exit\n"
+        "                              (needs no model; safe alongside serving)\n"
         "  --validate-tokens N         tokens compared by validation (default 32)\n",
         argv0);
 }
@@ -3958,6 +3966,30 @@ static bool env_seconds(const char *name, double fallback, double *out) {
         return true;
     }
     return parse_double_range(s, name, 0.0, 86400.0, out);
+}
+
+// Sweep HIP strided-batched GEMM batch counts against the one-row baseline.
+// The result bounds any future cross-session batched decode: above max_exact,
+// batching changes logits or faults and cannot replace the serial operation.
+static int run_gemm_batch_sweep(ember_backend *be, int limit) {
+    ember_gemm_batch_report r;
+    if (!ember_backend_validate_gemm_batch(be, limit, &r)) {
+        fprintf(stderr, "[ember-gemm-sweep] did not run: %s\n",
+                r.detail[0] ? r.detail : "unknown");
+        return 2;
+    }
+    printf("gemm batch sweep: shapes=%d limit=%d max_exact=%d",
+           r.shapes_tested, r.limit, r.max_exact);
+    if (r.first_divergent) printf(" first_divergent=%d", r.first_divergent);
+    if (r.first_fault) printf(" first_fault=%d", r.first_fault);
+    if (r.worst_rel > 0) printf(" worst_rel=%.3g", r.worst_rel);
+    printf("\n  %s\n", r.detail);
+    if (r.max_exact < 2) {
+        printf("  VERDICT: no bit-exact batching available (max_exact=1)\n");
+        return 1;
+    }
+    printf("  VERDICT: batched decode may use batchCount <= %d\n", r.max_exact);
+    return 0;
 }
 
 static int run_backend_validation(ember_backend *be, const char *path,
@@ -4073,6 +4105,7 @@ int main(int argc, char **argv) {
     double idle_reclaim_secs = 300.0;
     const char *validate_prompt = NULL;
     int validate_tokens = 32;
+    int validate_gemm_batch = 0;
     // Preserve the measured lucebox deployment override: its older DSpark
     // pairing accepted substantially better with target top-k=4 (~0.95 vs
     // ~0.68) and avoided two expert evaluations per layer. The model and the
@@ -4201,6 +4234,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(opt, "--max-ctx") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1, INT_MAX, &max_ctx);
+        } else if (strcmp(opt, "--validate-gemm-batch") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v &&
+                parse_int_range(v, opt, 2, 256, &validate_gemm_batch);
         } else if (strcmp(opt, "--validate-prompt") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
@@ -4218,6 +4255,11 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // The GEMM sweep measures a HIP library property, not a model property.
+    // Running it before model load keeps the standalone form usable without
+    // allocating the model weights.
+    if (validate_gemm_batch > 0 && !validate_prompt)
+        return run_gemm_batch_sweep(NULL, validate_gemm_batch);
     if (!model_path || !model_path[0]) {
         fprintf(stderr, "[ember] -m MODEL is required\n");
         print_usage(stderr, argv[0]);
@@ -4246,6 +4288,13 @@ int main(int argc, char **argv) {
         return 1;
     }
     free(err);
+    if (validate_gemm_batch > 0) {
+        const int rc = run_gemm_batch_sweep(be, validate_gemm_batch);
+        if (rc > 1) {
+            ember_backend_free(be);
+            return rc;
+        }
+    }
     if (validate_prompt) {
         int rc =
             run_backend_validation(be, validate_prompt, validate_tokens);

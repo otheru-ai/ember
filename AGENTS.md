@@ -141,17 +141,20 @@ the model. The server never sees ggml or HIP. **Changing the ABI means changing
 both implementations** (`backend_stub.c` and `backend_dflash.cc`), and the stub
 must keep the whole pipeline exercisable without a GPU.
 
-### One persistent generation worker, not thread-per-request
+### Persistent generation workers, not HTTP connection threads
 
-`http.c` is thread-per-connection, but connection threads hand chat jobs to a
-single long-lived worker thread (`gen_worker` in `main.c`) and block. This is
-not incidental: the DeepSeek4 compute-graph caches are `thread_local`, so a
+`http.c` is thread-per-connection, but connection threads hand chat jobs to
+long-lived workers (`gen_worker` in `main.c`) and block. The default path has
+one worker; `--batch-sessions N` creates N persistent workers. This is not
+incidental: the DeepSeek4 compute-graph caches are `thread_local`, so a
 short-lived thread rebuilt the ~918 MB prefill arena per request and orphaned
 it on exit. Consequences that constrain any change here:
 
-- `ember_kv_cache`, `ember_tool_memory`, and the DSML decode tracker are
-  **worker-thread-only and therefore lockless**. Touching them from an HTTP
-  thread is a data race.
+- `ember_kv_cache`, `ember_tool_memory`, and `ember_continuation_store` are
+  shared and every access takes `state_lock`. Tool-memory readers return
+  interior pointers that eviction can free, so callers must hold `state_lock`
+  for the full lifetime of a borrowed pointer. The DSML tracker is request-local
+  in `gen_ctx`, not shared.
 - `ember_backend_free` and `ember_backend_release_idle_graphs` **must** be
   called on the worker thread (the caches live in its TLS). `main` must not
   free the backend — that would double-free.
