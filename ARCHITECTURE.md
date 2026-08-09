@@ -22,40 +22,41 @@ and where changes belong.
 ## System at a glance
 
 ```text
- OpenAI / Anthropic / agent clients
-                  │ HTTP/1.1 + JSON/SSE
-                  ▼
- ┌──────────────────────────────────────────────────────────────┐
- │ HTTP and protocol layer                         fresh C      │
- │ src/server/http.c, api_adapters.c, chat_api.c, sse.c         │
- │ routing · validation · protocol normalization · wire output  │
- └──────────────────────────────┬───────────────────────────────┘
-                                │ ember_chat_request
-                                ▼
- ┌──────────────────────────────────────────────────────────────┐
- │ Request orchestration and model semantics       fresh C      │
- │ src/server/main.c + src/model/                                │
- │ DSML rendering · tools · compaction · KV policy · replay     │
- └──────────────────────────────┬───────────────────────────────┘
-                                │ stable C ABI
-                                ▼
- ┌──────────────────────────────────────────────────────────────┐
- │ Backend boundary                                              │
- │ src/backend/ember_backend.h                                   │
- │ tokenizer · generation · snapshots · disk cache · metrics    │
- └───────────────────┬──────────────────────┬───────────────────┘
-                     │                      │
-          tests and local builds       ROCm deployment
-                     │                      │
-                     ▼                      ▼
-       backend_stub.c (fresh C)   backend_dflash.cc (C++ bridge)
-                                            │
-                                            ▼
- ┌──────────────────────────────────────────────────────────────┐
- │ Vendored engine                                  C++ / HIP   │
- │ engine/dflash + engine/ggml                                   │
- │ DeepSeek forward pass · ROCMFP · MoE · attention · DSpark    │
- └──────────────────────────────────────────────────────────────┘
+OpenAI / Anthropic / agent clients
+                  |
+                  | HTTP/1.1 + JSON/SSE
+                  v
++------------------------------------------------------------+
+| HTTP and protocol layer (fresh C)                          |
+| src/server/: routing, validation, adapters, wire output    |
++------------------------------------------------------------+
+                  |
+                  | ember_chat_request
+                  v
++------------------------------------------------------------+
+| Request orchestration and model semantics (fresh C)        |
+| main.c + src/model/: DSML, tools, compaction, KV policy    |
++------------------------------------------------------------+
+                  |
+                  | stable C ABI
+                  v
++------------------------------------------------------------+
+| src/backend/ember_backend.h                                |
+| tokenizer, generation, snapshots, disk cache, metrics      |
++--------------------------+---------------------------------+
+                           |
+             +-------------+-------------+
+             |                           |
+             v                           v
+  backend_stub.c                 backend_dflash.cc
+  tests and local builds         ROCm C++ bridge
+                                         |
+                                         v
+                              +-------------------------+
+                              | Vendored engine         |
+                              | DeepSeek, ROCMFP, MoE,  |
+                              | attention, DSpark       |
+                              +-------------------------+
 ```
 
 The major ownership boundaries are:
@@ -94,18 +95,18 @@ the model. The main pipeline lives in `run_chat()` in `src/server/main.c`.
 
 ```text
 HTTP request
-  → route and parse protocol JSON
-  → normalize to ember_chat_request
-  → attach exact tool replay or restore a continuation frontier
-  → render DSML and encode, preserving token splices
-  → optionally compact, then re-render and re-encode
-  → enforce the context limit
-  → resolve sampling, reasoning budget, stops, and tool grammar
-  → choose the longest safe KV prefix and reserve a snapshot target
-  → generate through ember_backend_generate()
-  → split reasoning/text/tools and validate executable tool calls
-  → emit native buffered JSON or SSE events
-  → commit successful cache/replay state and release the generation
+  -> route and parse protocol JSON
+  -> normalize to ember_chat_request
+  -> attach exact tool replay or restore a continuation frontier
+  -> render DSML and encode, preserving token splices
+  -> optionally compact, then re-render and re-encode
+  -> enforce the context limit
+  -> resolve sampling, reasoning budget, stops, and tool grammar
+  -> choose the longest safe KV prefix and reserve a snapshot target
+  -> generate through ember_backend_generate()
+  -> split reasoning/text/tools and validate executable tool calls
+  -> emit native buffered JSON or SSE events
+  -> commit successful cache/replay state and release the generation
 ```
 
 ### 1. Route and normalize
@@ -353,11 +354,11 @@ The Dockerfile has two intentionally different outputs:
 
 ```text
 ROCm toolchain image
-        │
-        ├── dev target
-        │     full compiler/SDK + source + symbols + build tree
-        │
-        └── release target
+        |
+        +-- dev target
+        |     full compiler/SDK + source + symbols + build tree
+        |
+        +-- release target
               Ubuntu base + stripped server + crash shim
               + exact recursive ROCm runtime dependency closure
               + gfx1151 rocBLAS data + download utilities
