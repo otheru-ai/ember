@@ -17,13 +17,24 @@ mkdir -p "$destination"
 declare -A seen=()
 queue=("$@")
 
+runtime_path() {
+  # Ubuntu 24.04's merged-/usr layout exposes /lib and /lib64 as symlinks.
+  # ldd still reports those legacy paths; creating real directories there
+  # makes a later Docker COPY collide with the release image's symlinks.
+  case "$1" in
+    /lib/*) printf '/usr/lib/%s\n' "${1#/lib/}" ;;
+    /lib64/*) printf '/usr/lib64/%s\n' "${1#/lib64/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 copy_object() {
   local object="$1"
   [[ -f "$object" ]] || {
     echo "runtime object not found: $object" >&2
     exit 66
   }
-  local target="$destination$object"
+  local target="$destination$(runtime_path "$object")"
   mkdir -p "$(dirname "$target")"
   cp -L --preserve=mode,timestamps "$object" "$target"
 }
@@ -31,8 +42,9 @@ copy_object() {
 while [[ ${#queue[@]} -gt 0 ]]; do
   object="${queue[0]}"
   queue=("${queue[@]:1}")
-  [[ -n "${seen[$object]:-}" ]] && continue
-  seen["$object"]=1
+  target_path="$(runtime_path "$object")"
+  [[ -n "${seen[$target_path]:-}" ]] && continue
+  seen["$target_path"]=1
   copy_object "$object"
 
   linkage="$(ldd "$object")"

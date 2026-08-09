@@ -49,6 +49,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("cmake --build", release)
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
         self.assertIn("/usr/share/licenses/ember/", release)
+        self.assertIn("blas_lib_gfx1151.kpack", dockerfile)
+        self.assertNotIn("TensileLibrary_lazy_gfx1151.dat", dockerfile)
 
     def test_compose_pulls_release_and_keeps_source_build_explicit(self) -> None:
         compose = COMPOSE.read_text()
@@ -98,6 +100,8 @@ class ReleaseScriptTests(unittest.TestCase):
                 check=True,
             )
             self.assertTrue((pathlib.Path(directory) / "bin" / "echo").is_file())
+            self.assertFalse((pathlib.Path(directory) / "lib").exists())
+            self.assertTrue((pathlib.Path(directory) / "usr" / "lib").is_dir())
             copied = [path for path in pathlib.Path(directory).rglob("*") if path.is_file()]
             self.assertGreater(len(copied), 1)
 

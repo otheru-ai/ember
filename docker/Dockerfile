@@ -53,12 +53,13 @@ RUN gcc -shared -fPIC -O2 -g \
       /usr/local/bin/ember-dflash \
       /usr/local/lib/libsegvtrace.so \
       /opt/rocm/bin/rocminfo \
- && test -d /opt/rocm/lib/rocblas/library \
- && runtime_rocblas=/ember-runtime/opt/rocm/lib/rocblas/library \
- && mkdir -p "$runtime_rocblas" \
- && find /opt/rocm/lib/rocblas/library -maxdepth 1 -type f \
-      -name '*gfx1151*' -exec cp -a -t "$runtime_rocblas" {} + \
- && test -f "$runtime_rocblas/TensileLibrary_lazy_gfx1151.dat" \
+ && rocblas_kpack="$(find /opt/rocm -type f \
+      -path '*/.kpack/blas_lib_gfx1151.kpack' -print -quit)" \
+ && test -n "$rocblas_kpack" \
+ && runtime_kpack_dir="/ember-runtime$(dirname "$rocblas_kpack")" \
+ && mkdir -p "$runtime_kpack_dir" \
+ && cp -a "$rocblas_kpack" "$runtime_kpack_dir/" \
+ && test -f "$runtime_kpack_dir/blas_lib_gfx1151.kpack" \
  && if [ -d /opt/rocm/share/rocblas ]; then \
       mkdir -p /ember-runtime/opt/rocm/share; \
       cp -a /opt/rocm/share/rocblas /ember-runtime/opt/rocm/share/; \
