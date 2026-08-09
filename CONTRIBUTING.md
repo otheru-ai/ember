@@ -14,9 +14,9 @@ cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
 ```
 
-ROCm changes should also be built on gfx1151 hardware and checked with the
-differential validator documented in the README. Do not run GPU tests against a
-shared production device without coordinating the maintenance window.
+ROCm changes should also be built on gfx1151 hardware and checked with
+`ember-dflash --validate-prompt`. Do not run GPU tests against a shared device
+without coordinating the maintenance window.
 
 Use concise commits in the form `type(scope): subject`. By contributing, you
 agree that your contribution is licensed under the repository's MIT license.

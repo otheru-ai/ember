@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Ember is a from-scratch **C** inference server for DeepSeek-V4-Flash on AMD Strix
 Halo (gfx1151). It is
 **ds4/Dwarfstar's server architecture rewritten clean in C, driving lucebox's
-tuned HIP kernels** through a stable C ABI. See `README.md` (features, flags,
-benchmarks) and `ARCHITECTURE.md` (the layering rationale).
+tuned HIP kernels** through a stable C ABI. See `README.md` for installation
+and first use, and `ARCHITECTURE.md` for the layering rationale.
 
 The load-bearing decision: the GPU kernels and the tokenizer are *reused*
 (person-years of gfx1151 tuning, and a `joyai-llm` pre-tokenizer that must be

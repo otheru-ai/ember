@@ -20,13 +20,13 @@ with a kernel bridge*, not a kernel rewrite.
 
 The published full-ROCMFP affine fp2 model (85.3 GiB, 2.58 bpw) meets
 the Strix-Halo reference benchmarks (~248–253 tok/s sparse prefill, ~32 tok/s
-decode with DSpark). See `README.md` (features, flags, benchmarks, runtime env
-vars) and `ARCHITECTURE.md` (layering rationale) for the full picture.
+decode with DSpark). See `README.md` for installation and first use, and
+`ARCHITECTURE.md` for the layering rationale.
 
 Primary documentation to consult, in order:
 
-- `README.md` — feature list, CLI flags, runtime environment variables, memory
-  model, build/run instructions.
+- `README.md` — prerequisites, container quick start, first request, and
+  development commands.
 - `ARCHITECTURE.md` — the layering and why the server was rewritten but the
   kernels reused.
 - `docs/continuous-batching.md` — resident-session batching design.
@@ -307,7 +307,8 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
 - `scripts/build.sh` uses the `dev` image and does not require a GPU merely to
   compile because `gfx1151` is pinned explicitly. Override the image with
   `EMBER_IMAGE` and parallelism with `JOBS`.
-- Key runtime env vars (full list in `README.md`): `DFLASH_DS4_SPEC=1` +
+- Key runtime env vars (`.env.example` lists container settings):
+  `DFLASH_DS4_SPEC=1` +
   `DFLASH_DS4_DRAFT=<draft.gguf>` enable DSpark; `EMBER_BG_IDLE_SECS` /
   `EMBER_BG_MAX_WAIT_SECS` tune background gating; `EMBER_IDLE_RECLAIM_SECS`
   controls idle graph reclamation; `EMBER_TRACE_TOKENS` and
