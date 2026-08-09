@@ -96,20 +96,9 @@ jobs:
         run: ctest --test-dir build-asan --output-on-failure --timeout 300
 
   analyzer:
-    # Static analysis, REPORT-ONLY on purpose.
-    #
-    # -fanalyzer is GCC's symbolic-execution pass; it finds leak / null-deref
-    # paths the tests never reach. It currently reports 4 findings on src/
-    # (2 -Wanalyzer-null-argument in buf.h, 2 -Wanalyzer-malloc-leak in gguf.c
-    # and tool_memory.c). All 4 look like false positives — the analyzer cannot
-    # model ember_buf_fatal()'s abort-on-OOM contract, nor gguf_free()'s
-    # incremental population — but they have not been formally triaged, so
-    # gating here would make CI red on day one for no defect.
-    #
-    # Triage those 4, add inline suppressions with a reason, then flip both
-    # steps to gating by dropping `|| true` and restoring --error-exitcode=1.
-    # The step count is asserted so a NEW finding is visible in the log even
-    # while the job stays green.
+    # Both analyzers are release gates. Reviewed GCC false positives carry
+    # narrow source suppressions with ownership rationale; every new warning
+    # therefore fails the job instead of silently growing a baseline.
     runs-on: docker
     container:
       image: node:20-bookworm
@@ -119,20 +108,19 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends build-essential cmake python3 cppcheck
-      - name: GCC analyzer (report-only)
+      - name: GCC analyzer
         run: |
           for f in src/common/*.c src/model/*.c src/server/*.c src/backend/backend_stub.c; do
-            gcc -fanalyzer -c -o /dev/null -std=c11 -Wall -Wextra \
-                -Isrc -D_GNU_SOURCE "$f" 2>&1 || true
-          done | tee analyzer.log
-          echo "::notice::gcc -fanalyzer findings: $(grep -c 'warning:' analyzer.log || true) (baseline 4)"
-      - name: cppcheck (report-only)
+            gcc -fanalyzer -c -o /dev/null -std=c11 -Wall -Wextra -Werror \
+                -Isrc -D_GNU_SOURCE "$f"
+          done
+      - name: cppcheck
         run: |
           cppcheck --enable=warning,portability --inline-suppr --std=c11 \
+                   --error-exitcode=1 \
                    --suppress=missingIncludeSystem \
                    -I src src/common src/model src/server \
-                   src/backend/backend_stub.c 2>&1 | tee cppcheck.log || true
-          echo "::notice::cppcheck findings: $(grep -c '\](error|warning)' cppcheck.log || true)"
+                   src/backend/backend_stub.c
 
   coverage:
     # Per-file line-coverage ratchet. An aggregate percentage would let a new

@@ -43,19 +43,28 @@ size_t ember_http_parse(char *raw, size_t len, ember_http_request *req) {
     if (!hdr_end) return 0;
 
     // headers
-    while (p < hdr_end && req->n_headers < EMBER_HTTP_MAX_HEADERS) {
+    while (p < hdr_end) {
+        // Never silently drop headers: a proxy or caller may make a security
+        // decision from a field that Ember would otherwise ignore after #48.
+        if (req->n_headers >= EMBER_HTTP_MAX_HEADERS) return 0;
         char *eol = memmem(p, (size_t)(hdr_end - p), "\r\n", 2);
         if (!eol) eol = hdr_end;
         char *colon = memchr(p, ':', (size_t)(eol - p));
-        if (colon) {
-            *colon = '\0';
-            char *val = colon + 1;
-            while (val < eol && (*val == ' ' || *val == '\t')) val++;
-            *eol = '\0';
-            req->headers[req->n_headers].name = p;
-            req->headers[req->n_headers].value = val;
-            req->n_headers++;
-        }
+        if (!colon || colon == p) return 0;
+        for (char *name = p; name < colon; ++name)
+            if (!isalnum((unsigned char)*name) && *name != '!' &&
+                *name != '#' && *name != '$' && *name != '%' &&
+                *name != '&' && *name != '\'' && *name != '*' &&
+                *name != '+' && *name != '-' && *name != '.' &&
+                *name != '^' && *name != '_' && *name != '`' &&
+                *name != '|' && *name != '~') return 0;
+        *colon = '\0';
+        char *val = colon + 1;
+        while (val < eol && (*val == ' ' || *val == '\t')) val++;
+        *eol = '\0';
+        req->headers[req->n_headers].name = p;
+        req->headers[req->n_headers].value = val;
+        req->n_headers++;
         p = eol + 2;
     }
 
@@ -64,6 +73,11 @@ size_t ember_http_parse(char *raw, size_t len, ember_http_request *req) {
     size_t declared = 0;
     bool saw_cl = false;
     for (int i = 0; i < req->n_headers; ++i) {
+        // Chunked request bodies are deliberately unsupported. Reject every
+        // Transfer-Encoding spelling rather than create a proxy/backend
+        // framing differential.
+        if (strcasecmp(req->headers[i].name, "Transfer-Encoding") == 0)
+            return 0;
         if (strcasecmp(req->headers[i].name, "Content-Length") != 0) continue;
         // Reject duplicate framing fields rather than leave an HTTP
         // request-smuggling ambiguity for an upstream proxy to interpret.

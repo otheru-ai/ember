@@ -20,6 +20,18 @@ static bool validates(const char *instance_text, const char *schema_text,
     return ok;
 }
 
+static void test_large_number_equality(void) {
+    char err[256];
+    CHECK(validates("9007199254740992", "{\"const\":9007199254740992}",
+                    true, err, sizeof(err)));
+    CHECK(!validates("9007199254740993", "{\"const\":9007199254740992}",
+                     true, err, sizeof(err)));
+    CHECK(validates("1.00e2", "{\"enum\":[100]}",
+                    true, err, sizeof(err)));
+    CHECK(!validates("9007199254740993.5", "{\"type\":\"integer\"}",
+                     true, err, sizeof(err)));
+}
+
 static void test_recursive_constraints(void) {
     const char *schema =
         "{\"type\":\"object\",\"additionalProperties\":false,"
@@ -231,6 +243,13 @@ static void test_pattern_and_property_names(void) {
     CHECK(!validates("{\"A1\":1}", names, true, err, sizeof(err)) &&
           strstr(err, "pattern"));
 
+    CHECK(validates("\"12345\"", "{\"pattern\":\"^\\\\d+$\"}",
+                    true, err, sizeof(err)));
+    CHECK(!validates("\"dd\"", "{\"pattern\":\"^\\\\d+$\"}",
+                     true, err, sizeof(err)));
+    CHECK(!validates("\"x\"", "{\"pattern\":\"(?=x)x\"}",
+                     true, err, sizeof(err)) && strstr(err, "invalid"));
+
     // additionalProperties as a schema (rather than false) constrains the
     // uncovered properties instead of banning them.
     const char *typed_extras =
@@ -347,6 +366,7 @@ static void test_depth_limit(void) {
 }
 
 int main(void) {
+    test_large_number_equality();
     test_recursive_constraints();
     test_refs_and_combinators();
     test_strict_and_duplicates();

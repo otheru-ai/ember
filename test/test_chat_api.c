@@ -570,6 +570,17 @@ static void test_reject_invalid_sampler_ranges(void) {
         "{\"messages\":[],\"max_tokens\":-1}",
         "{\"messages\":[],\"reasoning_budget_tokens\":-1}",
         "{\"messages\":[],\"thinking_token_budget\":\"many\"}",
+        "{\"messages\":[],\"stream\":\"true\"}",
+        "{\"messages\":[],\"temperature\":\"zero\"}",
+        "{\"messages\":[],\"top_p\":null}",
+        "{\"messages\":[],\"max_tokens\":1.5}",
+        "{\"messages\":[],\"max_tokens\":2147483648}",
+        "{\"messages\":[],\"seed\":1.5}",
+        "{\"messages\":[],\"stop\":[\"ok\",1]}",
+        "{\"messages\":[],\"tools\":{}}",
+        "{\"messages\":[{\"content\":\"missing role\"}]}",
+        "{\"messages\":[{\"role\":\"user\",\"content\":7}]}",
+        "{\"messages\":[],\"stream\":false,\"stream\":true}",
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         ember_json *v = ember_json_parse(cases[i]);
@@ -596,6 +607,17 @@ static void test_explicit_zero_penalty_overrides(void) {
     CHECK(ember_chat_request_parse(v, &req), "omitted penalties parse");
     CHECK(!req.freq_pen_set && !req.pres_pen_set,
           "omitted penalties remain distinguishable from zero overrides");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+}
+
+static void test_large_seed_is_exact(void) {
+    ember_json *v = ember_json_parse(
+        "{\"messages\":[],\"seed\":9007199254740993}");
+    ember_chat_request req;
+    CHECK(v && ember_chat_request_parse(v, &req), "large seed parses");
+    CHECK(req.seed_set && req.seed == UINT64_C(9007199254740993),
+          "large seed is not rounded through double precision");
     ember_chat_request_free(&req);
     ember_json_free(v);
 }
@@ -674,6 +696,7 @@ int main(void) {
     test_reject_no_messages();
     test_reject_invalid_sampler_ranges();
     test_explicit_zero_penalty_overrides();
+    test_large_seed_is_exact();
     test_reasoning_budget_alias();
     test_tool_choice_constraints();
     printf("──────────────────────────────\n");

@@ -37,6 +37,9 @@ struct ember_json {
 // Parse `text`. Returns NULL on syntax error. Free the result with
 // ember_json_free (frees the whole tree).
 ember_json *ember_json_parse(const char *text);
+// Length-delimited variant for untrusted wire input. Embedded NUL bytes remain
+// visible and are rejected instead of truncating the document as a C string.
+ember_json *ember_json_parse_n(const char *text, size_t len);
 void        ember_json_free(ember_json *v);
 
 // Object member lookup (NULL if not an object or key absent).

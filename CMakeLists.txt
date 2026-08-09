@@ -272,7 +272,7 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_quant_manifest_corpus.py)
   # Offline analysis scripts — no server, no network. Same 60s ceiling as the
-  # C tests; the three server-spawning tests below keep their tighter 20s.
+  # C tests; server-spawning tests below keep their tighter 20s.
   set_tests_properties(
     quant_quality_report quant_behavior_eval gguf_tensor_error
     quant_manifest_corpus
@@ -306,6 +306,11 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_scripts.py)
   set_tests_properties(release_scripts PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME promote_from_dev
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_promote_from_dev.py)
+  set_tests_properties(promote_from_dev PROPERTIES TIMEOUT 20)
 endif()
 
 # ── standalone model-compute engine (vendored ggml fork + DeepSeek4) ──────

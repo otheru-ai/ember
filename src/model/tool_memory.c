@@ -502,11 +502,21 @@ bool ember_tool_memory_persistence_enabled(const ember_tool_memory *tm) {
     return tm && tm->persist_dir != NULL;
 }
 
+// GCC's analyzer does not model ownership transferred by put_internal() into
+// tm->e; ASan/LSan and ember_tool_memory_free cover that lifetime. Suppress the
+// reviewed false positive at this public ownership-transfer wrapper only.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
+#endif
 void ember_tool_memory_put(ember_tool_memory *tm, const char *id,
                            const char *bytes, size_t len,
                            const int32_t *ids, int n_ids) {
     (void)put_internal(tm, id, bytes, len, ids, n_ids, true);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 static void persisted_touch(const ember_tool_memory *tm, const char *id) {
     char *path = persisted_path(tm, id);

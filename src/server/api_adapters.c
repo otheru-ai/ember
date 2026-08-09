@@ -472,7 +472,8 @@ static bool append_responses_tools(ember_buf *body, const ember_json *tools,
 bool ember_responses_request_parse(const ember_json *root,
                                    ember_chat_request *out,
                                    char *err, size_t err_cap) {
-    if (!root || root->type != EMBER_JSON_OBJECT) {
+    if (!root || root->type != EMBER_JSON_OBJECT ||
+        ember_json_has_duplicate_keys(root)) {
         set_err(err, err_cap, "invalid Responses request");
         return false;
     }
@@ -499,6 +500,21 @@ bool ember_responses_request_parse(const ember_json *root,
         if (tool_choice->type != EMBER_JSON_STRING &&
             tool_choice->type != EMBER_JSON_OBJECT) {
             set_err(err, err_cap, "invalid Responses tool_choice");
+            return false;
+        }
+    }
+    const ember_json *reasoning = ember_json_get(root, "reasoning");
+    if (reasoning && reasoning->type != EMBER_JSON_NULL &&
+        reasoning->type != EMBER_JSON_OBJECT) {
+        set_err(err, err_cap, "Responses reasoning must be an object");
+        return false;
+    }
+    if (reasoning && reasoning->type == EMBER_JSON_OBJECT) {
+        const ember_json *effort = ember_json_get(reasoning, "effort");
+        const ember_json *summary = ember_json_get(reasoning, "summary");
+        if ((effort && effort->type != EMBER_JSON_STRING) ||
+            (summary && summary->type != EMBER_JSON_STRING)) {
+            set_err(err, err_cap, "Responses reasoning fields must be strings");
             return false;
         }
     }
@@ -534,7 +550,6 @@ bool ember_responses_request_parse(const ember_json *root,
     bool comma = false;
     append_common_fields(&body, root, &comma, true);
     append_json_field(&body, "tool_choice", tool_choice, &comma);
-    const ember_json *reasoning = ember_json_get(root, "reasoning");
     if (reasoning && reasoning->type == EMBER_JSON_OBJECT) {
         const ember_json *effort = ember_json_get(reasoning, "effort");
         append_json_field(&body, "reasoning_effort", effort, &comma);
@@ -594,7 +609,8 @@ bool ember_responses_request_parse(const ember_json *root,
 bool ember_completion_request_parse(const ember_json *root,
                                     ember_chat_request *out,
                                     char *err, size_t err_cap) {
-    if (!root || root->type != EMBER_JSON_OBJECT) {
+    if (!root || root->type != EMBER_JSON_OBJECT ||
+        ember_json_has_duplicate_keys(root)) {
         set_err(err, err_cap, "invalid Completions request");
         return false;
     }
@@ -893,7 +909,8 @@ static bool validate_anthropic_payload(const ember_json *root,
 bool ember_anthropic_request_parse(const ember_json *root,
                                    ember_chat_request *out,
                                    char *err, size_t err_cap) {
-    if (!root || root->type != EMBER_JSON_OBJECT) {
+    if (!root || root->type != EMBER_JSON_OBJECT ||
+        ember_json_has_duplicate_keys(root)) {
         set_err(err, err_cap, "invalid Anthropic request");
         return false;
     }
@@ -903,6 +920,21 @@ bool ember_anthropic_request_parse(const ember_json *root,
         return false;
     }
     if (!validate_anthropic_payload(root, err, err_cap)) return false;
+    const ember_json *thinking = ember_json_get(root, "thinking");
+    if (thinking && thinking->type != EMBER_JSON_OBJECT) {
+        set_err(err, err_cap, "Anthropic thinking must be an object");
+        return false;
+    }
+    if (thinking) {
+        const ember_json *type_value = ember_json_get(thinking, "type");
+        const char *type = ember_json_str(type_value, NULL);
+        const ember_json *budget = ember_json_get(thinking, "budget_tokens");
+        if (!type || (strcmp(type, "enabled") && strcmp(type, "disabled")) ||
+            (budget && budget->type != EMBER_JSON_NUMBER)) {
+            set_err(err, err_cap, "invalid Anthropic thinking configuration");
+            return false;
+        }
+    }
     const ember_json *anthropic_choice = ember_json_get(root, "tool_choice");
     const char *normalized_choice = NULL;
     const char *forced_name = NULL;
@@ -981,7 +1013,6 @@ bool ember_anthropic_request_parse(const ember_json *root,
         comma = true;
     }
     append_json_field(&body, "stop", ember_json_get(root, "stop_sequences"), &comma);
-    const ember_json *thinking = ember_json_get(root, "thinking");
     if (thinking && thinking->type == EMBER_JSON_OBJECT) {
         const char *type =
             ember_json_str(ember_json_get(thinking, "type"), "");

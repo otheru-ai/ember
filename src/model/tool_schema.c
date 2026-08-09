@@ -1,11 +1,15 @@
 #include "tool_schema.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <regex.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../common/buf.h"
 
 #define EMBER_SCHEMA_MAX_DEPTH 128
 
@@ -26,12 +30,100 @@ static bool schema_fail(schema_ctx *ctx, const char *fmt, ...) {
     return false;
 }
 
+typedef struct {
+    char *digits;
+    long long exponent;
+    bool negative;
+    bool zero;
+} normalized_number;
+
+// Normalize an RFC-8259 decimal as digits * 10^exponent. The JSON DOM keeps
+// the original number token specifically so equality need not collapse at the
+// double-precision boundary (for example 9007199254740992 vs 9007199254740993).
+static bool normalize_number(const ember_json *v, normalized_number *out) {
+    memset(out, 0, sizeof(*out));
+    if (!v || v->type != EMBER_JSON_NUMBER || !v->num_raw) return false;
+    const char *p = v->num_raw;
+    if (*p == '-') { out->negative = true; ++p; }
+
+    ember_buf digits = {0};
+    size_t fractional = 0;
+    bool after_dot = false;
+    while (*p && *p != 'e' && *p != 'E') {
+        if (*p == '.') { after_dot = true; ++p; continue; }
+        ember_buf_putc(&digits, *p++);
+        if (after_dot) ++fractional;
+    }
+    long long explicit_exp = 0;
+    if (*p) {
+        char *end = NULL;
+        errno = 0;
+        explicit_exp = strtoll(p + 1, &end, 10);
+        if (errno == ERANGE || !end || *end) {
+            ember_buf_free(&digits);
+            return false;
+        }
+    }
+
+    size_t first = 0;
+    while (first < digits.len && digits.ptr[first] == '0') ++first;
+    if (first == digits.len) {
+        ember_buf_free(&digits);
+        out->digits = strdup("0");
+        if (!out->digits) ember_buf_fatal("out of memory normalizing JSON number");
+        out->zero = true;
+        out->negative = false;
+        return true;
+    }
+    size_t last = digits.len;
+    while (last > first && digits.ptr[last - 1] == '0') --last;
+    size_t trailing = digits.len - last;
+    if (fractional > (size_t)LLONG_MAX || trailing > (size_t)LLONG_MAX ||
+        explicit_exp < LLONG_MIN + (long long)fractional ||
+        explicit_exp - (long long)fractional >
+            LLONG_MAX - (long long)trailing) {
+        ember_buf_free(&digits);
+        return false;
+    }
+    out->exponent = explicit_exp - (long long)fractional +
+                    (long long)trailing;
+    out->digits = strndup(digits.ptr + first, last - first);
+    ember_buf_free(&digits);
+    if (!out->digits) ember_buf_fatal("out of memory normalizing JSON number");
+    return true;
+}
+
+static bool json_number_equal(const ember_json *a, const ember_json *b) {
+    normalized_number na = {0}, nb = {0};
+    bool oka = normalize_number(a, &na);
+    bool okb = normalize_number(b, &nb);
+    if (!oka || !okb) {
+        free(na.digits);
+        free(nb.digits);
+        return false;
+    }
+    bool equal = (na.zero && nb.zero) ||
+        (na.negative == nb.negative && na.exponent == nb.exponent &&
+         strcmp(na.digits, nb.digits) == 0);
+    free(na.digits);
+    free(nb.digits);
+    return equal;
+}
+
+static bool json_number_is_integer(const ember_json *v) {
+    normalized_number n;
+    if (!normalize_number(v, &n)) return false;
+    bool result = n.zero || n.exponent >= 0;
+    free(n.digits);
+    return result;
+}
+
 static bool json_equal(const ember_json *a, const ember_json *b) {
     if (!a || !b || a->type != b->type) return false;
     switch (a->type) {
         case EMBER_JSON_NULL: return true;
         case EMBER_JSON_BOOL: return a->u.b == b->u.b;
-        case EMBER_JSON_NUMBER: return a->u.num == b->u.num;
+        case EMBER_JSON_NUMBER: return json_number_equal(a, b);
         case EMBER_JSON_STRING: return strcmp(a->u.str, b->u.str) == 0;
         case EMBER_JSON_ARRAY:
             if (ember_json_len(a) != ember_json_len(b)) return false;
@@ -75,7 +167,7 @@ static bool type_matches(const ember_json *v, const char *wanted) {
     if (!strcmp(wanted, "boolean")) return v->type == EMBER_JSON_BOOL;
     if (!strcmp(wanted, "number")) return v->type == EMBER_JSON_NUMBER;
     if (!strcmp(wanted, "integer"))
-        return v->type == EMBER_JSON_NUMBER && is_integer(v->u.num);
+        return v->type == EMBER_JSON_NUMBER && json_number_is_integer(v);
     if (!strcmp(wanted, "string")) return v->type == EMBER_JSON_STRING;
     if (!strcmp(wanted, "array")) return v->type == EMBER_JSON_ARRAY;
     if (!strcmp(wanted, "object")) return v->type == EMBER_JSON_OBJECT;
@@ -89,16 +181,75 @@ static size_t utf8_codepoints(const char *s) {
     return n;
 }
 
+// JSON Schema patterns use ECMA-262 syntax. libc only supplies POSIX ERE, so
+// passing patterns straight to regcomp() silently changes their meaning (most
+// dangerously, `\d` becomes a literal `d`). Translate the common portable
+// subset and reject constructs whose boolean semantics cannot be preserved.
+static char *ecma_pattern_to_posix(const char *pattern, bool *valid,
+                                   bool *has_wildcard) {
+    ember_buf out = {0};
+    bool in_class = false;
+    bool previous_quantifier = false;
+    *valid = false;
+    *has_wildcard = false;
+    for (const unsigned char *p = (const unsigned char *)pattern; *p; ++p) {
+        unsigned char c = *p;
+        if (c >= 0x80) goto unsupported;
+        if (c == '\\') {
+            unsigned char e = *++p;
+            if (!e || (e >= '1' && e <= '9') || strchr("bBckpPuUvVxDWS", e))
+                goto unsupported;
+            if (e == 'd') ember_buf_puts(&out, in_class ? "0-9" : "[0-9]");
+            else if (e == 'w')
+                ember_buf_puts(&out, in_class ? "A-Za-z0-9_" : "[A-Za-z0-9_]");
+            else if (e == 's') {
+                if (in_class) goto unsupported;
+                ember_buf_puts(&out, "[[:space:]]");
+            } else if (strchr(".^$*+?()[]{}|\\/-", e)) {
+                ember_buf_putc(&out, '\\');
+                ember_buf_putc(&out, (char)e);
+            } else goto unsupported;
+            previous_quantifier = false;
+            continue;
+        }
+        if (!in_class && c == '(' && p[1] == '?') goto unsupported;
+        if (in_class && c == '[' &&
+            (p[1] == ':' || p[1] == '.' || p[1] == '=')) goto unsupported;
+        if (!in_class && c == '.') *has_wildcard = true;
+        if (!in_class && c == '?' && previous_quantifier) goto unsupported;
+        if (c == '[') in_class = true;
+        else if (c == ']' && in_class) in_class = false;
+        ember_buf_putc(&out, (char)c);
+        previous_quantifier = !in_class &&
+            (c == '*' || c == '+' || c == '?' || c == '}');
+    }
+    if (in_class) goto unsupported;
+    *valid = true;
+    return ember_buf_take(&out);
+
+unsupported:
+    ember_buf_free(&out);
+    return NULL;
+}
+
 static bool regex_matches(const char *pattern, const char *value,
                           bool *valid_pattern) {
+    bool wildcard = false;
+    char *translated = ecma_pattern_to_posix(pattern, valid_pattern, &wildcard);
+    if (!translated) return false;
     regex_t re;
-    int rc = regcomp(&re, pattern, REG_EXTENDED | REG_NOSUB);
+    int rc = regcomp(&re, translated, REG_EXTENDED | REG_NOSUB);
+    free(translated);
     if (rc != 0) {
         *valid_pattern = false;
         return false;
     }
     *valid_pattern = true;
-    rc = regexec(&re, value, 0, NULL, 0);
+    // POSIX '.' includes newlines without REG_NEWLINE, unlike ECMA-262. Fail
+    // closed for that divergent input rather than accidentally broadening it.
+    bool divergent_wildcard = wildcard &&
+        (strchr(value, '\n') || strchr(value, '\r'));
+    rc = divergent_wildcard ? REG_NOMATCH : regexec(&re, value, 0, NULL, 0);
     regfree(&re);
     return rc == 0;
 }

@@ -26,3 +26,13 @@ using an ambiguous same-day suffix.
   of tool markup delivered as visible text.
 - Added opt-in stateless automatic loop recovery and Compose environment
   controls for progress reporting and recovery thresholds.
+- Hardened request parsing against embedded NULs, duplicate or mistyped fields,
+  unsupported HTTP transfer framing, and excess headers.
+- Made strict tool-schema number equality exact beyond IEEE-754's integer range
+  and replaced direct POSIX interpretation of ECMA-262 regex patterns with a
+  translated, fail-closed subset.
+- Removed one-off development probes and made static analysis, exact-commit
+  tests, and gfx1151 certification blocking image-release gates.
+- Added a history-free, policy-gated three-way promotion workflow for bringing
+  reviewed implementation changes over from `ember-dev` without overwriting
+  release-owned files.

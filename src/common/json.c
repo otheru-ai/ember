@@ -94,6 +94,14 @@ static char *parse_string_raw(jp *j) {
                         }
                     }
                     if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFDu;
+                    // The DOM exposes strings as NUL-terminated `char *` and
+                    // cannot preserve U+0000 without a parser/validator
+                    // differential. Fail closed for executable request data.
+                    if (cp == 0) {
+                        j->ok = false;
+                        ember_buf_free(&b);
+                        return NULL;
+                    }
                     // encode UTF-8
                     if (cp < 0x80) ember_buf_putc(&b, (char)cp);
                     else if (cp < 0x800) {
@@ -262,9 +270,9 @@ static ember_json *parse_value_inner(jp *j) {
     }
 }
 
-ember_json *ember_json_parse(const char *text) {
+ember_json *ember_json_parse_n(const char *text, size_t len) {
     if (!text) return NULL;
-    jp j = {.p = text, .end = text + strlen(text), .ok = true, .depth = 0};
+    jp j = {.p = text, .end = text + len, .ok = true, .depth = 0};
     ember_json *v = parse_value(&j);
     if (!j.ok) { if (v) ember_json_free(v); return NULL; }
     skip_ws(&j);
@@ -272,6 +280,10 @@ ember_json *ember_json_parse(const char *text) {
     // non-whitespace (e.g. "{} garbage", "1 2") that lenient parsers accept.
     if (j.p != j.end) { if (v) ember_json_free(v); return NULL; }
     return v;
+}
+
+ember_json *ember_json_parse(const char *text) {
+    return text ? ember_json_parse_n(text, strlen(text)) : NULL;
 }
 
 void ember_json_free(ember_json *v) {

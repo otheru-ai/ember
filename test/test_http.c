@@ -254,6 +254,24 @@ int main(void){
         "POST / HTTP/1.1\r\nContent-Length: 999999999999999999999999\r\n\r\n";
     CHECK(ember_http_parse(overflow, strlen(overflow), &req)==0,
           "overflowing Content-Length rejected");
+    char transfer_encoding[] =
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+    CHECK(ember_http_parse(transfer_encoding, strlen(transfer_encoding), &req)==0,
+          "unsupported Transfer-Encoding rejected");
+    char malformed_header[] =
+        "GET / HTTP/1.1\r\nMissing-Colon\r\n\r\n";
+    CHECK(ember_http_parse(malformed_header, strlen(malformed_header), &req)==0,
+          "malformed header line rejected");
+    char too_many[4096];
+    size_t used = (size_t)snprintf(too_many, sizeof(too_many),
+                                   "GET / HTTP/1.1\r\n");
+    for (int i = 0; i < EMBER_HTTP_MAX_HEADERS + 1; ++i)
+        used += (size_t)snprintf(too_many + used, sizeof(too_many) - used,
+                                 "X-%d: value\r\n", i);
+    used += (size_t)snprintf(too_many + used, sizeof(too_many) - used, "\r\n");
+    CHECK(used < sizeof(too_many) &&
+          ember_http_parse(too_many, used, &req)==0,
+          "header count beyond fixed storage rejected");
 
     // ember_client_gone: streaming generation must notice a departed client
     // without needing a write to fail, or it runs to completion into a dead

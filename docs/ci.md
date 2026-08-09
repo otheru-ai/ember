@@ -14,7 +14,10 @@ all server logic lives.
 The separate `container.yml` workflow builds through the full ROCm `dev` stage
 and publishes the minimal `release` stage on `vYEAR.MONTH.DAY` tags or manual
 dispatch. A tag-triggered build must exactly match the root `VERSION` file;
-manual builds receive a non-release `dev-<commit>` image tag.
+manual builds receive a non-release `dev-<commit>` image tag. Every publish
+first checks out and tests the exact event SHA. Versioned tags additionally
+require `EMBER_GFX1151_CERTIFIED_SHA` to name that same commit after the
+differential validator has passed on target hardware.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
@@ -36,11 +39,12 @@ Ordered cheapest-first so a break reports in seconds.
 | Job | Gates? | What it catches |
 |---|---|---|
 | `invariants` | yes | A `src/` file in only one CMake list (the `d8ace73` bug class); a test that compiles but is never registered with ctest; a target that escapes `-Werror`. |
-| `build-test` | yes | `EMBER_STRICT=ON` (warnings-as-errors) across Release **and** Debug, then the full 37-test suite. |
+| `build-test` | yes | `EMBER_STRICT=ON` (warnings-as-errors) across Release **and** Debug, then the full 38-test suite. |
 | `sanitizers` | yes | ASan + UBSan + LeakSanitizer over the whole suite. |
-| `analyzer` | no (report-only) | `gcc -fanalyzer` and `cppcheck` findings. |
+| `analyzer` | yes | New `gcc -fanalyzer` or `cppcheck` findings. |
 | `coverage` | yes | Per-file line-coverage regression against `ci/coverage_floors.json`. |
-| `release-image` | release gate | Validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, and pushes version plus commit tags. |
+| `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
+| `release-image` | release gate | Requires gfx1151 certification for version tags, validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, and pushes version plus commit tags. |
 
 ## Runner setup
 
@@ -75,6 +79,7 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 |---|---|---|
 | `EMBER_REGISTRY` | variable | `registry.example.org` |
 | `EMBER_IMAGE` | variable | `otheru/ember` |
+| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full commit SHA that passed target validation |
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
 

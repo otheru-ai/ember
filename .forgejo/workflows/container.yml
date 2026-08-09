@@ -10,10 +10,57 @@ on:
   workflow_dispatch:
 
 jobs:
+  source-gate:
+    runs-on: docker
+    container:
+      image: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Verify and test the publish commit
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "checkout does not match the event commit"
+            exit 1
+          }
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake python3
+          python3 ci/check_invariants.py
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEMBER_STRICT=ON
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure --timeout 120
+
   release-image:
+    needs: source-gate
     runs-on: docker-build
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Verify exact checkout and target certification
+        env:
+          CERTIFIED_SHA: ${{ vars.EMBER_GFX1151_CERTIFIED_SHA }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || {
+            echo "checkout does not match the tested event commit"
+            exit 1
+          }
+          case "${GITHUB_REF:-}" in
+            refs/tags/*)
+              test -n "$CERTIFIED_SHA" || {
+                echo 'Set EMBER_GFX1151_CERTIFIED_SHA after target-hardware validation'
+                exit 1
+              }
+              test "$CERTIFIED_SHA" = "$GITHUB_SHA" || {
+                echo "gfx1151 certification is for $CERTIFIED_SHA, not $GITHUB_SHA"
+                exit 1
+              }
+              ;;
+          esac
 
       - name: Validate registry configuration
         env:

@@ -1,6 +1,7 @@
 #include "chat_api.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <float.h>
 #include <limits.h>
 #include <math.h>
@@ -12,20 +13,24 @@
 // #4(d): a syntactically valid JSON number can still overflow to +/-inf via a
 // huge exponent (e.g. 1e400), and casting a non-finite or out-of-range double
 // straight to int/uint64_t is undefined behavior. These guards reject non-
-// finite input (returning false so the caller leaves the field unset) and clamp
-// finite values into the target integer range before the cast.
+// finite, fractional, and out-of-range input rather than silently truncating or
+// saturating client values.
 static bool json_num_to_int(double d, int *out) {
-    if (!isfinite(d)) return false;
-    if (d <= (double)INT_MIN) { *out = INT_MIN; return true; }
-    if (d >= (double)INT_MAX) { *out = INT_MAX; return true; }
+    if (!isfinite(d) || floor(d) != d || d < (double)INT_MIN ||
+        d > (double)INT_MAX) return false;
     *out = (int)d;
     return true;
 }
-static bool json_num_to_u64(double d, uint64_t *out) {
-    if (!isfinite(d)) return false;
-    if (d <= 0.0) { *out = 0; return true; }
-    if (d >= 18446744073709551616.0) { *out = UINT64_MAX; return true; }  // 2^64
-    *out = (uint64_t)d;
+static bool json_num_to_u64(const ember_json *v, uint64_t *out) {
+    if (!v || v->type != EMBER_JSON_NUMBER || !v->num_raw ||
+        !v->num_raw[0] || v->num_raw[0] == '-') return false;
+    for (const char *p = v->num_raw; *p; ++p)
+        if (*p < '0' || *p > '9') return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(v->num_raw, &end, 10);
+    if (errno == ERANGE || !end || *end) return false;
+    *out = (uint64_t)parsed;
     return true;
 }
 
@@ -38,23 +43,35 @@ static char *dup_or(const char *s, const char *dflt) {
 }
 
 // content is either a string or an array of parts; flatten text parts.
-static char *flatten_content(const ember_json *content) {
+static char *flatten_content(const ember_json *content, bool *ok) {
+    *ok = true;
     if (!content) return dup_or("", NULL);
+    if (content->type == EMBER_JSON_NULL) return dup_or("", NULL);
     if (content->type == EMBER_JSON_STRING)
         return dup_or(ember_json_str(content, ""), NULL);
     if (content->type == EMBER_JSON_ARRAY) {
         ember_buf b = {0};
         for (int i = 0; i < ember_json_len(content); i++) {
             const ember_json *part = ember_json_at(content, i);
-            const char *type = ember_json_str(ember_json_get(part, "type"), "");
+            if (!part || part->type != EMBER_JSON_OBJECT) goto invalid;
+            const ember_json *type_node = ember_json_get(part, "type");
+            const char *type = ember_json_str(type_node, NULL);
+            if (!type) goto invalid;
             if (strcmp(type, "text") == 0) {
-                ember_buf_puts(&b, ember_json_str(ember_json_get(part, "text"), ""));
-            }
+                const ember_json *text = ember_json_get(part, "text");
+                if (!text || text->type != EMBER_JSON_STRING) goto invalid;
+                ember_buf_puts(&b, text->u.str);
+            } // Non-text multimodal parts remain intentionally ignored.
         }
         char *s = ember_buf_take(&b);
         return s ? s : dup_or("", NULL);
+invalid:
+        ember_buf_free(&b);
+        *ok = false;
+        return NULL;
     }
-    return dup_or("", NULL);
+    *ok = false;
+    return NULL;
 }
 
 // ds4 parse_reasoning_effort_name: none→NONE(off), minimal..xhigh→HIGH, max→MAX.
@@ -169,14 +186,16 @@ static bool advertised_tool_name(const ember_json *tools, const char *wanted) {
 }
 
 // Parse an OpenAI assistant tool_calls array into msg->calls.
-static void parse_history_tool_calls(const ember_json *arr, ember_chat_msg *msg) {
-    if (!arr || arr->type != EMBER_JSON_ARRAY) return;
+static bool parse_history_tool_calls(const ember_json *arr, ember_chat_msg *msg) {
+    if (!arr) return true;
+    if (arr->type != EMBER_JSON_ARRAY) return false;
     int n = ember_json_len(arr);
     for (int i = 0; i < n; i++) {
         const ember_json *tc = ember_json_at(arr, i);
         const ember_json *fn = ember_json_get(tc, "function");
         const char *name = ember_json_str(ember_json_get(fn, "name"), NULL);
-        if (!name) continue;
+        if (!tc || tc->type != EMBER_JSON_OBJECT || !fn ||
+            fn->type != EMBER_JSON_OBJECT || !name || !name[0]) return false;
         // OpenAI spec: function.arguments is a JSON *string* holding a JSON
         // object. Be tolerant (ds4 parse_function_call): accept a raw object/
         // array too, else the args are lost.
@@ -185,6 +204,7 @@ static void parse_history_tool_calls(const ember_json *arr, ember_chat_msg *msg)
         if (a && (a->type == EMBER_JSON_OBJECT || a->type == EMBER_JSON_ARRAY))
             args_owned = ember_json_dump(a);
         else {
+            if (a && a->type != EMBER_JSON_STRING) return false;
             const char *s = ember_json_str(a, "{}");
             args_owned = dup_or(s && s[0] ? s : "{}", NULL);
         }
@@ -206,6 +226,7 @@ static void parse_history_tool_calls(const ember_json *arr, ember_chat_msg *msg)
         msg->calls.calls[msg->calls.len].id = dup_or(tcid, NULL);
         msg->calls.len++;
     }
+    return true;
 }
 
 static bool valid_sampler_float(double v) {
@@ -214,30 +235,39 @@ static bool valid_sampler_float(double v) {
 
 bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     memset(out, 0, sizeof(*out));
-    if (!root || root->type != EMBER_JSON_OBJECT) return false;
+    if (!root || root->type != EMBER_JSON_OBJECT ||
+        ember_json_has_duplicate_keys(root)) return false;
     out->api = EMBER_API_CHAT;
     out->parallel_tool_calls = true;
 
     const ember_json *msgs = ember_json_get(root, "messages");
     if (!msgs || msgs->type != EMBER_JSON_ARRAY) return false;
 
-    out->model = dup_or(ember_json_str(ember_json_get(root, "model"), NULL),
-                        "deepseek-v4-flash");
-    out->stream = ember_json_bool(ember_json_get(root, "stream"), false);
-    out->background =
-        ember_json_bool(ember_json_get(root, "ember_background"), false);
+    const ember_json *model = ember_json_get(root, "model");
+    if (model && model->type != EMBER_JSON_STRING) goto invalid;
+    out->model = dup_or(ember_json_str(model, NULL), "deepseek-v4-flash");
+    const ember_json *stream = ember_json_get(root, "stream");
+    const ember_json *background = ember_json_get(root, "ember_background");
+    if ((stream && stream->type != EMBER_JSON_BOOL) ||
+        (background && background->type != EMBER_JSON_BOOL)) goto invalid;
+    out->stream = ember_json_bool(stream, false);
+    out->background = ember_json_bool(background, false);
 
     // stream_options.include_usage
     const ember_json *so = ember_json_get(root, "stream_options");
-    if (so && so->type == EMBER_JSON_OBJECT)
-        out->stream_include_usage =
-            ember_json_bool(ember_json_get(so, "include_usage"), false);
+    if (so) {
+        if (so->type != EMBER_JSON_OBJECT) goto invalid;
+        const ember_json *include = ember_json_get(so, "include_usage");
+        if (include && include->type != EMBER_JSON_BOOL) goto invalid;
+        out->stream_include_usage = ember_json_bool(include, false);
+    }
 
     const ember_json *mt = ember_json_get(root, "max_tokens");
     if (!mt) mt = ember_json_get(root, "max_completion_tokens");
-    if (mt && mt->type == EMBER_JSON_NUMBER) {
+    if (mt) {
         int v;
-        if (json_num_to_int(ember_json_num(mt, 0), &v) && v >= 0) {  // #4(d)
+        if (mt->type == EMBER_JSON_NUMBER &&
+            json_num_to_int(ember_json_num(mt, 0), &v) && v >= 0) {
             out->max_tokens = v;
             out->max_tokens_set = true;
         } else goto invalid;
@@ -245,51 +275,58 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
 
     // Sampler surface.
     const ember_json *temp = ember_json_get(root, "temperature");
-    if (temp && temp->type == EMBER_JSON_NUMBER) {
-        if (!valid_sampler_float(temp->u.num) || temp->u.num < 0.0) goto invalid;
+    if (temp) {
+        if (temp->type != EMBER_JSON_NUMBER ||
+            !valid_sampler_float(temp->u.num) || temp->u.num < 0.0) goto invalid;
         out->temperature = temp->u.num;
         out->temperature_set = true;
     }
     const ember_json *tp = ember_json_get(root, "top_p");
-    if (tp && tp->type == EMBER_JSON_NUMBER) {
-        if (!valid_sampler_float(tp->u.num) || tp->u.num < 0.0 ||
+    if (tp) {
+        if (tp->type != EMBER_JSON_NUMBER || !valid_sampler_float(tp->u.num) || tp->u.num < 0.0 ||
             tp->u.num > 1.0) goto invalid;
         out->top_p = tp->u.num;
         out->top_p_set = true;
     }
     const ember_json *tk = ember_json_get(root, "top_k");
-    if (tk && tk->type == EMBER_JSON_NUMBER) {
+    if (tk) {
         int v;
-        if (json_num_to_int(tk->u.num, &v) && v >= 0) {
+        if (tk->type == EMBER_JSON_NUMBER &&
+            json_num_to_int(tk->u.num, &v) && v >= 0) {
             out->top_k = v;
             out->top_k_set = true;
         } else goto invalid;
     }
     const ember_json *mp = ember_json_get(root, "min_p");
-    if (mp && mp->type == EMBER_JSON_NUMBER) {
-        if (!valid_sampler_float(mp->u.num) || mp->u.num < 0.0 ||
+    if (mp) {
+        if (mp->type != EMBER_JSON_NUMBER || !valid_sampler_float(mp->u.num) || mp->u.num < 0.0 ||
             mp->u.num > 1.0) goto invalid;
         out->min_p = mp->u.num;
         out->min_p_set = true;
     }
     const ember_json *seed = ember_json_get(root, "seed");
-    if (seed && seed->type == EMBER_JSON_NUMBER) {
+    if (seed) {
         uint64_t v;
-        if (json_num_to_u64(seed->u.num, &v)) { out->seed = v; out->seed_set = true; }  // #4(d)
+        if (json_num_to_u64(seed, &v)) {
+            out->seed = v;
+            out->seed_set = true;
+        } else goto invalid;
     }
     // Penalties. repetition_penalty (HF/vLLM) with rep_pen alias; OpenAI additive
     // frequency_penalty / presence_penalty.
     const ember_json *rp = ember_json_get(root, "repetition_penalty");
     if (!rp) rp = ember_json_get(root, "rep_pen");
-    if (rp && rp->type == EMBER_JSON_NUMBER) {
-        if (!valid_sampler_float(rp->u.num) || rp->u.num <= 0.0) goto invalid;
+    if (rp) {
+        if (rp->type != EMBER_JSON_NUMBER ||
+            !valid_sampler_float(rp->u.num) || rp->u.num <= 0.0) goto invalid;
         out->rep_pen = rp->u.num;
         out->rep_pen_set = true;
     }
     const ember_json *rw = ember_json_get(root, "rep_window");
-    if (rw && rw->type == EMBER_JSON_NUMBER) {
+    if (rw) {
         int v;
-        if (json_num_to_int(rw->u.num, &v) && v >= 0) {
+        if (rw->type == EMBER_JSON_NUMBER &&
+            json_num_to_int(rw->u.num, &v) && v >= 0) {
             out->rep_window = v;
             out->rep_window_set = true;
         } else goto invalid;
@@ -334,10 +371,11 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     }
     const ember_json *dal = ember_json_get(root, "dry_allowed_length");
     if (dal) {
-        if (dal->type != EMBER_JSON_NUMBER || !valid_sampler_float(dal->u.num) ||
-            dal->u.num < 0.0 || dal->u.num > 4096.0)
+        int v;
+        if (dal->type != EMBER_JSON_NUMBER ||
+            !json_num_to_int(dal->u.num, &v) || v < 0 || v > 4096)
             goto invalid;
-        out->dry_allowed_length = (int)dal->u.num;
+        out->dry_allowed_length = v;
         out->dry_allowed_length_set = true;
     }
     const ember_json *dw = ember_json_get(root, "dry_penalty_last_n");
@@ -345,10 +383,11 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     if (dw) {
         // llama.cpp uses -1 for "whole context"; the sampler reads <=0 the same
         // way, so both spellings land on the same behaviour.
-        if (dw->type != EMBER_JSON_NUMBER || !valid_sampler_float(dw->u.num) ||
-            dw->u.num < -1.0 || dw->u.num > 1048576.0)
+        int v;
+        if (dw->type != EMBER_JSON_NUMBER ||
+            !json_num_to_int(dw->u.num, &v) || v < -1 || v > 1048576)
             goto invalid;
-        out->dry_window = (int)dw->u.num;
+        out->dry_window = v;
         out->dry_window_set = true;
     }
 
@@ -356,16 +395,21 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     const ember_json *stop = ember_json_get(root, "stop");
     if (stop) {
         if (stop->type == EMBER_JSON_STRING) stop_push(out, ember_json_str(stop, NULL));
-        else if (stop->type == EMBER_JSON_ARRAY)
-            for (int i = 0; i < ember_json_len(stop); i++)
-                stop_push(out, ember_json_str(ember_json_at(stop, i), NULL));
+        else if (stop->type == EMBER_JSON_ARRAY) {
+            for (int i = 0; i < ember_json_len(stop); i++) {
+                const ember_json *item = ember_json_at(stop, i);
+                if (!item || item->type != EMBER_JSON_STRING) goto invalid;
+                stop_push(out, item->u.str);
+            }
+        } else if (stop->type != EMBER_JSON_NULL) goto invalid;
     }
 
     // Thinking / reasoning-effort. ds4 default: thinking ON (HIGH).
     out->thinking_enabled = true;
     out->think_mode = EMBER_THINK_HIGH;
-    out->reasoning_effort =
-        dup_or(ember_json_str(ember_json_get(root, "reasoning_effort"), NULL), NULL);
+    const ember_json *effort = ember_json_get(root, "reasoning_effort");
+    if (effort && effort->type != EMBER_JSON_STRING) goto invalid;
+    out->reasoning_effort = dup_or(ember_json_str(effort, NULL), NULL);
     if (out->reasoning_effort)
         effort_to_mode(out->reasoning_effort, &out->think_mode, &out->thinking_enabled);
     const ember_json *reasoning_budget =
@@ -387,7 +431,8 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     // Explicit boolean overrides (enable_thinking / thinking).
     const ember_json *et = ember_json_get(root, "enable_thinking");
     if (!et) et = ember_json_get(root, "thinking");
-    if (et && et->type == EMBER_JSON_BOOL) {
+    if (et) {
+        if (et->type != EMBER_JSON_BOOL) goto invalid;
         out->thinking_enabled = et->u.b;
         if (!out->thinking_enabled) out->think_mode = EMBER_THINK_NONE;
     }
@@ -401,6 +446,19 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     }
 
     const ember_json *tools = ember_json_get(root, "tools");
+    if (tools && tools->type != EMBER_JSON_ARRAY) goto invalid;
+    for (int i = 0; tools && i < ember_json_len(tools); ++i) {
+        const ember_json *tool = ember_json_at(tools, i);
+        const ember_json *fn = ember_json_get(tool, "function");
+        if (!tool || tool->type != EMBER_JSON_OBJECT || !fn ||
+            fn->type != EMBER_JSON_OBJECT) goto invalid;
+        const ember_json *tool_name = ember_json_get(fn, "name");
+        const ember_json *params = ember_json_get(fn, "parameters");
+        if (!tool_name || tool_name->type != EMBER_JSON_STRING ||
+            !tool_name->u.str[0] ||
+            (params && params->type != EMBER_JSON_OBJECT &&
+             params->type != EMBER_JSON_BOOL)) goto invalid;
+    }
     if (tools && tools->type == EMBER_JSON_ARRAY && ember_json_len(tools) > 0 &&
         !out->tool_choice_none) {
         out->has_tools = true;
@@ -417,15 +475,28 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     out->n_messages = n;
     for (int i = 0; i < n; i++) {
         const ember_json *m = ember_json_at(msgs, i);
-        out->messages[i].role = dup_or(ember_json_str(ember_json_get(m, "role"), ""), "");
-        out->messages[i].content = flatten_content(ember_json_get(m, "content"));
+        if (!m || m->type != EMBER_JSON_OBJECT) goto invalid;
+        const ember_json *role = ember_json_get(m, "role");
+        const ember_json *name = ember_json_get(m, "name");
+        const ember_json *reasoning = ember_json_get(m, "reasoning_content");
+        const ember_json *call_id = ember_json_get(m, "tool_call_id");
+        if (!role || role->type != EMBER_JSON_STRING || !role->u.str[0] ||
+            (name && name->type != EMBER_JSON_STRING) ||
+            (reasoning && reasoning->type != EMBER_JSON_STRING) ||
+            (call_id && call_id->type != EMBER_JSON_STRING)) goto invalid;
+        out->messages[i].role = dup_or(role->u.str, "");
+        bool content_ok = false;
+        out->messages[i].content =
+            flatten_content(ember_json_get(m, "content"), &content_ok);
+        if (!content_ok) goto invalid;
         out->messages[i].name =
-            dup_or(ember_json_str(ember_json_get(m, "name"), NULL), NULL);
+            dup_or(ember_json_str(name, NULL), NULL);
         out->messages[i].reasoning =
-            dup_or(ember_json_str(ember_json_get(m, "reasoning_content"), NULL), NULL);
+            dup_or(ember_json_str(reasoning, NULL), NULL);
         out->messages[i].tool_call_id =  // B3: associates a tool result with its call
-            dup_or(ember_json_str(ember_json_get(m, "tool_call_id"), NULL), NULL);
-        parse_history_tool_calls(ember_json_get(m, "tool_calls"), &out->messages[i]);
+            dup_or(ember_json_str(call_id, NULL), NULL);
+        if (!parse_history_tool_calls(
+                ember_json_get(m, "tool_calls"), &out->messages[i])) goto invalid;
     }
     out->continuation_only = n > 0;
     for (int i = 0; i < n; ++i) {

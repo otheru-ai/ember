@@ -1502,7 +1502,7 @@ static bool continue_tool_started_in_think(
 //
 // Set EMBER_STREAM_TOOL_RETRY=0 to restore ds4's blanket refusal.
 static bool stream_tool_retry_enabled(void) {
-    static int cached = -1;
+    static _Thread_local int cached = -1;
     if (cached < 0) {
         const char *e = getenv("EMBER_STREAM_TOOL_RETRY");
         cached = (e && e[0] == '0') ? 0 : 1;
@@ -1674,7 +1674,7 @@ static bool stream_retry_forbidden(const ember_chat_request *req,
 // validates every call afterwards either way, so this is defence in depth
 // rather than a replacement for the validator.
 static bool tool_grammar_enabled(void) {
-    static int cached = -1;
+    static _Thread_local int cached = -1;
     if (cached < 0) {
         const char *e = getenv("EMBER_TOOL_GRAMMAR");
         cached = (e && e[0] == '1') ? 1 : 0;
@@ -1904,7 +1904,7 @@ static bool retry_malformed_tool_call(
 // Set EMBER_STREAM_TOOL_ERROR=1 to restore the typed-error boundary without a
 // rebuild.
 static bool stream_tool_text_fallback(void) {
-    static int cached = -1;
+    static _Thread_local int cached = -1;
     if (cached < 0) {
         const char *e = getenv("EMBER_STREAM_TOOL_ERROR");
         cached = (e && e[0] == '1') ? 0 : 1;
@@ -1934,7 +1934,7 @@ static bool stream_tool_text_fallback(void) {
 //
 // Set EMBER_STREAM_WATCHDOG_ERROR=1 to restore the typed-error boundary.
 static bool stream_watchdog_text_fallback(void) {
-    static int cached = -1;
+    static _Thread_local int cached = -1;
     if (cached < 0) {
         const char *e = getenv("EMBER_STREAM_WATCHDOG_ERROR");
         cached = (e && e[0] == '1') ? 0 : 1;
@@ -1952,7 +1952,7 @@ static bool stream_watchdog_text_fallback(void) {
 // stopped part-way through writing one, or emitted malformed markup implies
 // three different fixes, and only the raw bytes distinguish them.
 static bool log_rejected_block(void) {
-    static int cached = -1;
+    static _Thread_local int cached = -1;
     if (cached < 0) {
         const char *e = getenv("EMBER_LOG_REJECTED_BLOCK");
         cached = (e && e[0] == '1') ? 1 : 0;
@@ -1994,7 +1994,10 @@ static bool parse_double_range(const char *s, const char *name,
                                double min, double max, double *out);
 
 static float dry_default_multiplier(void) {
-    static float cached = -1.0f;
+    // Batch sessions may enter request policy on different coordinator
+    // threads. Per-thread lazy state avoids unsynchronized shared writes; the
+    // process environment is fixed before any request thread starts.
+    static _Thread_local float cached = -1.0f;
     if (cached >= 0.0f) return cached;
     const char *s = getenv("EMBER_DRY_MULTIPLIER");
     // parse_double_range, not atof: it validates and LOGS a bad value. atof
@@ -3684,8 +3687,7 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
     bool is_completion = strcmp(req->path, "/v1/completions") == 0;
     if (strcmp(req->method, "POST") == 0 &&
         (is_chat || is_responses || is_anthropic || is_completion)) {
-        char *body = strndup(req->body, req->body_len);
-        ember_json *root = ember_json_parse(body);
+        ember_json *root = ember_json_parse_n(req->body, req->body_len);
         ember_chat_request creq;
         char parse_err[192] = {0};
         bool parsed = root &&
@@ -3721,7 +3723,6 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 "invalid_request_error", "invalid_request");
         }
         if (root) ember_json_free(root);
-        free(body);
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/status") == 0) {

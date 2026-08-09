@@ -15,6 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 COLLECT_RUNTIME = ROOT / "docker" / "collect-runtime.sh"
 DOCKERFILE = ROOT / "docker" / "Dockerfile"
+CONTAINER_WORKFLOW = ROOT / ".forgejo" / "workflows" / "container.yml"
 PREFLIGHT = ROOT / "scripts" / "preflight.sh"
 SMOKE = ROOT / "scripts" / "smoke_test.sh"
 
@@ -42,6 +43,13 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("build-essential", release)
         self.assertNotIn("cmake --build", release)
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
+
+    def test_container_publish_is_sha_and_hardware_gated(self) -> None:
+        workflow = CONTAINER_WORKFLOW.read_text()
+        self.assertIn("needs: source-gate", workflow)
+        self.assertGreaterEqual(workflow.count("git rev-parse HEAD"), 2)
+        self.assertIn("EMBER_GFX1151_CERTIFIED_SHA", workflow)
+        self.assertIn("ctest --test-dir build", workflow)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

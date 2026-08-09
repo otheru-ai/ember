@@ -181,6 +181,14 @@ gguf_file *gguf_open(const char *path) {
     return g;
 }
 
+// GCC's path analyzer loses the fact that calloc zero-initializes every
+// not-yet-populated entry, then reports the partially populated rd_kv slot as
+// leaked at free(g->kv). The loop below owns and frees every such field; keep
+// the release analyzer gated while suppressing only this reviewed diagnostic.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
+#endif
 void gguf_free(gguf_file *g) {
     if (!g) return;
     for (uint64_t i = 0; g->kv && i < g->n_kv; i++) {
@@ -199,6 +207,9 @@ void gguf_free(gguf_file *g) {
     free(g->tensors);
     free(g);
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 const gguf_kv *gguf_get(const gguf_file *g, const char *key) {
     for (uint64_t i = 0; i < g->n_kv; i++)

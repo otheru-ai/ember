@@ -56,6 +56,11 @@ static void test_edge_cases(void) {
     CHECK(ember_json_parse("[1,2,") == NULL, "unterminated array → NULL");
     CHECK(ember_json_parse("{\"x\":\"line\nbreak\"}") == NULL,
           "unescaped control character rejected");
+    CHECK(ember_json_parse("{\"x\":\"a\\u0000b\"}") == NULL,
+          "escaped NUL rejected because DOM strings are NUL-terminated");
+    static const char embedded_nul[] = "{\"x\":1}\0{\"hidden\":true}";
+    CHECK(ember_json_parse_n(embedded_nul, sizeof(embedded_nul) - 1) == NULL,
+          "length-delimited parser rejects hidden suffix after NUL");
     CHECK(ember_json_parse("1e400") == NULL,
           "non-finite number rejected");
 
