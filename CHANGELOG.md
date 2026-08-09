@@ -44,7 +44,8 @@ using an ambiguous same-day suffix.
   the vulnerability-reporting fallback actionable.
 - Added GitHub-hosted CPU and large-disk container workflows, direct GHCR
   publishing, and a manual environment-gated gfx1151 certification workflow.
-- Fixed the ROCm 7.14 runtime image assembly to package the gfx1151 rocBLAS
-  KPACK used by the pinned toolchain instead of an obsolete Tensile data file.
+- Fixed the ROCm 7.14 runtime image assembly to package both the gfx1151
+  rocBLAS KPACK and its architecture-specific Tensile metadata/code-object
+  tree from the pinned toolchain.
 - Normalized loader-reported `/lib` paths into merged `/usr` locations so the
   collected runtime can be copied into the Ubuntu 24.04 release stage.

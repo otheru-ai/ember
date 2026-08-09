@@ -50,7 +50,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
         self.assertIn("/usr/share/licenses/ember/", release)
         self.assertIn("blas_lib_gfx1151.kpack", dockerfile)
-        self.assertNotIn("TensileLibrary_lazy_gfx1151.dat", dockerfile)
+        self.assertIn("rocblas/library/gfx1151", dockerfile)
+        self.assertIn("TensileLibrary_lazy_gfx1151.dat", dockerfile)
 
     def test_compose_pulls_release_and_keeps_source_build_explicit(self) -> None:
         compose = COMPOSE.read_text()

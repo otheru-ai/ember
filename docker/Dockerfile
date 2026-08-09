@@ -60,6 +60,11 @@ RUN gcc -shared -fPIC -O2 -g \
  && mkdir -p "$runtime_kpack_dir" \
  && cp -a "$rocblas_kpack" "$runtime_kpack_dir/" \
  && test -f "$runtime_kpack_dir/blas_lib_gfx1151.kpack" \
+ && test -f /opt/rocm/lib/rocblas/library/gfx1151/TensileLibrary_lazy_gfx1151.dat \
+ && runtime_rocblas=/ember-runtime/opt/rocm/lib/rocblas/library \
+ && mkdir -p "$runtime_rocblas" \
+ && cp -a /opt/rocm/lib/rocblas/library/gfx1151 "$runtime_rocblas/" \
+ && test -f "$runtime_rocblas/gfx1151/TensileLibrary_lazy_gfx1151.dat" \
  && if [ -d /opt/rocm/share/rocblas ]; then \
       mkdir -p /ember-runtime/opt/rocm/share; \
       cp -a /opt/rocm/share/rocblas /ember-runtime/opt/rocm/share/; \
