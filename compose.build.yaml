@@ -1,0 +1,11 @@
+services:
+  ember:
+    image: ember:local
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: release
+      args:
+        EMBER_VERSION: ${EMBER_VERSION:-dev}
+        EMBER_VCS_REF: ${EMBER_VCS_REF:-unknown}

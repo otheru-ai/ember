@@ -1,9 +1,10 @@
 # Security policy
 
 Please do not disclose vulnerabilities in an issue. Use the repository
-host's private security-advisory feature, or contact a maintainer privately if
-that feature is unavailable. Include the affected revision, reproduction steps,
-impact, and any proposed mitigation.
+host's private security-advisory feature. If that feature is unavailable, email
+`otheru@otheru.ai` with `Ember security` in the subject. Include the affected
+revision, reproduction steps, impact, and any proposed mitigation. Do not attach
+model weights, private prompts, credentials, or operational data.
 
 Only the latest release and the current `main` branch receive security fixes.
 Ember is intended to bind to loopback by default; exposing it through a reverse

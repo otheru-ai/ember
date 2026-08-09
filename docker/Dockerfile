@@ -65,6 +65,19 @@ RUN gcc -shared -fPIC -O2 -g \
     fi \
  && du -sh /ember-runtime
 
+# License texts are runtime content, not development documentation. Preserve
+# the project license and every vendored notice alongside the binaries that
+# incorporate those components.
+RUN install -Dm0644 LICENSE /ember-licenses/ember/LICENSE \
+ && install -Dm0644 engine/ggml/LICENSE /ember-licenses/ggml/LICENSE \
+ && install -Dm0644 engine/dflash/LICENSE /ember-licenses/dflash/LICENSE \
+ && install -Dm0644 engine/third_party/nlohmann/LICENSE.MIT \
+      /ember-licenses/nlohmann/LICENSE.MIT \
+ && install -Dm0644 vendor/xgrammar/LICENSE \
+      /ember-licenses/xgrammar/LICENSE \
+ && install -Dm0644 vendor/xgrammar/NOTICE \
+      /ember-licenses/xgrammar/NOTICE
+
 CMD ["/bin/bash"]
 
 FROM ${RUNTIME_IMAGE} AS release
@@ -88,6 +101,7 @@ RUN apt-get update \
  && mkdir -p /models /cache
 
 COPY --from=dev /ember-runtime/ /
+COPY --from=dev /ember-licenses/ /usr/share/licenses/ember/
 COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \

@@ -1,13 +1,7 @@
 services:
   ember:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: release
-      args:
-        EMBER_VERSION: ${EMBER_VERSION:-dev}
-        EMBER_VCS_REF: ${EMBER_VCS_REF:-unknown}
-    image: ember:local
+    image: ${EMBER_IMAGE_REF:-ghcr.io/otheru/ember:2026.8.9}
+    pull_policy: always
     init: true
     network_mode: host
     devices:

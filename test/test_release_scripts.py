@@ -16,6 +16,8 @@ ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 COLLECT_RUNTIME = ROOT / "docker" / "collect-runtime.sh"
 DOCKERFILE = ROOT / "docker" / "Dockerfile"
 CONTAINER_WORKFLOW = ROOT / ".forgejo" / "workflows" / "container.yml"
+COMPOSE = ROOT / "compose.yaml"
+COMPOSE_BUILD = ROOT / "compose.build.yaml"
 PREFLIGHT = ROOT / "scripts" / "preflight.sh"
 SMOKE = ROOT / "scripts" / "smoke_test.sh"
 
@@ -43,6 +45,18 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("build-essential", release)
         self.assertNotIn("cmake --build", release)
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
+        self.assertIn("/usr/share/licenses/ember/", release)
+
+    def test_compose_pulls_release_and_keeps_source_build_explicit(self) -> None:
+        compose = COMPOSE.read_text()
+        build = COMPOSE_BUILD.read_text()
+        release_service = compose.split("  ember-dev:", 1)[0]
+        version = (ROOT / "VERSION").read_text().strip()
+        self.assertIn(f"ghcr.io/otheru/ember:{version}", release_service)
+        self.assertIn("pull_policy: always", release_service)
+        self.assertNotIn("build:", release_service)
+        self.assertIn("target: release", build)
+        self.assertIn("pull_policy: build", build)
 
     def test_container_publish_is_sha_and_hardware_gated(self) -> None:
         workflow = CONTAINER_WORKFLOW.read_text()
@@ -50,6 +64,9 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count("git rev-parse HEAD"), 2)
         self.assertIn("EMBER_GFX1151_CERTIFIED_SHA", workflow)
         self.assertIn("ctest --test-dir build", workflow)
+        self.assertIn('tag_args+=(--tag "$image:latest")', workflow)
+        self.assertIn("aquasec/trivy:0.73.0@sha256:", workflow)
+        self.assertIn("--severity CRITICAL", workflow)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

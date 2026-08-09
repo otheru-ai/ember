@@ -35,10 +35,10 @@ supported.
 From the repository root:
 
 ```bash
-scripts/preflight.sh && docker compose up --build -d
+scripts/preflight.sh && docker compose up -d
 ```
 
-The first start builds the minimal runtime image, downloads the pinned
+The first start pulls `ghcr.io/otheru/ember:2026.8.9`, downloads the pinned
 [DeepSeek-V4-Flash Strix Halo GGUF](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF)
 (about 85 GiB), verifies it, and starts Ember at
 `http://127.0.0.1:8080`. Interrupted downloads resume automatically.
@@ -59,6 +59,12 @@ Later starts need only:
 
 ```bash
 docker compose up -d
+```
+
+To build the release image from source instead of pulling it:
+
+```bash
+docker compose -f compose.yaml -f compose.build.yaml up --build -d
 ```
 
 Stop Ember with:

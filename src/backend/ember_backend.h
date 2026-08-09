@@ -246,7 +246,7 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
 typedef struct {
     bool ok;                // the sweep ran at all
     int  limit;             // highest batchCount attempted
-    int  max_exact;         // largest batchCount bit-identical to 1 (>=1)
+    int  max_exact;         // largest count exact for every tested shape (>=1)
     int  first_divergent;   // smallest batchCount that differed, else 0
     int  first_fault;       // smallest batchCount that errored, else 0
     int  shapes_tested;

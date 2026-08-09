@@ -267,8 +267,8 @@ static void test_malformed_nested_tags_are_not_executable(void) {
 
 
 // ── real degraded output, captured in production ─────────────────────────────
-// Everything below is a verbatim specimen from /tmp/capture, not a synthetic
-// approximation. Real corruption is messier than anything hand-written: these
+// Everything below is a sanitized reduction of captured failure shapes, not an
+// invented parser grammar. Real corruption is messier than a minimal unit case: these
 // four carry at least five distinct mutations between them --
 //
 //   <?DSML?tool_caddy>   marker name bleeding a nearby word ("Caddy config")

@@ -10,7 +10,7 @@ guides.
 
 | Project | Useful release pattern | Ember decision |
 |---|---|---|
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Multiple distribution forms, server-specific images, direct Hugging Face model acquisition, checksum-bearing release artifacts, and an explicit untrusted-model threat model. | Keep one target-specific image and direct model acquisition. Pin and hash the single supported model. Preserve the explicit model/server security boundary. Published binaries and images remain a release-pipeline task. |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Multiple distribution forms, server-specific images, direct Hugging Face model acquisition, checksum-bearing release artifacts, and an explicit untrusted-model threat model. | Keep one published target-specific image and direct model acquisition. Pin and hash the single supported model, and preserve the explicit model/server security boundary. |
 | [DwarfStar/ds4](https://github.com/antirez/ds4) | Honest model/hardware scope, a model download helper, first-class OpenAI/Anthropic agent examples, differential/debug tooling, and test vectors based on real model behavior. | Match the narrow-scope honesty, agent-client recipes, validator, and model-specific QA. Do not copy ds4 features that conflict with documented Ember fidelity decisions. |
 | [vLLM](https://docs.vllm.ai/en/latest/deployment/docker/) | Stable and nightly ROCm images are visibly distinct; GPU/cache mounts are documented; non-root operation is supported; production metrics cover queueing, cache, throughput, TTFT, and latency. | Add OCI version/revision labels, persistent model/cache mounts, health checks, and an explicit observability gap. A non-root target needs target-host permission testing before it can be claimed. Prometheus semantics require a designed, versioned contract rather than wrapping `/status` casually. |
 | [SGLang](https://docs.sglang.io/docs/get-started/install) | Immutable image tags are recommended over `latest`, runtime images exclude development tools, and hardware-specific installation paths are explicit. | Document immutable release metadata, keep hardware specificity prominent, and separate the full ROCm development stage from a minimal runtime carrying the exact linked-library closure. |
@@ -28,6 +28,8 @@ guides.
 - OCI image version, revision, license, title, and vendor metadata.
 - Separate `dev` and `release` image targets; only the former carries the full
   ROCm toolchain, source, and build tree.
+- Default Compose path pulls an immutable release image; a separate override
+  makes source builds explicit.
 - A dedicated operations guide with hardware, update, rollback, security, and
   troubleshooting contracts.
 - Explicit disclosure of the loopback/no-auth boundary and absence of telemetry.

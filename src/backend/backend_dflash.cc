@@ -1416,6 +1416,10 @@ void fill_f16(std::vector<uint16_t> &dst, uint64_t seed) {
     }
 }
 
+void hip_free_if(void *ptr) {
+    if (ptr) (void)hipFree(ptr);
+}
+
 }  // namespace
 #endif  // DFLASH27B_BACKEND_HIP
 
@@ -1437,6 +1441,9 @@ extern "C" bool ember_backend_validate_gemm_batch(
                       "limit must be >= 2");
         return false;
     }
+    // The safe cross-shape ceiling is the minimum shape ceiling. Start at the
+    // requested upper bound and ratchet downward as each projection runs.
+    report->max_exact = limit;
 
     hipblasHandle_t handle = nullptr;
     if (hipblasCreate(&handle) != HIPBLAS_STATUS_SUCCESS) {
@@ -1460,8 +1467,14 @@ extern "C" bool ember_backend_validate_gemm_batch(
             (void)hipblasDestroy(handle);
             return false;
         }
-        (void)hipMemcpy(dev_w, host_w.data(), w_elems * sizeof(uint16_t),
-                  hipMemcpyHostToDevice);
+        if (hipMemcpy(dev_w, host_w.data(), w_elems * sizeof(uint16_t),
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "weight upload failed for %s", shape.name);
+            hip_free_if(dev_w);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
 
         const size_t x_elems = (size_t)shape.in_dim * limit;
         std::vector<uint16_t> host_x(x_elems);
@@ -1475,12 +1488,24 @@ extern "C" bool ember_backend_validate_gemm_batch(
             hipMalloc(&dev_bat, out_elems * sizeof(float)) != hipSuccess) {
             std::snprintf(report->detail, sizeof(report->detail),
                           "hipMalloc activations failed for %s", shape.name);
-            (void)hipFree(dev_w);
+            hip_free_if(dev_w);
+            hip_free_if(dev_x);
+            hip_free_if(dev_ref);
+            hip_free_if(dev_bat);
             (void)hipblasDestroy(handle);
             return false;
         }
-        (void)hipMemcpy(dev_x, host_x.data(), x_elems * sizeof(uint16_t),
-                  hipMemcpyHostToDevice);
+        if (hipMemcpy(dev_x, host_x.data(), x_elems * sizeof(uint16_t),
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "activation upload failed for %s", shape.name);
+            hip_free_if(dev_w);
+            hip_free_if(dev_x);
+            hip_free_if(dev_ref);
+            hip_free_if(dev_bat);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
 
         // Baseline: `limit` independent batchCount=1 calls. This is exactly
         // what decode_batch() does today, one row at a time.
@@ -1502,16 +1527,25 @@ extern "C" bool ember_backend_validate_gemm_batch(
         if (!baseline_ok) {
             std::snprintf(report->detail, sizeof(report->detail),
                           "batchCount=1 baseline failed for %s", shape.name);
-            (void)hipFree(dev_w); (void)hipFree(dev_x); (void)hipFree(dev_ref); (void)hipFree(dev_bat);
+            hip_free_if(dev_w); hip_free_if(dev_x);
+            hip_free_if(dev_ref); hip_free_if(dev_bat);
             (void)hipblasDestroy(handle);
             return false;
         }
 
         std::vector<float> host_ref(out_elems), host_bat(out_elems);
-        (void)hipMemcpy(host_ref.data(), dev_ref, out_elems * sizeof(float),
-                  hipMemcpyDeviceToHost);
+        if (hipMemcpy(host_ref.data(), dev_ref, out_elems * sizeof(float),
+                      hipMemcpyDeviceToHost) != hipSuccess) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "baseline download failed for %s", shape.name);
+            hip_free_if(dev_w); hip_free_if(dev_x);
+            hip_free_if(dev_ref); hip_free_if(dev_bat);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
         any_shape_ran = true;
         report->shapes_tested++;
+        int shape_max_exact = 1;
 
         for (int bc = 2; bc <= limit; ++bc) {
             const hipblasStatus_t st = hipblasGemmStridedBatchedEx(
@@ -1532,9 +1566,15 @@ extern "C" bool ember_backend_validate_gemm_batch(
                               shape.name, bc, (int)st, (int)sync);
                 goto shape_done;
             }
-            (void)hipMemcpy(host_bat.data(), dev_bat,
-                      (size_t)shape.out_dim * bc * sizeof(float),
-                      hipMemcpyDeviceToHost);
+            if (hipMemcpy(host_bat.data(), dev_bat,
+                          (size_t)shape.out_dim * bc * sizeof(float),
+                          hipMemcpyDeviceToHost) != hipSuccess) {
+                if (!report->first_fault) report->first_fault = bc;
+                std::snprintf(report->detail, sizeof(report->detail),
+                              "%s: batchCount=%d download failed",
+                              shape.name, bc);
+                goto shape_done;
+            }
             {
                 const size_t n = (size_t)shape.out_dim * bc;
                 bool exact = true;
@@ -1555,11 +1595,14 @@ extern "C" bool ember_backend_validate_gemm_batch(
                                   shape.name, bc, report->worst_rel);
                     goto shape_done;
                 }
-                if (bc > report->max_exact) report->max_exact = bc;
+                shape_max_exact = bc;
             }
         }
     shape_done:
-        (void)hipFree(dev_w); (void)hipFree(dev_x); (void)hipFree(dev_ref); (void)hipFree(dev_bat);
+        if (shape_max_exact < report->max_exact)
+            report->max_exact = shape_max_exact;
+        hip_free_if(dev_w); hip_free_if(dev_x);
+        hip_free_if(dev_ref); hip_free_if(dev_bat);
         if (report->first_divergent || report->first_fault) break;
     }
 

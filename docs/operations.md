@@ -29,19 +29,24 @@ before it downloads model data.
 ## Start and readiness
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-The first invocation builds the target-specific server, downloads the pinned
+The first invocation pulls the immutable target-specific image, downloads the pinned
 model with resumable HTTP, verifies its SHA-256 digest, loads it, and starts the
 API on `http://127.0.0.1:8080`. `./models` and `./cache` persist across container
 replacement. Follow progress with `docker compose logs -f ember`.
 
-Compose builds the `release` image target. The full ROCm SDK and compiler exist
-only in the `dev` build stage; the deployable image receives the stripped
-server, crash shim, recursive dynamic-library closure, and rocBLAS runtime
-kernel data. Source, headers, compilers, build intermediates, and model weights
-are absent from its filesystem.
+The deployable image contains the stripped server, crash shim, recursive
+dynamic-library closure, rocBLAS runtime kernel data, and license notices.
+Source, headers, compilers, build intermediates, and model weights are absent
+from its filesystem. To build that image locally instead of pulling it:
+
+```bash
+docker compose -f compose.yaml -f compose.build.yaml up --build -d
+```
+
+The full ROCm SDK and compiler exist only in the Dockerfile's `dev` stage.
 
 Compose reports the service healthy only after `GET /health` succeeds. The
 20-minute health start period accommodates first load on the release hardware;

@@ -44,7 +44,7 @@ Ordered cheapest-first so a break reports in seconds.
 | `analyzer` | yes | New `gcc -fanalyzer` or `cppcheck` findings. |
 | `coverage` | yes | Per-file line-coverage regression against `ci/coverage_floors.json`. |
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
-| `release-image` | release gate | Requires gfx1151 certification for version tags, validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, and pushes version plus commit tags. |
+| `release-image` | release gate | Requires gfx1151 certification for version tags, validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, pushes version plus commit tags, reports image size, and rejects fixed critical vulnerabilities. |
 
 ## Runner setup
 
@@ -77,11 +77,22 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 
 | Name | Kind | Example |
 |---|---|---|
-| `EMBER_REGISTRY` | variable | `registry.example.org` |
+| `EMBER_REGISTRY` | variable | `ghcr.io` |
 | `EMBER_IMAGE` | variable | `otheru/ember` |
 | `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full commit SHA that passed target validation |
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
+
+For GHCR, use `ghcr.io` and `otheru/ember`; the token needs `write:packages`.
+After the first publish, set the package visibility to public so anonymous
+Compose pulls work. Keep the immutable CalVer and `sha-*` tags even though the
+workflow also updates `latest` for discovery.
+
+The internal Forgejo repository remains the source of truth. Configure its push
+mirrors in repository settings for each public GitHub, GitLab, or Gitea target;
+use a dedicated token with repository-write permission, mirror only `main` and
+release tags, and enable synchronization after pushes. Mirror credentials stay
+in Forgejo and never enter this repository.
 
 The builder never needs `/dev/kfd`, `/dev/dri`, or model weights. A future
 self-hosted runner labeled `gfx1151` should pull the immutable commit tag and

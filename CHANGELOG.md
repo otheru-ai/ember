@@ -36,3 +36,9 @@ using an ambiguous same-day suffix.
 - Added a history-free, policy-gated three-way promotion workflow for bringing
   reviewed implementation changes over from `ember-dev` without overwriting
   release-owned files.
+- Promoted the gfx1151 HIP GEMM batch sweep and recorded the successful
+  two-session hardware acceptance result.
+- Changed the default Compose path to pull an immutable GHCR image while
+  retaining an explicit local source-build override.
+- Added project and third-party license notices to the runtime image and made
+  the vulnerability-reporting fallback actionable.

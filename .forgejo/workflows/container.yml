@@ -108,13 +108,19 @@ jobs:
             *) version="dev-$short_sha" ;;
           esac
           image="$REGISTRY/$IMAGE_NAME"
+          tag_args=(
+            --tag "$image:$version"
+            --tag "$image:sha-$short_sha"
+          )
+          case "${GITHUB_REF:-}" in
+            refs/tags/*) tag_args+=(--tag "$image:latest") ;;
+          esac
           docker buildx build \
             --platform linux/amd64 \
             --target release \
             --build-arg EMBER_VERSION="$version" \
             --build-arg EMBER_VCS_REF="$GITHUB_SHA" \
-            --tag "$image:$version" \
-            --tag "$image:sha-$short_sha" \
+            "${tag_args[@]}" \
             --provenance=mode=max \
             --sbom=true \
             --metadata-file image-metadata.json \
@@ -123,3 +129,19 @@ jobs:
 
       - name: Report immutable digest
         run: python3 -c 'import json; d=json.load(open("image-metadata.json")); print(d.get("containerimage.digest", d))'
+
+      - name: Pull, size, and scan the published commit image
+        env:
+          REGISTRY: ${{ vars.EMBER_REGISTRY }}
+          IMAGE_NAME: ${{ vars.EMBER_IMAGE }}
+        run: |
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          image="$REGISTRY/$IMAGE_NAME:sha-$short_sha"
+          docker pull "$image"
+          docker image inspect --format \
+            'release image: {{.Size}} bytes (uncompressed)' "$image"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --image-src docker --exit-code 1 \
+            --severity CRITICAL --ignore-unfixed "$image"

@@ -64,7 +64,7 @@ share/         model_cards/ (per-model defaults sidecar JSON + _schema.json),
                quant_eval/ (eval fixtures).
 reports/       Generated quant quality reports (Markdown/JSON/CSV/SVG).
 docker/        Multi-stage Dockerfile: full-ROCm `dev` toolchain and minimal
-               dependency-closure `release` image (Compose default).
+               dependency-closure `release` image (published through GHCR).
 tools/         segvtrace.c — crash-backtrace shim LD_PRELOAD'd in production.
 docs/          Design/audit documents listed above.
 ```
@@ -298,8 +298,9 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
 
 ## Container deployment
 
-- `docker compose up --build` builds the server, downloads the default published
-  model when needed, and persists model and KV data in local mounted directories.
+- `docker compose up -d` pulls the immutable GHCR release image, downloads the
+  default model when needed, and persists model and KV data in local mounted
+  directories. `compose.build.yaml` is the explicit local source-build override.
 - The `dev` target is AMD's stock
   `rocm/dev-ubuntu-24.04:7.14.0-full` plus build tooling, source, and symbols.
   The Ubuntu-based `release` target contains only the stripped server, its
