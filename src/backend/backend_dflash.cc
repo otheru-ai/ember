@@ -1371,6 +1371,208 @@ static bool backend_validate_impl(
     return true;
 }
 
+
+// ── hipBLAS strided-batched GEMM batchCount sweep ───────────────────────────
+// See ember_backend.h for why this is measured rather than assumed. Shapes are
+// the DeepSeek4 decode-time projection family: one activation row per session,
+// a weight matrix shared across the batch (strideA = 0), f16 in / f32 out --
+// the same layout ds4 uses for f16_router_rows_exact.
+#if defined(DFLASH27B_BACKEND_HIP)
+#include <hip/hip_runtime.h>
+#include <hipblas/hipblas.h>
+
+namespace {
+
+struct GemmShape { int out_dim; int in_dim; const char *name; };
+
+// Representative decode projections. Deliberately a small explicit table: the
+// point is a reproducible answer for shapes this model actually runs, not a
+// sweep of the whole space.
+constexpr GemmShape kGemmShapes[] = {
+    {  256, 7168, "router (n_embd -> n_routed_experts)" },
+    { 2048, 7168, "qkv-ish narrow projection"           },
+    { 7168, 2048, "down projection"                     },
+};
+
+// Deterministic pseudo-random f16 fill. Fixed seed so two runs on the same
+// machine compare like for like, and so a divergence is reproducible.
+uint16_t f32_to_f16_bits(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t exp = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t man = x & 0x7FFFFFu;
+    if (exp <= 0) return (uint16_t)sign;
+    if (exp >= 31) return (uint16_t)(sign | 0x7C00u);
+    return (uint16_t)(sign | ((uint32_t)exp << 10) | (man >> 13));
+}
+
+void fill_f16(std::vector<uint16_t> &dst, uint64_t seed) {
+    uint64_t s = seed ? seed : 1;
+    for (size_t i = 0; i < dst.size(); ++i) {
+        s ^= s << 13; s ^= s >> 7; s ^= s << 17;           // xorshift64
+        const float v = (float)((int64_t)(s % 2001) - 1000) / 1000.0f;
+        dst[i] = f32_to_f16_bits(v * 0.05f);
+    }
+}
+
+}  // namespace
+#endif  // DFLASH27B_BACKEND_HIP
+
+extern "C" bool ember_backend_validate_gemm_batch(
+        ember_backend *b, int limit, ember_gemm_batch_report *report) {
+    if (!report) return false;
+    std::memset(report, 0, sizeof(*report));
+    report->limit = limit;
+    report->max_exact = 1;
+#if !defined(DFLASH27B_BACKEND_HIP)
+    (void)b;
+    std::snprintf(report->detail, sizeof(report->detail),
+                  "built without the HIP backend");
+    return false;
+#else
+    (void)b;
+    if (limit < 2) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "limit must be >= 2");
+        return false;
+    }
+
+    hipblasHandle_t handle = nullptr;
+    if (hipblasCreate(&handle) != HIPBLAS_STATUS_SUCCESS) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "hipblasCreate failed");
+        return false;
+    }
+
+    const float alpha = 1.0f, beta = 0.0f;
+    bool any_shape_ran = false;
+
+    for (const GemmShape &shape : kGemmShapes) {
+        const size_t w_elems = (size_t)shape.in_dim * shape.out_dim;
+        std::vector<uint16_t> host_w(w_elems);
+        fill_f16(host_w, 0x9E3779B97F4A7C15ull ^ (uint64_t)shape.out_dim);
+
+        void *dev_w = nullptr;
+        if (hipMalloc(&dev_w, w_elems * sizeof(uint16_t)) != hipSuccess) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "hipMalloc weights failed for %s", shape.name);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
+        (void)hipMemcpy(dev_w, host_w.data(), w_elems * sizeof(uint16_t),
+                  hipMemcpyHostToDevice);
+
+        const size_t x_elems = (size_t)shape.in_dim * limit;
+        std::vector<uint16_t> host_x(x_elems);
+        fill_f16(host_x, 0xD1B54A32D192ED03ull ^ (uint64_t)shape.in_dim);
+        void *dev_x = nullptr;
+        void *dev_ref = nullptr;
+        void *dev_bat = nullptr;
+        const size_t out_elems = (size_t)shape.out_dim * limit;
+        if (hipMalloc(&dev_x, x_elems * sizeof(uint16_t)) != hipSuccess ||
+            hipMalloc(&dev_ref, out_elems * sizeof(float)) != hipSuccess ||
+            hipMalloc(&dev_bat, out_elems * sizeof(float)) != hipSuccess) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "hipMalloc activations failed for %s", shape.name);
+            (void)hipFree(dev_w);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
+        (void)hipMemcpy(dev_x, host_x.data(), x_elems * sizeof(uint16_t),
+                  hipMemcpyHostToDevice);
+
+        // Baseline: `limit` independent batchCount=1 calls. This is exactly
+        // what decode_batch() does today, one row at a time.
+        bool baseline_ok = true;
+        for (int row = 0; row < limit && baseline_ok; ++row) {
+            const hipblasStatus_t st = hipblasGemmStridedBatchedEx(
+                handle, HIPBLAS_OP_T, HIPBLAS_OP_N,
+                shape.out_dim, 1, shape.in_dim, &alpha,
+                dev_w, HIP_R_16F, shape.in_dim, 0,
+                (const uint16_t *)dev_x + (size_t)row * shape.in_dim,
+                HIP_R_16F, shape.in_dim, 0,
+                &beta,
+                (float *)dev_ref + (size_t)row * shape.out_dim,
+                HIP_R_32F, shape.out_dim, 0,
+                1, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
+            if (st != HIPBLAS_STATUS_SUCCESS) baseline_ok = false;
+        }
+        if (hipDeviceSynchronize() != hipSuccess) baseline_ok = false;
+        if (!baseline_ok) {
+            std::snprintf(report->detail, sizeof(report->detail),
+                          "batchCount=1 baseline failed for %s", shape.name);
+            (void)hipFree(dev_w); (void)hipFree(dev_x); (void)hipFree(dev_ref); (void)hipFree(dev_bat);
+            (void)hipblasDestroy(handle);
+            return false;
+        }
+
+        std::vector<float> host_ref(out_elems), host_bat(out_elems);
+        (void)hipMemcpy(host_ref.data(), dev_ref, out_elems * sizeof(float),
+                  hipMemcpyDeviceToHost);
+        any_shape_ran = true;
+        report->shapes_tested++;
+
+        for (int bc = 2; bc <= limit; ++bc) {
+            const hipblasStatus_t st = hipblasGemmStridedBatchedEx(
+                handle, HIPBLAS_OP_T, HIPBLAS_OP_N,
+                shape.out_dim, 1, shape.in_dim, &alpha,
+                dev_w, HIP_R_16F, shape.in_dim, 0,
+                dev_x, HIP_R_16F, shape.in_dim, shape.in_dim,
+                &beta,
+                dev_bat, HIP_R_32F, shape.out_dim, shape.out_dim,
+                bc, HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
+            const hipError_t sync = hipDeviceSynchronize();
+            if (st != HIPBLAS_STATUS_SUCCESS || sync != hipSuccess) {
+                // Algorithm selection can pick a kernel that is missing or
+                // faults; that is a distinct outcome from disagreeing.
+                if (!report->first_fault) report->first_fault = bc;
+                std::snprintf(report->detail, sizeof(report->detail),
+                              "%s: batchCount=%d FAULTED (hipblas=%d hip=%d)",
+                              shape.name, bc, (int)st, (int)sync);
+                goto shape_done;
+            }
+            (void)hipMemcpy(host_bat.data(), dev_bat,
+                      (size_t)shape.out_dim * bc * sizeof(float),
+                      hipMemcpyDeviceToHost);
+            {
+                const size_t n = (size_t)shape.out_dim * bc;
+                bool exact = true;
+                for (size_t i = 0; i < n; ++i) {
+                    if (host_bat[i] == host_ref[i]) continue;
+                    exact = false;
+                    const double denom =
+                        std::fabs((double)host_ref[i]) > 1e-12
+                            ? std::fabs((double)host_ref[i]) : 1.0;
+                    const double rel =
+                        std::fabs((double)host_bat[i] - (double)host_ref[i]) / denom;
+                    if (rel > report->worst_rel) report->worst_rel = rel;
+                }
+                if (!exact) {
+                    if (!report->first_divergent) report->first_divergent = bc;
+                    std::snprintf(report->detail, sizeof(report->detail),
+                                  "%s: batchCount=%d diverged (worst rel %.3g)",
+                                  shape.name, bc, report->worst_rel);
+                    goto shape_done;
+                }
+                if (bc > report->max_exact) report->max_exact = bc;
+            }
+        }
+    shape_done:
+        (void)hipFree(dev_w); (void)hipFree(dev_x); (void)hipFree(dev_ref); (void)hipFree(dev_bat);
+        if (report->first_divergent || report->first_fault) break;
+    }
+
+    (void)hipblasDestroy(handle);
+    report->ok = any_shape_ran;
+    if (report->ok && !report->first_divergent && !report->first_fault)
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "bit-exact through batchCount=%d on %d shape(s)",
+                      report->max_exact, report->shapes_tested);
+    return report->ok;
+#endif  // DFLASH27B_BACKEND_HIP
+}
+
 extern "C" bool ember_backend_validate(
         ember_backend *b, const int32_t *prompt, int n_prompt, int n_gen,
         ember_validation_report *report) {

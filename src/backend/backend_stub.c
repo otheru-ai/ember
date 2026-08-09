@@ -230,6 +230,21 @@ ember_gen_result ember_backend_generate(ember_backend *b,
     return r;
 }
 
+bool ember_backend_validate_gemm_batch(ember_backend *b, int limit,
+                                       ember_gemm_batch_report *report) {
+    (void)b;
+    (void)limit;
+    // Deliberately not simulated. The sweep exists to measure a hipBLAS
+    // property of real hardware; a stub answer would be a fabricated number,
+    // and this repo has already paid for one of those.
+    if (!report) return false;
+    memset(report, 0, sizeof(*report));
+    report->ok = false;
+    snprintf(report->detail, sizeof(report->detail),
+             "stub backend: GEMM batch sweep needs the real HIP backend");
+    return false;
+}
+
 bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
                             int n_prompt, int n_gen,
                             ember_validation_report *report) {

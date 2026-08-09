@@ -53,9 +53,15 @@ void ember_tool_memory_put(ember_tool_memory *tm, const char *id,
                            const int32_t *ids, int n_ids);
 
 // Borrowed NUL-terminated exact bytes for id, or NULL. Marks most-recent.
+// Borrowed pointer into the store, valid ONLY while the caller holds the lock
+// that also serializes ember_tool_memory_put() -- srv->state_lock in the
+// server. _put() evicts under pressure and free()s exactly this buffer, so an
+// unlocked read is a use-after-free rather than a stale read. Not a pure read
+// either: it bumps the LRU stamp and touches the persisted file.
 const char *ember_tool_memory_get(ember_tool_memory *tm, const char *id);
 
 // Borrowed exact token ids for id (*n set to count), or NULL. Marks most-recent.
+// Same borrowing and locking contract as ember_tool_memory_get().
 const int32_t *ember_tool_memory_get_tokens(ember_tool_memory *tm, const char *id, int *n);
 
 #endif  // EMBER_TOOL_MEMORY_H

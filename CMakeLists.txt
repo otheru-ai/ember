@@ -406,4 +406,14 @@ if(EMBER_ENGINE)
   endif()
   # xgrammar: backend_dflash.cc compiles the tool grammar and masks logits.
   target_link_libraries(ember-dflash PRIVATE ember_engine xgrammar Threads::Threads m)
+  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
+    # --validate-gemm-batch calls hipBLAS directly from backend_dflash.cc.
+    # ggml-hip links roc::hipblas PRIVATE, so it does not propagate; ask for it
+    # here rather than widening ggml's link interface.
+    find_package(hip QUIET)
+    find_package(hipblas QUIET)
+    if(TARGET roc::hipblas AND TARGET hip::host)
+      target_link_libraries(ember-dflash PRIVATE hip::host roc::hipblas)
+    endif()
+  endif()
 endif()

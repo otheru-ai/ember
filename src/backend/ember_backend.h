@@ -223,6 +223,40 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
                             int n_prompt, int n_gen,
                             ember_validation_report *report);
 
+// ── hipBLAS strided-batched GEMM batchCount sweep ──
+// Answers the one question the batched-decode design hangs on: can N decode
+// rows share a single strided-batched GEMM and still produce BIT-IDENTICAL
+// results to N separate calls?
+//
+// It has to be measured, not looked up. Dwarfstar found empirically on CUDA
+// that "larger batchCount values let cuBLAS select a different reduction and
+// change logits", and settled on 4 (ds4_cuda.cu:13205-13208). That constant is
+// a property of cuBLAS on that hardware; nothing in the rocBLAS/hipBLAS docs or
+// the ROCm 7.14 notes states an equivalent guarantee, so the gfx1151 number is
+// unknown until run.
+//
+// The sweep also has to survive, not merely agree. This engine has already been
+// bitten by batch-count-dependent ALGORITHM SELECTION: at N>1 the cuBLAS M=1
+// heuristic picked a split-K kernel absent from the shipped library and
+// poisoned the stream (moe_hybrid_ffn_eval.cpp:105-111). So a fault at some
+// batchCount is a real possible outcome and is reported separately from a
+// numeric divergence.
+//
+// GPU-only. The stub reports ok=false so the GPU-free gauntlet is unaffected.
+typedef struct {
+    bool ok;                // the sweep ran at all
+    int  limit;             // highest batchCount attempted
+    int  max_exact;         // largest batchCount bit-identical to 1 (>=1)
+    int  first_divergent;   // smallest batchCount that differed, else 0
+    int  first_fault;       // smallest batchCount that errored, else 0
+    int  shapes_tested;
+    double worst_rel;       // largest relative deviation observed
+    char detail[256];
+} ember_gemm_batch_report;
+
+bool ember_backend_validate_gemm_batch(ember_backend *b, int limit,
+                                       ember_gemm_batch_report *report);
+
 // ── disk KV cache (cross-restart persistence; no-op if kv_cache_dir unset) ──
 // These reuse the model-coupled snapshot serialization (ggml tensor I/O +
 // layout fingerprint) from the underlying backend.
