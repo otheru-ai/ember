@@ -16,6 +16,9 @@ ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 COLLECT_RUNTIME = ROOT / "docker" / "collect-runtime.sh"
 DOCKERFILE = ROOT / "docker" / "Dockerfile"
 CONTAINER_WORKFLOW = ROOT / ".forgejo" / "workflows" / "container.yml"
+GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
+GITHUB_CONTAINER = ROOT / ".github" / "workflows" / "container.yml"
+GITHUB_CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
 COMPOSE = ROOT / "compose.yaml"
 COMPOSE_BUILD = ROOT / "compose.build.yaml"
 PREFLIGHT = ROOT / "scripts" / "preflight.sh"
@@ -67,6 +70,26 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn('tag_args+=(--tag "$image:latest")', workflow)
         self.assertIn("aquasec/trivy:0.73.0@sha256:", workflow)
         self.assertIn("--severity CRITICAL", workflow)
+
+    def test_github_workflows_split_hosted_build_and_halo_certification(self) -> None:
+        ci = GITHUB_CI.read_text()
+        container = GITHUB_CONTAINER.read_text()
+        certify = GITHUB_CERTIFY.read_text()
+        self.assertIn("runs-on: ubuntu-24.04", ci)
+        self.assertNotIn("self-hosted", ci)
+        self.assertIn("actionlint_1.7.12_linux_amd64.tar.gz", ci)
+        self.assertIn("runs-on: ubuntu-latest-8-cores", container)
+        self.assertIn("packages: write", container)
+        self.assertIn("ghcr.io/${GITHUB_REPOSITORY,,}", container)
+        self.assertIn("EMBER_GFX1151_CERTIFIED_SHA", container)
+        self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", certify)
+        self.assertIn("environment: gfx1151-certification", certify)
+        self.assertIn("--validate-gemm-batch 64", certify)
+        self.assertIn("--validate-prompt", certify)
+        self.assertIn("org.opencontainers.image.revision", certify)
+        self.assertNotIn("actions/checkout", certify)
+        triggers = certify.split("permissions:", 1)[0]
+        self.assertNotIn("pull_request", triggers)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -42,3 +42,5 @@ using an ambiguous same-day suffix.
   retaining an explicit local source-build override.
 - Added project and third-party license notices to the runtime image and made
   the vulnerability-reporting fallback actionable.
+- Added GitHub-hosted CPU and large-disk container workflows, direct GHCR
+  publishing, and a manual environment-gated gfx1151 certification workflow.

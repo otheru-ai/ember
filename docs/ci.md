@@ -1,7 +1,10 @@
 # CI/CD
 
-Ember's reference CI uses Forgejo Actions' GitHub-Actions-compatible syntax,
-with workflows in `.forgejo/workflows/`.
+Ember runs the same release gates in two places:
+
+- `.forgejo/workflows/` keeps the internal source-of-truth repository gated.
+- `.github/workflows/` runs on the synchronized GitHub repository, publishes
+  `ghcr.io/otheru/ember`, and coordinates target-hardware certification.
 
 ## What CI covers, and what it deliberately cannot
 
@@ -21,16 +24,17 @@ differential validator has passed on target hardware.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
-The workflows cannot cover:
+The hosted workflows cannot cover these checks by themselves:
 
 | Out of scope | Why |
 |---|---|
-| End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights. |
-| Differential validator | Needs the GPU and the 85 GiB GGUF. |
+| End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights; `gfx1151-certify.yml` runs it on the protected Halo runner. |
+| Differential validator | Needs the GPU and the 85 GiB GGUF; `gfx1151-certify.yml` runs exact, batched, and optional DSpark validation. |
 
-Those stay manual and are listed in `AGENTS.md`. The one ROCm failure mode CI
-*can* catch cheaply is source-list drift between the two hand-maintained CMake
-lists — see `ci/check_invariants.py`.
+Target-hardware certification is therefore manually dispatched and approval
+gated, while its checks are automated. The one ROCm failure mode hosted CI can
+catch cheaply is source-list drift between the two hand-maintained CMake lists
+— see `ci/check_invariants.py`.
 
 ## Jobs
 
@@ -45,8 +49,52 @@ Ordered cheapest-first so a break reports in seconds.
 | `coverage` | yes | Per-file line-coverage regression against `ci/coverage_floors.json`. |
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
 | `release-image` | release gate | Requires gfx1151 certification for version tags, validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, pushes version plus commit tags, reports image size, and rejects fixed critical vulnerabilities. |
+| `certify-gfx1151` | manual hardware gate | Verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, optional DSpark, and a live generation request on Strix Halo. |
 
 ## Runner setup
+
+### GitHub-hosted runners and GHCR
+
+`.github/workflows/ci.yml` uses the standard `ubuntu-24.04` hosted runner. It
+needs no repository secrets and covers invariants, strict Debug/Release builds,
+all tests, sanitizers, both analyzers, and the coverage ratchet.
+
+The ROCm image needs more than the standard runner's 14 GB disk. In the OtherU
+GitHub organization, enable the 8-core Ubuntu larger runner exposed as
+`ubuntu-latest-8-cores`; that shape supplies 32 GB RAM and 300 GB disk. Grant
+the Ember repository access to it. The container workflow uses only GitHub's
+scoped `GITHUB_TOKEN` with `packages: write`; no long-lived GHCR token is stored
+in GitHub.
+
+Run the Container workflow manually on a candidate commit before certification.
+It publishes `dev-<sha12>` and `sha-<sha12>` images with SBOM/provenance, then
+reports size and runs the critical-vulnerability gate. After the first publish,
+make the `otheru/ember` GHCR package public so Compose can pull it anonymously.
+
+For the hardware gate, register the Halo host as a GitHub self-hosted runner
+with labels `self-hosted`, `linux`, `x64`, and `gfx1151`. Create a GitHub
+environment named `gfx1151-certification` with required reviewers. The workflow
+is manual-only and never runs for a pull request. Before approving it, schedule
+a maintenance window and stop any server already occupying the GPU; the
+workflow deliberately refuses to stop operator services itself.
+
+The certification sequence is:
+
+1. Manually run **Container** for the candidate SHA.
+2. Run **gfx1151 certification** with that full SHA, the pinned model path, a
+   non-sensitive prompt path, and optional draft path plus digest.
+3. After the validators and generation smoke test pass, set the GitHub
+   repository variable `EMBER_GFX1151_CERTIFIED_SHA` to the full SHA.
+4. Create and mirror the matching `vYEAR.MONTH.DAY` tag. The tag workflow
+   refuses any other SHA and publishes the CalVer and `latest` GHCR tags.
+
+The self-hosted runner needs Docker, `curl`, Python 3, `/dev/kfd`, `/dev/dri`,
+and read access to the model and validation prompt. The workflow pulls the
+already-built `sha-*` image, verifies its full OCI revision label, mounts model
+files read-only, uses disposable Docker volumes for KV state, and never checks
+out repository content onto the Halo runner.
+
+### Forgejo runners
 
 CI needs one Forgejo runner with the `docker` label. On a host with Docker:
 
@@ -83,10 +131,10 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
 
-For GHCR, use `ghcr.io` and `otheru/ember`; the token needs `write:packages`.
-After the first publish, set the package visibility to public so anonymous
-Compose pulls work. Keep the immutable CalVer and `sha-*` tags even though the
-workflow also updates `latest` for discovery.
+For Forgejo-driven GHCR publishing, use `ghcr.io` and `otheru/ember`; the token
+needs `write:packages`. This token is needed only by Forgejo—GitHub Actions uses
+its built-in `GITHUB_TOKEN`. Keep the immutable CalVer and `sha-*` tags even
+though the workflows also update `latest` for discovery.
 
 The internal Forgejo repository remains the source of truth. Configure its push
 mirrors in repository settings for each public GitHub, GitLab, or Gitea target;
@@ -94,10 +142,9 @@ use a dedicated token with repository-write permission, mirror only `main` and
 release tags, and enable synchronization after pushes. Mirror credentials stay
 in Forgejo and never enter this repository.
 
-The builder never needs `/dev/kfd`, `/dev/dri`, or model weights. A future
-self-hosted runner labeled `gfx1151` should pull the immutable commit tag and
-run the differential validator plus `scripts/smoke_test.sh --generate` before a
-release digest is promoted.
+The builder never needs `/dev/kfd`, `/dev/dri`, or model weights. The separate
+`gfx1151` runner pulls the immutable commit image and performs the hardware
+checks before a versioned release is allowed.
 
 The workflow uses `actions/checkout@v4`, which Forgejo resolves against
 `code.forgejo.org` by default (`[actions] DEFAULT_ACTIONS_URL`). If the runner

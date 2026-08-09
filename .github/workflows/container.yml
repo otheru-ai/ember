@@ -1,0 +1,125 @@
+name: Container
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Verify and test the publish commit
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 ci/check_invariants.py
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEMBER_STRICT=ON
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure --timeout 120
+
+  release-image:
+    needs: source-gate
+    # GitHub's paid 8-core Ubuntu larger runner provides 32 GB RAM and 300 GB
+    # disk, enough for the pinned ROCm toolchain and release image closure.
+    runs-on: ubuntu-latest-8-cores
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Verify checkout, version, and hardware certification
+        env:
+          CERTIFIED_SHA: ${{ vars.EMBER_GFX1151_CERTIFIED_SHA }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          project_version="$(tr -d '\n' < VERSION)"
+          printf '%s\n' "$project_version" | grep -Eq \
+            '^[0-9]{4}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])$'
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              test "$GITHUB_REF_NAME" = "v$project_version" || {
+                echo "tag $GITHUB_REF_NAME does not match VERSION v$project_version"
+                exit 1
+              }
+              test -n "$CERTIFIED_SHA" || {
+                echo 'Set EMBER_GFX1151_CERTIFIED_SHA after Halo certification'
+                exit 1
+              }
+              test "$CERTIFIED_SHA" = "$GITHUB_SHA" || {
+                echo "certified $CERTIFIED_SHA, but tag targets $GITHUB_SHA"
+                exit 1
+              }
+              ;;
+          esac
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create Buildx builder
+        run: |
+          docker buildx create \
+            --name "ember-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Build and publish minimal release image
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          project_version="$(tr -d '\n' < VERSION)"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag_args=(
+            --tag "$image:sha-$short_sha"
+          )
+          case "$GITHUB_REF" in
+            refs/tags/*)
+              version="$project_version"
+              tag_args+=(--tag "$image:$version" --tag "$image:latest")
+              ;;
+            *)
+              version="dev-$short_sha"
+              tag_args+=(--tag "$image:$version")
+              ;;
+          esac
+          docker buildx build \
+            --platform linux/amd64 \
+            --target release \
+            --build-arg EMBER_VERSION="$version" \
+            --build-arg EMBER_VCS_REF="$GITHUB_SHA" \
+            "${tag_args[@]}" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file image-metadata.json \
+            --output type=registry,compression=gzip,compression-level=9,force-compression=true \
+            -f docker/Dockerfile .
+
+      - name: Report digest, size, and vulnerability scan
+        run: |
+          set -euo pipefail
+          python3 -c 'import json; d=json.load(open("image-metadata.json")); print(d.get("containerimage.digest", d))'
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA:0:12}"
+          docker pull "$image"
+          docker image inspect --format \
+            'release image: {{.Size}} bytes (uncompressed)' "$image"
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
+            image --image-src docker --exit-code 1 \
+            --severity CRITICAL --ignore-unfixed "$image"
