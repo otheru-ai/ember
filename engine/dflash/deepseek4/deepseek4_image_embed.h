@@ -26,6 +26,11 @@ struct Ds4ImageEmbed {
     // `model_n_embd` is checked against the sidecar; a mismatch is fatal.
     static const Ds4ImageEmbed & instance(int64_t model_n_embd);
 
+    // The already-loaded instance, or an inert one if the backend has not
+    // initialised yet. Never triggers a load, so the server layer -- which does
+    // not know n_embd -- cannot trip the width check above.
+    static const Ds4ImageEmbed & loaded();
+
     // Locate the image span by matching the palette cycle.
     //
     // The palette is 64 fixed token IDs, so a run where tokens[s+k] ==
