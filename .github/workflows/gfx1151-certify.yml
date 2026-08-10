@@ -11,8 +11,16 @@ on:
         description: Absolute path to the pinned GGUF on the runner host
         required: true
         type: string
+      model_sha256:
+        description: SHA-256 of the pinned GGUF
+        required: true
+        type: string
       prompt_path:
-        description: Absolute path to a non-sensitive validation prompt on the runner host
+        description: Absolute path to a non-sensitive prompt that generates at least one DSpark block
+        required: true
+        type: string
+      disk_prompt_path:
+        description: Absolute path to a non-sensitive prompt containing at least 512 model tokens
         required: true
         type: string
       draft_model_path:
@@ -51,7 +59,9 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           MODEL_PATH: ${{ inputs.model_path }}
+          MODEL_SHA256: ${{ inputs.model_sha256 }}
           PROMPT_PATH: ${{ inputs.prompt_path }}
+          DISK_PROMPT_PATH: ${{ inputs.disk_prompt_path }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
           DRAFT_SHA256: ${{ inputs.draft_model_sha256 }}
           PORT: ${{ inputs.port }}
@@ -59,7 +69,9 @@ jobs:
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MODEL_PATH" = /* && -f "$MODEL_PATH" ]]
+          [[ "$MODEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$PROMPT_PATH" = /* && -f "$PROMPT_PATH" ]]
+          [[ "$DISK_PROMPT_PATH" = /* && -f "$DISK_PROMPT_PATH" ]]
           [[ -z "$DRAFT_PATH" || ( "$DRAFT_PATH" = /* && -f "$DRAFT_PATH" ) ]]
           [[ -z "$DRAFT_PATH" || "$DRAFT_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ -n "$DRAFT_PATH" || -z "$DRAFT_SHA256" ]]
@@ -93,12 +105,12 @@ jobs:
       - name: Verify the model artifact
         env:
           MODEL_PATH: ${{ inputs.model_path }}
-          EXPECTED_SHA256: 18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed
+          MODEL_SHA256: ${{ inputs.model_sha256 }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
           DRAFT_SHA256: ${{ inputs.draft_model_sha256 }}
         run: |
           set -euo pipefail
-          printf '%s  %s\n' "$EXPECTED_SHA256" "$MODEL_PATH" |
+          printf '%s  %s\n' "$MODEL_SHA256" "$MODEL_PATH" |
             sha256sum --check --strict
           if [[ -n "$DRAFT_PATH" ]]; then
             printf '%s  %s\n' "$DRAFT_SHA256" "$DRAFT_PATH" |
@@ -110,6 +122,7 @@ jobs:
           TARGET_SHA: ${{ inputs.commit_sha }}
           MODEL_PATH: ${{ inputs.model_path }}
           PROMPT_PATH: ${{ inputs.prompt_path }}
+          DISK_PROMPT_PATH: ${{ inputs.disk_prompt_path }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
         run: |
           set -euo pipefail
@@ -118,6 +131,7 @@ jobs:
             --device /dev/kfd --device /dev/dri
             --group-add video --group-add render
             --ipc host --security-opt seccomp=unconfined
+            --ulimit memlock=-1:-1
           )
           docker run --rm "${gpu_args[@]}" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
@@ -127,9 +141,12 @@ jobs:
           model_file="$(basename -- "$MODEL_PATH")"
           prompt_dir="$(dirname -- "$PROMPT_PATH")"
           prompt_file="$(basename -- "$PROMPT_PATH")"
+          disk_prompt_dir="$(dirname -- "$DISK_PROMPT_PATH")"
+          disk_prompt_file="$(basename -- "$DISK_PROMPT_PATH")"
           mounts=(
             -v "$model_dir:/cert-model:ro"
             -v "$prompt_dir:/cert-prompt:ro"
+            -v "$disk_prompt_dir:/cert-disk-prompt:ro"
           )
           env_args=()
           if [[ -n "$DRAFT_PATH" ]]; then
@@ -145,7 +162,7 @@ jobs:
           docker volume create "$cache_volume" >/dev/null
           cleanup_validator() { docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true; }
           trap cleanup_validator EXIT
-          docker run --rm "${gpu_args[@]}" "${mounts[@]}" "${env_args[@]}" \
+          spec_report="$(docker run --rm "${gpu_args[@]}" "${mounts[@]}" "${env_args[@]}" \
             -v "$cache_volume:/cache" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
             -m "/cert-model/$model_file" \
@@ -153,12 +170,41 @@ jobs:
             --ds4-prefill exact \
             --batch-sessions 2 \
             --validate-prompt "/cert-prompt/$prompt_file" \
-            --validate-tokens 32
+            --validate-tokens 32)"
+          printf '%s\n' "$spec_report"
+          expect_spec=0
+          [[ -n "$DRAFT_PATH" ]] && expect_spec=1
+          python3 -c '
+          import json, sys
+          report = json.load(sys.stdin)
+          expect_spec = sys.argv[1] == "1"
+          assert report["ok"] and report["snapshot_ok"], report
+          assert report["batch"]["checked"] and report["batch"]["exact"], report
+          if expect_spec:
+              assert report["spec"]["checked"] and report["spec"]["exact"], report
+          ' "$expect_spec" <<<"$spec_report"
+
+          disk_report="$(docker run --rm "${gpu_args[@]}" "${mounts[@]}" \
+            -v "$cache_volume:/cache" \
+            --entrypoint /usr/local/bin/ember-dflash "$image" \
+            -m "/cert-model/$model_file" \
+            --kv-cache-dir /cache \
+            --ds4-prefill exact \
+            --validate-prompt "/cert-disk-prompt/$disk_prompt_file" \
+            --validate-tokens 16)"
+          printf '%s\n' "$disk_report"
+          python3 -c '
+          import json, sys
+          report = json.load(sys.stdin)
+          assert report["ok"] and report["snapshot_ok"], report
+          assert report["disk"]["checked"] and report["disk"]["exact"], report
+          ' <<<"$disk_report"
 
       - name: Run end-to-end generation smoke test
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           MODEL_PATH: ${{ inputs.model_path }}
+          MODEL_SHA256: ${{ inputs.model_sha256 }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
           PORT: ${{ inputs.port }}
         run: |
@@ -177,7 +223,7 @@ jobs:
           mounts=(-v "$model_dir:/cert-model:ro" -v "$cache_volume:/cache")
           env_args=(
             -e "EMBER_MODEL=/cert-model/$model_file"
-            -e EMBER_MODEL_SHA256=18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed
+            -e "EMBER_MODEL_SHA256=$MODEL_SHA256"
             -e "EMBER_PORT=$PORT"
           )
           if [[ -n "$DRAFT_PATH" ]]; then
@@ -190,8 +236,9 @@ jobs:
             --device /dev/kfd --device /dev/dri \
             --group-add video --group-add render \
             --ipc host --security-opt seccomp=unconfined \
+            --ulimit memlock=-1:-1 \
             "${mounts[@]}" "${env_args[@]}" "$image" \
-            --ds4-prefill exact --batch-sessions 2 >/dev/null
+            --ds4-prefill exact --batch-sessions 1 >/dev/null
 
           ready=0
           for _ in $(seq 1 240); do
@@ -208,11 +255,21 @@ jobs:
             sleep 5
           done
           [[ "$ready" = 1 ]] || { docker logs "$name"; exit 1; }
-          curl --fail --silent --show-error --max-time 120 \
+          response="$(curl --fail --silent --show-error --max-time 300 \
             -H 'Content-Type: application/json' \
-            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with only: ember-ready"}],"max_tokens":16,"temperature":0,"stream":false}' \
-            "http://127.0.0.1:$PORT/v1/chat/completions" |
-            python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["choices"][0]["message"]["content"]'
+            -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply briefly that Ember is ready."}],"max_tokens":128,"temperature":0,"top_p":1,"top_k":0,"stream":false}' \
+            "http://127.0.0.1:$PORT/v1/chat/completions")"
+          printf '%s\n' "$response"
+          expect_spec=0
+          [[ -n "$DRAFT_PATH" ]] && expect_spec=1
+          python3 -c '
+          import json, sys
+          response = json.load(sys.stdin)
+          message = response["choices"][0]["message"]
+          assert message.get("content") or message.get("reasoning_content"), response
+          if sys.argv[1] == "1":
+              assert response["usage"]["backend"]["spec_ran"] is True, response
+          ' "$expect_spec" <<<"$response"
 
       - name: Record certification result
         env:

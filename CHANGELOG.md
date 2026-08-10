@@ -49,3 +49,6 @@ using an ambiguous same-day suffix.
   tree from the pinned toolchain.
 - Normalized loader-reported `/lib` paths into merged `/usr` locations so the
   collected runtime can be copied into the Ubuntu 24.04 release stage.
+- Hardened gfx1151 certification to accept an explicit immutable model digest,
+  separately require exercised DSpark and disk-cache paths, use locked memory,
+  and verify live speculative decoding outside resident batching.

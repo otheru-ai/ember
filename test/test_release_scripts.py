@@ -89,6 +89,12 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("environment: gfx1151-certification", certify)
         self.assertIn("--validate-gemm-batch 64", certify)
         self.assertIn("--validate-prompt", certify)
+        self.assertIn("model_sha256:", certify)
+        self.assertIn("disk_prompt_path:", certify)
+        self.assertIn('report["disk"]["checked"]', certify)
+        self.assertIn('report["spec"]["checked"]', certify)
+        self.assertIn("--batch-sessions 1", certify)
+        self.assertNotIn("EXPECTED_SHA256:", certify)
         self.assertIn("org.opencontainers.image.revision", certify)
         self.assertNotIn("actions/checkout", certify)
         triggers = certify.split("permissions:", 1)[0]

@@ -81,8 +81,10 @@ workflow deliberately refuses to stop operator services itself.
 The certification sequence is:
 
 1. Manually run **Container** for the candidate SHA.
-2. Run **gfx1151 certification** with that full SHA, the pinned model path, a
-   non-sensitive prompt path, and optional draft path plus digest.
+2. Run **gfx1151 certification** with that full SHA, the pinned model path and
+   digest, a short non-sensitive prompt that produces enough output to enter
+   DSpark, a separate non-sensitive prompt of at least 512 model tokens for the
+   disk round trip, and the optional draft path plus digest.
 3. After the validators and generation smoke test pass, set the GitHub
    repository variable `EMBER_GFX1151_CERTIFIED_SHA` to the full SHA.
 4. Create and mirror the matching `vYEAR.MONTH.DAY` tag. The tag workflow

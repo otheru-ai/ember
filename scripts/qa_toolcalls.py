@@ -150,7 +150,8 @@ def one(prompt, expect, stream):
 
     if expect is None:
         return (["over-trigger: fired %s on a non-tool prompt"
-                 % [e[0] for e in emitted]] if emitted else [])
+                 % [{"name": name, "arguments": args}
+                    for name, args in emitted]] if emitted else [])
     if not emitted:
         return ["no tool call emitted (expected %s)" % expect]
 
