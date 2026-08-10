@@ -10,6 +10,7 @@
   "src/model/gguf.c": 30.4,
   "src/model/kv_cache.c": 89.4,
   "src/model/model_card.c": 99.5,
+  "src/model/tool_grammar.c": 99.5,
   "src/model/tool_memory.c": 84.0,
   "src/model/tool_parser.c": 86.3,
   "src/model/tool_schema.c": 87.2,

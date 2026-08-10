@@ -127,6 +127,7 @@ def main() -> int:
         print(f"\n{len(failures)} coverage regression(s):", file=sys.stderr)
         for msg in failures:
             print(f"  ✗ {msg}", file=sys.stderr)
+    if failures or untracked:
         return 1
     print("\ncoverage floors OK")
     return 0

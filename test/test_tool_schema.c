@@ -249,6 +249,16 @@ static void test_pattern_and_property_names(void) {
                      true, err, sizeof(err)));
     CHECK(!validates("\"x\"", "{\"pattern\":\"(?=x)x\"}",
                      true, err, sizeof(err)) && strstr(err, "invalid"));
+    CHECK(validates("\"abc_123\"", "{\"pattern\":\"^\\\\w+$\"}",
+                    true, err, sizeof(err)));
+    CHECK(validates("\"a b\"", "{\"pattern\":\"^a\\\\sb$\"}",
+                    true, err, sizeof(err)));
+    CHECK(validates("\"a.b\"", "{\"pattern\":\"^a\\\\.b$\"}",
+                    true, err, sizeof(err)));
+    CHECK(!validates("\"line\\nbreak\"", "{\"pattern\":\"^.*$\"}",
+                     true, err, sizeof(err)) && strstr(err, "pattern"));
+    CHECK(!validates("\"1\"", "{\"pattern\":\"[[:digit:]]\"}",
+                     true, err, sizeof(err)) && strstr(err, "invalid"));
 
     // additionalProperties as a schema (rather than false) constrains the
     // uncovered properties instead of banning them.
