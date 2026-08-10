@@ -45,6 +45,10 @@ def github_error(path: str, message: str) -> None:
 
 def run_gcov(build: Path, gcov: str) -> dict[str, tuple[float, int]]:
     """Map repo-relative source path -> (line coverage %, executable lines)."""
+    # gcov runs from a temporary output directory. Resolve before rglob so a
+    # caller-provided relative build path does not become relative to that
+    # temporary directory and silently yield an empty report.
+    build = build.resolve()
     gcda = sorted(build.rglob("*.gcda"))
     if not gcda:
         sys.exit(f"no .gcda under {build}: configure with --coverage and run ctest first")
