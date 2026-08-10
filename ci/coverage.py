@@ -43,7 +43,7 @@ def github_error(path: str, message: str) -> None:
         print(f"::error file={path}::{escaped}")
 
 
-def run_gcov(build: Path) -> dict[str, tuple[float, int]]:
+def run_gcov(build: Path, gcov: str) -> dict[str, tuple[float, int]]:
     """Map repo-relative source path -> (line coverage %, executable lines)."""
     gcda = sorted(build.rglob("*.gcda"))
     if not gcda:
@@ -53,7 +53,7 @@ def run_gcov(build: Path) -> dict[str, tuple[float, int]]:
     with tempfile.TemporaryDirectory() as tmp:
         for path in gcda:
             proc = subprocess.run(
-                ["gcov", "-b", str(path)],
+                [gcov, "-b", str(path)],
                 cwd=tmp, capture_output=True, text=True,
             )
             for block in re.split(r"\n(?=File ')", proc.stdout):
@@ -84,11 +84,19 @@ def run_gcov(build: Path) -> dict[str, tuple[float, int]]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True, type=Path)
+    ap.add_argument("--gcov", default="gcov",
+                    help="gcov executable matching the compiler used for the build")
     ap.add_argument("--update", action="store_true",
                     help="raise floors to current coverage (never lowers)")
     args = ap.parse_args()
 
-    cov = run_gcov(args.build)
+    cov = run_gcov(args.build, args.gcov)
+    if not cov:
+        message = ("gcov produced no repository coverage; ensure --gcov matches "
+                   "the compiler used to create the build")
+        github_error("ci/coverage.py", message)
+        print(message, file=sys.stderr)
+        return 1
     floors = json.loads(FLOORS.read_text()) if FLOORS.exists() else {}
 
     width = max(len(p) for p in cov)

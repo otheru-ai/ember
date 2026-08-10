@@ -107,8 +107,12 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake python3
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake gcc-13 g++-13 python3
       - name: Configure coverage build
+        env:
+          CC: gcc-13
+          CXX: g++-13
         run: |
           cmake -S . -B build-cov \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -120,4 +124,4 @@ jobs:
       - name: Test
         run: ctest --test-dir build-cov --output-on-failure --timeout 300
       - name: Enforce per-file coverage floors
-        run: python3 ci/coverage.py --build build-cov
+        run: python3 ci/coverage.py --build build-cov --gcov gcov-13
