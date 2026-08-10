@@ -2,13 +2,19 @@
 set -euo pipefail
 
 model_dir="${EMBER_MODEL_DIR:-/models}"
-model="${EMBER_MODEL:-}"
-draft="${EMBER_DRAFT_MODEL:-}"
 server_bin="${EMBER_SERVER_BIN:-/usr/local/bin/ember-dflash}"
-revision="${EMBER_MODEL_REVISION:-f6e507774f7133568f6fec0635057cb20134f307}"
-expected_sha256="${EMBER_MODEL_SHA256-18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed}"
-expected_size="${EMBER_MODEL_SIZE_BYTES:-91547243104}"
+repo="otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF"
+revision="9fe32d8d4a1abed16c84e2636b26950232869929"
+file="DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+expected_sha256="a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54"
+expected_size="91547243200"
+draft_file="DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
+draft_expected_sha256="1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6"
+draft_expected_size="10897111840"
+model="$model_dir/$file"
+draft="$model_dir/$draft_file"
 model_verified=0
+draft_verified=0
 
 die() {
   echo "ember: $*" >&2
@@ -36,21 +42,19 @@ fi
 
 verify_sha256() {
   local path="$1"
-  [[ -z "$expected_sha256" ]] && return 0
-  [[ "$expected_sha256" =~ ^[0-9a-fA-F]{64}$ ]] ||
-    die "EMBER_MODEL_SHA256 must be empty or a 64-character hexadecimal digest"
+  local digest="$2"
+  local label="$3"
   echo "ember: verifying SHA-256 for $(basename "$path")"
-  printf '%s  %s\n' "$expected_sha256" "$path" | sha256sum --check --status ||
-    die "model SHA-256 mismatch: $path (remove the file and download it again)"
+  printf '%s  %s\n' "$digest" "$path" | sha256sum --check --status ||
+    die "$label SHA-256 mismatch: $path (remove the file and download it again)"
 }
 
 check_download_space() {
   local partial="$1"
-  [[ "$expected_size" =~ ^[0-9]+$ ]] ||
-    die "EMBER_MODEL_SIZE_BYTES must contain only decimal digits"
+  local size="$2"
   local have=0
   [[ -f "$partial" ]] && have="$(stat -c %s "$partial")"
-  local remaining=$((expected_size > have ? expected_size - have : 0))
+  local remaining=$((size > have ? size - have : 0))
   local reserve=$((2 * 1024 * 1024 * 1024))
   local available
   available="$(df -PB1 "$model_dir" | awk 'NR == 2 {print $4}')"
@@ -59,43 +63,33 @@ check_download_space() {
   fi
 }
 
-if [[ -z "$model" ]]; then
-  mapfile -t candidates < <(find "$model_dir" -maxdepth 1 -type f \
-    -iname '*.gguf' ! -iname '*draft*' -print | sort)
-  if [[ ${#candidates[@]} -eq 0 && "${EMBER_AUTO_DOWNLOAD:-1}" == 1 ]]; then
-    repo="${EMBER_MODEL_REPO:-otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF}"
-    file="${EMBER_MODEL_FILE:-DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf}"
-    destination="$model_dir/$file"
-    partial="$destination.part"
-    mkdir -p "$model_dir"
-    check_download_space "$partial"
-    echo "ember: downloading $repo@$revision/$file (resume is enabled; this is about 85 GiB)"
-    partial_size=0
-    [[ -f "$partial" ]] && partial_size="$(stat -c %s "$partial")"
-    if [[ "$partial_size" != "$expected_size" ]]; then
-      curl --fail --location --retry 5 --retry-delay 5 --continue-at - \
-        --output "$partial" \
-        "https://huggingface.co/$repo/resolve/$revision/$file"
-    fi
-    verify_sha256 "$partial"
-    model_verified=1
-    mv "$partial" "$destination"
-    candidates=("$destination")
+download_artifact() {
+  local artifact_file="$1"
+  local artifact_size="$2"
+  local artifact_sha256="$3"
+  local label="$4"
+  local destination="$model_dir/$artifact_file"
+  local partial="$destination.part"
+  mkdir -p "$model_dir"
+  check_download_space "$partial" "$artifact_size"
+  echo "ember: downloading $repo@$revision/$artifact_file (resume is enabled)"
+  local partial_size=0
+  [[ -f "$partial" ]] && partial_size="$(stat -c %s "$partial")"
+  if [[ "$partial_size" != "$artifact_size" ]]; then
+    curl --fail --location --retry 5 --retry-delay 5 --continue-at - \
+      --output "$partial" \
+      "https://huggingface.co/$repo/resolve/$revision/$artifact_file"
   fi
-  if [[ ${#candidates[@]} -ne 1 ]]; then
-    echo "ember: expected exactly one non-draft GGUF in $model_dir; found ${#candidates[@]}" >&2
-    echo "ember: set EMBER_MODEL=/models/your-model.gguf when the directory contains multiple models" >&2
-    exit 64
-  fi
-  model="${candidates[0]}"
-fi
+  verify_sha256 "$partial" "$artifact_sha256" "$label"
+  mv "$partial" "$destination"
+  downloaded_artifact="$destination"
+}
 
-if [[ -z "$draft" ]]; then
-  mapfile -t drafts < <(find "$model_dir" -maxdepth 1 -type f \
-    -iname '*draft*.gguf' -print | sort)
-  if [[ ${#drafts[@]} -eq 1 ]]; then
-    draft="${drafts[0]}"
-  fi
+if [[ ! -r "$model" && "$model" == "$model_dir/$file" && \
+      "${EMBER_AUTO_DOWNLOAD:-1}" == 1 ]]; then
+  download_artifact "$file" "$expected_size" "$expected_sha256" model
+  model_verified=1
+  model="$downloaded_artifact"
 fi
 
 if [[ ! -r "$model" ]]; then
@@ -104,19 +98,26 @@ if [[ ! -r "$model" ]]; then
 fi
 
 if [[ "$model_verified" != 1 ]]; then
-  verify_sha256 "$model"
+  verify_sha256 "$model" "$expected_sha256" model
 fi
 
-if [[ -n "$draft" ]]; then
-  if [[ ! -r "$draft" ]]; then
-    echo "ember: draft model is not readable: $draft" >&2
-    exit 66
-  fi
-  export DFLASH_DS4_SPEC=1
-  export DFLASH_DS4_DRAFT="$draft"
-else
-  export DFLASH_DS4_SPEC=0
+if [[ ! -r "$draft" && "$draft" == "$model_dir/$draft_file" && \
+      "${EMBER_AUTO_DOWNLOAD:-1}" == 1 ]]; then
+  download_artifact "$draft_file" "$draft_expected_size" \
+    "$draft_expected_sha256" "draft model"
+  draft_verified=1
+  draft="$downloaded_artifact"
 fi
+
+if [[ ! -r "$draft" ]]; then
+  echo "ember: draft model is not readable: $draft" >&2
+  exit 66
+fi
+if [[ "$draft_verified" != 1 ]]; then
+  verify_sha256 "$draft" "$draft_expected_sha256" "draft model"
+fi
+export DFLASH_DS4_SPEC=1
+export DFLASH_DS4_DRAFT="$draft"
 
 segvtrace="${EMBER_SEGVTRACE:-/usr/local/lib/libsegvtrace.so}"
 if [[ -n "$segvtrace" && -r "$segvtrace" ]]; then

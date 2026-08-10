@@ -114,11 +114,6 @@ RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && ldconfig
 
 ENV EMBER_MODEL_DIR=/models \
-    EMBER_KV_CACHE_DIR=/cache \
-    EMBER_MODEL_REPO=otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF \
-    EMBER_MODEL_FILE=DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf \
-    EMBER_MODEL_REVISION=f6e507774f7133568f6fec0635057cb20134f307 \
-    EMBER_MODEL_SHA256=18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed \
-    EMBER_MODEL_SIZE_BYTES=91547243104
+    EMBER_KV_CACHE_DIR=/cache
 
 ENTRYPOINT ["/usr/local/bin/ember-entrypoint"]

@@ -11,10 +11,6 @@ on:
         description: Absolute path to the pinned GGUF on the runner host
         required: true
         type: string
-      model_sha256:
-        description: SHA-256 of the pinned GGUF
-        required: true
-        type: string
       prompt_path:
         description: Absolute path to a non-sensitive prompt that generates at least one DSpark block
         required: true
@@ -24,14 +20,8 @@ on:
         required: true
         type: string
       draft_model_path:
-        description: Optional absolute DSpark draft GGUF path
-        required: false
-        default: ''
-        type: string
-      draft_model_sha256:
-        description: Required SHA-256 when a DSpark draft path is supplied
-        required: false
-        default: ''
+        description: Absolute path to the pinned DSpark draft GGUF
+        required: true
         type: string
       port:
         description: Unused loopback port for the generation smoke test
@@ -59,22 +49,17 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           MODEL_PATH: ${{ inputs.model_path }}
-          MODEL_SHA256: ${{ inputs.model_sha256 }}
           PROMPT_PATH: ${{ inputs.prompt_path }}
           DISK_PROMPT_PATH: ${{ inputs.disk_prompt_path }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
-          DRAFT_SHA256: ${{ inputs.draft_model_sha256 }}
           PORT: ${{ inputs.port }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MODEL_PATH" = /* && -f "$MODEL_PATH" ]]
-          [[ "$MODEL_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$PROMPT_PATH" = /* && -f "$PROMPT_PATH" ]]
           [[ "$DISK_PROMPT_PATH" = /* && -f "$DISK_PROMPT_PATH" ]]
-          [[ -z "$DRAFT_PATH" || ( "$DRAFT_PATH" = /* && -f "$DRAFT_PATH" ) ]]
-          [[ -z "$DRAFT_PATH" || "$DRAFT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ -n "$DRAFT_PATH" || -z "$DRAFT_SHA256" ]]
+          [[ "$DRAFT_PATH" = /* && -f "$DRAFT_PATH" ]]
           [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 ))
           [[ -r /dev/kfd && -d /dev/dri ]]
           command -v docker >/dev/null
@@ -105,17 +90,15 @@ jobs:
       - name: Verify the model artifact
         env:
           MODEL_PATH: ${{ inputs.model_path }}
-          MODEL_SHA256: ${{ inputs.model_sha256 }}
+          MODEL_SHA256: a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
           DRAFT_PATH: ${{ inputs.draft_model_path }}
-          DRAFT_SHA256: ${{ inputs.draft_model_sha256 }}
+          DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
         run: |
           set -euo pipefail
           printf '%s  %s\n' "$MODEL_SHA256" "$MODEL_PATH" |
             sha256sum --check --strict
-          if [[ -n "$DRAFT_PATH" ]]; then
-            printf '%s  %s\n' "$DRAFT_SHA256" "$DRAFT_PATH" |
-              sha256sum --check --strict
-          fi
+          printf '%s  %s\n' "$DRAFT_SHA256" "$DRAFT_PATH" |
+            sha256sum --check --strict
 
       - name: Run HIP GEMM and generation differential validators
         env:
@@ -148,16 +131,13 @@ jobs:
             -v "$prompt_dir:/cert-prompt:ro"
             -v "$disk_prompt_dir:/cert-disk-prompt:ro"
           )
-          env_args=()
-          if [[ -n "$DRAFT_PATH" ]]; then
-            draft_dir="$(dirname -- "$DRAFT_PATH")"
-            draft_file="$(basename -- "$DRAFT_PATH")"
-            mounts+=(-v "$draft_dir:/cert-draft:ro")
-            env_args+=(
-              -e DFLASH_DS4_SPEC=1
-              -e "DFLASH_DS4_DRAFT=/cert-draft/$draft_file"
-            )
-          fi
+          draft_dir="$(dirname -- "$DRAFT_PATH")"
+          draft_file="$(basename -- "$DRAFT_PATH")"
+          mounts+=(-v "$draft_dir:/cert-draft:ro")
+          env_args=(
+            -e DFLASH_DS4_SPEC=1
+            -e "DFLASH_DS4_DRAFT=/cert-draft/$draft_file"
+          )
           cache_volume="ember-cert-validator-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker volume create "$cache_volume" >/dev/null
           cleanup_validator() { docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true; }
@@ -172,17 +152,13 @@ jobs:
             --validate-prompt "/cert-prompt/$prompt_file" \
             --validate-tokens 32)"
           printf '%s\n' "$spec_report"
-          expect_spec=0
-          [[ -n "$DRAFT_PATH" ]] && expect_spec=1
           python3 -c '
           import json, sys
           report = json.load(sys.stdin)
-          expect_spec = sys.argv[1] == "1"
           assert report["ok"] and report["snapshot_ok"], report
           assert report["batch"]["checked"] and report["batch"]["exact"], report
-          if expect_spec:
-              assert report["spec"]["checked"] and report["spec"]["exact"], report
-          ' "$expect_spec" <<<"$spec_report"
+          assert report["spec"]["checked"] and report["spec"]["exact"], report
+          ' <<<"$spec_report"
 
           disk_report="$(docker run --rm "${gpu_args[@]}" "${mounts[@]}" \
             -v "$cache_volume:/cache" \
@@ -204,14 +180,11 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           MODEL_PATH: ${{ inputs.model_path }}
-          MODEL_SHA256: ${{ inputs.model_sha256 }}
           DRAFT_PATH: ${{ inputs.draft_model_path }}
           PORT: ${{ inputs.port }}
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
-          model_dir="$(dirname -- "$MODEL_PATH")"
-          model_file="$(basename -- "$MODEL_PATH")"
           name="ember-cert-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           cache_volume="$name-cache"
           docker volume create "$cache_volume" >/dev/null
@@ -220,18 +193,13 @@ jobs:
             docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true
           }
           trap cleanup_server EXIT
-          mounts=(-v "$model_dir:/cert-model:ro" -v "$cache_volume:/cache")
+          model_target=/models/DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf
+          draft_target=/models/DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf
+          mounts=(-v "$MODEL_PATH:$model_target:ro" -v "$cache_volume:/cache")
           env_args=(
-            -e "EMBER_MODEL=/cert-model/$model_file"
-            -e "EMBER_MODEL_SHA256=$MODEL_SHA256"
             -e "EMBER_PORT=$PORT"
           )
-          if [[ -n "$DRAFT_PATH" ]]; then
-            draft_dir="$(dirname -- "$DRAFT_PATH")"
-            draft_file="$(basename -- "$DRAFT_PATH")"
-            mounts+=(-v "$draft_dir:/cert-draft:ro")
-            env_args+=(-e "EMBER_DRAFT_MODEL=/cert-draft/$draft_file")
-          fi
+          mounts+=(-v "$DRAFT_PATH:$draft_target:ro")
           docker run -d --name "$name" --network host \
             --device /dev/kfd --device /dev/dri \
             --group-add video --group-add render \
@@ -260,16 +228,13 @@ jobs:
             -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply briefly that Ember is ready."}],"max_tokens":128,"temperature":0,"top_p":1,"top_k":0,"stream":false}' \
             "http://127.0.0.1:$PORT/v1/chat/completions")"
           printf '%s\n' "$response"
-          expect_spec=0
-          [[ -n "$DRAFT_PATH" ]] && expect_spec=1
           python3 -c '
           import json, sys
           response = json.load(sys.stdin)
           message = response["choices"][0]["message"]
           assert message.get("content") or message.get("reasoning_content"), response
-          if sys.argv[1] == "1":
-              assert response["usage"]["backend"]["spec_ran"] is True, response
-          ' "$expect_spec" <<<"$response"
+          assert response["usage"]["backend"]["spec_ran"] is True, response
+          ' <<<"$response"
 
       - name: Record certification result
         env:

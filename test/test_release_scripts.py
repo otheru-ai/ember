@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import pathlib
 import subprocess
@@ -28,12 +27,21 @@ SMOKE = ROOT / "scripts" / "smoke_test.sh"
 class ReleaseScriptTests(unittest.TestCase):
     def test_default_model_is_immutably_pinned(self) -> None:
         script = ENTRYPOINT.read_text()
-        self.assertIn("/resolve/$revision/$file", script)
-        self.assertNotIn("/resolve/main/$file", script)
+        self.assertIn("/resolve/$revision/$artifact_file", script)
+        self.assertNotIn("/resolve/main/", script)
         self.assertIn(
-            "18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed",
+            "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
             script,
         )
+        self.assertIn(
+            "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
+            script,
+        )
+        self.assertIn("9fe32d8d4a1abed16c84e2636b26950232869929", script)
+        self.assertNotIn("EMBER_MODEL:-", script)
+        self.assertNotIn("EMBER_DRAFT_MODEL:-", script)
+        self.assertNotIn("EMBER_MODEL_SHA256-", script)
+        self.assertNotIn("EMBER_DRAFT_MODEL_SHA256-", script)
 
     def test_shell_syntax(self) -> None:
         for script in (ENTRYPOINT, COLLECT_RUNTIME, PREFLIGHT, SMOKE):
@@ -89,12 +97,18 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("environment: gfx1151-certification", certify)
         self.assertIn("--validate-gemm-batch 64", certify)
         self.assertIn("--validate-prompt", certify)
-        self.assertIn("model_sha256:", certify)
         self.assertIn("disk_prompt_path:", certify)
         self.assertIn('report["disk"]["checked"]', certify)
         self.assertIn('report["spec"]["checked"]', certify)
         self.assertIn("--batch-sessions 1", certify)
-        self.assertNotIn("EXPECTED_SHA256:", certify)
+        self.assertIn(
+            "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
+            certify,
+        )
+        self.assertIn(
+            "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
+            certify,
+        )
         self.assertIn("org.opencontainers.image.revision", certify)
         self.assertNotIn("actions/checkout", certify)
         triggers = certify.split("permissions:", 1)[0]
@@ -114,20 +128,27 @@ class ReleaseScriptTests(unittest.TestCase):
 
     def test_entrypoint_verifies_model_and_forwards_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            model = pathlib.Path(directory) / "model.gguf"
+            model = pathlib.Path(directory) / (
+                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+            )
+            draft = pathlib.Path(directory) / (
+                "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
+            )
             model.write_bytes(b"release-test-model")
-            digest = hashlib.sha256(model.read_bytes()).hexdigest()
+            draft.write_bytes(b"release-test-draft")
+            fake_sha256sum = pathlib.Path(directory) / "sha256sum"
+            fake_sha256sum.write_text("#!/usr/bin/env bash\nexit 0\n")
+            fake_sha256sum.chmod(0o755)
             env = os.environ | {
                 "EMBER_SKIP_DEVICE_CHECK": "1",
-                "EMBER_MODEL": str(model),
                 "EMBER_MODEL_DIR": directory,
-                "EMBER_MODEL_SHA256": digest,
                 "EMBER_SERVER_BIN": "/bin/echo",
                 "EMBER_KV_CACHE_DIR": directory,
                 "EMBER_PORT": "18080",
                 "EMBER_TOOL_LOOP_REPORT": "9",
                 "EMBER_NO_PROGRESS_REPORT": "10",
                 "EMBER_AUTO_ANSWER_AFTER_LOOP": "11",
+                "PATH": directory + os.pathsep + os.environ["PATH"],
             }
             result = subprocess.run(
                 ["bash", str(ENTRYPOINT), "--ctx", "42"],
@@ -143,15 +164,67 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn("--auto-answer-after-loop 11", result.stdout)
             self.assertIn("--ctx 42", result.stdout)
 
-    def test_entrypoint_rejects_wrong_digest(self) -> None:
+    def test_default_start_downloads_both_pinned_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            model = pathlib.Path(directory) / "model.gguf"
+            root = pathlib.Path(directory)
+            curl_log = root / "curl.log"
+            fake_curl = root / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "output=\n"
+                "url=${@: -1}\n"
+                "while (( $# )); do\n"
+                "  if [[ $1 == --output ]]; then output=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "case $url in\n"
+                "  *DSpark-draft*) size=10897111840 ;;\n"
+                "  *) size=91547243200 ;;\n"
+                "esac\n"
+                "truncate -s $size \"$output\"\n"
+                f"printf '%s\\n' \"$url\" >> {curl_log}\n"
+            )
+            fake_curl.chmod(0o755)
+            fake_sha256sum = root / "sha256sum"
+            fake_sha256sum.write_text("#!/usr/bin/env bash\nexit 0\n")
+            fake_sha256sum.chmod(0o755)
+            fake_df = root / "df"
+            fake_df.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'Filesystem 1-blocks Used Available Use%% Mounted on\\n'\n"
+                "printf 'test 300000000000 0 300000000000 0%% /models\\n'\n"
+            )
+            fake_df.chmod(0o755)
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_SERVER_BIN": "/bin/echo",
+                "EMBER_SEGVTRACE": "",
+                "PATH": directory + os.pathsep + os.environ["PATH"],
+            }
+            subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            urls = curl_log.read_text().splitlines()
+            self.assertEqual(len(urls), 2)
+            self.assertTrue(all(
+                "/resolve/9fe32d8d4a1abed16c84e2636b26950232869929/" in url
+                for url in urls
+            ))
+            self.assertTrue(any("ROCMFPx-Strix-Lean-2.58bpw.gguf" in url for url in urls))
+            self.assertTrue(any("DSpark-draft-4.25bpw.gguf" in url for url in urls))
+
+    def test_entrypoint_rejects_wrong_digest_even_with_ignored_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model = pathlib.Path(directory) / (
+                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+            )
             model.write_bytes(b"tampered")
             env = os.environ | {
                 "EMBER_SKIP_DEVICE_CHECK": "1",
-                "EMBER_MODEL": str(model),
                 "EMBER_MODEL_DIR": directory,
-                "EMBER_MODEL_SHA256": "0" * 64,
+                "EMBER_MODEL_SHA256": "",
                 "EMBER_SERVER_BIN": "/bin/true",
             }
             result = subprocess.run(
@@ -160,18 +233,27 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 78)
             self.assertIn("SHA-256 mismatch", result.stderr)
 
-    def test_custom_model_can_explicitly_disable_verification(self) -> None:
+    def test_draft_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            model = pathlib.Path(directory) / "local.gguf"
-            model.write_bytes(b"local-development-model")
+            model = pathlib.Path(directory) / (
+                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+            )
+            model.write_bytes(b"test-model")
+            fake_sha256sum = pathlib.Path(directory) / "sha256sum"
+            fake_sha256sum.write_text("#!/usr/bin/env bash\nexit 0\n")
+            fake_sha256sum.chmod(0o755)
             env = os.environ | {
                 "EMBER_SKIP_DEVICE_CHECK": "1",
-                "EMBER_MODEL": str(model),
                 "EMBER_MODEL_DIR": directory,
-                "EMBER_MODEL_SHA256": "",
                 "EMBER_SERVER_BIN": "/bin/true",
+                "EMBER_AUTO_DOWNLOAD": "0",
+                "PATH": directory + os.pathsep + os.environ["PATH"],
             }
-            subprocess.run(["bash", str(ENTRYPOINT)], env=env, check=True)
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 66)
+            self.assertIn("draft model is not readable", result.stderr)
 
     def test_entrypoint_preflight_mode_needs_no_model(self) -> None:
         result = subprocess.run(

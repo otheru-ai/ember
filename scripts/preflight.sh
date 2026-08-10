@@ -57,11 +57,11 @@ fi
 models_dir="${EMBER_MODELS_DIR:-./models}"
 mkdir -p "$models_dir"
 available="$(df -PB1 "$models_dir" | awk 'NR == 2 {print $4}')"
-required=$((94 * 1024 * 1024 * 1024))
+required=$((100 * 1024 * 1024 * 1024))
 if [[ "$available" =~ ^[0-9]+$ ]] && (( available >= required )); then
-  pass "$models_dir has at least 94 GiB free"
+  pass "$models_dir has at least 100 GiB free"
 else
-  fail "$models_dir needs at least 94 GiB free for the verified model download"
+  fail "$models_dir needs at least 100 GiB free for the verified model pair"
 fi
 
 if command -v rocminfo >/dev/null 2>&1; then

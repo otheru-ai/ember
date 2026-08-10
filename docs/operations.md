@@ -12,8 +12,9 @@ other GPU architectures.
 - AMD Strix Halo (`gfx1151`). The image is compiled specifically for this ISA.
 - Approximately 128 GiB unified memory. The tested model is 85.3 GiB and uses
   about 89 GiB resident before context and operating-system overhead.
-- At least 94 GiB free in the model directory for the 91,547,243,104-byte
-  artifact, download staging, and filesystem headroom.
+- At least 100 GiB free in the model directory for the 91,547,243,200-byte
+  quant, 10,897,111,840-byte drafter, download staging, and filesystem
+  headroom.
 - Docker Engine with the Compose v2 plugin.
 
 Run the host checks before the first build:
@@ -32,10 +33,11 @@ before it downloads model data.
 docker compose up -d
 ```
 
-The first invocation pulls the immutable target-specific image, downloads the pinned
-model with resumable HTTP, verifies its SHA-256 digest, loads it, and starts the
-API on `http://127.0.0.1:8080`. `./models` and `./cache` persist across container
-replacement. Follow progress with `docker compose logs -f ember`.
+The first invocation pulls the immutable target-specific image, downloads the
+pinned quant and DSpark drafter with resumable HTTP, verifies both SHA-256
+digests, loads them, and starts the API on `http://127.0.0.1:8080`. `./models`
+and `./cache` persist across container replacement. Follow progress with
+`docker compose logs -f ember`.
 
 The deployable image contains the stripped server, crash shim, recursive
 dynamic-library closure, rocBLAS runtime kernel data, and license notices.
@@ -65,22 +67,25 @@ short end-to-end inference request.
 
 ## Reproducible model acquisition
 
-The default container configuration binds the tested model to all three of:
+The container supports exactly this published pair at Hugging Face revision
+`9fe32d8d4a1abed16c84e2636b26950232869929`:
 
-- Hugging Face revision `f6e507774f7133568f6fec0635057cb20134f307`
-- file size `91547243104`
-- SHA-256 `18aec8c0be4087007e557aa6020b28f12cd4c5d1f9c67b2a815c152aea97b3ed`
+- `DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf`:
+  91,547,243,200 bytes, SHA-256
+  `a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54`.
+- `DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf`:
+  10,897,111,840 bytes, SHA-256
+  `1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6`.
 
 Downloads first land in a `.part` file and resume after interruption. Ember
 checks available space before transfer, verifies the completed staging file,
 and only then renames it to the final `.gguf` path. A digest mismatch never
 starts the server.
 
-When selecting a different artifact, set `EMBER_MODEL_FILE`,
-`EMBER_MODEL_REVISION`, `EMBER_MODEL_SIZE_BYTES`, and `EMBER_MODEL_SHA256`
-together. Setting `EMBER_MODEL_SHA256=` explicitly opts out of verification and
-should be reserved for local development artifacts. The model has its own
-license on its Hugging Face card and is not included in the Ember image.
+Other model artifacts are unsupported. The artifact filenames, revision, and
+digests are not configurable, and verification cannot be disabled. The model
+pair has its own license on its Hugging Face card and is not included in the
+Ember image.
 
 ## Runtime state and observability
 

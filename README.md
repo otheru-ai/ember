@@ -23,7 +23,7 @@ on one local endpoint.
 
 - Native x86_64 Linux on AMD Strix Halo (`gfx1151`)
 - Approximately 128 GiB unified memory
-- At least 94 GiB free disk space
+- At least 100 GiB free disk space
 - Docker Engine with Docker Compose v2
 - `/dev/kfd` and `/dev/dri` available to Docker
 
@@ -39,8 +39,8 @@ scripts/preflight.sh && docker compose up -d
 ```
 
 The first start pulls `ghcr.io/otheru/ember:2026.8.9`, downloads the pinned
-[DeepSeek-V4-Flash Strix Halo GGUF](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF)
-(about 85 GiB), verifies it, and starts Ember at
+[DeepSeek-V4-Flash Strix Halo model and DSpark drafter](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF)
+(about 95 GiB combined), verifies both, and starts Ember at
 `http://127.0.0.1:8080`. Interrupted downloads resume automatically.
 
 Follow startup progress:
@@ -103,8 +103,7 @@ authenticating reverse proxy before exposing it to another host.
 
 ## Configure
 
-The defaults require no configuration. To change the port, model location, or
-downloaded artifact:
+The defaults require no configuration. To change the port or host directories:
 
 ```bash
 cp .env.example .env
@@ -116,11 +115,11 @@ Edit `.env`, then restart with `docker compose up -d`. Common settings are:
 EMBER_PORT=8080
 EMBER_MODELS_DIR=./models
 EMBER_CACHE_DIR=./cache
-EMBER_MODEL=/models/your-model.gguf
 ```
 
-If you select a different downloaded model, set its file, revision, size, and
-SHA-256 together. See [.env.example](.env.example) for every container setting.
+Only the pinned quant and drafter are supported. They are not configurable,
+and Ember always verifies both SHA-256 digests before start. See
+[.env.example](.env.example) for every container setting.
 
 ## Coding agents
 
