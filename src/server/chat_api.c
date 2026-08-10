@@ -233,6 +233,15 @@ static bool valid_sampler_float(double v) {
     return isfinite(v) && v >= -(double)FLT_MAX && v <= (double)FLT_MAX;
 }
 
+// GCC 13's path analyzer reports request-owned strings as leaked at the next
+// local declaration after assignment. On success ownership is deliberately
+// returned through out; every invalid path calls ember_chat_request_free(out).
+// ASan/LSan and the parser tests cover both lifetimes. Keep the suppression on
+// this ownership-producing function only so unrelated analyzer findings fail.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
+#endif
 bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     memset(out, 0, sizeof(*out));
     if (!root || root->type != EMBER_JSON_OBJECT ||
@@ -514,6 +523,9 @@ invalid:
     ember_chat_request_free(out);
     return false;
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 bool ember_chat_request_is_tool_result_continuation(
         const ember_chat_request *r) {
