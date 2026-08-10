@@ -3,13 +3,13 @@
 Ember uses calendar versions in `YEAR.MONTH.DAY` form without zero-padding.
 Release notes record user-visible features, fixes, compatibility changes,
 upgrade steps, and validated hardware. Git tags add a `v` prefix; for example,
-version `2026.8.9` is tagged `v2026.8.9`.
+version `2026.8.10` is tagged `v2026.8.10`.
 
 `VERSION` is authoritative. Ember publishes at most one release per calendar
 day; additional fixes remain on `main` until the next dated release rather than
 using an ambiguous same-day suffix.
 
-## 2026.8.9
+## 2026.8.10
 
 - Prepared the first source release.
 - Added a one-command Docker Compose workflow with resumable model download.

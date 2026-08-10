@@ -26,7 +26,7 @@ agree that your contribution is licensed under the repository's MIT license.
 Ember uses calendar versions in `YEAR.MONTH.DAY` form without zero-padding.
 Before cutting a release, update the root `VERSION` file and add the matching
 dated section to `CHANGELOG.md`. Create a signed or annotated Git tag by adding
-`v` to that exact value (for example, `v2026.8.9`). The container workflow
+`v` to that exact value (for example, `v2026.8.10`). The container workflow
 rejects release tags that do not match `VERSION`.
 
 Only one release is published per calendar day. If another change is needed on
