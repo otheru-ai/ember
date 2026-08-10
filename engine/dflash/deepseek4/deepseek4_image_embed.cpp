@@ -81,6 +81,8 @@ const Ds4ImageEmbed & Ds4ImageEmbed::instance(int64_t model_n_embd) {
     return g_embed;
 }
 
+const Ds4ImageEmbed & Ds4ImageEmbed::loaded() { return g_embed; }
+
 int64_t Ds4ImageEmbed::find_span(const std::vector<int32_t> & tokens,
                                  std::string * err) const {
     if (!active || palette.empty()) return -1;
