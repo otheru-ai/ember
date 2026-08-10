@@ -173,6 +173,11 @@ target_include_directories(test_prefill_policy PRIVATE
   engine/ggml/src)
 add_test(NAME prefill_policy COMMAND test_prefill_policy)
 
+add_executable(test_ds4_image_span test/test_ds4_image_span.cpp
+  engine/dflash/deepseek4/deepseek4_image_embed.cpp)
+target_include_directories(test_ds4_image_span PRIVATE engine/dflash)
+add_test(NAME ds4_image_span COMMAND test_ds4_image_span)
+
 add_executable(test_api_adapters test/test_api_adapters.c)
 target_link_libraries(test_api_adapters ember_core m)
 add_test(NAME api_adapters COMMAND test_api_adapters)

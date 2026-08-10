@@ -1074,6 +1074,67 @@ static bool ids_append(int32_t **ids, int *n, int *cap,
 // diverge from what was sampled and miss the post-tool-call snapshot. Text
 // segments between sentinels are tokenized normally. Returns the combined length
 // (>=0), or -1 on tokenizer error; *out_ids is malloc'd (caller frees).
+// ---------------------------------------------------------------------------
+// Vision graft, validation path (docs/VISION-GRAFT.md).
+//
+// Implemented in engine/dflash/deepseek4/deepseek4_image_embed.cpp so the
+// sidecar parser has exactly one implementation. Reports 0 unless
+// $EMBER_DS4_IMAGE_EMBED was loaded at model init.
+int ember_ds4_image_token_count(const int32_t **palette_out, int *n_palette_out);
+
+// Split `prompt` on the first "<image>", encode each text half separately, and
+// emit the trained routing palette in between -- one token ID per image
+// position, cycling with the phase anchored to the image start.
+//
+// Those palette IDs are what DS4's hash routing sees; the deepseek4 backend then
+// overwrites the embedding rows for that span with real projector output. The
+// substitution is mandatory rather than cosmetic: the upstream placeholder ID is
+// 129280, which equals vocab_size and indexes neither the embedding table nor
+// the routing tables.
+//
+// Splitting rather than slicing one encode is deliberate -- BPE merges across
+// the boundary, which would silently shift the span by a token or two and
+// misalign every image row while still decoding fluently.
+static int encode_with_image(ember_backend *be, const char *prompt,
+                             int32_t **out_ids) {
+    const int32_t *palette = NULL;
+    int n_palette = 0;
+    const int n_img = ember_ds4_image_token_count(&palette, &n_palette);
+    const char *marker = prompt ? strstr(prompt, "<image>") : NULL;
+    if (n_img <= 0 || n_palette <= 0 || !palette || !marker)
+        return ember_backend_encode(be, prompt, out_ids);
+
+    int32_t *ids = NULL; int n = 0, cap = 0;
+    const size_t head_len = (size_t)(marker - prompt);
+    char *head = (char *)malloc(head_len + 1);
+    if (!head) return -1;
+    memcpy(head, prompt, head_len);
+    head[head_len] = '\0';
+
+    int32_t *hids = NULL;
+    int hn = ember_backend_encode(be, head, &hids);
+    free(head);
+    if (hn < 0) { free(hids); return -1; }
+    if (!ids_append(&ids, &n, &cap, hids, hn)) { free(hids); free(ids); return -1; }
+    free(hids);
+
+    for (int k = 0; k < n_img; k++) {
+        int32_t id = palette[k % n_palette];
+        if (!ids_append(&ids, &n, &cap, &id, 1)) { free(ids); return -1; }
+    }
+
+    int32_t *tids = NULL;
+    int tn = ember_backend_encode(be, marker + strlen("<image>"), &tids);
+    if (tn < 0) { free(tids); free(ids); return -1; }
+    if (!ids_append(&ids, &n, &cap, tids, tn)) { free(tids); free(ids); return -1; }
+    free(tids);
+
+    fprintf(stderr, "[ds4-image] encoded %d image tokens at position %d of %d\n",
+            n_img, hn, n);
+    *out_ids = ids;
+    return n;
+}
+
 static int encode_with_splices(ember_server *srv, ember_backend *be,
                                const char *prompt, int32_t **out_ids) {
     if (!srv || !be || !prompt || !out_ids) return -1;
@@ -2444,7 +2505,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     } else {
         attach_tool_memory(srv, req);  // B3: exact-DSML replay substitution
         if (req->raw_prompt) {
-            n_prompt = ember_backend_encode(be, req->raw_prompt, &ids);
+            n_prompt = encode_with_image(be, req->raw_prompt, &ids);
         } else {
             char *prompt =
                 ember_render_prompt(req, enable_thinking,

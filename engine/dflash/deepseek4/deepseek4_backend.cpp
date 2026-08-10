@@ -6,6 +6,7 @@
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
 #include "deepseek4_dspark_scheduler.h"
+#include "deepseek4_image_embed.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
 
@@ -870,6 +871,10 @@ bool DeepSeek4Backend::load_model() {
         return false;
     }
     w_.routed_expert_top_k = cfg_.expert_top_k;
+    // Vision graft (validation path): resolve $EMBER_DS4_IMAGE_EMBED now that
+    // n_embd is known. Must happen before any request, because the encode-time
+    // shim in src/server/main.c reads the palette from the loaded instance.
+    Ds4ImageEmbed::instance(w_.n_embd);
     w_.fused_decode = cfg_.fused_decode && !moe_hybrid_;
     // PORTED from lucebox d03bcc4. Off by default: upstream documents that it
     // changes verifier floating-point inputs and can change generated tokens,
@@ -1236,6 +1241,26 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         : cfg_.prefill_mode;
     const int requested_chunk = cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa;
     const int n_total = (int)tokens.size();
+
+    // Vision graft (validation path). The image span is located by matching the
+    // trained 64-id palette cycle, which cannot plausibly occur in text, so no
+    // span has to be threaded down from the server layer. A partial match means
+    // the prompt and the sidecar disagree about length -- abort rather than
+    // splice through it, because misaligned image rows still decode fluently.
+    const Ds4ImageEmbed & img_embed = Ds4ImageEmbed::instance(w_.n_embd);
+    int64_t img_span = -1;
+    if (img_embed.active) {
+        std::string img_err;
+        img_span = img_embed.find_span(tokens, &img_err);
+        if (!img_err.empty()) {
+            std::fprintf(stderr, "[ds4-image] %s\n", img_err.c_str());
+            return -1;
+        }
+        if (img_span >= 0) {
+            std::fprintf(stderr, "[ds4-image] splicing %d image tokens at position %lld\n",
+                         img_embed.n_tokens, (long long) img_span);
+        }
+    }
     // Bound the layer-major graph to the topology validated by the prefill
     // kernels. Smaller tail chunks use the same scheduler or its reference
     // fallback.
@@ -1371,6 +1396,10 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         std::vector<float> embed(w_.n_embd * n_tok);
         const auto embed_t0 = Clock::now();
         w_.embedder.embed(tokens.data() + i, n_tok, embed.data());
+        // Vision graft: overwrite the rows carrying image positions. The palette
+        // IDs stay in `tokens`, so hash routing is unchanged -- which is exactly
+        // upstream's bridge. Prefill only; decode keeps ordinary token IDs.
+        img_embed.splice(embed.data(), i, n_tok, img_span);
         DeepSeek4StepTelemetry step_tel;
         if (timing) step_tel.embed_us = elapsed_us(embed_t0, Clock::now());
 
