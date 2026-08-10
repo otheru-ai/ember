@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,13 @@ FLOORS = Path(__file__).resolve().parent / "coverage_floors.json"
 # bridge and the vendored engine are excluded: no runner has the toolchain.
 INCLUDE_PREFIX = "src/"
 EXCLUDE = {"src/backend/backend_dflash.cc"}
+
+
+def github_error(path: str, message: str) -> None:
+    """Expose ratchet failures as check annotations, not only private logs."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error file={path}::{escaped}")
 
 
 def run_gcov(build: Path) -> dict[str, tuple[float, int]]:
@@ -127,6 +135,9 @@ def main() -> int:
         print(f"\n{len(failures)} coverage regression(s):", file=sys.stderr)
         for msg in failures:
             print(f"  ✗ {msg}", file=sys.stderr)
+            github_error(msg.split(":", 1)[0], msg)
+    for rel in untracked:
+        github_error(rel, f"{rel} has coverage data but no checked-in floor")
     if failures or untracked:
         return 1
     print("\ncoverage floors OK")
