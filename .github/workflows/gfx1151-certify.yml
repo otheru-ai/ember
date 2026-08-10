@@ -245,5 +245,5 @@ jobs:
             echo
             echo "Certified source SHA: \`$TARGET_SHA\`"
             echo
-            echo 'Set the repository variable `EMBER_GFX1151_CERTIFIED_SHA` to this full SHA before creating its version tag.'
+            echo 'Set the repository variable EMBER_GFX1151_CERTIFIED_SHA to this full SHA before creating its version tag.'
           } >> "$GITHUB_STEP_SUMMARY"
