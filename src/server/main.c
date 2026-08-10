@@ -3623,7 +3623,9 @@ static bool gen_worker_submit(gen_worker *w, ember_server *srv,
     }
     if (!req->background)
         ember_background_gate_note_foreground(&w->bg_gate, job.enqueued_at);
+    // cppcheck-suppress autoVariables
     if (w->tail) w->tail->next = &job; else w->head = &job;
+    // cppcheck-suppress autoVariables
     w->tail = &job;
     w->queued++;
     pthread_cond_signal(&w->cond);

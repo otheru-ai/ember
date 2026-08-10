@@ -78,24 +78,17 @@ static inline void ember_buf_putc(ember_buf *b, char c) {
 static inline void ember_buf_printf(ember_buf *b, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    va_list ap2;
-    va_copy(ap2, ap);
     int need = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (need < 0) {
-        va_end(ap2);
-        ember_buf_fatal("vsnprintf failed");
-    }
+    if (need < 0) ember_buf_fatal("vsnprintf failed");
     if (need > 0) {
         ember_buf_reserve(b, (size_t)need);
-        int wrote = vsnprintf(b->ptr + b->len, (size_t)need + 1, fmt, ap2);
-        if (wrote != need) {
-            va_end(ap2);
-            ember_buf_fatal("vsnprintf length changed");
-        }
+        va_start(ap, fmt);
+        int wrote = vsnprintf(b->ptr + b->len, (size_t)need + 1, fmt, ap);
+        va_end(ap);
+        if (wrote != need) ember_buf_fatal("vsnprintf length changed");
         b->len += (size_t)need;
     }
-    va_end(ap2);
 }
 
 // Take ownership of the buffer's storage; caller must free(). Resets `b`.
