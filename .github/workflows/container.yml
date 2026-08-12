@@ -34,7 +34,14 @@ jobs:
     needs: source-gate
     # GitHub's paid 8-core Ubuntu larger runner provides 32 GB RAM and 300 GB
     # disk, enough for the pinned ROCm toolchain and release image closure.
-    runs-on: ubuntu-latest-8-cores
+    # Larger runners need a Team or Enterprise Cloud plan. On any other plan the
+    # label is unsatisfiable and the job queues silently until GitHub cancels it
+    # at 24h -- this is exactly how the v2026.8.10 publish was lost. Set the
+    # repository variable EMBER_BUILD_RUNNER to a self-hosted builder label
+    # (>=200 GiB free, Docker + Buildx) when larger runners are unavailable.
+    runs-on: ${{ vars.EMBER_BUILD_RUNNER || 'ubuntu-latest-8-cores' }}
+    # Fail in hours rather than burning a day against a missing runner.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

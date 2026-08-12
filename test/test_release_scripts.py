@@ -66,7 +66,7 @@ class ReleaseScriptTests(unittest.TestCase):
         build = COMPOSE_BUILD.read_text()
         release_service = compose.split("  ember-dev:", 1)[0]
         version = (ROOT / "VERSION").read_text().strip()
-        self.assertIn(f"ghcr.io/otheru/ember:{version}", release_service)
+        self.assertIn(f"ghcr.io/otheru-ai/ember:{version}", release_service)
         self.assertIn("pull_policy: always", release_service)
         self.assertNotIn("build:", release_service)
         self.assertIn("target: release", build)
@@ -89,7 +89,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-24.04", ci)
         self.assertNotIn("self-hosted", ci)
         self.assertIn("actionlint_1.7.12_linux_amd64.tar.gz", ci)
-        self.assertIn("runs-on: ubuntu-latest-8-cores", container)
+        self.assertIn("vars.EMBER_BUILD_RUNNER || 'ubuntu-latest-8-cores'", container)
+        self.assertIn("timeout-minutes:", container)
         self.assertIn("packages: write", container)
         self.assertIn("ghcr.io/${GITHUB_REPOSITORY,,}", container)
         self.assertIn("EMBER_GFX1151_CERTIFIED_SHA", container)

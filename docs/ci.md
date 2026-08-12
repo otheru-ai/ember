@@ -4,7 +4,7 @@ Ember runs the same release gates in two places:
 
 - `.forgejo/workflows/` keeps the internal source-of-truth repository gated.
 - `.github/workflows/` runs on the synchronized GitHub repository, publishes
-  `ghcr.io/otheru/ember`, and coordinates target-hardware certification.
+  `ghcr.io/otheru-ai/ember`, and coordinates target-hardware certification.
 
 ## What CI covers, and what it deliberately cannot
 
@@ -59,17 +59,36 @@ Ordered cheapest-first so a break reports in seconds.
 needs no repository secrets and covers invariants, strict Debug/Release builds,
 all tests, sanitizers, both analyzers, and the coverage ratchet.
 
-The ROCm image needs more than the standard runner's 14 GB disk. In the OtherU
-GitHub organization, enable the 8-core Ubuntu larger runner exposed as
-`ubuntu-latest-8-cores`; that shape supplies 32 GB RAM and 300 GB disk. Grant
-the Ember repository access to it. The container workflow uses only GitHub's
-scoped `GITHUB_TOKEN` with `packages: write`; no long-lived GHCR token is stored
-in GitHub.
+The ROCm image needs more than the standard runner's 14 GB disk, so
+`release-image` runs on `${{ vars.EMBER_BUILD_RUNNER || 'ubuntu-latest-8-cores' }}`.
+
+GitHub larger runners require a **Team or Enterprise Cloud plan**. The
+`otheru-ai` organization is currently on the free plan, where
+`ubuntu-latest-8-cores` can never be scheduled: the job queues silently and
+GitHub cancels it after 24 hours. That is precisely how the `v2026.8.10` publish
+was lost -- `source-gate` passed and `release-image` was cancelled a day later,
+so no image reached GHCR. Pick one:
+
+- **Upgrade the organization to Team**, then leave `EMBER_BUILD_RUNNER` unset so
+  the default larger-runner label applies. Grant the Ember repository access to
+  the runner.
+- **Stay on the free plan** and set the repository variable
+  `EMBER_BUILD_RUNNER` to a self-hosted builder label with Docker, Buildx and at
+  least 200 GiB free. The `dev` stage alone is ~21 GB, so a standard
+  `ubuntu-24.04` runner cannot substitute even with aggressive disk reclaim.
+
+The job also carries `timeout-minutes: 180` so a misconfigured runner fails the
+same day instead of consuming the full 24-hour queue ceiling.
+
+The container workflow uses only GitHub's scoped `GITHUB_TOKEN` with
+`packages: write`; no long-lived GHCR token is stored in GitHub.
 
 Run the Container workflow manually on a candidate commit before certification.
 It publishes `dev-<sha12>` and `sha-<sha12>` images with SBOM/provenance, then
 reports size and runs the critical-vulnerability gate. After the first publish,
-make the `otheru/ember` GHCR package public so Compose can pull it anonymously.
+make the `otheru-ai/ember` GHCR package public so Compose can pull it
+anonymously. GitHub exposes no REST endpoint for this; it is a one-time manual
+step under Package settings -> Danger Zone -> Change visibility.
 
 For the hardware gate, register the Halo host as a GitHub self-hosted runner
 with labels `self-hosted`, `linux`, `x64`, and `gfx1151`. Create a GitHub
@@ -129,12 +148,12 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 | Name | Kind | Example |
 |---|---|---|
 | `EMBER_REGISTRY` | variable | `ghcr.io` |
-| `EMBER_IMAGE` | variable | `otheru/ember` |
+| `EMBER_IMAGE` | variable | `otheru-ai/ember` |
 | `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full commit SHA that passed target validation |
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
 
-For Forgejo-driven GHCR publishing, use `ghcr.io` and `otheru/ember`; the token
+For Forgejo-driven GHCR publishing, use `ghcr.io` and `otheru-ai/ember`; the token
 needs `write:packages`. This token is needed only by Forgejo—GitHub Actions uses
 its built-in `GITHUB_TOKEN`. Keep the immutable CalVer and `sha-*` tags even
 though the workflows also update `latest` for discovery.
