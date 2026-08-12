@@ -77,6 +77,17 @@ so no image reached GHCR. Pick one:
   least 200 GiB free. The `dev` stage alone is ~21 GB, so a standard
   `ubuntu-24.04` runner cannot substitute even with aggressive disk reclaim.
 
+The second option is what Ember currently uses. The builder is registered as the
+repository runner `ember-builder-halo` with the label `ember-builder`, and
+`EMBER_BUILD_RUNNER` is set to that label. It runs as a systemd **user** service
+(`systemctl --user status actions-runner-ember`) with lingering enabled, so it
+survives logout and reboot without a root-owned unit.
+
+Because Ember is a public repository, a fork pull request can edit a workflow to
+target the builder's label. Repository Actions settings therefore require
+approval for **all external contributors** before any fork workflow runs; do not
+relax that while a self-hosted runner is attached.
+
 The job also carries `timeout-minutes: 180` so a misconfigured runner fails the
 same day instead of consuming the full 24-hour queue ceiling.
 
