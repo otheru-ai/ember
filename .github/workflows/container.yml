@@ -80,10 +80,15 @@ jobs:
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Create Buildx builder
+        # The docker-container driver is required for --provenance/--sbom, but it
+        # puts BuildKit on the default bridge. Give it the host network namespace
+        # so the build still reaches the package mirrors on runners where bridge
+        # networking is unavailable; this does not affect build output.
         run: |
           docker buildx create \
             --name "ember-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --driver docker-container --use
+            --driver docker-container \
+            --driver-opt network=host --use
           docker buildx inspect --bootstrap
 
       - name: Build and publish minimal release image
