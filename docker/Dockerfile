@@ -95,7 +95,8 @@ LABEL org.opencontainers.image.title="Ember" \
       org.opencontainers.image.version="${EMBER_VERSION}" \
       org.opencontainers.image.revision="${EMBER_VCS_REF}" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="OtherU"
+      org.opencontainers.image.vendor="OtherU" \
+      org.opencontainers.image.source="https://github.com/otheru-ai/ember"
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

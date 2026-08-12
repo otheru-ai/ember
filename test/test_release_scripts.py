@@ -56,6 +56,12 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("build-essential", release)
         self.assertNotIn("cmake --build", release)
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
+        # GHCR links a package to its repository from this label; without it a
+        # package can end up unlinked and GITHUB_TOKEN cannot push to it.
+        self.assertIn(
+            'org.opencontainers.image.source="https://github.com/otheru-ai/ember"',
+            release,
+        )
         self.assertIn("/usr/share/licenses/ember/", release)
         self.assertIn("blas_lib_gfx1151.kpack", dockerfile)
         self.assertIn("rocblas/library/gfx1151", dockerfile)
