@@ -131,6 +131,7 @@ jobs:
           docker image inspect --format \
             'release image: {{.Size}} bytes (uncompressed)' "$image"
           docker run --rm \
+            --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
             image --image-src docker --exit-code 1 \
