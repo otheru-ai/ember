@@ -1360,7 +1360,11 @@ static bool eval_moe_hybrid_ffn_batched_core(
     // Reuse per-n_tokens cached graphs so steady-state rebuilds nothing. Large
     // prefill batches (n_tokens >= kMaxBatchedCache) fall through to the inline
     // path below.
-    if (n_tokens > 0 && n_tokens < MoeHybridLayerStorage::kMaxBatchedCache) {
+    const bool use_expert_compute =
+        expert_compute && expert_layer &&
+        expert_compute->accepts(n_tokens, cfg.n_expert_used);
+    if (!use_expert_compute &&
+        n_tokens > 0 && n_tokens < MoeHybridLayerStorage::kMaxBatchedCache) {
         const int total_slots = n_used * n_tokens;
         const int n_cold_stack = std::max(1, (int)(storage.down_cold ? storage.down_cold->ne[2] : 1));
         std::vector<int32_t> hot_sel(total_slots);
@@ -1559,7 +1563,7 @@ static bool eval_moe_hybrid_ffn_batched_core(
         // Used by reduced-stack prefill: hot/shared must be sliced for MMVQ
         // stability, but remote cold expert compute can still run as one
         // larger batched IPC request for the full prefill chunk.
-    } else if (has_cold && expert_compute && expert_layer) {
+    } else if (has_cold && use_expert_compute) {
         if (!eval_moe_hybrid_remote_cold_batched(
                 cfg, storage, cur_host, selected_ids, selected_weights,
                 n_tokens, cold_partial, err, expert_compute, expert_layer)) {

@@ -16,7 +16,8 @@ network fetch.
 
 `engine/` is intentionally a fork, not an unmodified third-party mirror.
 Local changes cover the C ABI bridge, gfx1151 ROCMFP integration, DSpark
-scheduling, resident-session batching, and release-specific tests. Before
+scheduling, resident-session batching, the opt-in XDNA2 selected-expert
+provider seam, and release-specific tests. Before
 updating it, diff the candidate upstream revision against `8fd9584`, preserve
 the license notices above, and record the new upstream commit and any local
 divergence in this file.

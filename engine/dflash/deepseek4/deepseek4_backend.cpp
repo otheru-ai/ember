@@ -455,6 +455,36 @@ static MoeHybridConfig make_ds4_parent_cpu_tail_cfg(const DeepSeek4Weights & w) 
     return cfg;
 }
 
+static std::vector<MoeExpertLayer> make_ds4_xdna_expert_layers(
+        const DeepSeek4Weights & w,
+        const MoeHybridStorage & hybrid) {
+    std::vector<MoeExpertLayer> layers(hybrid.layers.size());
+    for (size_t il = 0; il < hybrid.layers.size(); ++il) {
+        const MoeHybridLayerStorage & storage = hybrid.layers[il];
+        const DeepSeek4Layer & src = w.layers[il];
+        MoeExpertLayer & dst = layers[il];
+        dst.layer_idx = (int)il;
+        dst.cold_global_by_local = storage.cold_expert_ids;
+        dst.fused_gate_up = storage.gate_up_cold != nullptr;
+        dst.gate_data = storage.gate_cold ? storage.gate_cold->data : nullptr;
+        dst.up_data = storage.up_cold ? storage.up_cold->data : nullptr;
+        dst.down_data = storage.down_cold ? storage.down_cold->data : nullptr;
+        dst.gate_up_data = storage.gate_up_cold ? storage.gate_up_cold->data : nullptr;
+        dst.gate_stride = storage.gate_expert_bytes;
+        dst.up_stride = storage.up_expert_bytes;
+        dst.down_stride = storage.down_expert_bytes;
+        dst.gate_up_stride = storage.gate_up_expert_bytes;
+        dst.gate_type = src.ffn_gate_exps ? src.ffn_gate_exps->type : GGML_TYPE_COUNT;
+        dst.up_type = src.ffn_up_exps ? src.ffn_up_exps->type : GGML_TYPE_COUNT;
+        dst.down_type = src.ffn_down_exps ? src.ffn_down_exps->type : GGML_TYPE_COUNT;
+        dst.gate_up_type = GGML_TYPE_COUNT;
+        dst.gate_scale = 1.0f;
+        dst.up_scale = 1.0f;
+        dst.down_scale = 1.0f;
+    }
+    return layers;
+}
+
 }  // namespace
 
 DeepSeek4Backend::DeepSeek4Backend(const DeepSeek4BackendConfig & cfg)
@@ -750,6 +780,9 @@ bool DeepSeek4Backend::init() {
     if (!validate_prefill_mode()) {
         return false;
     }
+    if (!init_xdna_moe_provider()) {
+        return false;
+    }
     if (prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
         std::fprintf(stderr,
             "[deepseek4] warning: %s prefill is approximate and may change "
@@ -895,6 +928,46 @@ bool DeepSeek4Backend::init_hybrid_model() {
     return true;
 }
 
+bool DeepSeek4Backend::init_xdna_moe_provider() {
+    xdna_expert_compute_.reset();
+    xdna_expert_layers_.clear();
+    const char * plugin = std::getenv("DFLASH_MOE_XDNA_PLUGIN");
+    if (!plugin || !plugin[0]) return true;
+
+    const bool required = env_flag_enabled("DFLASH_MOE_XDNA_REQUIRED");
+    if (!moe_hybrid_) {
+        std::fprintf(stderr,
+                     "[xdna-moe] provider requested but model placement has no cold experts; "
+                     "set DFLASH_EXPERT_BUDGET_MB to force a hybrid placement\n");
+        return !required;
+    }
+
+    XdnaMoeExpertComputeConfig config;
+    config.plugin_path = plugin;
+    config.model_path = cfg_.model_path ? cfg_.model_path : "";
+    config.n_layer = w_.n_layer;
+    config.n_expert = w_.n_expert;
+    config.n_expert_used = w_.n_expert_used;
+    config.n_embd = w_.n_embd;
+    config.n_ff_exp = w_.n_ff_exp;
+    config.swiglu_clamp = w_.swiglu_clamp_exp;
+    config.min_tokens = (int)std::max(
+        1L, std::min(env_nonnegative_long("DFLASH_MOE_XDNA_MIN_TOKENS", 1), 4096L));
+    config.required = required;
+
+    std::string error;
+    xdna_expert_compute_ = make_xdna_moe_expert_compute(config, &error);
+    if (!xdna_expert_compute_) {
+        std::fprintf(stderr, "[xdna-moe] %s%s\n", error.c_str(),
+                     required ? " (required)" : "; using existing GPU/CPU path");
+        return !required;
+    }
+    xdna_expert_layers_ = make_ds4_xdna_expert_layers(w_, *moe_hybrid_);
+    std::fprintf(stderr, "[xdna-moe] provider ready: min_tokens=%d%s\n",
+                 config.min_tokens, required ? " required" : "");
+    return true;
+}
+
 void DeepSeek4Backend::print_ready_banner() const {
     std::printf("[deepseek4-daemon] ready layers=%d ctx=%d experts=%d/%d\n",
                 w_.n_layer, cache_.max_ctx, w_.n_expert_used, w_.n_expert);
@@ -919,6 +992,8 @@ bool DeepSeek4Backend::park(ParkTarget target) {
     }
     last_logits_.clear();
     free_deepseek4_cache(cache_);
+    xdna_expert_compute_.reset();
+    xdna_expert_layers_.clear();
     stream_engine_.destroy();
     moe_hybrid_.reset();
     moe_placement_ = {};
@@ -941,6 +1016,17 @@ bool DeepSeek4Backend::unpark(ParkTarget target) {
     if (want_target_model && parked_) {
         if (!load_model()) {
             std::fprintf(stderr, "[deepseek4] unpark: failed to restore target model\n");
+            free_deepseek4_weights(w_);
+            stream_engine_.destroy();
+            moe_hybrid_.reset();
+            moe_placement_ = {};
+            return false;
+        }
+        if (!init_xdna_moe_provider()) {
+            std::fprintf(stderr,
+                         "[deepseek4] unpark: failed to restore XDNA MoE provider\n");
+            xdna_expert_compute_.reset();
+            xdna_expert_layers_.clear();
             free_deepseek4_weights(w_);
             stream_engine_.destroy();
             moe_hybrid_.reset();
@@ -1211,7 +1297,8 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             ok = deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), n_tok, pos,
                                 logits, moe_hybrid_.get(), tokens.data() + i,
                                 &stream_engine_, timing ? &step_tel : nullptr,
-                                routing_stats_.get(), hp);
+                                routing_stats_.get(), hp,
+                                xdna_expert_compute_.get(), &xdna_expert_layers_);
         } else {
             std::vector<float> hc_state;
             // In exact q=1 prefill, intermediate logits have no consumer and
@@ -1315,7 +1402,8 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         return deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), 1,
                               committed + idx, lg, moe_hybrid_.get(), &tok,
                               moe_hybrid_ ? &stream_engine_ : nullptr, nullptr,
-                              routing_stats_.get());
+                              routing_stats_.get(), nullptr,
+                              xdna_expert_compute_.get(), &xdna_expert_layers_);
     };
     auto sample_from = [&](std::vector<float> & lg) -> int32_t {
         if (token_mask && token_mask->active())
@@ -1445,7 +1533,8 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
                                 moe_hybrid_.get(), &tok_to_eval,
                                 moe_hybrid_ ? &stream_engine_ : nullptr,
                                 timing ? &step_tel : nullptr,
-                                routing_stats_.get())) {
+                                routing_stats_.get(), nullptr,
+                                xdna_expert_compute_.get(), &xdna_expert_layers_)) {
                 std::fprintf(stderr, "[deepseek4] decode step failed\n");
                 return false;
             }
@@ -2594,7 +2683,8 @@ DeepSeek4Backend::decode_batch(
             embed.data(), 1, pos, logits,
             moe_hybrid_.get(), &token,
             moe_hybrid_ ? &stream_engine_ : nullptr,
-            nullptr, routing_stats_.get());
+            nullptr, routing_stats_.get(), nullptr,
+            xdna_expert_compute_.get(), &xdna_expert_layers_);
         session.decode_s += elapsed_s(t0);
         if (!ok) {
             session.failed = true;
@@ -2672,6 +2762,8 @@ void DeepSeek4Backend::shutdown() {
         free_deepseek4_snapshot(snapshots_[i]);
     }
     free_deepseek4_cache(cache_);
+    xdna_expert_compute_.reset();
+    xdna_expert_layers_.clear();
     stream_engine_.destroy();
     moe_hybrid_.reset();
     routing_stats_.reset();

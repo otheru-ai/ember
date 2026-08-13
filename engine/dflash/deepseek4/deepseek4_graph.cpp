@@ -2962,9 +2962,13 @@ static bool eval_ds4_hybrid(
         std::vector<float> & ffn_out_host,
         ggml_gallocr_t * hot_alloc,
         ggml_gallocr_t * cold_alloc,
+        MoeExpertCompute * expert_compute,
+        const MoeExpertLayer * expert_layer,
         DeepSeek4StepTelemetry * step_tel) {
     const auto ffn_t0 = Ds4TimingClock::now();
-    if (!storage.down_cold && !storage.gate_up_cold) {
+    if (!storage.down_cold && !storage.gate_up_cold &&
+        (!expert_compute || !expert_layer ||
+         !expert_compute->accepts(n_tokens, n_expert_used))) {
         if (!hybrid_owner || !stream_engine || !stream_engine->is_ready() ||
             !hybrid_owner->has_mmap() ||
             layer < 0 || layer >= (int) hybrid_owner->layer_regions.size()) {
@@ -3045,12 +3049,15 @@ static bool eval_ds4_hybrid(
         return true;
     }
 
+    const bool attempted_expert_compute =
+        expert_compute && expert_layer &&
+        expert_compute->accepts(n_tokens, n_expert_used);
     MoeHybridFfnTelemetry ffn_tel;
     bool ffn_ok = eval_moe_hybrid_ffn_batched(
         backend, cpu_backend, hybrid_cfg, desc, storage,
         ffn_normed_host, selected_host, weights_host,
         n_tokens, ffn_out_host, nullptr, hot_alloc, cold_alloc,
-        nullptr, nullptr,
+        expert_compute, expert_layer,
         step_tel ? &ffn_tel : nullptr);
     if (ffn_ok) {
         if (step_tel) {
@@ -3058,6 +3065,20 @@ static bool eval_ds4_hybrid(
             add_ffn_telemetry(step_tel, ffn_tel);
         }
         return true;
+    }
+
+    if (attempted_expert_compute && expert_compute->failure_is_fatal()) {
+        return false;
+    }
+    if (!storage.down_cold && !storage.gate_up_cold) {
+        // An optional provider may fail after initialization. Re-enter the
+        // existing mmap-to-GPU path so a prototype fault does not take down
+        // inference or silently produce a partial expert sum.
+        return eval_ds4_hybrid(
+            backend, cpu_backend, hybrid_cfg, desc, hybrid_owner, storage,
+            stream_engine, layer, n_embd, n_expert_used, ffn_normed_host,
+            selected_host, weights_host, n_tokens, ffn_out_host,
+            hot_alloc, cold_alloc, nullptr, nullptr, step_tel);
     }
 
     ffn_out_host.assign((size_t)n_embd * (size_t)n_tokens, 0.0f);
@@ -3967,7 +3988,9 @@ static bool deepseek4_step_hybrid(
         const int32_t * token_ids,
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
-        MoeHybridRoutingStats * routing_stats) {
+        MoeHybridRoutingStats * routing_stats,
+        MoeExpertCompute * expert_compute,
+        const std::vector<MoeExpertLayer> * expert_layers) {
     const auto step_t0 = Ds4TimingClock::now();
     const int n_embd = w.n_embd;
     const int n_hc = w.n_hc;
@@ -4232,11 +4255,16 @@ static bool deepseek4_step_hybrid(
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
+            const MoeExpertLayer * expert_layer =
+                expert_layers && (size_t)il < expert_layers->size()
+                    ? &(*expert_layers)[(size_t)il]
+                    : nullptr;
             if (!eval_ds4_hybrid(
                     backend, cpu_backend, hybrid_cfg, desc, &moe_hybrid, storage, stream_engine,
                     il, n_embd, n_used,
                     ffn_normed_host.data(), selected_host.data(), weights_host.data(),
-                    n_tokens, ffn_out_host, &hot_alloc, &cold_alloc, telemetry)) {
+                    n_tokens, ffn_out_host, &hot_alloc, &cold_alloc,
+                    expert_compute, expert_layer, telemetry)) {
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);
                 return false;
@@ -4347,11 +4375,16 @@ static bool deepseek4_step_hybrid(
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
+            const MoeExpertLayer * expert_layer =
+                expert_layers && (size_t)il < expert_layers->size()
+                    ? &(*expert_layers)[(size_t)il]
+                    : nullptr;
             if (!eval_ds4_hybrid(
                     backend, cpu_backend, hybrid_cfg, desc, &moe_hybrid, storage, stream_engine,
                     il, n_embd, n_used,
                     ffn_normed_host.data(), selected_host.data(), weights_host.data(),
-                    n_tokens, ffn_out_host, &hot_alloc, &cold_alloc, telemetry)) {
+                    n_tokens, ffn_out_host, &hot_alloc, &cold_alloc,
+                    expert_compute, expert_layer, telemetry)) {
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);
                 return false;
@@ -4456,7 +4489,9 @@ bool deepseek4_step(
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
         MoeHybridRoutingStats * routing_stats,
-        Ds4VerifyHooks * verify_hooks) {
+        Ds4VerifyHooks * verify_hooks,
+        MoeExpertCompute * expert_compute,
+        const std::vector<MoeExpertLayer> * expert_layers) {
     if (w.moe_hybrid && moe_hybrid != nullptr) {
         if (!deepseek4_cuda_hc_set_device(device)) {
             std::fprintf(stderr,
@@ -4466,7 +4501,8 @@ bool deepseek4_step(
         }
         return deepseek4_step_hybrid(backend, w, cache, *moe_hybrid,
                                      embed, n_tokens, kv_start, out_logits,
-                                     token_ids, stream_engine, telemetry, routing_stats);
+                                     token_ids, stream_engine, telemetry, routing_stats,
+                                     expert_compute, expert_layers);
     }
 
     std::vector<float> hc_state;

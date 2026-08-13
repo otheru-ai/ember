@@ -51,6 +51,15 @@ struct MoeExpertCompute {
     virtual ~MoeExpertCompute() = default;
     virtual bool healthy() const { return true; }
 
+    // Accelerators with non-trivial dispatch overhead can decline shapes that
+    // are better left on the local fallback. CPU implementations accept all
+    // valid shapes. A required accelerator reports failures as fatal so a
+    // release validator cannot silently exercise a different backend.
+    virtual bool accepts(int n_tokens, int n_selected) const {
+        return n_tokens > 0 && n_selected > 0;
+    }
+    virtual bool failure_is_fatal() const { return true; }
+
     // Compute selected expert FFN contributions and accumulate into output.
     // input:   [n_embd] F32 — post-norm hidden state
     // ids:     [n_cold] I32 — local cold expert indices

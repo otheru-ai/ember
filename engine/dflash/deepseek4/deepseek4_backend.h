@@ -13,6 +13,7 @@
 #include "../common/moe_hybrid_routing_stats.h"
 #include "../common/moe_hybrid_storage.h"
 #include "../common/moe_hybrid_stream.h"
+#include "../common/moe_expert_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
 
@@ -183,6 +184,7 @@ private:
 
     bool load_model();
     bool init_hybrid_model();
+    bool init_xdna_moe_provider();
     bool requires_monolithic_model() const;
     bool validate_prefill_mode() const;
     bool compute_uniform_hybrid_placement(const DeepSeek4Weights & w,
@@ -194,6 +196,8 @@ private:
     std::shared_ptr<MoeHybridStorage> moe_hybrid_;
     MoeHybridPlacement                moe_placement_;
     MoeHybridStreamEngine             stream_engine_;
+    std::unique_ptr<MoeExpertCompute> xdna_expert_compute_;
+    std::vector<MoeExpertLayer>       xdna_expert_layers_;
     // Expert IPC removed — layer split replaces expert split.
     // Kept for compilation compatibility; init_hybrid_model() is no longer called
     // from the layer-split path.

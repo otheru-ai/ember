@@ -114,6 +114,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/common/layer_split_utils.cpp
   ${DFLASH}/common/peer_access.cpp
   ${DFLASH}/common/moe_expert_compute.cpp
+  ${DFLASH}/common/moe_expert_compute_xdna.cpp
   ${DFLASH}/common/moe_hybrid_ffn_eval.cpp
   ${DFLASH}/common/moe_hybrid_placement.cpp
   ${DFLASH}/common/moe_hybrid_routing_stats.cpp
@@ -132,7 +133,7 @@ add_library(ember_engine STATIC
 
 target_include_directories(ember_engine PUBLIC ${EMBER_ENGINE_INC})
 target_compile_features(ember_engine PUBLIC cxx_std_17)
-target_link_libraries(ember_engine PUBLIC ggml ggml-base ${EMBER_GGML_BACKEND} ggml-cpu)
+target_link_libraries(ember_engine PUBLIC ggml ggml-base ${EMBER_GGML_BACKEND} ggml-cpu ${CMAKE_DL_LIBS})
 
 if(EMBER_ENGINE_BACKEND STREQUAL "hip")
   # Only the HC kernel is HIP. geometric_sampler_cuda.cu is CUDA-only in lucebox

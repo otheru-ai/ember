@@ -156,6 +156,7 @@ scripts/build.sh
 ## Documentation
 
 - [Operations and troubleshooting](docs/operations.md)
+- [Experimental XDNA2 MoE provider](docs/xdna2-moe-prototype.md)
 - [Client configuration](docs/client-compatibility.md)
 - [Architecture](ARCHITECTURE.md)
 - [Security policy](SECURITY.md)

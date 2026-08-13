@@ -47,6 +47,8 @@ struct MoeHybridPlacement;
 struct MoeHybridConfig;
 struct MoeHybridRoutingStats;
 class MoeHybridStreamEngine;
+struct MoeExpertCompute;
+struct MoeExpertLayer;
 
 struct DeepSeek4StepTelemetry {
     uint64_t total_us = 0;
@@ -400,7 +402,9 @@ bool deepseek4_step(
     MoeHybridStreamEngine *     stream_engine = nullptr,
     DeepSeek4StepTelemetry *    telemetry = nullptr,
     MoeHybridRoutingStats *     routing_stats = nullptr,
-    Ds4VerifyHooks *            verify_hooks = nullptr);
+    Ds4VerifyHooks *            verify_hooks = nullptr,
+    MoeExpertCompute *          expert_compute = nullptr,
+    const std::vector<MoeExpertLayer> * expert_layers = nullptr);
 
 // Optional hooks for the DSpark spec-decode batched verify (deepseek4_dspark).
 // When set on a multi-token deepseek4_step_layer_range call they add: per-layer
