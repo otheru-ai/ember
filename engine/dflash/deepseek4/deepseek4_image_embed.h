@@ -22,6 +22,20 @@ struct Ds4ImageEmbed {
     std::vector<int32_t> palette;   // trained routing palette, in cycle order
     std::vector<float>   data;      // n_tokens * n_embd, n_embd fast axis
 
+    // Content digest over the spliced embeddings (never 0 when active).
+    //
+    // THE PREFIX CACHE CANNOT SEE THE IMAGE WITHOUT THIS. Every image emits the
+    // SAME token IDs -- the 64-entry palette cycle -- so two requests carrying
+    // different pictures produce byte-identical prompt token sequences. The
+    // prefix cache keys on token IDs, so image B's request matches image A's
+    // cached prefix, restores A's KV, prefills nothing, and the model answers
+    // about A while the caller believes it asked about B. Fluent, confident,
+    // wrong, and invisible in the logs.
+    //
+    // Stage 2b avoided this by running --prefix-cache-slots 0. Production runs
+    // 6, so the cache must instead be able to tell two images apart.
+    uint64_t             digest   = 0;
+
     // Process-wide instance, loaded once from $EMBER_DS4_IMAGE_EMBED.
     // `model_n_embd` is checked against the sidecar; a mismatch is fatal.
     static const Ds4ImageEmbed & instance(int64_t model_n_embd);
@@ -55,4 +69,16 @@ extern "C" {
 // Returns the number of image tokens to emit (0 when no image is loaded) and,
 // when non-zero, points *palette_out at n_palette_out fixed token IDs.
 int ember_ds4_image_token_count(const int32_t ** palette_out, int * n_palette_out);
+
+// Content digest of the currently loaded image, or 0 when none is loaded.
+// The prefix cache mixes this into its match so that identical palette tokens
+// carrying different pictures cannot alias. Never triggers a sidecar load.
+uint64_t ember_ds4_image_digest(void);
+
+// Index of the first image token in `ids`, or -1 when the prompt carries none.
+// Wraps the same palette-cycle match the backend splices against, so the cache
+// and the splice cannot disagree about where the image starts. A partial match
+// -- prompt and sidecar disagreeing on length -- reports -1 here; the backend
+// raises that as a hard error on the splice path, which is where it belongs.
+int ember_ds4_image_span_start(const int32_t * ids, int n);
 }

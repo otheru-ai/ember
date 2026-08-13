@@ -181,6 +181,14 @@ static struct timespec monotonic_deadline(double when) {
     return ts;
 }
 
+// Prefix-cache disambiguation for the vision graft. Every image emits the SAME
+// palette token IDs, so without the digest a request carrying image B matches
+// image A's cached prefix and is answered from A's KV. Both report inert values
+// (0 / -1) when no sidecar is loaded, so the non-vision path is unchanged.
+uint64_t ember_ds4_image_digest(void);
+int      ember_ds4_image_span_start(const int32_t *ids, int n);
+
+
 // JSON-escape `s` into `b` (no surrounding quotes).
 static void json_escape_str(ember_buf *b, const char *s) {
     ember_json_escape_content(b, s);
@@ -915,7 +923,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
         }
     }
     pthread_mutex_lock(&srv->state_lock);
-    bool committed = ember_kv_commit(&srv->kv, slot, seq, total);
+    bool committed = ember_kv_commit(&srv->kv, slot, seq, total,
+                                     ember_ds4_image_digest(),
+                                     ember_ds4_image_span_start(seq, total));
     if (!committed)
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
@@ -943,7 +953,9 @@ static void finish_prompt_snapshot(ember_server *srv, ember_backend *be,
     if (saved && ember_backend_disk_enabled(be))
         (void)ember_backend_disk_save(be, slot, ids, cut, reason);
     pthread_mutex_lock(&srv->state_lock);
-    if (!saved || !ember_kv_commit(&srv->kv, slot, ids, cut))
+    if (!saved || !ember_kv_commit(&srv->kv, slot, ids, cut,
+                                   ember_ds4_image_digest(),
+                                   ember_ds4_image_span_start(ids, cut)))
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
 }
@@ -1081,6 +1093,7 @@ static bool ids_append(int32_t **ids, int *n, int *cap,
 // sidecar parser has exactly one implementation. Reports 0 unless
 // $EMBER_DS4_IMAGE_EMBED was loaded at model init.
 int ember_ds4_image_token_count(const int32_t **palette_out, int *n_palette_out);
+
 
 // Split `prompt` on the first "<image>", encode each text half separately, and
 // emit the trained routing palette in between -- one token ID per image
@@ -2770,8 +2783,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int restore_slot = -1, restore_len = 0;
     bool restore_pinned = false;
     pthread_mutex_lock(&srv->state_lock);
-    if (!req->has_images)
-        ember_kv_lookup(&srv->kv, ids, n_prompt, &restore_slot, &restore_len);
+    ember_kv_lookup(&srv->kv, ids, n_prompt, ember_ds4_image_digest(),
+                    &restore_slot, &restore_len);
     if (restore_slot >= 0) {
         restore_pinned = ember_kv_pin(&srv->kv, restore_slot);
         if (!restore_pinned) {
@@ -2806,7 +2819,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                       ember_backend_disk_lookup(be, ids, dl, disk_slot);
         pthread_mutex_lock(&srv->state_lock);
         if (loaded &&
-            ember_kv_commit(&srv->kv, disk_slot, ids, dl) &&
+            ember_kv_commit(&srv->kv, disk_slot, ids, dl,
+                            ember_ds4_image_digest(),
+                            ember_ds4_image_span_start(ids, dl)) &&
             ember_kv_pin(&srv->kv, disk_slot)) {
             if (restore_pinned)
                 ember_kv_unpin(&srv->kv, restore_slot);
