@@ -24,6 +24,19 @@ bool read_exact(std::FILE * f, void * dst, size_t n) {
     return std::fread(dst, 1, n, f) == n;
 }
 
+static uint64_t ds4_image_digest(const Ds4ImageEmbed & e) {
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](const void * p, size_t n) {
+        const unsigned char * b = (const unsigned char *) p;
+        for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    };
+    mix(&e.n_tokens, sizeof(e.n_tokens));
+    mix(&e.n_embd,   sizeof(e.n_embd));
+    if (!e.palette.empty()) mix(e.palette.data(), e.palette.size() * sizeof(int32_t));
+    if (!e.data.empty())    mix(e.data.data(),    e.data.size()    * sizeof(float));
+    return h ? h : 1ULL;
+}
+
 Ds4ImageEmbed load(int64_t model_n_embd) {
     Ds4ImageEmbed e;
     const char * path = std::getenv("EMBER_DS4_IMAGE_EMBED");
@@ -65,12 +78,26 @@ Ds4ImageEmbed load(int64_t model_n_embd) {
     std::fclose(f);
 
     e.active = true;
+
+    // Digest the SPLICED CONTENT -- the embedding rows and the palette that
+    // addresses them -- not the file path or mtime. Two sidecars written from
+    // the same picture must collide (so the cache still helps on a repeat), and
+    // two different pictures must not (so image B can never restore image A's
+    // KV behind identical palette tokens).
+    e.digest = ds4_image_digest(e);
+
     std::fprintf(stderr,
-                 "[ds4-image] loaded %s: %d image tokens x %d, palette %d\n",
-                 path, e.n_tokens, e.n_embd, np);
+                 "[ds4-image] loaded %s: %d image tokens x %d, palette %d, "
+                 "digest %016llx\n",
+                 path, e.n_tokens, e.n_embd, np,
+                 (unsigned long long) e.digest);
     return e;
 }
 
+// FNV-1a over the embedding bytes plus the palette and shape. Not a security
+// hash -- it only has to separate distinct images inside one process, where the
+// alternative (token IDs alone) cannot separate them at all. Forced non-zero so
+// 0 stays an unambiguous "no image loaded".
 Ds4ImageEmbed   g_embed;
 std::once_flag  g_once;
 
@@ -122,6 +149,23 @@ void Ds4ImageEmbed::splice(float * embed, int64_t chunk_start, int n_tok,
                     data.data() + (size_t) (p - span_start) * (size_t) n_embd,
                     sizeof(float) * (size_t) n_embd);
     }
+}
+
+extern "C" uint64_t ember_ds4_image_digest(void) {
+    return g_embed.active ? g_embed.digest : 0;
+}
+
+extern "C" int ember_ds4_image_span_start(const int32_t * ids, int n) {
+    if (!g_embed.active || !ids || n <= 0) return -1;
+    std::vector<int32_t> v(ids, ids + n);
+    std::string err;
+    const int64_t s = g_embed.find_span(v, &err);
+    // A partial match means prompt and sidecar disagree about the image length.
+    // The splice path treats that as fatal. Here the safe reading is "no usable
+    // span", which makes the cache refuse to tag the entry rather than tag it
+    // at a position the backend will reject anyway.
+    if (s < 0) return -1;
+    return (int) s;
 }
 
 extern "C" int ember_ds4_image_token_count(const int32_t ** palette_out,

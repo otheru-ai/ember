@@ -18,17 +18,17 @@ static void test_longest_prefix(void) {
     c.anchor_min = 2;  // small for tests
     int32_t p1[] = {U, 10, 11, 12, A, 20};       // 6 tokens
     int slot = ember_kv_reserve(&c);
-    ember_kv_commit(&c, slot, p1, 4);            // cache prefix [U,10,11,12]
+    ember_kv_commit(&c, slot, p1, 4, 0, -1);            // cache prefix [U,10,11,12]
 
     // a longer prompt extending that prefix → hit at len 4
     int32_t p2[] = {U, 10, 11, 12, A, 20, E, U, 30};
     int s, len;
-    ember_kv_lookup(&c, p2, 9, &s, &len);
+    ember_kv_lookup(&c, p2, 9, 0, &s, &len);
     CHECK(s == slot && len == 4, "longest-prefix hit reuses the cached slot");
 
     // a divergent prompt → no hit
     int32_t p3[] = {U, 99};
-    ember_kv_lookup(&c, p3, 2, &s, &len);
+    ember_kv_lookup(&c, p3, 2, 0, &s, &len);
     CHECK(s == -1 && len == 0, "divergent prompt: no hit");
     ember_kv_free(&c);
 }
@@ -98,16 +98,16 @@ static void test_lru_eviction(void) {
     int32_t b[] = {U, 2};
     int32_t d[] = {U, 3};
     int s;
-    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, a, 2);
-    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, b, 2);
+    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, a, 2, 0, -1);
+    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, b, 2, 0, -1);
     // touch 'a' so 'b' is LRU
-    int slot, len; ember_kv_lookup(&c, a, 2, &slot, &len);
+    int slot, len; ember_kv_lookup(&c, a, 2, 0, &slot, &len);
     // reserve a third → must evict (prefer LRU leaf = b)
-    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, d, 2);
+    s = ember_kv_reserve(&c); ember_kv_commit(&c, s, d, 2, 0, -1);
     // 'a' should still be present, 'b' evicted
-    ember_kv_lookup(&c, a, 2, &slot, &len);
+    ember_kv_lookup(&c, a, 2, 0, &slot, &len);
     CHECK(slot >= 0 && len == 2, "recently-used entry survives eviction");
-    ember_kv_lookup(&c, b, 2, &slot, &len);
+    ember_kv_lookup(&c, b, 2, 0, &slot, &len);
     CHECK(slot == -1, "LRU entry evicted at capacity");
     CHECK(c.n_entries == 2, "cache stays within capacity");
     ember_kv_free(&c);
@@ -119,7 +119,7 @@ static void test_disabled_and_invalid_cache(void) {
     int32_t p[] = {U, 1};
     CHECK(ember_kv_reserve(&c) == -1,
           "zero-capacity cache does not manufacture a slot");
-    CHECK(!ember_kv_commit(&c, 0, p, 2),
+    CHECK(!ember_kv_commit(&c, 0, p, 2, 0, -1),
           "zero-capacity cache rejects commits");
     CHECK(c.n_entries == 0, "invalid commit cannot create an entry");
     ember_kv_free(&c);
@@ -137,13 +137,13 @@ static void test_inflight_slot_lifecycle(void) {
     CHECK(ember_kv_reserve(&c) == -1,
           "all in-flight slots apply backpressure");
     ember_kv_release(&c, s1);
-    CHECK(ember_kv_commit(&c, s0, a, 2),
+    CHECK(ember_kv_commit(&c, s0, a, 2, 0, -1),
           "reserved slot can be committed");
-    CHECK(ember_kv_commit(&c, s1, b, 2),
+    CHECK(ember_kv_commit(&c, s1, b, 2, 0, -1),
           "released slot remains usable");
 
     int slot = -1, len = 0;
-    ember_kv_lookup(&c, a, 2, &slot, &len);
+    ember_kv_lookup(&c, a, 2, 0, &slot, &len);
     CHECK(slot == s0 && ember_kv_pin(&c, slot),
           "restore target can be pinned");
     int replacement = ember_kv_reserve(&c);
@@ -158,7 +158,56 @@ static void test_inflight_slot_lifecycle(void) {
     ember_kv_free(&c);
 }
 
+
+// The failure this field exists to prevent. The vision graft emits a FIXED
+// palette cycle at image positions, so two different pictures produce identical
+// prompt token IDs. Without the digest, image B's request matches image A's
+// cached prefix, restores A's KV, prefills nothing, and answers about A.
+static void test_image_digest_prevents_aliasing(void) {
+    ember_kv_cache c;
+    ember_kv_init(&c, 32, U, A, E);
+    c.anchor_min = 2;
+
+    // Identical tokens; the palette run starts at index 2. Only the pictures
+    // (and therefore the digests) differ.
+    int32_t prompt[] = {U, 50, 90, 91, 92, 93};
+    const int span = 2;
+    const uint64_t img_a = 0xAAAAAAAAAAAAAAAAULL;
+    const uint64_t img_b = 0xBBBBBBBBBBBBBBBBULL;
+
+    int slot = ember_kv_reserve(&c);
+    ember_kv_commit(&c, slot, prompt, 6, img_a, span);   // cut reaches the image
+
+    int s2, len;
+    ember_kv_lookup(&c, prompt, 6, img_a, &s2, &len);
+    CHECK(s2 == slot && len == 6, "same image still reuses its own cached KV");
+
+    ember_kv_lookup(&c, prompt, 6, img_b, &s2, &len);
+    CHECK(s2 == -1 && len == 0,
+          "a DIFFERENT image with identical tokens must NOT hit that entry");
+
+    ember_kv_lookup(&c, prompt, 6, 0, &s2, &len);
+    CHECK(s2 == -1 && len == 0,
+          "a prompt with no image must not restore image KV either");
+
+    // A prefix that stops BEFORE the image carries no image content, so it must
+    // stay reusable across images -- this is the long shared system prefix, the
+    // case the cache exists for. Losing it would be a silent perf regression.
+    ember_kv_cache c2;
+    ember_kv_init(&c2, 32, U, A, E);
+    c2.anchor_min = 2;
+    int slot2 = ember_kv_reserve(&c2);
+    ember_kv_commit(&c2, slot2, prompt, span, img_a, span);  // cut == span start
+    ember_kv_lookup(&c2, prompt, 6, img_b, &s2, &len);
+    CHECK(s2 == slot2 && len == span,
+          "a prefix ending before the image is reused across different images");
+
+    ember_kv_free(&c);
+    ember_kv_free(&c2);
+}
+
 int main(void) {
+    test_image_digest_prevents_aliasing();
     printf("ember kv_cache tests\n");
     test_longest_prefix();
     test_anchor_cut();

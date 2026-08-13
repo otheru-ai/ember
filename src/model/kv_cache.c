@@ -27,7 +27,7 @@ static bool is_prefix(const int32_t *a, int alen, const int32_t *b, int blen) {
 }
 
 void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
-                     int *slot_out, int *len_out) {
+                     uint64_t img_digest, int *slot_out, int *len_out) {
     if (!slot_out || !len_out) return;
     if (!c || n < 0 || (n > 0 && !prompt)) {
         *slot_out = -1;
@@ -38,6 +38,11 @@ void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
     for (int i = 0; i < c->n_entries; i++) {
         ember_kv_entry *e = &c->entries[i];
         if (e->len == 0 || e->len > n || e->len <= best_len) continue;
+        // An entry holding image content is usable only for the SAME image.
+        // Shortening the match is not an option: the slot's KV covers exactly
+        // e->len tokens, so a shorter returned length would leave the backend
+        // holding image KV it believes it has not prefilled.
+        if (e->img_digest != 0 && e->img_digest != img_digest) continue;
         if (is_prefix(e->ids, e->len, prompt, n)) { best = i; best_len = e->len; }
     }
     if (best >= 0) {
@@ -208,7 +213,8 @@ void ember_kv_release(ember_kv_cache *c, int slot) {
 }
 
 bool ember_kv_commit(ember_kv_cache *c, int slot,
-                     const int32_t *prompt, int cut) {
+                     const int32_t *prompt, int cut,
+                     uint64_t img_digest, int img_span_start) {
     if (!c || c->cap <= 0 || slot < 0 || slot >= c->cap ||
         !prompt || cut <= 0) return false;
     // drop any stale entry pointing at this slot
@@ -228,6 +234,12 @@ bool ember_kv_commit(ember_kv_cache *c, int slot,
     e->len = cut;
     e->slot = slot;
     e->lru = ++c->lru_counter;
+    // Tag the entry with the image ONLY if the stored prefix actually reaches
+    // into the image span. A cut that stops short holds no image content, and
+    // tagging it would needlessly forbid reuse across images -- which is
+    // exactly the long shared system prefix we most want to keep.
+    e->img_digest =
+        (img_span_start >= 0 && cut > img_span_start) ? img_digest : 0;
     c->reserved[slot] = false;
     return true;
 }
