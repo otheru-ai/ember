@@ -1,101 +1,140 @@
 # XDNA2 MoE expert prototype
 
-This branch contains an experimental seam for running selected DeepSeek-V4
-routed experts on the Strix Halo XDNA2 NPU while the existing HIP path retains
-attention, routing logits, shared experts, and residual combination. It is off
-by default and does not yet include a production XRT/IRON kernel.
+This branch contains an opt-in bring-up path for running selected
+DeepSeek-V4-Flash routed experts on Strix Halo's 32-tile XDNA2 NPU. HIP keeps
+attention, routing, shared experts, and residual combination; CPU code handles
+control and the current SwiGLU boundary. It is a measurement vehicle, not a
+production acceleration claim, and the normal HIP image is unchanged.
 
-The design follows AMD's published GPT-OSS-20B QMoE implementation: CPU code
-performs top-K routing and groups tokens, then an accelerator evaluates only
-the selected expert projections. See AMD's
-[Strix/Halo QMoE case study](https://www.amd.com/en/developer/resources/technical-articles/2026/accelerating-gpt-oss-20b-on-amd-ryzen-ai-npus.html).
+The design follows AMD's GPT-OSS-20B QMoE split—host routing followed by
+selected-expert accelerator work—and adapts TileFuse's full 4x8 XDNA2 GEMV
+dataflow to decode Ember's byte-exact affine ROCMFP2 blocks. Provenance and
+pins are recorded in `providers/xdna2/VENDOR.md`.
 
-## What the prototype proves
+## Lessons carried forward from ViT-Scout
 
-- `MoeExpertCompute` can decline inefficient shapes, allowing the measured GPU
-  path to retain any batch shape the provider cannot accelerate.
-- DeepSeek-V4's hybrid graph now passes cold-expert work through the existing
-  selected-expert abstraction instead of always passing a null backend.
-- A provider is loaded at runtime through a versioned C ABI. Ember therefore
-  has no compile-time XRT dependency and the ROCm release remains usable when
-  the XDNA driver or provider is absent.
-- Placement-local expert IDs are translated to model-global IDs before the
-  provider sees them. A provider can load or requantize precisely the experts
-  it owns directly from the GGUF.
-- Optional provider failure disables the provider and replays the operation on
-  the existing mmap-to-GPU path. `DFLASH_MOE_XDNA_REQUIRED=1` makes any load or
-  runtime failure fatal for benchmarking and differential validation.
+The design explicitly incorporates the negative and positive results in
+[Ryzen AI / Strix Halo NPU — Findings](https://git.otheru.ai/otheru/vit-scout/src/branch/main/RYZEN_AI_FINDINGS.md):
 
-The GPU-free `xdna_moe_provider` test loads a mock shared object and verifies
-ABI negotiation, shape gating, expert-ID translation, router weights, output,
-and load errors. The mock deliberately performs ordinary host arithmetic; it
-is not a performance implementation.
+- **Correctness gates every benchmark.** A compiled xclbin, low latency, or an
+  active-NPU signal is not evidence of correct output. The legacy ViT result
+  timed silently uncorrelated multi-output data. Ember must compare each NPU
+  projection to the ROCMFP2 host reference, then run the full differential
+  validator before reporting throughput.
+- **Dispatch-heavy hybrid paths usually lose.** ViT's small custom kernels
+  reached only 0.07% of peak, and AMD's hybrid LLM artifacts were 8x slower
+  than pure NPU in one measured case. This prototype therefore uses all 32
+  compute tiles, persistent instruction/context objects, bounded persistent
+  weight BOs, and selective BO synchronization. Its current three launches per
+  selected expert are still a known red flag; a fused expert runlist is a
+  prerequisite for promotion.
+- **Use realistic data and end-to-end timing.** Random weights inflated one CPU
+  baseline by roughly 14x. Ember's decision data must use the published model,
+  include first-use packing/cache misses and GPU/NPU synchronization, and
+  report steady state separately.
+- **Do not infer a small fixed NPU memory ceiling from one `ENOSPC`.** A later
+  13.1 GiB-RSS pure-NPU model worked. Ember exposes a bounded cache and records
+  eviction/miss behavior rather than baking in the earlier 3 GiB assumption.
+- **UMA is not an allocation-coherence API.** ROCm and XRT still require their
+  own ownership and synchronization. Model bytes remain mmap-backed on the
+  host; packed XRT BOs are synchronized once on cache fill, then only the small
+  activations/results move per invocation.
+- **Telemetry is limited.** On the tested Linux stack, `xrt-smi` exposed an
+  active partition but no per-NPU utilization or power. Benchmarks must report
+  package power as package power, never relabel it as NPU power.
 
-## Provider ABI
+The report's successful SDK recipe—BF16 transformer graphs through VitisAI—is
+also important, but it does not directly consume the model's ROCMFP2 expert
+weights. A future whole-expert BF16/VitisAI experiment is worth comparing; it
+does not replace the byte-exact custom-kernel correctness baseline.
 
-Implement `ember_xdna_moe_get_provider_v1` from
-`engine/dflash/common/moe_expert_compute_xdna.h`. The returned vtable owns a
-persistent provider context and receives `ember_xdna_moe_batch_v1` requests:
+## Implemented pieces
 
-- F32 input activations shaped `[n_tokens, n_embd]`;
-- global expert IDs and F32 routing weights shaped
-  `[n_tokens, n_selected]`;
-- an F32 output buffer for the already-weighted sum of routed expert outputs.
+- `MoeExpertCompute` can decline shapes and safely replay on the existing cold
+  path. `DFLASH_MOE_XDNA_REQUIRED=1` turns failures fatal for validation.
+- The versioned provider ABI passes global expert IDs, routing weights, and
+  placement-local mmap-backed ROCMFP2 weight views. The plugin does not parse or
+  remap the 85.3 GiB GGUF.
+- `rocmfp2_pack.cpp` losslessly permutes GGML output-major blocks into 128x64
+  AIE tiles. Its raw and packed F32 references are tested for exact equality.
+- `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
+  for the exact 4096->2048 and 2048->4096 expert projections.
+- `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. It is currently scalar
+  bring-up code; TileFuse-style vectorization comes only after hardware
+  equivalence.
+- `provider_xrt.cpp` owns persistent XRT contexts/instruction BOs and a bounded
+  LRU of pre-tiled host-only weight BOs. It accepts q=1 and separate
+  gate/up/down ROCMFP2 tensors only.
+- The optional `release-xdna` image builds XRT plus the XDNA userspace shim from
+  the pinned `amd/xdna-driver` tree, builds both AOT kernels with Peano, and
+  packages the plugin and artifacts. It never packages a kernel module.
 
-The provider receives the model path and architecture dimensions at creation.
-This is intentional: the production provider must parse the GGUF, retain its
-own NPU-resident expert cache, and either decode ROCMFP weights directly or
-maintain a quality-gated NPU representation. Passing host tensor pointers
-would incorrectly imply that ROCm and XRT share a coherent allocation API.
+## Build and run the image
 
-`test/mock_xdna_moe_provider.cpp` is the smallest complete provider example.
-
-## Enable the prototype
-
-Build Ember normally in the ROCm development container, then launch with:
+The host needs a compatible `amdxdna` kernel driver and firmware, a visible
+`/dev/accel/accel0`, and membership in the render group. The container cannot
+install or replace these host components. Validate the host first:
 
 ```bash
-DFLASH_MOE_XDNA_PLUGIN=/opt/ember/libember_xdna_moe.so \
-DFLASH_EXPERT_BUDGET_MB=32768 \
-./build-rocm/ember-dflash -m /models/model.gguf
+source /opt/xilinx/xrt/setup.sh
+xrt-smi examine
 ```
 
-`DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
-all experts are assigned to the GPU, there is nothing for the provider to do.
+Build the opt-in image (the XRT/Peano stages are intentionally much heavier
+than the normal release image):
 
-Prototype controls:
+```bash
+docker build --target release-xdna -f docker/Dockerfile \
+  -t ember:xdna-local .
+```
+
+Start it with the normal Compose definition plus the XDNA override:
+
+```bash
+docker compose -f compose.yaml -f compose.xdna.yaml up --build -d
+```
+
+The override passes `/dev/accel/accel0`, sets unlimited memlock, enables the
+packaged provider, and leaves enough experts cold to exercise it. The provider
+is optional by default so a failure falls back to the baseline path. Use
+`DFLASH_MOE_XDNA_REQUIRED=1` only for equivalence testing and benchmarks.
+
+## Controls
 
 | variable | default | purpose |
 |---|---:|---|
-| `DFLASH_MOE_XDNA_PLUGIN` | unset | Provider shared-object path; unset disables the feature |
-| `DFLASH_MOE_XDNA_REQUIRED` | `0` | Fail instead of falling back if provider loading or execution fails |
-| `DFLASH_MOE_XDNA_MIN_TOKENS` | `1` | Smallest batch sent to the provider |
-| `DFLASH_MOE_XDNA_TRACE` | `0` | Log provider call, token, and wall-time totals at shutdown |
+| `DFLASH_MOE_XDNA_PLUGIN` | unset | Provider `.so`; packaged override supplies it |
+| `DFLASH_MOE_XDNA_REQUIRED` | `0` | Fail rather than replay on the baseline path |
+| `DFLASH_MOE_XDNA_MIN_TOKENS` | `1` | Smallest batch accepted by the ABI wrapper |
+| `DFLASH_MOE_XDNA_TRACE` | `0` | Engine and provider call/cache counters |
+| `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
+| `EMBER_XDNA_DEVICE` | `0` | XRT device index |
+| `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
 
-## Production-provider work
+`DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
+all routed experts are resident on the GPU, the provider has no work.
 
-The stock Ryzen AI operator set supports W4A-BF16/W4A-FP16 matmuls, not the
-model's affine fp2 ROCMFP representation. A production provider therefore
-needs one of:
+## Required hardware gates
 
-1. an IRON/AIE-MLIR kernel that decodes ROCMFP and performs the gate, up,
-   SwiGLU, and down projections on XDNA2; or
-2. a bounded INT4 cache of popular cold experts with a quant-quality report
-   proving that its output remains inside the release gates.
+This development host has no XDNA device, so the source, ABI, packer, Peano
+compile, and container build can be verified here, but NPU execution cannot.
+Before treating the path as usable on gfx1151 hardware:
 
-The current DeepSeek hybrid path deliberately retains q=1 prefill because its
-HC update is sequential. This prototype therefore exercises the provider at
-q=1 by default. A later prefill-batching change must preserve HC state at every
-token boundary and pass the differential validator independently; merely
-raising a chunk limit is not correct.
+1. Compare both individual projection outputs against the F32 ROCMFP2 host
+   reference with signed, trained-model activations; include cache hit/miss
+   cases and every output lane.
+2. Compare the full selected expert (clamped SwiGLU and router weighting) to the
+   HIP baseline. Define explicit BF16 tolerances and fail closed.
+3. Run Ember's differential validator with
+   `DFLASH_MOE_XDNA_REQUIRED=1`, snapshot restore, disk round-trip, two resident
+   sessions, and DSpark when configured.
+4. Measure end-to-end tok/s and per-token latency against HIP-only, with cold
+   packing separated from warm steady state. Record provider launch/sync time,
+   total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
+   and `xrt-smi` partition activity.
+5. Replace the three-launch expert sequence with a fused runlist or prove with
+   measurement that its dispatch/synchronization overhead still wins. Keep the
+   feature off by default unless both output and end-to-end performance pass.
 
-The first hardware milestone should benchmark exact DS4 shapes at batch sizes
-1, 2, 4, 8, 16, 32, 128, and 512. Record provider dispatch and synchronization
-time, total memory bandwidth, GPU slowdown while XDNA runs, power, and thermal
-steady state. Do not enable decode by default unless batch-1 end-to-end latency
-wins after the GPU/NPU synchronization cost.
-
-Before considering the provider deployable, run the existing differential
-validator with `DFLASH_MOE_XDNA_REQUIRED=1`, including snapshot restore, disk
-round-trip, two resident sessions, and DSpark when compatible. HIP-only output
-and performance remain the release baseline.
+DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
+prefill chunk limit without preserving every token boundary is not correct.

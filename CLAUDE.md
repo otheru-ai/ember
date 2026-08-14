@@ -28,6 +28,11 @@ docker build --target dev -f docker/Dockerfile \
 scripts/build.sh                                          # -> build-rocm/ember-dflash
 ```
 
+The opt-in `release-xdna` Docker target packages the experimental XRT/IRON
+XDNA2 MoE provider. It requires the host `amdxdna` driver, firmware, and
+`/dev/accel/accel0`; use `compose.xdna.yaml`. It is not part of the normal
+release path or performance baseline.
+
 `build/` is already configured, so `cmake --build build` is the fast inner loop.
 
 Single test — every test is a plain binary with a `main()`; run it directly for

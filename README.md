@@ -153,6 +153,12 @@ docker build --target dev -f docker/Dockerfile -t ember-rocm:7.14-dev .
 scripts/build.sh
 ```
 
+An experimental image that additionally packages the XRT/IRON XDNA2 MoE
+provider is available as the opt-in `release-xdna` target. It requires a
+working host `amdxdna` driver and `/dev/accel/accel0`; see the
+[XDNA2 prototype guide](docs/xdna2-moe-prototype.md) before building or
+benchmarking it.
+
 ## Documentation
 
 - [Operations and troubleshooting](docs/operations.md)

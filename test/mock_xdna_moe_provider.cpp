@@ -37,8 +37,10 @@ int compute(void * raw, const ember_xdna_moe_batch_v1 * batch,
             char * error, size_t capacity) {
     auto * context = static_cast<MockContext *>(raw);
     if (!context || !batch || batch->abi_version != EMBER_XDNA_MOE_PROVIDER_ABI_VERSION ||
+        batch->struct_size < sizeof(ember_xdna_moe_batch_v1) ||
         batch->layer_idx < 0 || batch->layer_idx >= context->n_layer ||
-        batch->n_embd != context->n_embd || batch->n_ff_exp != context->n_ff_exp) {
+        batch->n_embd != context->n_embd || batch->n_ff_exp != context->n_ff_exp ||
+        !batch->expert_weights) {
         set_error(error, capacity, "invalid mock batch");
         return 0;
     }
@@ -47,6 +49,18 @@ int compute(void * raw, const ember_xdna_moe_batch_v1 * batch,
         for (int slot = 0; slot < batch->n_selected; ++slot) {
             const size_t index = (size_t)token * (size_t)batch->n_selected +
                                  (size_t)slot;
+            const auto & view = batch->expert_weights[index];
+            if (view.struct_size < sizeof(ember_xdna_moe_weight_view_v1) ||
+                !view.gate || !view.up || !view.down || view.gate_bytes != 4 ||
+                view.up_bytes != 4 || view.down_bytes != 4 ||
+                view.gate_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2 ||
+                view.up_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2 ||
+                view.down_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2 ||
+                view.gate_scale != 0.5f || view.up_scale != 0.25f ||
+                view.down_scale != 2.0f) {
+                set_error(error, capacity, "invalid mock expert weight view");
+                return 0;
+            }
             routed += (float)(batch->expert_ids[index] + 1) *
                       batch->router_weights[index];
         }

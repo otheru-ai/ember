@@ -1,0 +1,23 @@
+services:
+  ember:
+    image: ember:xdna-local
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: release-xdna
+      args:
+        EMBER_VERSION: ${EMBER_VERSION:-dev}
+        EMBER_VCS_REF: ${EMBER_VCS_REF:-unknown}
+    devices:
+      - /dev/accel/accel0:/dev/accel/accel0
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    environment:
+      DFLASH_MOE_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_moe.so
+      DFLASH_MOE_XDNA_REQUIRED: ${DFLASH_MOE_XDNA_REQUIRED:-0}
+      DFLASH_MOE_XDNA_TRACE: ${DFLASH_MOE_XDNA_TRACE:-1}
+      DFLASH_EXPERT_BUDGET_MB: ${DFLASH_EXPERT_BUDGET_MB:-32768}
+      EMBER_XDNA_WEIGHT_CACHE_MB: ${EMBER_XDNA_WEIGHT_CACHE_MB:-1024}

@@ -308,6 +308,11 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   utilities, and `libsegvtrace.so`. The shim is LD_PRELOAD'd to print a
   symbolized backtrace on fatal signals because a real core dump is impractical
   at ~100 GB RSS.
+- The experimental `release-xdna` target layers an XRT userspace stack, XDNA
+  shim, AOT IRON artifacts, and the opt-in MoE provider over `release`. The
+  `amdxdna` kernel driver and firmware remain host responsibilities; pass
+  `/dev/accel/accel0` with `compose.xdna.yaml`. This target is a correctness and
+  measurement prototype, not a release-default backend.
 - `scripts/build.sh` uses the `dev` image and does not require a GPU merely to
   compile because `gfx1151` is pinned explicitly. Override the image with
   `EMBER_IMAGE` and parallelism with `JOBS`.

@@ -14,6 +14,9 @@ ARG ROCM_DEV_IMAGE=rocm/dev-ubuntu-24.04:7.14.0-full@sha256:439edaa8f0c4be4a3728
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467
 ARG EMBER_VERSION=dev
 ARG EMBER_VCS_REF=unknown
+ARG XDNA_DRIVER_REF=455fc6be78e9cdf8b41a1547eff0e30351f21fec
+ARG MLIR_AIE_VERSION=1.3.4
+ARG LLVM_AIE_VERSION=22.0.0.2026081201+046b11f9
 
 FROM ${ROCM_DEV_IMAGE} AS toolchain
 
@@ -118,3 +121,138 @@ ENV EMBER_MODEL_DIR=/models \
     EMBER_KV_CACHE_DIR=/cache
 
 ENTRYPOINT ["/usr/local/bin/ember-entrypoint"]
+
+# ── Optional XDNA2 userspace ──────────────────────────────────────────────
+#
+# The container carries userspace only. amdxdna.ko and NPU firmware must be
+# installed on the host, whose /dev/accel/accel0 is passed at runtime. Building
+# the shim with SKIP_KMOD avoids the common container mistake of packaging a
+# DKMS module that cannot control the host kernel.
+FROM ${RUNTIME_IMAGE} AS xdna-userspace-build
+
+ARG XDNA_DRIVER_REF
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates git jq \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --filter=blob:none https://github.com/amd/xdna-driver.git /xdna-driver \
+ && git -C /xdna-driver checkout "${XDNA_DRIVER_REF}" \
+ && git -C /xdna-driver submodule update --init --recursive
+
+# XRT's dependency helper knows the distro-specific package set. -docker
+# deliberately omits host-driver-only dependencies.
+RUN /xdna-driver/xrt/src/runtime_src/tools/scripts/xrtdeps.sh -docker
+
+RUN cd /xdna-driver/xrt/build \
+ && ./build.sh -npu -opt -noctest -noinit -j "$(nproc)" \
+ && cp -a /xdna-driver/xrt/build/Release/opt/xilinx /opt/ \
+ && echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
+ && ldconfig
+
+RUN cmake -S /xdna-driver -B /xdna-driver/build/EmberRelease \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/opt/xilinx/xrt \
+      -DSKIP_KMOD=ON \
+      -DBUILD_VXDNA=OFF \
+ && cmake --build /xdna-driver/build/EmberRelease -j"$(nproc)" \
+ && DESTDIR=/xdna-plugin cmake --install /xdna-driver/build/EmberRelease \
+ && mkdir -p /xdna-runtime/opt/xilinx \
+ && cp -a /xdna-driver/xrt/build/Release/opt/xilinx/xrt \
+      /xdna-runtime/opt/xilinx/ \
+ && cp -a /xdna-plugin/opt/xilinx/xrt/. \
+      /xdna-runtime/opt/xilinx/xrt/ \
+ && install -Dm0644 /xdna-driver/LICENSE.amdnpu \
+      /xdna-licenses/amd-xdna-driver/LICENSE.amdnpu \
+ && install -Dm0644 /xdna-driver/xrt/LICENSE \
+      /xdna-licenses/xrt/LICENSE
+
+# Compile both DeepSeek expert projection shapes with the open Peano flow.
+# xclbinutil comes from the exact XRT build above; the source remains in the
+# repository so every binary in the image is reproducible and auditable.
+FROM ${RUNTIME_IMAGE} AS xdna-kernel-build
+
+ARG MLIR_AIE_VERSION
+ARG LLVM_AIE_VERSION
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential ca-certificates libboost-filesystem1.83.0 \
+      libboost-program-options1.83.0 make python3-pip python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /iron
+
+RUN /iron/bin/pip install \
+      "mlir_aie==${MLIR_AIE_VERSION}" \
+      "llvm-aie==${LLVM_AIE_VERSION}" \
+      -f https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4 \
+      -f https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
+
+COPY --from=xdna-userspace-build /xdna-runtime/ /
+COPY providers/xdna2/kernel/ /kernel/
+
+ENV PATH=/iron/bin:/iron/lib/python3.12/site-packages/mlir_aie/bin:/opt/xilinx/xrt/bin:$PATH \
+    PYTHONPATH=/iron/lib/python3.12/site-packages/mlir_aie/python \
+    LD_LIBRARY_PATH=/iron/lib/python3.12/site-packages/mlir_aie/lib:/opt/xilinx/xrt/lib \
+    MLIR_AIE_INSTALL_DIR=/iron/lib/python3.12/site-packages/mlir_aie \
+    PEANO_INSTALL_DIR=/iron/lib/python3.12/site-packages/llvm-aie
+
+RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
+ && make -C /kernel K=2048 N=4096 BUILD_DIR=/kernel/build/2048x4096 \
+ && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.xclbin \
+      /xdna-artifacts/gemv_4096x2048.xclbin \
+ && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.insts \
+      /xdna-artifacts/gemv_4096x2048.insts \
+ && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
+      /xdna-artifacts/gemv_2048x4096.xclbin \
+ && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
+      /xdna-artifacts/gemv_2048x4096.insts
+
+FROM dev AS dev-xdna
+
+COPY --from=xdna-userspace-build /xdna-runtime/ /
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      uuid-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
+ && ldconfig \
+ && cmake -S /ember -B /ember/build-xdna-provider \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DEMBER_XDNA_XRT_PROVIDER=ON \
+      -DEMBER_XRT_ROOT=/opt/xilinx/xrt \
+ && cmake --build /ember/build-xdna-provider \
+      --target ember_xdna_moe_xrt -j"$(nproc)" \
+ && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
+      /xdna-provider/libember_xdna_moe.so
+
+FROM release AS release-xdna
+
+LABEL org.opencontainers.image.description="DeepSeek-V4-Flash inference server with experimental AMD XDNA2 MoE provider"
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libboost-filesystem1.83.0 libboost-program-options1.83.0 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=xdna-userspace-build /xdna-runtime/ /
+COPY --from=xdna-userspace-build /xdna-licenses/ /usr/share/licenses/ember/
+COPY --from=dev-xdna /xdna-provider/libember_xdna_moe.so \
+  /usr/local/lib/ember/libember_xdna_moe.so
+COPY --from=xdna-kernel-build /xdna-artifacts/ \
+  /usr/local/share/ember/xdna2/
+COPY providers/xdna2/VENDOR.md \
+  /usr/share/doc/ember/xdna2/VENDOR.md
+COPY providers/xdna2/LLVM-EXCEPTION.txt \
+  /usr/share/licenses/ember/tilefuse/LLVM-EXCEPTION.txt
+COPY vendor/xgrammar/LICENSE \
+  /usr/share/licenses/ember/tilefuse/LICENSE.Apache-2.0
+
+RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
+ && ldconfig \
+ && ! ldd /usr/local/lib/ember/libember_xdna_moe.so | grep -q 'not found' \
+ && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
+ && /opt/xilinx/xrt/bin/xrt-smi --version
+
+ENV EMBER_XDNA_ARTIFACT_DIR=/usr/local/share/ember/xdna2

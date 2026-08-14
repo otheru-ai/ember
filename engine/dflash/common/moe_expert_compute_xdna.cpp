@@ -21,6 +21,12 @@ bool trace_enabled() {
     return value && value[0] && std::strcmp(value, "0") != 0;
 }
 
+uint32_t xdna_weight_format(ggml_type type) {
+    return type == GGML_TYPE_Q2_0_ROCMFP2
+        ? EMBER_XDNA_MOE_WEIGHT_ROCMFP2
+        : EMBER_XDNA_MOE_WEIGHT_NONE;
+}
+
 class XdnaMoeExpertCompute final : public MoeExpertCompute {
 public:
     XdnaMoeExpertCompute(void * library,
@@ -89,12 +95,44 @@ public:
 
         const size_t slots = (size_t)n_tokens * (size_t)n_selected;
         std::vector<int32_t> global_ids(slots);
+        std::vector<ember_xdna_moe_weight_view_v1> weight_views(slots);
         for (size_t i = 0; i < slots; ++i) {
             const int32_t local = ids[i];
             if (local < 0 || (size_t)local >= layer.cold_global_by_local.size()) {
                 return false;
             }
             global_ids[i] = layer.cold_global_by_local[(size_t)local];
+            auto & view = weight_views[i];
+            view.struct_size = sizeof(view);
+            view.fused_gate_up = layer.fused_gate_up ? 1u : 0u;
+            if (layer.gate_data && layer.gate_stride) {
+                view.gate = static_cast<const unsigned char *>(layer.gate_data) +
+                            (size_t)local * layer.gate_stride;
+                view.gate_bytes = layer.gate_stride;
+            }
+            if (layer.up_data && layer.up_stride) {
+                view.up = static_cast<const unsigned char *>(layer.up_data) +
+                          (size_t)local * layer.up_stride;
+                view.up_bytes = layer.up_stride;
+            }
+            if (layer.down_data && layer.down_stride) {
+                view.down = static_cast<const unsigned char *>(layer.down_data) +
+                            (size_t)local * layer.down_stride;
+                view.down_bytes = layer.down_stride;
+            }
+            if (layer.gate_up_data && layer.gate_up_stride) {
+                view.gate_up = static_cast<const unsigned char *>(layer.gate_up_data) +
+                               (size_t)local * layer.gate_up_stride;
+                view.gate_up_bytes = layer.gate_up_stride;
+            }
+            view.gate_format = xdna_weight_format(layer.gate_type);
+            view.up_format = xdna_weight_format(layer.up_type);
+            view.down_format = xdna_weight_format(layer.down_type);
+            view.gate_up_format = xdna_weight_format(layer.gate_up_type);
+            view.gate_scale = layer.gate_scale;
+            view.up_scale = layer.up_scale;
+            view.down_scale = layer.down_scale;
+            view.gate_up_scale = layer.gate_up_scale;
         }
 
         ember_xdna_moe_batch_v1 batch{};
@@ -109,6 +147,7 @@ public:
         batch.expert_ids = global_ids.data();
         batch.router_weights = weights;
         batch.output = output;
+        batch.expert_weights = weight_views.data();
 
         char error[512] = {};
         const auto start = std::chrono::steady_clock::now();

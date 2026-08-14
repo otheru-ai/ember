@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -20,11 +21,25 @@ GITHUB_CONTAINER = ROOT / ".github" / "workflows" / "container.yml"
 GITHUB_CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
 COMPOSE = ROOT / "compose.yaml"
 COMPOSE_BUILD = ROOT / "compose.build.yaml"
+COMPOSE_XDNA = ROOT / "compose.xdna.yaml"
 PREFLIGHT = ROOT / "scripts" / "preflight.sh"
 SMOKE = ROOT / "scripts" / "smoke_test.sh"
 
 
 class ReleaseScriptTests(unittest.TestCase):
+    @staticmethod
+    def docker_stage(dockerfile: str, name: str) -> str:
+        match = re.search(
+            rf"^FROM\s+\S+\s+AS\s+{re.escape(name)}\s*$",
+            dockerfile,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        if not match:
+            raise AssertionError(f"Docker stage not found: {name}")
+        following = re.search(r"^FROM\s+", dockerfile[match.end():], re.MULTILINE)
+        end = match.end() + following.start() if following else len(dockerfile)
+        return dockerfile[match.end():end]
+
     def test_default_model_is_immutably_pinned(self) -> None:
         script = ENTRYPOINT.read_text()
         self.assertIn("/resolve/$revision/$artifact_file", script)
@@ -52,7 +67,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("AS dev", dockerfile)
         self.assertIn("AS release", dockerfile)
         self.assertGreaterEqual(dockerfile.count("@sha256:"), 2)
-        release = dockerfile.split("AS release", 1)[1]
+        release = self.docker_stage(dockerfile, "release")
         self.assertNotIn("build-essential", release)
         self.assertNotIn("cmake --build", release)
         self.assertIn("COPY --from=dev /ember-runtime/ /", release)
@@ -66,6 +81,18 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("blas_lib_gfx1151.kpack", dockerfile)
         self.assertIn("rocblas/library/gfx1151", dockerfile)
         self.assertIn("TensileLibrary_lazy_gfx1151.dat", dockerfile)
+
+    def test_xdna_image_keeps_host_driver_outside_container(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+        compose = COMPOSE_XDNA.read_text()
+        runtime = self.docker_stage(dockerfile, "release-xdna")
+        self.assertIn("COPY --from=xdna-userspace-build", runtime)
+        self.assertIn("libember_xdna_moe.so", runtime)
+        self.assertNotIn("amdxdna.ko", runtime)
+        self.assertIn("SKIP_KMOD=ON", dockerfile)
+        self.assertIn("/dev/accel/accel0:/dev/accel/accel0", compose)
+        self.assertIn("memlock:", compose)
+        self.assertIn("DFLASH_MOE_XDNA_PLUGIN", compose)
 
     def test_compose_pulls_release_and_keeps_source_build_explicit(self) -> None:
         compose = COMPOSE.read_text()

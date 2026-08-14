@@ -33,6 +33,37 @@ typedef struct ember_xdna_moe_config_v1 {
     float swiglu_clamp;
 } ember_xdna_moe_config_v1;
 
+typedef enum ember_xdna_moe_weight_format_v1 {
+    EMBER_XDNA_MOE_WEIGHT_NONE = 0,
+    EMBER_XDNA_MOE_WEIGHT_ROCMFP2 = 1,
+} ember_xdna_moe_weight_format_v1;
+
+// One placement-local selected expert. The pointers remain valid only for the
+// duration of compute(). Keeping the views in the request lets an XRT provider
+// lazily pre-tile the exact mmap-backed expert selected by Ember without
+// independently reparsing GGUF or duplicating the 85 GiB model mapping. XRT
+// still owns its BO mappings; UMA does not imply ROCm/XRT allocation coherence.
+typedef struct ember_xdna_moe_weight_view_v1 {
+    uint32_t struct_size;
+    uint32_t fused_gate_up;
+    const void * gate;
+    size_t gate_bytes;
+    const void * up;
+    size_t up_bytes;
+    const void * down;
+    size_t down_bytes;
+    const void * gate_up;
+    size_t gate_up_bytes;
+    uint32_t gate_format;
+    uint32_t up_format;
+    uint32_t down_format;
+    uint32_t gate_up_format;
+    float gate_scale;
+    float up_scale;
+    float down_scale;
+    float gate_up_scale;
+} ember_xdna_moe_weight_view_v1;
+
 typedef struct ember_xdna_moe_batch_v1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -45,6 +76,9 @@ typedef struct ember_xdna_moe_batch_v1 {
     const int32_t * expert_ids;   // global ids [n_tokens, n_selected]
     const float * router_weights; // [n_tokens, n_selected]
     float * output;               // weighted sum [n_tokens, n_embd]
+    // Same slot order as expert_ids. Added at the end of ABI v1 so providers
+    // that only use routing metadata remain source-compatible.
+    const ember_xdna_moe_weight_view_v1 * expert_weights;
 } ember_xdna_moe_batch_v1;
 
 typedef struct ember_xdna_moe_provider_v1 {

@@ -25,6 +25,10 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 # hold upstream code to Ember's standard — turning every fork sync into a
 # warning-fixing exercise. EMBER_STRICT_TARGETS below is the ember-owned set.
 option(EMBER_STRICT "Treat warnings as errors and enable the strict warning set" OFF)
+option(EMBER_XDNA_XRT_PROVIDER
+  "Build the optional XRT/IRON ROCMFP2 MoE provider" OFF)
+set(EMBER_XRT_ROOT "/opt/xilinx/xrt" CACHE PATH
+  "XRT userspace prefix used by EMBER_XDNA_XRT_PROVIDER")
 set(EMBER_STRICT_FLAGS
   -Werror
   -Wshadow            # a shadowed KV slot / token index is a real bug class
@@ -38,6 +42,26 @@ function(ember_strict target)
     target_compile_options(${target} PRIVATE ${EMBER_STRICT_FLAGS})
   endif()
 endfunction()
+
+if(EMBER_XDNA_XRT_PROVIDER)
+  find_path(EMBER_XRT_INCLUDE_DIR xrt/xrt_bo.h
+    HINTS "${EMBER_XRT_ROOT}/include" REQUIRED)
+  find_library(EMBER_XRT_COREUTIL xrt_coreutil
+    HINTS "${EMBER_XRT_ROOT}/lib" "${EMBER_XRT_ROOT}/lib64" REQUIRED)
+  add_library(ember_xdna_moe_xrt MODULE
+    providers/xdna2/provider_xrt.cpp
+    providers/xdna2/rocmfp2_pack.cpp)
+  target_include_directories(ember_xdna_moe_xrt PRIVATE
+    providers/xdna2
+    engine/dflash/common
+    engine/ggml/include
+    engine/ggml/src
+    "${EMBER_XRT_INCLUDE_DIR}")
+  target_link_libraries(ember_xdna_moe_xrt PRIVATE "${EMBER_XRT_COREUTIL}")
+  set_target_properties(ember_xdna_moe_xrt PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "libember_xdna_moe")
+endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────
 # Built in both configurations: the grammar and its token masks are GPU-free,
@@ -224,6 +248,13 @@ target_link_libraries(test_xdna_moe_provider PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME xdna_moe_provider COMMAND test_xdna_moe_provider
   $<TARGET_FILE:mock_xdna_moe_provider>)
 
+add_executable(test_xdna_rocmfp2_pack
+  test/test_xdna_rocmfp2_pack.cpp
+  providers/xdna2/rocmfp2_pack.cpp)
+target_include_directories(test_xdna_rocmfp2_pack PRIVATE providers/xdna2)
+add_test(NAME xdna_rocmfp2_pack COMMAND test_xdna_rocmfp2_pack)
+ember_strict(test_xdna_rocmfp2_pack)
+
 # Every C/C++ test gets a wall-clock ceiling. Without one a hung test blocks
 # ctest forever: `test_api_adapters` builds a socketpair and pthread_join()s a
 # reader thread, so a reader that never sees EOF deadlocks the whole run rather
@@ -243,7 +274,8 @@ set(EMBER_C_TESTS
   chat_api prefill_policy api_adapters http background_gate chat_template
   compaction gguf model_card kv_cache qa dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
-  continuous_batch_executor resident_batch_coordinator xdna_moe_provider)
+  continuous_batch_executor resident_batch_coordinator xdna_moe_provider
+  xdna_rocmfp2_pack)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 
 # ── ember-server binary ──
