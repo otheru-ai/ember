@@ -60,12 +60,15 @@ does not replace the byte-exact custom-kernel correctness baseline.
   AIE tiles. Its raw and packed F32 references are tested for exact equality.
 - `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
   for the exact 4096->2048 and 2048->4096 expert projections.
-- `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. It is currently scalar
-  bring-up code; TileFuse-style vectorization comes only after hardware
-  equivalence.
+- `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. Generation 2 keeps the
+  K-tile carry in a tile-local F32 buffer and converts to BF16 only at the DMA
+  boundary; generation 1 rounded through its BF16 output FIFO after every
+  128 inputs.
 - `provider_xrt.cpp` owns persistent XRT contexts/instruction BOs and a bounded
-  LRU of pre-tiled host-only weight BOs. It accepts q=1 and separate
-  gate/up/down ROCMFP2 tensors only.
+  LRU of pre-tiled host-only weight BOs. Generation 2 submits every selected
+  gate/up projection in one XRT runlist and every down projection in a second
+  runlist, with the CPU SwiGLU calculation as the unavoidable phase boundary.
+  It accepts q=1 and separate gate/up/down ROCMFP2 tensors only.
 - The optional `release-xdna` image builds XRT plus the XDNA userspace shim from
   the pinned `amd/xdna-driver` tree, builds both AOT kernels with Peano, and
   packages the plugin and artifacts. It never packages a kernel module.
@@ -128,23 +131,41 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
+| `EMBER_XDNA_KERNEL_GEN` | `2` | Select packaged generation `1` or `2` |
+| `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
+| `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
 
 `DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
 all routed experts are resident on the GPU, the provider has no work.
 
-## Hardware validation status (2026-08-14)
+## Hardware validation status (2026-08-15)
 
 The prototype was exercised on the target gfx1151 Strix Halo host after
 enabling IOMMU. XRT identified `RyzenAI-npu5`, AIE2P 6x8, firmware 1.1.2.65.
 The stock XRT validation workload reported 51 TOPS GEMM, 50 us latency, and
 94,160 operations/s, proving the packaged XRT/driver/device path is functional.
 
-The structured `ember-xdna-validate` case passed cold and warm execution with
-zero maximum absolute error and cosine similarity 1.0 (101.98 ms cold, 99.20 ms
-warm in the final packaged image). A dense deterministic stress case did not
-meet the correctness gate: maximum absolute error was about 0.0414, RMS error
-about 0.0101, and cosine similarity 0.998465. That failure is material even
-though the cosine value looks high.
+Generation 1's structured `ember-xdna-validate` case passed cold and warm
+execution with zero maximum absolute error and cosine similarity 1.0 (about
+102 ms cold and 100 ms warm). A deterministic dense A/B exposed its repeated
+BF16 carry rounding: maximum absolute error 0.15625, RMS error 0.08283, and
+cosine similarity 0.999375.
+
+Generation 2 packages separate AOT artifacts for both projection shapes. Its
+tile-local F32 carry retained exact structured output (101.83 ms cold,
+100.27 ms warm) and improved the same dense case to maximum absolute error
+0.01250, RMS error 0.00424, and cosine similarity 0.9999945. This is a 19.5x
+RMS reduction, but the dense probe still deliberately fails the strict
+`1e-4` gate. Keeping the output FIFO BF16 matters: an earlier F32 object-FIFO
+attempt appeared to run in roughly 54 ms but produced cosine similarity near
+0.01 because its host/DMA layout was wrong.
+
+The model-default six-expert runlist also passed the structured reference. Two
+calls executed 36 projection kernels through four host submissions, instead of
+36 submissions, but warm latency was still 560.25 ms. The six-expert dense
+case took 799.73 ms warm and accumulated 0.075 maximum absolute error. XRT
+runlists therefore solve submission scaling but do not solve scalar kernel
+throughput.
 
 The trained 85.3 GiB DeepSeek-V4-Flash model then ran with the provider marked
 required, a 32 GiB hot-expert budget, exact prefill, and runtime top-k 4. This
@@ -157,11 +178,41 @@ HIP:  795, 17038, 1137, 4
 XDNA: 1718, 82, 1018, 1718
 ```
 
-The bring-up implementation also recorded 1,049 provider calls in 370.6 seconds
-(roughly 353 ms per call), before model-load and non-provider work. Its three
-serial XRT launches per selected expert are therefore both numerically invalid
-for inference and a severe performance regression. Keep the provider opt-in;
-do not deploy it for model serving or claim CPU/GPU/NPU acceleration yet.
+The generation-2 trained-model run used exact prefill, runtime top-k 4, a
+16 GiB hot-expert budget, and the provider marked required. It reached every
+layer and recorded 1,069 calls / 3,389 cold experts / 10,167 projection kernels
+as 2,138 runlist submissions. Provider wall time was 476.4 seconds, or roughly
+446 ms per call. The differential validator still reproduced the separate
+hybrid snapshot mismatch at token index 2 (`41070` versus `5375`), so it did
+not establish trained-model equivalence. Generation 2 is more accurate in the
+standalone dense probe and far less dispatch-heavy, but is not faster end to
+end. Keep the provider opt-in; do not deploy it for model serving or claim
+CPU/GPU/NPU acceleration yet.
+
+### What the NPU should do next
+
+Direct scalar ROCMFP2 decode is the wrong steady-state role. A trial that
+constructed BF16 vectors inside the tile and used elementwise vector MACs
+compiled, but returned non-finite down-projection output on hardware and was
+rejected. More importantly, decoding each 2-bit weight into a vector register
+still spends scalar instructions in the inner loop.
+
+The next useful prototype should prepack a bounded hot set into a native AIE2P
+matrix layout and use the supported BF16/BFP16 matrix-multiply path. The
+[official IRON kernel library](https://xilinx.github.io/mlir-aie/dev/api/kernels/)
+already exposes vectorized `mm`/`mv` kernels and an AIE2P option that implements
+BF16 MMUL with BFP16. That trades cache memory
+and first-use conversion for hardware MAC utilization, so it must report both
+cold conversion and warm resident latency. Fuse gate, up, SwiGLU, and down in
+one persistent graph if the local-memory budget permits; otherwise the two
+runlist phases in generation 2 remain the minimum correct boundary.
+
+Until that matrix-native kernel beats HIP, the NPU should stay off the token
+critical path. The safer eventual role is coarse, asynchronous work that can
+overlap the GPU—such as a compact speculative drafter or background embedding
+pipeline—not fine-grained per-layer assistance. UMA makes the bytes physically
+reachable, but XRT and ROCm ownership transitions still make small ping-pong
+workloads expensive.
 
 The same session exposed a separate hybrid-path snapshot issue in the HIP
 control: its fresh run matched its baseline, but restored decoding diverged at
@@ -182,9 +233,11 @@ Before treating the path as usable on gfx1151 hardware:
    packing separated from warm steady state. Record provider launch/sync time,
    total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
    and `xrt-smi` partition activity.
-5. Replace the three-launch expert sequence with a fused runlist or prove with
-   measurement that its dispatch/synchronization overhead still wins. Keep the
-   feature off by default unless both output and end-to-end performance pass.
+5. Replace scalar ROCMFP2 decode with a matrix-native packed kernel and compare
+   cold conversion, warm cache residency, and end-to-end performance. The
+   generation-2 runlists already prove that submission fusion alone is not
+   enough. Keep the feature off by default unless both output and end-to-end
+   performance pass.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.

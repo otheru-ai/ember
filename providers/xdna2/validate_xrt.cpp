@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -43,10 +44,32 @@ float decode(const uint8_t * block, int index) {
            ember::xdna2::ue4m3_to_float(block[9]);
 }
 
-void fill_projection(std::vector<uint8_t> & raw, int k, int n, uint32_t salt) {
+void fill_projection(std::vector<uint8_t> & raw, int k, int n, uint32_t salt,
+                     bool dense) {
     const int blocks_per_row = k / ember::xdna2::kRocmfp2BlockWeights;
     std::fill(raw.begin(), raw.end(), 0);
     for (int output = 0; output < n; ++output) {
+        if (dense) {
+            for (int block = 0; block < blocks_per_row; ++block) {
+                uint8_t * q = raw.data() +
+                    (static_cast<size_t>(output) *
+                         static_cast<size_t>(blocks_per_row) +
+                     static_cast<size_t>(block)) *
+                        ember::xdna2::kRocmfp2BlockBytes;
+                uint32_t state = salt ^
+                    (static_cast<uint32_t>(output) * 0x9e3779b9u) ^
+                    (static_cast<uint32_t>(block) * 0x85ebca6bu);
+                for (int byte = 0; byte < 8; ++byte) {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    q[byte] = static_cast<uint8_t>(state >> 24);
+                }
+                q[8] = static_cast<uint8_t>(0x18u + (state & 7u));
+                q[9] = static_cast<uint8_t>(0x20u + ((state >> 3) & 7u));
+            }
+            continue;
+        }
         const uint32_t multiplier = ((salt >> 24) % 61u) | 1u;
         const int input = static_cast<int>(
             (static_cast<uint32_t>(output) * multiplier + (salt & 0xffffu)) %
@@ -63,7 +86,8 @@ void fill_projection(std::vector<uint8_t> & raw, int k, int n, uint32_t salt) {
 
 bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
                            const std::vector<float> & input,
-                           int k, int n, std::vector<float> & output) {
+                           int k, int n, bool bf16_partials,
+                           std::vector<float> & output) {
     const size_t expected = ember::xdna2::rocmfp2_projection_bytes(k, n);
     if (raw.size() != expected || input.size() != static_cast<size_t>(k))
         return false;
@@ -75,9 +99,9 @@ bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
 
     output.assign(static_cast<size_t>(n), 0.0f);
     for (int out = 0; out < n; ++out) {
-        float accumulated_bf16 = 0.0f;
+        float accumulated = 0.0f;
         for (int tile = 0; tile < tiles; ++tile) {
-            float sum = accumulated_bf16;
+            float sum = accumulated;
             for (int block = 0;
                  block < ember::xdna2::kGemvTileK /
                              ember::xdna2::kRocmfp2BlockWeights;
@@ -95,9 +119,10 @@ bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
                     sum += input_bf16[static_cast<size_t>(input_index)] * decode(q, i);
                 }
             }
-            accumulated_bf16 = bf16_round(sum);
+            accumulated = bf16_partials ? bf16_round(sum) : sum;
         }
-        output[static_cast<size_t>(out)] = accumulated_bf16;
+        output[static_cast<size_t>(out)] =
+            bf16_partials ? accumulated : bf16_round(accumulated);
     }
     return true;
 }
@@ -187,13 +212,36 @@ int main(int argc, char ** argv) {
     constexpr float up_scale = 0.625f;
     constexpr float down_scale = 0.5f;
     constexpr float route = 0.8f;
+    int generation = 2;
+    if (const char * raw = std::getenv("EMBER_XDNA_KERNEL_GEN")) {
+        if (std::strcmp(raw, "1") == 0) generation = 1;
+        else if (std::strcmp(raw, "2") != 0) {
+            std::fprintf(stderr, "EMBER_XDNA_KERNEL_GEN must be 1 or 2\n");
+            dlclose(library);
+            return 1;
+        }
+    }
+    const bool bf16_partials = generation == 1;
+    const bool dense = std::getenv("EMBER_XDNA_VALIDATION_DENSE") != nullptr;
+    int selected_experts = 1;
+    if (const char * raw = std::getenv("EMBER_XDNA_VALIDATION_EXPERTS")) {
+        char * end = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 1 || parsed > 6) {
+            std::fprintf(stderr,
+                         "EMBER_XDNA_VALIDATION_EXPERTS must be in [1,6]\n");
+            dlclose(library);
+            return 1;
+        }
+        selected_experts = static_cast<int>(parsed);
+    }
 
     ember_xdna_moe_config_v1 config{};
     config.abi_version = EMBER_XDNA_MOE_PROVIDER_ABI_VERSION;
     config.struct_size = sizeof(config);
     config.n_layer = 1;
     config.n_expert = 256;
-    config.n_expert_used = 1;
+    config.n_expert_used = selected_experts;
     config.n_embd = n_embd;
     config.n_ff_exp = n_ff;
     config.swiglu_clamp = clamp;
@@ -208,9 +256,9 @@ int main(int argc, char ** argv) {
     const size_t gate_bytes = ember::xdna2::rocmfp2_projection_bytes(n_embd, n_ff);
     const size_t down_bytes = ember::xdna2::rocmfp2_projection_bytes(n_ff, n_embd);
     std::vector<uint8_t> gate(gate_bytes), up(gate_bytes), down(down_bytes);
-    fill_projection(gate, n_embd, n_ff, 0x13579bdfu);
-    fill_projection(up, n_embd, n_ff, 0x2468ace0u);
-    fill_projection(down, n_ff, n_embd, 0xdeadbeefu);
+    fill_projection(gate, n_embd, n_ff, 0x13579bdfu, dense);
+    fill_projection(up, n_embd, n_ff, 0x2468ace0u, dense);
+    fill_projection(down, n_ff, n_embd, 0xdeadbeefu, dense);
 
     std::vector<float> input(n_embd);
     for (int i = 0; i < n_embd; ++i)
@@ -219,8 +267,10 @@ int main(int argc, char ** argv) {
 
     const auto reference_start = std::chrono::steady_clock::now();
     std::vector<float> gate_out, up_out, hidden(n_ff), expected;
-    if (!gemv_kernel_reference(gate, input, n_embd, n_ff, gate_out) ||
-        !gemv_kernel_reference(up, input, n_embd, n_ff, up_out)) {
+    if (!gemv_kernel_reference(gate, input, n_embd, n_ff,
+                               bf16_partials, gate_out) ||
+        !gemv_kernel_reference(up, input, n_embd, n_ff,
+                               bf16_partials, up_out)) {
         std::fprintf(stderr, "reference gate/up failed\n");
         provider->destroy(context);
         dlclose(library);
@@ -233,13 +283,15 @@ int main(int argc, char ** argv) {
         u = std::max(-clamp, std::min(u, clamp));
         hidden[static_cast<size_t>(i)] = (g / (1.0f + std::exp(-g))) * u;
     }
-    if (!gemv_kernel_reference(down, hidden, n_ff, n_embd, expected)) {
+    if (!gemv_kernel_reference(down, hidden, n_ff, n_embd,
+                               bf16_partials, expected)) {
         std::fprintf(stderr, "reference down failed\n");
         provider->destroy(context);
         dlclose(library);
         return 1;
     }
-    for (float & value : expected) value *= down_scale * route;
+    for (float & value : expected)
+        value *= down_scale * route * static_cast<float>(selected_experts);
     const double reference_ms = milliseconds(reference_start);
 
     ember_xdna_moe_weight_view_v1 view{};
@@ -257,21 +309,25 @@ int main(int argc, char ** argv) {
     view.up_scale = up_scale;
     view.down_scale = down_scale;
 
-    const int32_t expert_id = 17;
-    const float router_weight = route;
+    std::vector<int32_t> expert_ids(static_cast<size_t>(selected_experts));
+    std::vector<float> router_weights(static_cast<size_t>(selected_experts), route);
+    std::vector<ember_xdna_moe_weight_view_v1> views(
+        static_cast<size_t>(selected_experts), view);
+    for (int slot = 0; slot < selected_experts; ++slot)
+        expert_ids[static_cast<size_t>(slot)] = 17 + slot;
     std::vector<float> actual(n_embd, std::numeric_limits<float>::quiet_NaN());
     ember_xdna_moe_batch_v1 batch{};
     batch.abi_version = EMBER_XDNA_MOE_PROVIDER_ABI_VERSION;
     batch.struct_size = sizeof(batch);
     batch.n_tokens = 1;
-    batch.n_selected = 1;
+    batch.n_selected = selected_experts;
     batch.n_embd = n_embd;
     batch.n_ff_exp = n_ff;
     batch.input = input.data();
-    batch.expert_ids = &expert_id;
-    batch.router_weights = &router_weight;
+    batch.expert_ids = expert_ids.data();
+    batch.router_weights = router_weights.data();
     batch.output = actual.data();
-    batch.expert_weights = &view;
+    batch.expert_weights = views.data();
 
     const auto cold_start = std::chrono::steady_clock::now();
     const int cold_ok = provider->compute(context, &batch, error, sizeof(error));
@@ -301,9 +357,11 @@ int main(int argc, char ** argv) {
     const bool pass = finite && cold.max_abs <= 1.0e-4f &&
                       warm.max_abs <= 1.0e-4f;
 
-    std::printf("provider=%s outputs=%d reference_ms=%.3f cold_ms=%.3f "
+    std::printf("provider=%s generation=%d mode=%s experts=%d outputs=%d "
+                "reference_ms=%.3f cold_ms=%.3f "
                 "warm_ms=%.3f\n",
-                provider->name ? provider->name : "(unnamed)", n_embd,
+                provider->name ? provider->name : "(unnamed)", generation,
+                dense ? "dense" : "structured", selected_experts, n_embd,
                 reference_ms, cold_ms, warm_ms);
     std::printf("cold max_abs=%.9g max_rel=%.9g mean_abs=%.9g rms=%.9g "
                 "cosine=%.9g actual_range=%.9g expected_range=%.9g "

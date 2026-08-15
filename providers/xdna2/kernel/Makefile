@@ -12,16 +12,23 @@ KERNEL_FLAGS ?= --target=aie2p-none-unknown-elf -Wno-unknown-attributes \
 	-std=c++20 -O3 -DNDEBUG
 
 MLIR := $(BUILD_DIR)/design.mlir
+MLIR_V2 := $(BUILD_DIR)/design_v2.mlir
 OBJECT := $(BUILD_DIR)/rocmfp2_gemv.o
 XCLBIN := $(BUILD_DIR)/gemv_$(K)x$(N).xclbin
 INSTS := $(BUILD_DIR)/gemv_$(K)x$(N).insts
+XCLBIN_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).xclbin
+INSTS_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).insts
 
 .PHONY: all clean
-all: $(XCLBIN)
+all: $(XCLBIN) $(XCLBIN_V2)
 
 $(MLIR): rocmfp2_gemv.py
 	mkdir -p $(dir $@)
 	python3 $< -K $(K) -N $(N) > $@
+
+$(MLIR_V2): rocmfp2_gemv.py
+	mkdir -p $(dir $@)
+	python3 $< -K $(K) -N $(N) --generation 2 > $@
 
 $(OBJECT): rocmfp2_gemv.cc
 	mkdir -p $(dir $@)
@@ -35,6 +42,15 @@ $(XCLBIN): $(MLIR) $(OBJECT)
 		--npu-insts-name=$(notdir $(INSTS)) $(notdir $(MLIR))
 	test -s $(XCLBIN)
 	test -s $(INSTS)
+
+$(XCLBIN_V2): $(MLIR_V2) $(OBJECT)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_V2)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_V2)) $(notdir $(MLIR_V2))
+	test -s $(XCLBIN_V2)
+	test -s $(INSTS_V2)
 
 clean:
 	rm -rf build

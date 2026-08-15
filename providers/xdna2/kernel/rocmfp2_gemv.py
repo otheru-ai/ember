@@ -12,6 +12,7 @@ from aie.extras.context import mlir_mod_ctx
 from aie.dialects.aie import (
     AIEDevice,
     ObjectFifoPort,
+    buffer,
     core,
     device,
     external_func,
@@ -31,7 +32,7 @@ ROCMFP2_TILE_BYTES = TILE_N * (TILE_K // 32) * 10
 ARRAY_OUTPUTS = TILE_N * AIE_ROWS * AIE_COLS
 
 
-def build_gemv(k_total, n_total):
+def build_gemv(k_total, n_total, generation):
     if k_total <= 0 or k_total % TILE_K:
         raise ValueError("K must be a positive multiple of 128")
     if n_total <= 0 or n_total % ARRAY_OUTPUTS:
@@ -50,17 +51,34 @@ def build_gemv(k_total, n_total):
                 (ROCMFP2_TILE_BYTES * AIE_ROWS,), np.dtype[np.uint8]
             ]
             output_tile_ty = np.ndarray[(TILE_N,), np.dtype[bfloat16]]
-            output_mem_ty = np.ndarray[(TILE_N * AIE_ROWS,), np.dtype[bfloat16]]
+            output_mem_ty = np.ndarray[
+                (TILE_N * AIE_ROWS,), np.dtype[bfloat16]
+            ]
+            accumulator_ty = np.ndarray[(TILE_N,), np.dtype[np.float32]]
+            if generation == 1:
+                zero_name = "zero_rocmfp2_bf16"
+                gemv_name = "gemv_rocmfp2_bf16"
+            else:
+                zero_name = "zero_rocmfp2_f32"
+                gemv_name = "gemv_rocmfp2_f32"
 
             zero = external_func(
-                "zero_rocmfp2_bf16", inputs=[output_tile_ty],
+                zero_name,
+                inputs=[output_tile_ty if generation == 1 else accumulator_ty],
                 link_with="rocmfp2_gemv.o",
             )
             gemv = external_func(
-                "gemv_rocmfp2_bf16",
-                inputs=[input_tile_ty, weight_tile_ty, output_tile_ty],
+                gemv_name,
+                inputs=[input_tile_ty, weight_tile_ty,
+                        output_tile_ty if generation == 1 else accumulator_ty],
                 link_with="rocmfp2_gemv.o",
             )
+            if generation == 2:
+                store = external_func(
+                    "store_rocmfp2_f32_bf16",
+                    inputs=[accumulator_ty, output_tile_ty],
+                    link_with="rocmfp2_gemv.o",
+                )
 
             shims = [tile(col, 0) for col in range(AIE_COLS)]
             mems = [tile(col, 1) for col in range(AIE_COLS)]
@@ -68,6 +86,14 @@ def build_gemv(k_total, n_total):
                 [tile(col, row + 2) for col in range(AIE_COLS)]
                 for row in range(AIE_ROWS)
             ]
+            accumulators = None
+            if generation == 2:
+                accumulators = [
+                    [buffer(cores[row][col], accumulator_ty,
+                            name=f"accumulator_{row}_{col}")
+                     for col in range(AIE_COLS)]
+                    for row in range(AIE_ROWS)
+                ]
 
             mem_a = [None] * AIE_COLS
             in_a = [None] * AIE_COLS
@@ -118,13 +144,18 @@ def build_gemv(k_total, n_total):
 
             for row in range(AIE_ROWS):
                 for col in range(AIE_COLS):
+                    accumulator = (
+                        accumulators[row][col] if generation == 2 else None
+                    )
+
                     @core(cores[row][col])
                     def core_body():
                         for _ in range_(0xFFFFFFFF):
                             output = out_c[row][col].acquire(
                                 ObjectFifoPort.Produce, 1
                             )
-                            zero(output)
+                            partial = output if generation == 1 else accumulator
+                            zero(partial)
                             for _ in range_(k_tiles):
                                 activation = in_a[col].acquire(
                                     ObjectFifoPort.Consume, 1
@@ -132,9 +163,11 @@ def build_gemv(k_total, n_total):
                                 weight = in_b[row][col].acquire(
                                     ObjectFifoPort.Consume, 1
                                 )
-                                gemv(activation, weight, output)
+                                gemv(activation, weight, partial)
                                 in_a[col].release(ObjectFifoPort.Consume, 1)
                                 in_b[row][col].release(ObjectFifoPort.Consume, 1)
+                            if generation == 2:
+                                store(partial, output)
                             out_c[row][col].release(ObjectFifoPort.Produce, 1)
 
             @runtime_sequence(
@@ -177,5 +210,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-K", type=int, required=True)
     parser.add_argument("-N", type=int, required=True)
+    parser.add_argument("--generation", type=int, choices=(1, 2), default=1)
     args = parser.parse_args()
-    build_gemv(args.K, args.N)
+    build_gemv(args.K, args.N, args.generation)

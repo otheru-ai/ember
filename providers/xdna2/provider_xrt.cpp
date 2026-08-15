@@ -1,11 +1,10 @@
 // XRT provider for Ember's experimental XDNA2 selected-expert ABI.
 //
-// This is intentionally a bring-up provider: weights are cached as persistent
-// host-only BOs and synchronized only once, but each selected expert currently
-// requires one gate, one up, and one down launch. RYZEN_AI_FINDINGS.md in
-// otheru/vit-scout measured dispatch-heavy hybrid execution losing badly, so
-// this provider remains opt-in until a fused selected-expert instruction stream
-// and hardware measurements prove an end-to-end win.
+// Gen2 keeps weights in persistent host-only BOs, carries projection partials
+// in FP32, and uses one atomic XRT runlist for all selected gate/up projections
+// plus one for all downs.  SwiGLU remains the synchronization boundary.  The
+// provider stays opt-in until trained-weight equivalence and end-to-end speedup
+// are measured; UMA is not treated as implicit ROCm/XRT coherence.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -14,6 +13,7 @@
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_hw_context.h>
 #include <xrt/xrt_kernel.h>
+#include <xrt/experimental/xrt_kernel.h>
 
 #include <algorithm>
 #include <atomic>
@@ -88,10 +88,19 @@ unsigned device_index() {
     return static_cast<unsigned>(value);
 }
 
-std::string artifact_path(int k, int n, const char * suffix) {
+int kernel_generation() {
+    const char * raw = nonempty_env("EMBER_XDNA_KERNEL_GEN");
+    if (!raw) return 2;
+    if (std::strcmp(raw, "1") == 0) return 1;
+    if (std::strcmp(raw, "2") == 0) return 2;
+    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1 or 2");
+}
+
+std::string artifact_path(int k, int n, const char * suffix, int generation) {
     const char * directory = nonempty_env("EMBER_XDNA_ARTIFACT_DIR");
     std::string path = directory ? directory : "/usr/local/share/ember/xdna2";
-    path += "/gemv_" + std::to_string(k) + "x" + std::to_string(n) + suffix;
+    path += generation == 2 ? "/gemv_v2_" : "/gemv_";
+    path += std::to_string(k) + "x" + std::to_string(n) + suffix;
     return path;
 }
 
@@ -126,10 +135,20 @@ float bf16_to_float(uint16_t value) {
 
 class GemvProgram {
 public:
-    GemvProgram(xrt::device & device, int k, int n)
-        : device_(device), k_(k), n_(n) {
-        const std::string xclbin_path = artifact_path(k, n, ".xclbin");
-        const std::string insts_path = artifact_path(k, n, ".insts");
+    struct Invocation {
+        const float * input = nullptr;
+        xrt::bo * weights = nullptr;
+        float * output = nullptr;
+    };
+
+    GemvProgram(xrt::device & device, int k, int n, int max_runs,
+                int generation)
+        : device_(device), k_(k), n_(n), generation_(generation) {
+        if (max_runs < 1) throw std::runtime_error("invalid XDNA2 run capacity");
+        const std::string xclbin_path =
+            artifact_path(k, n, ".xclbin", generation_);
+        const std::string insts_path =
+            artifact_path(k, n, ".insts", generation_);
         xclbin_ = std::make_unique<xrt::xclbin>(xclbin_path);
         const auto kernels = xclbin_->get_kernels();
         const auto found = std::find_if(kernels.begin(), kernels.end(),
@@ -151,12 +170,15 @@ public:
                     instructions_.size() * sizeof(uint32_t));
         instruction_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        input_bo_ = std::make_unique<xrt::bo>(
-            device_, static_cast<size_t>(k_) * sizeof(uint16_t),
-            XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(3));
-        output_bo_ = std::make_unique<xrt::bo>(
-            device_, static_cast<size_t>(n_) * sizeof(uint16_t),
-            XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(5));
+        const size_t output_element_bytes = sizeof(uint16_t);
+        for (int i = 0; i < max_runs; ++i) {
+            input_bos_.push_back(std::make_unique<xrt::bo>(
+                device_, static_cast<size_t>(k_) * sizeof(uint16_t),
+                XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(3)));
+            output_bos_.push_back(std::make_unique<xrt::bo>(
+                device_, static_cast<size_t>(n_) * output_element_bytes,
+                XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(5)));
+        }
         scratch_bo_ = std::make_unique<xrt::bo>(
             device_, 1, XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(6));
         trace_bo_ = std::make_unique<xrt::bo>(
@@ -171,34 +193,93 @@ public:
         return result;
     }
 
-    void run(const float * input, xrt::bo & weights, float * output) {
-        uint16_t * input_bf16 = input_bo_->map<uint16_t *>();
-        for (int i = 0; i < k_; ++i) input_bf16[i] = float_to_bf16(input[i]);
-        input_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
-
-        auto invocation = (*kernel_)(
-            3, *instruction_bo_, static_cast<uint32_t>(instructions_.size()),
-            *input_bo_, weights, *output_bo_, *scratch_bo_, *trace_bo_);
-        const ert_cmd_state state = invocation.wait();
-        if (state != ERT_CMD_STATE_COMPLETED) {
-            throw std::runtime_error("XDNA2 GEMV command did not complete");
+    void run_many(const std::vector<Invocation> & invocations) {
+        if (invocations.empty()) return;
+        if (invocations.size() > input_bos_.size()) {
+            throw std::runtime_error("XDNA2 runlist exceeds configured capacity");
         }
-        output_bo_->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
-        const uint16_t * output_bf16 = output_bo_->map<uint16_t *>();
-        for (int i = 0; i < n_; ++i) output[i] = bf16_to_float(output_bf16[i]);
+
+        // Gate and up share one activation.  Down projections each have their
+        // own SwiGLU result.  Reuse one BO for identical input pointers so the
+        // common gate/up phase performs only one activation synchronization.
+        std::vector<size_t> input_slot(invocations.size());
+        std::vector<const float *> unique_inputs;
+        for (size_t run_index = 0; run_index < invocations.size(); ++run_index) {
+            const Invocation & invocation = invocations[run_index];
+            if (!invocation.input || !invocation.weights || !invocation.output) {
+                throw std::runtime_error("invalid XDNA2 GEMV invocation");
+            }
+            const auto found = std::find(unique_inputs.begin(), unique_inputs.end(),
+                                         invocation.input);
+            size_t slot = static_cast<size_t>(
+                std::distance(unique_inputs.begin(), found));
+            if (found == unique_inputs.end()) {
+                slot = unique_inputs.size();
+                unique_inputs.push_back(invocation.input);
+                uint16_t * input_bf16 = input_bos_[slot]->map<uint16_t *>();
+                for (int i = 0; i < k_; ++i)
+                    input_bf16[i] = float_to_bf16(invocation.input[i]);
+                input_bos_[slot]->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+            }
+            input_slot[run_index] = slot;
+        }
+
+        auto configure_run = [&](size_t index) {
+            xrt::run run(*kernel_);
+            run.set_arg(0, 3);
+            run.set_arg(1, *instruction_bo_);
+            run.set_arg(2, static_cast<uint32_t>(instructions_.size()));
+            run.set_arg(3, *input_bos_[input_slot[index]]);
+            run.set_arg(4, *invocations[index].weights);
+            run.set_arg(5, *output_bos_[index]);
+            run.set_arg(6, *scratch_bo_);
+            run.set_arg(7, *trace_bo_);
+            return run;
+        };
+
+        if (generation_ == 2) {
+            // XRT 2.26 runlists submit the phase atomically and wait once.  The
+            // runs still execute in order on one AIE context, but host dispatch
+            // and synchronization no longer scale with selected-expert count.
+            xrt::runlist list(*context_);
+            for (size_t i = 0; i < invocations.size(); ++i)
+                list.add(configure_run(i));
+            list.execute();
+            list.wait();
+        } else {
+            for (size_t i = 0; i < invocations.size(); ++i) {
+                xrt::run run = configure_run(i);
+                run.start();
+                if (run.wait() != ERT_CMD_STATE_COMPLETED) {
+                    throw std::runtime_error("XDNA2 GEMV command did not complete");
+                }
+            }
+        }
+
+        for (size_t run_index = 0; run_index < invocations.size(); ++run_index) {
+            output_bos_[run_index]->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+            const uint16_t * source = output_bos_[run_index]->map<uint16_t *>();
+            for (int i = 0; i < n_; ++i)
+                invocations[run_index].output[i] = bf16_to_float(source[i]);
+        }
+    }
+
+    void run(const float * input, xrt::bo & weights, float * output) {
+        run_many({Invocation{input, &weights, output}});
     }
 
 private:
     xrt::device & device_;
     int k_;
     int n_;
+    int generation_;
     std::unique_ptr<xrt::xclbin> xclbin_;
     std::unique_ptr<xrt::hw_context> context_;
     std::unique_ptr<xrt::kernel> kernel_;
     std::vector<uint32_t> instructions_;
     std::unique_ptr<xrt::bo> instruction_bo_;
-    std::unique_ptr<xrt::bo> input_bo_;
-    std::unique_ptr<xrt::bo> output_bo_;
+    std::vector<std::unique_ptr<xrt::bo>> input_bos_;
+    std::vector<std::unique_ptr<xrt::bo>> output_bos_;
     std::unique_ptr<xrt::bo> scratch_bo_;
     std::unique_ptr<xrt::bo> trace_bo_;
 };
@@ -234,9 +315,12 @@ struct CachedWeight {
 class Provider {
 public:
     explicit Provider(const ember_xdna_moe_config_v1 & config)
-        : config_(config), device_(device_index()),
-          gate_up_(device_, config.n_embd, config.n_ff_exp),
-          down_(device_, config.n_ff_exp, config.n_embd),
+        : config_(config), generation_(kernel_generation()),
+          device_(device_index()),
+          gate_up_(device_, config.n_embd, config.n_ff_exp,
+                   std::max(2, config.n_expert_used * 2), generation_),
+          down_(device_, config.n_ff_exp, config.n_embd,
+                std::max(1, config.n_expert_used), generation_),
           capacity_(cache_capacity_bytes()) {
         if (config.n_embd <= 0 || config.n_ff_exp <= 0 ||
             !rocmfp2_supported_shape(config.n_embd, config.n_ff_exp) ||
@@ -253,6 +337,7 @@ public:
         }
         if (batch.n_tokens != 1 || batch.n_selected <= 0 || !batch.input ||
             !batch.router_weights || !batch.output || !batch.expert_weights ||
+            batch.n_selected > config_.n_expert_used ||
             batch.n_embd != config_.n_embd || batch.n_ff_exp != config_.n_ff_exp) {
             if (error) *error = "unsupported or invalid XDNA2 batch";
             return 0;
@@ -268,10 +353,16 @@ public:
                 return 0;
             }
             std::fill(batch.output, batch.output + batch.n_embd, 0.0f);
-            std::vector<float> gate(static_cast<size_t>(batch.n_ff_exp));
-            std::vector<float> up(static_cast<size_t>(batch.n_ff_exp));
-            std::vector<float> hidden(static_cast<size_t>(batch.n_ff_exp));
-            std::vector<float> projected(static_cast<size_t>(batch.n_embd));
+            const size_t selected = static_cast<size_t>(batch.n_selected);
+            const size_t ff = static_cast<size_t>(batch.n_ff_exp);
+            const size_t embd = static_cast<size_t>(batch.n_embd);
+            std::vector<float> gate(selected * ff);
+            std::vector<float> up(selected * ff);
+            std::vector<float> hidden(selected * ff);
+            std::vector<float> projected(selected * embd);
+            std::vector<std::shared_ptr<CachedWeight>> gate_weights(selected);
+            std::vector<std::shared_ptr<CachedWeight>> up_weights(selected);
+            std::vector<std::shared_ptr<CachedWeight>> down_weights(selected);
 
             for (int slot = 0; slot < batch.n_selected; ++slot) {
                 const auto & view = batch.expert_weights[slot];
@@ -284,19 +375,35 @@ public:
                     return 0;
                 }
 
-                auto gate_weight = weight(view.gate, view.gate_bytes,
-                                          batch.n_embd, batch.n_ff_exp, gate_up_);
-                auto up_weight = weight(view.up, view.up_bytes,
-                                        batch.n_embd, batch.n_ff_exp, gate_up_);
-                auto down_weight = weight(view.down, view.down_bytes,
-                                          batch.n_ff_exp, batch.n_embd, down_);
-                gate_up_.run(batch.input, *gate_weight->bo, gate.data());
-                gate_up_.run(batch.input, *up_weight->bo, up.data());
+                const size_t index = static_cast<size_t>(slot);
+                gate_weights[index] = weight(
+                    view.gate, view.gate_bytes,
+                    batch.n_embd, batch.n_ff_exp, gate_up_);
+                up_weights[index] = weight(
+                    view.up, view.up_bytes,
+                    batch.n_embd, batch.n_ff_exp, gate_up_);
+                down_weights[index] = weight(
+                    view.down, view.down_bytes,
+                    batch.n_ff_exp, batch.n_embd, down_);
+            }
 
+            std::vector<GemvProgram::Invocation> gate_up_runs;
+            gate_up_runs.reserve(selected * 2);
+            for (size_t slot = 0; slot < selected; ++slot) {
+                gate_up_runs.push_back({batch.input, gate_weights[slot]->bo.get(),
+                                        gate.data() + slot * ff});
+                gate_up_runs.push_back({batch.input, up_weights[slot]->bo.get(),
+                                        up.data() + slot * ff});
+            }
+            gate_up_.run_many(gate_up_runs);
+
+            for (int slot = 0; slot < batch.n_selected; ++slot) {
+                const size_t index = static_cast<size_t>(slot);
+                const auto & view = batch.expert_weights[slot];
                 bool gate_finite = false;
                 bool up_finite = false;
-                (void)finite_max_abs(gate.data(), gate.size(), &gate_finite);
-                (void)finite_max_abs(up.data(), up.size(), &up_finite);
+                (void)finite_max_abs(gate.data() + index * ff, ff, &gate_finite);
+                (void)finite_max_abs(up.data() + index * ff, ff, &up_finite);
                 if (!gate_finite || !up_finite) {
                     if (error) *error = "non-finite XDNA gate/up output at layer " +
                         std::to_string(batch.layer_idx) + " expert " +
@@ -305,20 +412,33 @@ public:
                 }
 
                 for (int i = 0; i < batch.n_ff_exp; ++i) {
-                    float gate_value = gate[(size_t)i] * view.gate_scale;
-                    float up_value = up[(size_t)i] * view.up_scale;
+                    const size_t offset = index * ff + static_cast<size_t>(i);
+                    float gate_value = gate[offset] * view.gate_scale;
+                    float up_value = up[offset] * view.up_scale;
                     if (config_.swiglu_clamp > 1.0e-6f) {
                         gate_value = std::min(gate_value, config_.swiglu_clamp);
                         up_value = std::max(-config_.swiglu_clamp,
                                             std::min(up_value, config_.swiglu_clamp));
                     }
-                    hidden[(size_t)i] =
+                    hidden[offset] =
                         (gate_value / (1.0f + std::exp(-gate_value))) * up_value;
                 }
+            }
 
-                down_.run(hidden.data(), *down_weight->bo, projected.data());
+            std::vector<GemvProgram::Invocation> down_runs;
+            down_runs.reserve(selected);
+            for (size_t slot = 0; slot < selected; ++slot) {
+                down_runs.push_back({hidden.data() + slot * ff,
+                                     down_weights[slot]->bo.get(),
+                                     projected.data() + slot * embd});
+            }
+            down_.run_many(down_runs);
+
+            for (int slot = 0; slot < batch.n_selected; ++slot) {
+                const size_t index = static_cast<size_t>(slot);
+                const auto & view = batch.expert_weights[slot];
                 bool projected_finite = false;
-                (void)finite_max_abs(projected.data(), projected.size(),
+                (void)finite_max_abs(projected.data() + index * embd, embd,
                                      &projected_finite);
                 if (!projected_finite) {
                     if (error) *error = "non-finite XDNA down output at layer " +
@@ -328,10 +448,13 @@ public:
                 }
                 const float scale = view.down_scale * batch.router_weights[slot];
                 for (int i = 0; i < batch.n_embd; ++i) {
-                    batch.output[i] += projected[(size_t)i] * scale;
+                    batch.output[i] +=
+                        projected[index * embd + static_cast<size_t>(i)] * scale;
                 }
                 ++experts_;
             }
+            kernel_runs_ += selected * 3;
+            submissions_ += generation_ == 2 ? 2 : selected * 3;
             bool output_finite = false;
             const float output_max = finite_max_abs(
                 batch.output, static_cast<size_t>(batch.n_embd), &output_finite);
@@ -360,10 +483,14 @@ public:
     ~Provider() {
         if (nonempty_env("DFLASH_MOE_XDNA_TRACE")) {
             std::fprintf(stderr,
-                "[xdna2-xrt] calls=%llu experts=%llu cache_hits=%llu "
+                "[xdna2-xrt] generation=%d calls=%llu experts=%llu "
+                "kernel_runs=%llu submissions=%llu cache_hits=%llu "
                 "cache_misses=%llu cache_bytes=%zu\n",
+                generation_,
                 static_cast<unsigned long long>(calls_),
                 static_cast<unsigned long long>(experts_),
+                static_cast<unsigned long long>(kernel_runs_),
+                static_cast<unsigned long long>(submissions_),
                 static_cast<unsigned long long>(cache_hits_),
                 static_cast<unsigned long long>(cache_misses_), cache_bytes_);
         }
@@ -412,6 +539,7 @@ private:
     }
 
     ember_xdna_moe_config_v1 config_{};
+    int generation_ = 2;
     xrt::device device_;
     GemvProgram gate_up_;
     GemvProgram down_;
@@ -420,6 +548,8 @@ private:
     uint64_t clock_ = 0;
     uint64_t calls_ = 0;
     uint64_t experts_ = 0;
+    uint64_t kernel_runs_ = 0;
+    uint64_t submissions_ = 0;
     uint64_t cache_hits_ = 0;
     uint64_t cache_misses_ = 0;
     std::atomic<bool> healthy_{true};
@@ -467,7 +597,7 @@ void destroy_provider(void * context) {
 const ember_xdna_moe_provider_v1 kProvider = {
     EMBER_XDNA_MOE_PROVIDER_ABI_VERSION,
     sizeof(ember_xdna_moe_provider_v1),
-    "xrt-iron-rocmfp2-bringup",
+    "xrt-iron-rocmfp2-gen2",
     create_provider,
     compute_provider,
     healthy_provider,

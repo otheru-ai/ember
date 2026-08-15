@@ -58,4 +58,39 @@ void gemv_rocmfp2_bf16(const bfloat16 * input,
     }
 }
 
+// Gen2 keeps the K-tile carry in FP32.  Gen1 stores the partial sum through a
+// BF16 object FIFO after every 128 input elements; that rounding was harmless
+// for the structured one-hot bring-up vector but accumulated visible error on
+// dense trained projections.
+void zero_rocmfp2_f32(float * output) {
+    for (int lane = 0; lane < kOutput; ++lane) output[lane] = 0.0f;
+}
+
+void gemv_rocmfp2_f32(const bfloat16 * input,
+                      const uint8_t * weights,
+                      float * output) {
+    for (int lane = 0; lane < kOutput; ++lane) {
+        float sum = output[lane];
+        const uint8_t * row = weights + lane * 4 * kBlockBytes;
+        for (int block = 0; block < kInput / kBlockWeights; ++block) {
+            const uint8_t * q = row + block * kBlockBytes;
+            const float scale = ue4m3(q[8]);
+            const float offset = ue4m3(q[9]);
+            for (int i = 0; i < kBlockWeights; ++i) {
+                const uint8_t code =
+                    static_cast<uint8_t>((q[i >> 2] >> (2 * (i & 3))) & 3u);
+                const float value = static_cast<float>(code) * scale - offset;
+                sum += static_cast<float>(input[block * kBlockWeights + i]) * value;
+            }
+        }
+        output[lane] = sum;
+    }
+}
+
+void store_rocmfp2_f32_bf16(const float * input, bfloat16 * output) {
+    for (int lane = 0; lane < kOutput; ++lane) {
+        output[lane] = bfloat16(input[lane]);
+    }
+}
+
 }  // extern "C"
