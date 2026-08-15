@@ -1214,6 +1214,21 @@ static bool validation_tokens_equal(const std::vector<int32_t> & expected,
     return true;
 }
 
+static bool validation_token_trace_enabled() {
+    const char *value = std::getenv("EMBER_TRACE_TOKENS");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+}
+
+static void trace_validation_tokens(
+        const char *path, const std::vector<int32_t> &tokens) {
+    if (!validation_token_trace_enabled()) return;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        std::fprintf(stderr,
+                     "[ember-validate-token] path=%s index=%zu id=%d\n",
+                     path, i, tokens[i]);
+    }
+}
+
 static bool backend_validate_impl(
         ember_backend *b, const int32_t *prompt, int n_prompt, int n_gen,
         ember_validation_report *report) {
@@ -1238,6 +1253,7 @@ static bool backend_validate_impl(
     DaemonIO io;
     io.stream_fd = -1;
     GenerateResult baseline = b->be->generate(ar, io);
+    trace_validation_tokens("baseline", baseline.tokens);
     report->baseline_tokens = (int)baseline.tokens.size();
     report->snapshot_ok =
         baseline.ok() && baseline.snapshot_saved &&
@@ -1260,7 +1276,9 @@ static bool backend_validate_impl(
     // passive feature capture during exact prefill leaves target logits intact.
     GenerateResult restored_speculative =
         b->be->restore_and_generate(0, spec, io);
+    trace_validation_tokens("restored", restored_speculative.tokens);
     GenerateResult speculative = b->be->generate(spec, io);
+    trace_validation_tokens("fresh", speculative.tokens);
     report->spec_tokens = (int)speculative.tokens.size();
     report->spec_checked =
         restored_speculative.ok() &&
@@ -1284,6 +1302,7 @@ static bool backend_validate_impl(
             disk_req.snap_pos = -1;
             disk_ar = b->be->restore_and_generate(1, disk_req, io);
         }
+        trace_validation_tokens("disk", disk_ar.tokens);
         report->disk_tokens = (int)disk_ar.tokens.size();
         report->disk_exact =
             loaded && disk_ar.ok() &&

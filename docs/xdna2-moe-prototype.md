@@ -53,8 +53,9 @@ does not replace the byte-exact custom-kernel correctness baseline.
 - `MoeExpertCompute` can decline shapes and safely replay on the existing cold
   path. `DFLASH_MOE_XDNA_REQUIRED=1` turns failures fatal for validation.
 - The versioned provider ABI passes global expert IDs, routing weights, and
-  placement-local mmap-backed ROCMFP2 weight views. The plugin does not parse or
-  remap the 85.3 GiB GGUF.
+  ROCMFP2 weight views whose local/global indexing is explicit. The plugin does
+  not parse or remap the 85.3 GiB GGUF; hybrid placement exposes its validated
+  mmap regions directly.
 - `rocmfp2_pack.cpp` losslessly permutes GGML output-major blocks into 128x64
   AIE tiles. Its raw and packed F32 references are tested for exact equality.
 - `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
@@ -80,6 +81,11 @@ source /opt/xilinx/xrt/setup.sh
 xrt-smi examine
 ```
 
+IOMMU translation is a hard host prerequisite on the tested Strix Halo system.
+With `amd_iommu=off`, the accelerator cannot establish the DMA mappings used by
+XRT. Remove that kernel argument, reboot, and confirm both `/dev/accel/accel0`
+and translated AMD-Vi domains before testing the provider.
+
 Build the opt-in image (the XRT/Peano stages are intentionally much heavier
 than the normal release image):
 
@@ -87,6 +93,18 @@ than the normal release image):
 docker build --target release-xdna -f docker/Dockerfile \
   -t ember:xdna-local .
 ```
+
+Run the packaged hardware correctness probe before loading model weights:
+
+```bash
+docker run --rm --device /dev/accel/accel0 \
+  --security-opt seccomp=unconfined --ulimit memlock=-1:-1 \
+  ember:xdna-local ember-xdna-validate
+```
+
+The probe enters through the public provider ABI and checks cold and warm-cache
+execution against a BF16-aware CPU reference. It is deliberately a structured
+bring-up gate, not a substitute for trained-weight differential validation.
 
 Start it with the normal Compose definition plus the XDNA override:
 
@@ -114,10 +132,42 @@ is optional by default so a failure falls back to the baseline path. Use
 `DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
 all routed experts are resident on the GPU, the provider has no work.
 
-## Required hardware gates
+## Hardware validation status (2026-08-14)
 
-This development host has no XDNA device, so the source, ABI, packer, Peano
-compile, and container build can be verified here, but NPU execution cannot.
+The prototype was exercised on the target gfx1151 Strix Halo host after
+enabling IOMMU. XRT identified `RyzenAI-npu5`, AIE2P 6x8, firmware 1.1.2.65.
+The stock XRT validation workload reported 51 TOPS GEMM, 50 us latency, and
+94,160 operations/s, proving the packaged XRT/driver/device path is functional.
+
+The structured `ember-xdna-validate` case passed cold and warm execution with
+zero maximum absolute error and cosine similarity 1.0 (101.98 ms cold, 99.20 ms
+warm in the final packaged image). A dense deterministic stress case did not
+meet the correctness gate: maximum absolute error was about 0.0414, RMS error
+about 0.0101, and cosine similarity 0.998465. That failure is material even
+though the cosine value looks high.
+
+The trained 85.3 GiB DeepSeek-V4-Flash model then ran with the provider marked
+required, a 32 GiB hot-expert budget, exact prefill, and runtime top-k 4. This
+proved all 43 mmap-backed expert layers can reach XRT without fallback. A
+self-comparison reproduced four tokens after in-memory snapshot restore, but a
+paired first-pass comparison failed immediately:
+
+```text
+HIP:  795, 17038, 1137, 4
+XDNA: 1718, 82, 1018, 1718
+```
+
+The bring-up implementation also recorded 1,049 provider calls in 370.6 seconds
+(roughly 353 ms per call), before model-load and non-provider work. Its three
+serial XRT launches per selected expert are therefore both numerically invalid
+for inference and a severe performance regression. Keep the provider opt-in;
+do not deploy it for model serving or claim CPU/GPU/NPU acceleration yet.
+
+The same session exposed a separate hybrid-path snapshot issue in the HIP
+control: its fresh run matched its baseline, but restored decoding diverged at
+token index 2. That must be fixed before the hybrid differential validator can
+serve as a clean oracle for later XDNA work.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host

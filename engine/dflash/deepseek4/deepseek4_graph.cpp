@@ -2911,7 +2911,7 @@ static MoeHybridConfig make_ds4_moe_hybrid_config(const DeepSeek4Weights & w) {
     MoeHybridConfig cfg;
     cfg.n_embd = w.n_embd;
     cfg.n_expert = w.n_expert;
-    cfg.n_expert_used = w.n_expert_used;
+    cfg.n_expert_used = ds4_effective_expert_count(w);
     cfg.n_ff_exp = w.n_ff_exp;
     cfg.n_ff_shexp = w.n_ff_exp;
     cfg.n_layer = w.n_layer;
@@ -2966,6 +2966,12 @@ static bool eval_ds4_hybrid(
         const MoeExpertLayer * expert_layer,
         DeepSeek4StepTelemetry * step_tel) {
     const auto ffn_t0 = Ds4TimingClock::now();
+    if (hybrid_cfg.n_expert_used != n_expert_used) {
+        std::fprintf(stderr,
+                     "[deepseek4] layer %d hybrid top-k mismatch: config=%d routing=%d\n",
+                     layer, hybrid_cfg.n_expert_used, n_expert_used);
+        return false;
+    }
     if (!storage.down_cold && !storage.gate_up_cold &&
         (!expert_compute || !expert_layer ||
          !expert_compute->accepts(n_tokens, n_expert_used))) {
@@ -3053,10 +3059,11 @@ static bool eval_ds4_hybrid(
         expert_compute && expert_layer &&
         expert_compute->accepts(n_tokens, n_expert_used);
     MoeHybridFfnTelemetry ffn_tel;
+    std::string ffn_err;
     bool ffn_ok = eval_moe_hybrid_ffn_batched(
         backend, cpu_backend, hybrid_cfg, desc, storage,
         ffn_normed_host, selected_host, weights_host,
-        n_tokens, ffn_out_host, nullptr, hot_alloc, cold_alloc,
+        n_tokens, ffn_out_host, &ffn_err, hot_alloc, cold_alloc,
         expert_compute, expert_layer,
         step_tel ? &ffn_tel : nullptr);
     if (ffn_ok) {
@@ -3068,6 +3075,9 @@ static bool eval_ds4_hybrid(
     }
 
     if (attempted_expert_compute && expert_compute->failure_is_fatal()) {
+        std::fprintf(stderr,
+                     "[xdna-moe] required mixed expert eval failed at layer %d: %s\n",
+                     layer, ffn_err.empty() ? "no engine error" : ffn_err.c_str());
         return false;
     }
     if (!storage.down_cold && !storage.gate_up_cold) {
@@ -4035,6 +4045,9 @@ static bool deepseek4_step_hybrid(
     }
 
     for (int il = 0; il < w.n_layer; ++il) {
+        if (ds4_env_flag("DFLASH_MOE_XDNA_TRACE")) {
+            std::fprintf(stderr, "[xdna-moe] layer %d begin\n", il);
+        }
         const DeepSeek4Layer & L = w.layers[(size_t) il];
         DeepSeek4LayerCache & lc = cache.layers[(size_t) il];
         const HcLayerWeightsCpu & hc_lw = hc_layer_weights[(size_t)il];
@@ -4121,6 +4134,7 @@ static bool deepseek4_step_hybrid(
         ggml_gallocr_free(attn_alloc);
         ggml_free(ctx);
         if (!ok) {
+            std::fprintf(stderr, "[deepseek4] layer %d attention compute failed\n", il);
             if (hot_alloc) ggml_gallocr_free(hot_alloc);
             if (cold_alloc) ggml_gallocr_free(cold_alloc);
             return false;
@@ -4207,6 +4221,8 @@ static bool deepseek4_step_hybrid(
             ggml_gallocr_free(ffn_alloc);
             ggml_free(ffn_ctx);
             if (!ok) {
+                std::fprintf(stderr,
+                             "[deepseek4] layer %d hash router compute failed\n", il);
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);
                 return false;
@@ -4303,6 +4319,8 @@ static bool deepseek4_step_hybrid(
             ok = ggml_backend_graph_compute(backend, ffn_gf) == GGML_STATUS_SUCCESS;
             if (telemetry) telemetry->route_compute_us += ds4_elapsed_us(route_compute_t0, Ds4TimingClock::now());
             if (!ok) {
+                std::fprintf(stderr,
+                             "[deepseek4] layer %d router compute failed\n", il);
                 ggml_gallocr_free(ffn_alloc); ggml_free(ffn_ctx);
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);

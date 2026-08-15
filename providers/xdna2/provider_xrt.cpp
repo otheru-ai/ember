@@ -48,6 +48,19 @@ const char * nonempty_env(const char * name) {
     return value && value[0] ? value : nullptr;
 }
 
+float finite_max_abs(const float * values, size_t count, bool * finite) {
+    float maximum = 0.0f;
+    *finite = true;
+    for (size_t i = 0; i < count; ++i) {
+        if (!std::isfinite(values[i])) {
+            *finite = false;
+            return maximum;
+        }
+        maximum = std::max(maximum, std::fabs(values[i]));
+    }
+    return maximum;
+}
+
 size_t cache_capacity_bytes() {
     constexpr size_t fallback_mb = 1024;
     const char * raw = nonempty_env("EMBER_XDNA_WEIGHT_CACHE_MB");
@@ -246,6 +259,14 @@ public:
         }
 
         try {
+            bool input_finite = false;
+            const float input_max = finite_max_abs(
+                batch.input, static_cast<size_t>(batch.n_embd), &input_finite);
+            if (!input_finite) {
+                if (error) *error = "non-finite XDNA input at layer " +
+                    std::to_string(batch.layer_idx);
+                return 0;
+            }
             std::fill(batch.output, batch.output + batch.n_embd, 0.0f);
             std::vector<float> gate(static_cast<size_t>(batch.n_ff_exp));
             std::vector<float> up(static_cast<size_t>(batch.n_ff_exp));
@@ -272,6 +293,17 @@ public:
                 gate_up_.run(batch.input, *gate_weight->bo, gate.data());
                 gate_up_.run(batch.input, *up_weight->bo, up.data());
 
+                bool gate_finite = false;
+                bool up_finite = false;
+                (void)finite_max_abs(gate.data(), gate.size(), &gate_finite);
+                (void)finite_max_abs(up.data(), up.size(), &up_finite);
+                if (!gate_finite || !up_finite) {
+                    if (error) *error = "non-finite XDNA gate/up output at layer " +
+                        std::to_string(batch.layer_idx) + " expert " +
+                        std::to_string(batch.expert_ids[slot]);
+                    return 0;
+                }
+
                 for (int i = 0; i < batch.n_ff_exp; ++i) {
                     float gate_value = gate[(size_t)i] * view.gate_scale;
                     float up_value = up[(size_t)i] * view.up_scale;
@@ -285,11 +317,34 @@ public:
                 }
 
                 down_.run(hidden.data(), *down_weight->bo, projected.data());
+                bool projected_finite = false;
+                (void)finite_max_abs(projected.data(), projected.size(),
+                                     &projected_finite);
+                if (!projected_finite) {
+                    if (error) *error = "non-finite XDNA down output at layer " +
+                        std::to_string(batch.layer_idx) + " expert " +
+                        std::to_string(batch.expert_ids[slot]);
+                    return 0;
+                }
                 const float scale = view.down_scale * batch.router_weights[slot];
                 for (int i = 0; i < batch.n_embd; ++i) {
                     batch.output[i] += projected[(size_t)i] * scale;
                 }
                 ++experts_;
+            }
+            bool output_finite = false;
+            const float output_max = finite_max_abs(
+                batch.output, static_cast<size_t>(batch.n_embd), &output_finite);
+            if (!output_finite) {
+                if (error) *error = "non-finite XDNA accumulated output at layer " +
+                    std::to_string(batch.layer_idx);
+                return 0;
+            }
+            if (nonempty_env("DFLASH_MOE_XDNA_TRACE")) {
+                std::fprintf(stderr,
+                    "[xdna2-xrt] layer=%d experts=%d input_max=%.7g output_max=%.7g\n",
+                    batch.layer_idx, batch.n_selected,
+                    (double)input_max, (double)output_max);
             }
             ++calls_;
             return 1;

@@ -42,9 +42,9 @@ int main(int argc, char ** argv) {
     MoeExpertLayer layer;
     layer.layer_idx = 1;
     layer.cold_global_by_local = {3, 7, 11};
-    const uint8_t gate[12] = {};
-    const uint8_t up[12] = {};
-    const uint8_t down[12] = {};
+    const uint8_t gate[12] = {3, 0, 0, 0, 7, 0, 0, 0, 11, 0, 0, 0};
+    const uint8_t up[12] = {3, 0, 0, 0, 7, 0, 0, 0, 11, 0, 0, 0};
+    const uint8_t down[12] = {3, 0, 0, 0, 7, 0, 0, 0, 11, 0, 0, 0};
     layer.gate_data = gate;
     layer.up_data = up;
     layer.down_data = down;
@@ -72,6 +72,24 @@ int main(int argc, char ** argv) {
     for (int i = 4; i < 8; ++i)
         CHECK(std::fabs(output[i] - (input[i] + 6.0f)) < 1e-6f,
               "token one output matches");
+
+    uint8_t global_gate[48] = {};
+    uint8_t global_up[48] = {};
+    uint8_t global_down[48] = {};
+    for (int global : layer.cold_global_by_local) {
+        global_gate[(size_t)global * 4] = (uint8_t)global;
+        global_up[(size_t)global * 4] = (uint8_t)global;
+        global_down[(size_t)global * 4] = (uint8_t)global;
+    }
+    MoeExpertLayer mmap_layer = layer;
+    mmap_layer.gate_data = global_gate;
+    mmap_layer.up_data = global_up;
+    mmap_layer.down_data = global_down;
+    mmap_layer.weights_indexed_by_global = true;
+    float mmap_output[8] = {};
+    CHECK(compute->compute_batch(mmap_layer, input, ids, weights,
+                                 2, 2, 4, 8, mmap_output),
+          "mmap global expert indexing succeeds");
 
     XdnaMoeExpertComputeConfig q1_config = config;
     q1_config.min_tokens = 1;

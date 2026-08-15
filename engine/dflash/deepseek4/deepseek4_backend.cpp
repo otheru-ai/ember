@@ -465,7 +465,7 @@ static std::vector<MoeExpertLayer> make_ds4_xdna_expert_layers(
         MoeExpertLayer & dst = layers[il];
         dst.layer_idx = (int)il;
         dst.cold_global_by_local = storage.cold_expert_ids;
-        dst.fused_gate_up = storage.gate_up_cold != nullptr;
+        dst.fused_gate_up = storage.fused_gate_up;
         dst.gate_data = storage.gate_cold ? storage.gate_cold->data : nullptr;
         dst.up_data = storage.up_cold ? storage.up_cold->data : nullptr;
         dst.down_data = storage.down_cold ? storage.down_cold->data : nullptr;
@@ -481,6 +481,25 @@ static std::vector<MoeExpertLayer> make_ds4_xdna_expert_layers(
         dst.gate_scale = 1.0f;
         dst.up_scale = 1.0f;
         dst.down_scale = 1.0f;
+
+        // The streaming hybrid path intentionally leaves cold experts in the
+        // GGUF mmap. Give XDNA direct views of those already-validated regions
+        // instead of making a second host copy of every cold expert. GGUF
+        // tensors retain global expert order, unlike materialized cold tensors.
+        if (!dst.down_data && hybrid.has_mmap() &&
+            il < hybrid.layer_regions.size()) {
+            const auto * base = static_cast<const uint8_t *>(hybrid.mmap_data);
+            const LayerExpertRegions & regions = hybrid.layer_regions[il];
+            dst.gate_data = regions.gate_exps.size
+                ? base + regions.gate_exps.offset : nullptr;
+            dst.up_data = regions.up_exps.size
+                ? base + regions.up_exps.offset : nullptr;
+            dst.down_data = regions.down_exps.size
+                ? base + regions.down_exps.offset : nullptr;
+            dst.gate_up_data = regions.gate_up_exps.size
+                ? base + regions.gate_up_exps.offset : nullptr;
+            dst.weights_indexed_by_global = true;
+        }
     }
     return layers;
 }
@@ -615,6 +634,18 @@ bool DeepSeek4Backend::resident_sample_next(ResidentSession &session) {
 }
 
 bool DeepSeek4Backend::requires_monolithic_model() const {
+    // An explicit expert cap is an operator request for hybrid placement.  In
+    // particular, the XDNA provider needs cold experts even on Strix Halo,
+    // where the full model otherwise fits in unified memory.  Exact prefill
+    // supports the layered hybrid path; load_model() will disable fused decode
+    // after that placement is built.  Approximate prefill still requires every
+    // expert resident and therefore retains monolithic precedence.
+    const bool explicit_hybrid_budget =
+        env_nonnegative_long("DFLASH_EXPERT_BUDGET_MB", 0) > 0;
+    if (explicit_hybrid_budget &&
+        !prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
+        return false;
+    }
     return cfg_.fused_decode ||
            prefill_attention_mode_is_approximate(cfg_.prefill_mode);
 }

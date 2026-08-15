@@ -43,6 +43,19 @@ function(ember_strict target)
   endif()
 endfunction()
 
+# Hardware-only validator for the packaged provider.  It links only the public
+# provider ABI and the CPU ROCMFP2 reference, then dlopen()s the XRT module at
+# runtime, so normal GPU-free builds can still compile it without XRT.
+add_executable(ember-xdna-validate
+  providers/xdna2/validate_xrt.cpp
+  providers/xdna2/rocmfp2_pack.cpp)
+target_include_directories(ember-xdna-validate PRIVATE
+  providers/xdna2
+  engine/dflash/common
+  engine/ggml/include
+  engine/ggml/src)
+target_link_libraries(ember-xdna-validate PRIVATE ${CMAKE_DL_LIBS})
+
 if(EMBER_XDNA_XRT_PROVIDER)
   find_path(EMBER_XRT_INCLUDE_DIR xrt/xrt_bo.h
     HINTS "${EMBER_XRT_ROOT}/include" REQUIRED)

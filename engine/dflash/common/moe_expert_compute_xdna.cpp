@@ -102,27 +102,30 @@ public:
                 return false;
             }
             global_ids[i] = layer.cold_global_by_local[(size_t)local];
+            const size_t weight_index = layer.weights_indexed_by_global
+                ? (size_t)global_ids[i]
+                : (size_t)local;
             auto & view = weight_views[i];
             view.struct_size = sizeof(view);
             view.fused_gate_up = layer.fused_gate_up ? 1u : 0u;
             if (layer.gate_data && layer.gate_stride) {
                 view.gate = static_cast<const unsigned char *>(layer.gate_data) +
-                            (size_t)local * layer.gate_stride;
+                            weight_index * layer.gate_stride;
                 view.gate_bytes = layer.gate_stride;
             }
             if (layer.up_data && layer.up_stride) {
                 view.up = static_cast<const unsigned char *>(layer.up_data) +
-                          (size_t)local * layer.up_stride;
+                          weight_index * layer.up_stride;
                 view.up_bytes = layer.up_stride;
             }
             if (layer.down_data && layer.down_stride) {
                 view.down = static_cast<const unsigned char *>(layer.down_data) +
-                            (size_t)local * layer.down_stride;
+                            weight_index * layer.down_stride;
                 view.down_bytes = layer.down_stride;
             }
             if (layer.gate_up_data && layer.gate_up_stride) {
                 view.gate_up = static_cast<const unsigned char *>(layer.gate_up_data) +
-                               (size_t)local * layer.gate_up_stride;
+                               weight_index * layer.gate_up_stride;
                 view.gate_up_bytes = layer.gate_up_stride;
             }
             view.gate_format = xdna_weight_format(layer.gate_type);

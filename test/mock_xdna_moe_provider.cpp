@@ -61,6 +61,13 @@ int compute(void * raw, const ember_xdna_moe_batch_v1 * batch,
                 set_error(error, capacity, "invalid mock expert weight view");
                 return 0;
             }
+            const auto expected = static_cast<uint8_t>(batch->expert_ids[index]);
+            if (*static_cast<const uint8_t *>(view.gate) != expected ||
+                *static_cast<const uint8_t *>(view.up) != expected ||
+                *static_cast<const uint8_t *>(view.down) != expected) {
+                set_error(error, capacity, "mock expert weight offset is wrong");
+                return 0;
+            }
             routed += (float)(batch->expert_ids[index] + 1) *
                       batch->router_weights[index];
         }

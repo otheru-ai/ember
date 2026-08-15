@@ -39,6 +39,10 @@ struct MoeExpertLayer {
     float up_scale = 1.0f;
     float down_scale = 1.0f;
 
+    // Materialized cold tensors are compacted into placement-local order.
+    // mmap-backed tensors retain the GGUF's global expert order instead.
+    bool weights_indexed_by_global = false;
+
     // Maps placement-local expert indices back to model-global expert ids.
     // CPU implementations consume local ids directly; remote mixed-backend
     // implementations use this to address the complementary remote placement.

@@ -223,9 +223,11 @@ RUN apt-get update \
       -DEMBER_XDNA_XRT_PROVIDER=ON \
       -DEMBER_XRT_ROOT=/opt/xilinx/xrt \
  && cmake --build /ember/build-xdna-provider \
-      --target ember_xdna_moe_xrt -j"$(nproc)" \
+      --target ember_xdna_moe_xrt ember-xdna-validate -j"$(nproc)" \
  && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
-      /xdna-provider/libember_xdna_moe.so
+      /xdna-provider/libember_xdna_moe.so \
+ && install -Dm0755 /ember/build-xdna-provider/ember-xdna-validate \
+      /xdna-provider/ember-xdna-validate
 
 FROM release AS release-xdna
 
@@ -240,6 +242,8 @@ COPY --from=xdna-userspace-build /xdna-runtime/ /
 COPY --from=xdna-userspace-build /xdna-licenses/ /usr/share/licenses/ember/
 COPY --from=dev-xdna /xdna-provider/libember_xdna_moe.so \
   /usr/local/lib/ember/libember_xdna_moe.so
+COPY --from=dev-xdna /xdna-provider/ember-xdna-validate \
+  /usr/local/bin/ember-xdna-validate
 COPY --from=xdna-kernel-build /xdna-artifacts/ \
   /usr/local/share/ember/xdna2/
 COPY providers/xdna2/VENDOR.md \
@@ -252,6 +256,7 @@ COPY vendor/xgrammar/LICENSE \
 RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
  && ldconfig \
  && ! ldd /usr/local/lib/ember/libember_xdna_moe.so | grep -q 'not found' \
+ && ! ldd /usr/local/bin/ember-xdna-validate | grep -q 'not found' \
  && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
  && /opt/xilinx/xrt/bin/xrt-smi --version
 
