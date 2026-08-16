@@ -20,6 +20,8 @@ OBJECT_V4 := $(BUILD_DIR)/rocmfp2_gemv_v4.o
 OBJECT_EXPERT_V5 := $(BUILD_DIR)/rocmfp2_expert_v5.o
 OBJECT_GEMM_V6 := $(BUILD_DIR)/rocmfp2_gemm_v6.o
 OBJECT_EXPERT_V6 := $(BUILD_DIR)/rocmfp2_expert_v6.o
+OBJECT_GEMM_V7 := $(BUILD_DIR)/rocmfp4_gemm_v7.o
+OBJECT_EXPERT_V7 := $(BUILD_DIR)/rocmfp4_expert_v7.o
 XCLBIN := $(BUILD_DIR)/gemv_$(K)x$(N).xclbin
 INSTS := $(BUILD_DIR)/gemv_$(K)x$(N).insts
 XCLBIN_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).xclbin
@@ -34,6 +36,9 @@ INSTS_EXPERT_V5 := $(BUILD_DIR)/expert_v5_4096x2048x4096.insts
 MLIR_EXPERT_V6 := $(BUILD_DIR)/expert_v6.mlir
 XCLBIN_EXPERT_V6 := $(BUILD_DIR)/expert_v6_4096x2048x4096_b4.xclbin
 INSTS_EXPERT_V6 := $(BUILD_DIR)/expert_v6_4096x2048x4096_b4.insts
+MLIR_EXPERT_V7 := $(BUILD_DIR)/expert_v7.mlir
+XCLBIN_EXPERT_V7 := $(BUILD_DIR)/expert_v7_4096x2048x4096_b5.xclbin
+INSTS_EXPERT_V7 := $(BUILD_DIR)/expert_v7_4096x2048x4096_b5.insts
 MLIR_GATE_V5 := $(BUILD_DIR)/gate_v5.mlir
 XCLBIN_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.xclbin
 INSTS_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.insts
@@ -41,10 +46,11 @@ MLIR_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5.mlir
 XCLBIN_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.xclbin
 INSTS_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.insts
 
-.PHONY: all expert-v5 expert-v6 gate-v5 one-down-v5 clean
+.PHONY: all expert-v5 expert-v6 expert-v7 gate-v5 one-down-v5 clean
 all: $(XCLBIN) $(XCLBIN_V2) $(XCLBIN_V3) $(XCLBIN_V4)
 expert-v5: $(XCLBIN_EXPERT_V5)
 expert-v6: $(XCLBIN_EXPERT_V6)
+expert-v7: $(XCLBIN_EXPERT_V7)
 gate-v5: $(XCLBIN_GATE_V5)
 one-down-v5: $(XCLBIN_ONE_DOWN_V5)
 
@@ -84,11 +90,23 @@ $(OBJECT_EXPERT_V6): rocmfp2_expert_v6.cc
 	mkdir -p $(dir $@)
 	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
 
+$(OBJECT_GEMM_V7): rocmfp4_gemm_v7.cc
+	mkdir -p $(dir $@)
+	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
+
+$(OBJECT_EXPERT_V7): rocmfp4_expert_v7.cc
+	mkdir -p $(dir $@)
+	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
+
 $(MLIR_EXPERT_V5): rocmfp2_expert_v5.py
 	mkdir -p $(dir $@)
 	python3 $< > $@
 
 $(MLIR_EXPERT_V6): rocmfp2_expert_v6.py
+	mkdir -p $(dir $@)
+	python3 $< > $@
+
+$(MLIR_EXPERT_V7): rocmfp4_expert_v7.py
 	mkdir -p $(dir $@)
 	python3 $< > $@
 
@@ -153,6 +171,15 @@ $(XCLBIN_EXPERT_V6): $(MLIR_EXPERT_V6) $(OBJECT_GEMM_V6) $(OBJECT_EXPERT_V6)
 		--npu-insts-name=$(notdir $(INSTS_EXPERT_V6)) $(notdir $(MLIR_EXPERT_V6))
 	test -s $(XCLBIN_EXPERT_V6)
 	test -s $(INSTS_EXPERT_V6)
+
+$(XCLBIN_EXPERT_V7): $(MLIR_EXPERT_V7) $(OBJECT_GEMM_V7) $(OBJECT_EXPERT_V7)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_EXPERT_V7)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_EXPERT_V7)) $(notdir $(MLIR_EXPERT_V7))
+	test -s $(XCLBIN_EXPERT_V7)
+	test -s $(INSTS_EXPERT_V7)
 
 $(XCLBIN_GATE_V5): $(MLIR_GATE_V5) $(OBJECT_V4) $(OBJECT_EXPERT_V5)
 	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \

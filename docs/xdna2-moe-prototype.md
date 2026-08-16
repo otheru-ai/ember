@@ -568,6 +568,47 @@ does not yet export the DSpark symbol: a hardware provider needs the complete
 fixed-shape draft AIE graph and trained-weight packer before the environment
 variables are usable in production.
 
+### Gen7 ROCMFP4 draft-expert primitive
+
+Gen7 supplies the first trained-format building block for that graph. The
+DSpark draft has three MoE layers, 256 experts, six routed experts per row, one
+shared expert, a five-row block, and 4096/2048 expert dimensions. Its gate,
+up, and down tensors are `GGML_TYPE_Q4_0_ROCMFP4_FAST` (type 101), not the
+target prototype's ROCMFP2 type. Each 32-weight block is 16 signed-codebook
+nibble bytes plus one UE4M3 scale byte.
+
+The host packer losslessly permutes those blocks into 128x64 AIE tiles. It
+keeps the nibble plane compact and expands only the scale to exact BF16, so a
+packed block costs 18 bytes instead of 17 rather than doubling the weights to
+int8. On AIE2P the microkernel vector-unpacks the nibbles, maps codebook
+magnitudes `{0,1,2,3,4,6,8,10}`, applies the sign bit and BF16 scale once, and
+reuses the decoded tile across all five draft rows. The resident 4x8 graph then
+performs gate/up, exact clamped SwiGLU, and both down-projection groups without
+an intermediate host round trip.
+
+`expert_v7_4096x2048x4096_b5.{xclbin,insts}` and
+`ember-xdna-rocmfp4-validate` are packaged in the `release-xdna` image. The
+validator is deliberately separate from the ROCMFP2 target provider while the
+whole draft graph is incomplete. It covers all 15 nonzero signed codebook
+values, the complete projection shapes, five independent rows, and the fused
+epilogue.
+
+On the physical Strix Halo, the validator passed with maximum absolute error
+zero and cosine 1.0. Twenty cached runs averaged 0.898 ms for the complete
+five-row expert, with 14,155,776 packed weight bytes. The server stayed active
+and healthy during the test. This is close to Gen6's roughly 0.84 ms four-row
+FP2 result, proving that compact signed FP4 decode is not the limiting cost.
+
+The result does **not** justify launching one Gen7 graph for every routed
+expert. Five tokens select up to 30 routed expert rows per layer, and most
+expert ids will be unique; a one-expert/five-row launch would compute four
+unselected rows in that common case. The next kernel must consume the five-row
+routing table, stream each selected expert only for its owning rows, multiply
+by router weights, and accumulate directly into five output rows. Shared
+experts can still use the existing five-row reuse. This route-fused graph is
+the useful optimization because it preserves the coarse whole-draft boundary
+while eliminating both wasted rows and per-expert output materialization.
+
 The scheduling target is deliberately cross-session and coarse: while the GPU
 verifies session A (roughly 63-82 ms for q=2..4 in the measurements above), the
 NPU prepares session B's five-row draft hidden block. The CPU owns admission,

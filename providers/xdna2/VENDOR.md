@@ -48,6 +48,16 @@ that start-queue field available on AIE2IPU. These are research references,
 not vendored dependencies. Ember's activation contract and accuracy thresholds
 remain independent.
 
+Generation 7 also uses only the public AIE API operations demonstrated by the
+official MLIR-AIE tree (uint4 unpack, vector masks/select, BF16 conversion and
+whole-array object FIFOs). The current upstream tree was rechecked at commit
+`c495b2b4f988d81043b5a3cbea3be223c1c7a93c`, including the BF16 norm, RoPE,
+softmax, matrix-multiplication, and activation-epilogue examples. Ember's
+ROCMFP4 signed-codebook mapping, five-row expert graph, packer, and numerical
+contract are original to this prototype. The AIE-RT queue findings above are
+why Gen7 retains explicit completion-producing tasks rather than assuming
+that queued descriptor reuse is safe.
+
 Generation 6's weight-reusing batch topology also consulted, without copying
 source from, the official MLIR-AIE whole-array matrix examples:
 
