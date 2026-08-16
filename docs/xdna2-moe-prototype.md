@@ -481,6 +481,17 @@ rejected and is not shipped; Gen6 retains the hardware-proven vector
 accumulation above. Revisit native matrix instructions only with an isolated
 tile-level layout/conformance test, not in the full expert graph.
 
+The AIE-RT `release/main_aig` task-queue and repeat-count APIs motivated one
+last Gen6 controller experiment. Collapsing the two 16-repeat hidden replays
+into one 32-repeat task read beyond the intended staging cycle and produced
+non-finite output. Queueing two 16-repeat tasks without the intermediate wait,
+issuing a completion token only from the second, stayed finite but failed the
+reference at cosine 0.9721 and maximum absolute error 1.33. Its 0.835 ms warm
+time was indistinguishable from the exact 0.836 ms baseline. Keep the separate
+token-producing task and `dma_wait` for each down-projection group: descriptor
+reuse and the shallow broadcast FIFO make that wait a correctness boundary,
+not useful host overhead.
+
 ### Fused-verifier shared-expert budget
 
 The q-wide DSpark verifier was then measured by diagnostic graph surgery, not
