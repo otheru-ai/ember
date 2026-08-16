@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +36,13 @@
 #include <vector>
 
 namespace {
+
+using ProviderClock = std::chrono::steady_clock;
+
+double elapsed_ms(ProviderClock::time_point begin,
+                  ProviderClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+}
 
 using ember::xdna2::pack_rocmfp2_gemv;
 using ember::xdna2::pack_rocmfp2_gemv_v4;
@@ -208,6 +216,9 @@ public:
             throw std::runtime_error("XDNA2 runlist exceeds configured capacity");
         }
 
+        const bool trace = nonempty_env("DFLASH_MOE_XDNA_TRACE") != nullptr;
+        const auto start = ProviderClock::now();
+
         // Gate and up share one activation.  Down projections each have their
         // own SwiGLU result.  Reuse one BO for identical input pointers so the
         // common gate/up phase performs only one activation synchronization.
@@ -232,6 +243,7 @@ public:
             }
             input_slot[run_index] = slot;
         }
+        const auto inputs_ready = ProviderClock::now();
 
         auto configure_run = [&](size_t index) {
             xrt::run run(*kernel_);
@@ -264,6 +276,7 @@ public:
                 }
             }
         }
+        const auto execution_ready = ProviderClock::now();
 
         for (size_t run_index = 0; run_index < invocations.size(); ++run_index) {
             output_bos_[run_index]->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
@@ -276,6 +289,18 @@ public:
                 for (int i = 0; i < n_; ++i)
                     invocations[run_index].output[i] = bf16_to_float(source[i]);
             }
+        }
+        const auto outputs_ready = ProviderClock::now();
+        if (trace) {
+            std::fprintf(stderr,
+                "[xdna2-xrt-gemv] k=%d n=%d runs=%zu inputs=%zu "
+                "upload_ms=%.3f execute_ms=%.3f download_ms=%.3f "
+                "total_ms=%.3f\n",
+                k_, n_, invocations.size(), unique_inputs.size(),
+                elapsed_ms(start, inputs_ready),
+                elapsed_ms(inputs_ready, execution_ready),
+                elapsed_ms(execution_ready, outputs_ready),
+                elapsed_ms(start, outputs_ready));
         }
     }
 
@@ -359,6 +384,8 @@ public:
         }
 
         try {
+            const bool trace = nonempty_env("DFLASH_MOE_XDNA_TRACE") != nullptr;
+            const auto start = ProviderClock::now();
             bool input_finite = false;
             const float input_max = finite_max_abs(
                 batch.input, static_cast<size_t>(batch.n_embd), &input_finite);
@@ -378,6 +405,7 @@ public:
             std::vector<std::shared_ptr<CachedWeight>> gate_weights(selected);
             std::vector<std::shared_ptr<CachedWeight>> up_weights(selected);
             std::vector<std::shared_ptr<CachedWeight>> down_weights(selected);
+            const auto buffers_ready = ProviderClock::now();
 
             for (int slot = 0; slot < batch.n_selected; ++slot) {
                 const auto & view = batch.expert_weights[slot];
@@ -401,6 +429,7 @@ public:
                     view.down, view.down_bytes,
                     batch.n_ff_exp, batch.n_embd, down_);
             }
+            const auto weights_ready = ProviderClock::now();
 
             std::vector<GemvProgram::Invocation> gate_up_runs;
             gate_up_runs.reserve(selected * 2);
@@ -411,6 +440,7 @@ public:
                                         up.data() + slot * ff});
             }
             gate_up_.run_many(gate_up_runs);
+            const auto gate_up_ready = ProviderClock::now();
 
             for (int slot = 0; slot < batch.n_selected; ++slot) {
                 const size_t index = static_cast<size_t>(slot);
@@ -439,6 +469,7 @@ public:
                         (gate_value / (1.0f + std::exp(-gate_value))) * up_value;
                 }
             }
+            const auto swiglu_ready = ProviderClock::now();
 
             std::vector<GemvProgram::Invocation> down_runs;
             down_runs.reserve(selected);
@@ -448,6 +479,7 @@ public:
                                      projected.data() + slot * embd});
             }
             down_.run_many(down_runs);
+            const auto down_ready = ProviderClock::now();
 
             for (int slot = 0; slot < batch.n_selected; ++slot) {
                 const size_t index = static_cast<size_t>(slot);
@@ -468,6 +500,7 @@ public:
                 }
                 ++experts_;
             }
+            const auto accumulated = ProviderClock::now();
             kernel_runs_ += selected * 3;
             submissions_ += generation_ >= 2 ? 2 : selected * 3;
             bool output_finite = false;
@@ -478,11 +511,22 @@ public:
                     std::to_string(batch.layer_idx);
                 return 0;
             }
-            if (nonempty_env("DFLASH_MOE_XDNA_TRACE")) {
+            if (trace) {
                 std::fprintf(stderr,
-                    "[xdna2-xrt] layer=%d experts=%d input_max=%.7g output_max=%.7g\n",
+                    "[xdna2-xrt] layer=%d experts=%d input_max=%.7g "
+                    "output_max=%.7g setup_ms=%.3f pack_ms=%.3f "
+                    "gate_up_ms=%.3f swiglu_ms=%.3f down_ms=%.3f "
+                    "accum_ms=%.3f total_ms=%.3f\n",
                     batch.layer_idx, batch.n_selected,
-                    (double)input_max, (double)output_max);
+                    static_cast<double>(input_max),
+                    static_cast<double>(output_max),
+                    elapsed_ms(start, buffers_ready),
+                    elapsed_ms(buffers_ready, weights_ready),
+                    elapsed_ms(weights_ready, gate_up_ready),
+                    elapsed_ms(gate_up_ready, swiglu_ready),
+                    elapsed_ms(swiglu_ready, down_ready),
+                    elapsed_ms(down_ready, accumulated),
+                    elapsed_ms(start, accumulated));
             }
             ++calls_;
             return 1;

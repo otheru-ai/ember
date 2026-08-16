@@ -210,6 +210,14 @@ cosine 1.0. Cold times were 27.11 ms for one expert and 29.15 ms for the
 six-slot repeated-weight validator; distinct trained experts must still report
 their larger cache-fill cost separately.
 
+Opt-in provider phase timing explains the remaining warm latency. One dense
+expert spent 3.27 ms in the combined gate/up runlist and 3.13 ms in the down
+runlist; host SwiGLU took 0.005 ms and XRT BO synchronization was below 0.002
+ms in each direction. Six experts spent 4.45 ms in gate/up, 3.77 ms in down,
+and 0.031 ms in host SwiGLU. The useful next target is therefore the fixed
+second device execution boundary. Moving only SwiGLU arithmetic or activation
+copies cannot materially improve this path.
+
 The trained 85.3 GiB DeepSeek-V4-Flash model then ran with the provider marked
 required, a 32 GiB hot-expert budget, exact prefill, and runtime top-k 4. This
 proved all 43 mmap-backed expert layers can reach XRT without fallback. A
