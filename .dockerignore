@@ -1,6 +1,7 @@
 .git
 build
 build-*
+providers/xdna2/kernel/build
 models
 cache
 reports

@@ -137,7 +137,7 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`, `2`, `3`, or `4` |
+| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`-`5`; Gen5 fused expert remains explicit opt-in |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
 | `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
 
@@ -240,22 +240,76 @@ standalone dense probe and far less dispatch-heavy, but is not faster end to
 end. Keep the provider opt-in; do not deploy it for model serving or claim
 CPU/GPU/NPU acceleration yet.
 
-### What the NPU should do next
+### Gen5 fused expert
 
-Gen4 clears the standalone correctness and kernel-latency gates without a
-persistent BF16/BFP16 expert expansion. The next optimization should eliminate
-the remaining host phase boundary: keep gate and up results on the array, apply
-clamped SwiGLU with a vector kernel, and feed the down projection without an
-XRT-to-host-to-XRT round trip. The official
-[IRON kernel library](https://xilinx.github.io/mlir-aie/dev/api/kernels/)
-contains a BF16 SwiGLU implementation, but its tanh approximation must be
-compared against Ember's exact sigmoid contract before reuse.
+Gen5 implements the next Gen4 optimization without a persistent BF16/BFP16
+expert expansion. One fixed spatial graph keeps gate and up results on the
+array, applies Ember-compatible clamped SwiGLU, stages the BF16 hidden vector
+through NPU DMA, and performs both down-projection passes under one host
+dispatch. `EMBER_XDNA_KERNEL_GEN=5` selects it; Gen4 remains the default until
+trained-model differential and end-to-end serving gates pass.
+
+AMD's current [IRON operator library](https://github.com/amd/IRON) confirms the
+overall shape: its decode SwiGLU sequences gate GEMV, up GEMV, SiLU, multiply,
+and down GEMV under one host dispatch. Its full-ELF path is temporal fusion,
+however: the command processor reconfigures the array between separate
+operators. Ember's measured host copies are already negligible, and published
+[*Unlocking the AMD Neural Processing Unit for ML Training on the Client*](https://arxiv.org/html/2504.03083v1)
+reports that minimal reconfiguration was 3.5x faster than whole-array
+reconfiguration on the first invocation of a new shape. Gen4 should therefore
+use one spatial design and one fixed control program, not concatenate five
+independent overlays. This is also consistent with the Linux driver model:
+firmware executes one `ctrlcode` program which starts host-DDR DMAs and raises
+one completion interrupt, as described by the
+[upstream `amdxdna` documentation](https://docs.kernel.org/accel/amdxdna/amdnpu.html).
+
+The upstream BF16 SiLU is not accurate enough for Ember. Its own decode test
+uses 4% relative and `0.4` absolute tolerances. A 16,384-value hardware sweep
+on this Strix Halo found that the unguarded AIE2P tanh approximation can wrap
+outside its useful input domain (`tanh(-9.65)` returned `+1`). Explicitly
+saturating outside `[-4, 4]` removed that failure, but 2,317 values still
+exceeded `1e-4`; maximum absolute tanh error was `0.0371` and RMS error was
+`0.00344`. That implementation is rejected. Gen5 instead uses a degree-11,
+range-reduced scalar exponential and explicit BF16 round-to-nearest-even. Its
+complete scale/clamp/SwiGLU contract matched 16,384 of 16,384 hardware probe
+values exactly. A single core processing 256 blocks averaged 94.98 us per
+64-value block.
+
+The first full control stream timed out because it waited on an MM2S DMA task
+which had not requested a completion token. The supplied
+[AIE-RT `release/main_aig` branch](https://github.com/Xilinx/aie-rt/tree/release/main_aig)
+documents this contract: a descriptor must issue a task-completion token before
+software waits on or reuses it. Explicit `issue_token=True` fixed the replay.
+This also avoids a seventh memory-tile DMA channel: hidden and final results use
+one sequenced packet channel, exactly filling the six-channel hardware limit.
+
+On physical Strix Halo, the complete one-expert graph measured 3.88 ms cold and
+0.544 ms warm with exact structured-weight output. A dense run measured 3.55 ms
+cold and 0.513 ms warm, maximum absolute error `3.34e-6`, RMS error `5.01e-7`,
+and cosine 1.0. Against Gen4's 6.44 ms dense warm result, the standalone fused
+kernel is 12.5x faster. This is a kernel result, not an end-to-end inference
+claim; multi-expert runlists, trained weights, cache fill, and HIP comparison
+remain required.
+
+The packaged provider validator reproduced the result: one dense expert was
+`0.569` ms warm (`26.42` ms cold including fused weight packing), and a
+six-entry dense runlist was `2.583` ms warm. Both passed at cosine 1.0; the
+six-entry maximum absolute error was `4.29e-6`. The six-entry kernel path is
+3.2x faster than Gen4's `8.32` ms, while retaining Gen4 as the default.
 
 After fusion, measure trained-model cache-fill cost and routing locality with
 the 2x packed representation. Native BFP16 matrix multiplication remains a
 fallback experiment if vector GEMV stops scaling, not the immediate next step.
 UMA can remove byte copies through dual-registered host pages, but the current
 XRT/ROCm stack still requires CPU ownership transitions and fences.
+
+[Ryzen AI 1.8](https://ryzenai.docs.amd.com/en/latest/linux.html) now documents
+Strix-class Linux support, while its installer ships an XRT 2.25 package set
+and its release notes include Strix Halo in the supported processor family.
+This prototype is built and hardware-validated as one pinned XDNA/XRT 2.26
+source stack; do not mix its userspace libraries or shim with the independently
+versioned installer packages. The host kernel driver and firmware remain host
+responsibilities in either installation model.
 
 The same session exposed a separate hybrid-path snapshot issue in the HIP
 control: its fresh run matched its baseline, but restored decoding diverged at
@@ -276,9 +330,9 @@ Before treating the path as usable on gfx1151 hardware:
    packing separated from warm steady state. Record provider launch/sync time,
    total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
    and `xrt-smi` partition activity.
-5. Fuse gate/up, clamped SwiGLU, and down around the Gen4 vector GEMV; compare
-   cold conversion, warm cache residency, and end-to-end performance. Keep the
-   provider opt-in unless both output and end-to-end performance pass.
+5. Run the new Gen5 fused expert through trained-weight cache residency and
+   end-to-end performance tests. Keep the provider opt-in unless both output
+   and end-to-end performance pass.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.

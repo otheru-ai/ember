@@ -1,4 +1,5 @@
 /build/
+/providers/xdna2/kernel/build/
 *.o
 *.a
 compile_commands.json

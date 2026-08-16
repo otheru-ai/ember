@@ -49,6 +49,15 @@ bool pack_rocmfp2_gemv_v4(const void * raw, size_t raw_bytes, int k, int n,
                           std::vector<uint8_t> & packed,
                           std::string * error = nullptr);
 
+// Fixed DeepSeek-V4 expert layout consumed by the spatially fused Gen5 graph:
+// column -> K tile -> interleaved gate/up row tiles, then both down groups.
+size_t rocmfp2_expert_v5_bytes();
+bool pack_rocmfp2_expert_v5(const void * gate, size_t gate_bytes,
+                            const void * up, size_t up_bytes,
+                            const void * down, size_t down_bytes,
+                            std::vector<uint8_t> & packed,
+                            std::string * error = nullptr);
+
 float ue4m3_to_float(uint8_t value);
 
 // Deterministic references used to validate the lossless permutation and the

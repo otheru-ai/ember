@@ -208,6 +208,74 @@ bool pack_rocmfp2_gemv_v4(const void * raw, size_t raw_bytes, int k, int n,
     return tile_index == v4_tile_count(k, n);
 }
 
+size_t rocmfp2_expert_v5_bytes() {
+    return 3 * rocmfp2_v4_projection_bytes(4096, 2048);
+}
+
+bool pack_rocmfp2_expert_v5(const void * gate, size_t gate_bytes,
+                            const void * up, size_t up_bytes,
+                            const void * down, size_t down_bytes,
+                            std::vector<uint8_t> & packed,
+                            std::string * error) {
+    std::vector<uint8_t> gate_v4, up_v4, down_v4;
+    if (!pack_rocmfp2_gemv_v4(gate, gate_bytes, 4096, 2048,
+                              gate_v4, error) ||
+        !pack_rocmfp2_gemv_v4(up, up_bytes, 4096, 2048,
+                              up_v4, error) ||
+        !pack_rocmfp2_gemv_v4(down, down_bytes, 2048, 4096,
+                              down_v4, error)) {
+        return false;
+    }
+    constexpr int gate_k_tiles = 4096 / kGemvTileK;
+    constexpr int down_k_tiles = 2048 / kGemvTileK;
+    constexpr int down_groups = 4096 / kOutputsPerArrayPass;
+    packed.resize(rocmfp2_expert_v5_bytes());
+    size_t destination = 0;
+    auto append_tile = [&](const std::vector<uint8_t> & source,
+                           size_t tile_index) {
+        std::memcpy(packed.data() + destination,
+                    source.data() + tile_index * kV4PackedTileBytes,
+                    kV4PackedTileBytes);
+        destination += kV4PackedTileBytes;
+    };
+    for (int column = 0; column < kAieColumns; ++column) {
+        for (int kt = 0; kt < gate_k_tiles; ++kt) {
+            for (int row = 0; row < kAieRows; ++row) {
+                const size_t tile =
+                    (static_cast<size_t>(column) *
+                         static_cast<size_t>(gate_k_tiles) +
+                     static_cast<size_t>(kt)) * static_cast<size_t>(kAieRows) +
+                    static_cast<size_t>(row);
+                append_tile(gate_v4, tile);
+            }
+            for (int row = 0; row < kAieRows; ++row) {
+                const size_t tile =
+                    (static_cast<size_t>(column) *
+                         static_cast<size_t>(gate_k_tiles) +
+                     static_cast<size_t>(kt)) * static_cast<size_t>(kAieRows) +
+                    static_cast<size_t>(row);
+                append_tile(up_v4, tile);
+            }
+        }
+        for (int group = 0; group < down_groups; ++group) {
+            for (int kt = 0; kt < down_k_tiles; ++kt) {
+                for (int row = 0; row < kAieRows; ++row) {
+                    const size_t tile =
+                        ((static_cast<size_t>(group) *
+                              static_cast<size_t>(kAieColumns) +
+                          static_cast<size_t>(column)) *
+                             static_cast<size_t>(down_k_tiles) +
+                         static_cast<size_t>(kt)) *
+                            static_cast<size_t>(kAieRows) +
+                        static_cast<size_t>(row);
+                    append_tile(down_v4, tile);
+                }
+            }
+        }
+    }
+    return destination == packed.size();
+}
+
 bool rocmfp2_gemv_raw_reference(const void * raw, size_t raw_bytes,
                                 const float * input, int k, int n,
                                 float scale, float * output) {

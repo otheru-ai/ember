@@ -105,6 +105,27 @@ int main() {
                                 rejected, &error),
           "truncated Gen4 projection rejected");
 
+    const size_t expert_projection = rocmfp2_projection_bytes(4096, 2048);
+    const size_t expert_down = rocmfp2_projection_bytes(2048, 4096);
+    std::vector<uint8_t> expert_gate(expert_projection, 0x11);
+    std::vector<uint8_t> expert_up(expert_projection, 0x22);
+    std::vector<uint8_t> expert_down_raw(expert_down, 0x33);
+    std::vector<uint8_t> expert_packed;
+    CHECK(pack_rocmfp2_expert_v5(
+              expert_gate.data(), expert_gate.size(),
+              expert_up.data(), expert_up.size(),
+              expert_down_raw.data(), expert_down_raw.size(), expert_packed,
+              &error),
+          "Gen5 fused expert packs");
+    CHECK(expert_packed.size() == rocmfp2_expert_v5_bytes(),
+          "Gen5 fused expert has exact packed size");
+    CHECK(!pack_rocmfp2_expert_v5(
+              expert_gate.data(), expert_gate.size() - 1,
+              expert_up.data(), expert_up.size(),
+              expert_down_raw.data(), expert_down_raw.size(), expert_packed,
+              &error),
+          "short Gen5 gate projection rejected");
+
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

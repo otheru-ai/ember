@@ -29,3 +29,17 @@ The runtime image's XRT base and XDNA shim are built from AMD's driver tree:
 
 Only userspace XRT and the XDNA shim belong in the container. The kernel driver
 and firmware belong on the host and `/dev/accel/accel0` is passed through.
+
+Generation 4's fused-expert investigation also consulted, without copying
+source from, AMD's current IRON operator and sequencing examples:
+
+- repository: <https://github.com/amd/IRON>
+- commit: `cdc48e93fd2c8776105780790c46ba4bca1bc40e`
+- relevant paths: `iron/operators/swiglu_decode/`,
+  `iron/common/compilation/sequence.py`, and `aie_kernels/aie2p/silu.cc`
+- license: Apache-2.0
+
+The low-level DMA/task-queue contract was checked against AIE-RT branch
+`release/main_aig` at commit `8849e208bdcc533b20a0ed3f95c1ce961dee9c3a`.
+These are research references, not vendored dependencies. Ember's activation
+contract and accuracy thresholds remain independent.
