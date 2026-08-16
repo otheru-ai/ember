@@ -256,6 +256,18 @@ int main(int argc, char ** argv) {
         dlclose(library);
         return 1;
     }
+    int warm_runs = 1;
+    if (const char * raw = std::getenv("EMBER_XDNA_VALIDATION_WARM_RUNS")) {
+        char * end = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 1 || parsed > 10000) {
+            std::fprintf(stderr,
+                         "EMBER_XDNA_VALIDATION_WARM_RUNS must be in [1,10000]\n");
+            dlclose(library);
+            return 1;
+        }
+        warm_runs = static_cast<int>(parsed);
+    }
 
     ember_xdna_moe_config_v1 config{};
     config.abi_version = EMBER_XDNA_MOE_PROVIDER_ABI_VERSION;
@@ -384,29 +396,34 @@ int main(int argc, char ** argv) {
     }
     const ErrorMetrics cold = compare(actual, expected);
 
-    std::fill(actual.begin(), actual.end(), std::numeric_limits<float>::quiet_NaN());
-    error[0] = '\0';
     const auto warm_start = std::chrono::steady_clock::now();
-    const int warm_ok = provider->compute(context, &batch, error, sizeof(error));
-    const double warm_ms = milliseconds(warm_start);
-    if (!warm_ok) {
-        std::fprintf(stderr, "warm provider compute failed: %s\n", error);
-        provider->destroy(context);
-        dlclose(library);
-        return 1;
+    for (int run = 0; run < warm_runs; ++run) {
+        std::fill(actual.begin(), actual.end(),
+                  std::numeric_limits<float>::quiet_NaN());
+        error[0] = '\0';
+        if (!provider->compute(context, &batch, error, sizeof(error))) {
+            std::fprintf(stderr,
+                         "warm provider compute failed at run %d/%d: %s\n",
+                         run + 1, warm_runs, error);
+            provider->destroy(context);
+            dlclose(library);
+            return 1;
+        }
     }
+    const double warm_ms = milliseconds(warm_start) / warm_runs;
     const ErrorMetrics warm = compare(actual, expected);
     const bool finite = std::all_of(actual.begin(), actual.end(),
         [](float value) { return std::isfinite(value); });
     const bool pass = finite && cold.max_abs <= 1.0e-4f &&
                       warm.max_abs <= 1.0e-4f;
 
-    std::printf("provider=%s generation=%d mode=%s tokens=%d experts=%d outputs=%zu "
+    std::printf("provider=%s generation=%d mode=%s tokens=%d experts=%d "
+                "warm_runs=%d outputs=%zu "
                 "reference_ms=%.3f cold_ms=%.3f "
                 "warm_ms=%.3f\n",
                 provider->name ? provider->name : "(unnamed)", generation,
-                dense ? "dense" : "structured", token_count,
-                selected_experts, actual.size(),
+                dense ? "dense" : "structured", token_count, selected_experts,
+                warm_runs, actual.size(),
                 reference_ms, cold_ms, warm_ms);
     std::printf("cold max_abs=%.9g max_rel=%.9g mean_abs=%.9g rms=%.9g "
                 "cosine=%.9g actual_range=%.9g expected_range=%.9g "

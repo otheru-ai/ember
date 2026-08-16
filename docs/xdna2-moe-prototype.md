@@ -138,6 +138,7 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
 | `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`-`5`; Gen5 fused expert remains explicit opt-in |
+| `EMBER_XDNA_VALIDATION_WARM_RUNS` | `1` | Repeat cached validation dispatches for sustained-load and overlap measurements |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
 | `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
 
@@ -398,6 +399,41 @@ their separately packed XRT cache. The next verifier experiment may use this
 zero-copy activation seam, but it must first prove that splitting the 43-layer
 fused GPU graph costs less than the expert work moved to XDNA2.
 
+That concurrency gate rejected the per-layer verifier split before invasive
+graph surgery. `ember-xdna-validate` supports
+`EMBER_XDNA_VALIDATION_WARM_RUNS` so a cached Gen5 workload can remain active
+across a real server request. Eight matched 32-token DSpark requests were
+measured with and without a concurrent dense five-token/four-expert workload.
+The acceptance pattern was identical between the two sets. Mean GPU decode
+rose from 1400.6 ms to 1503.3 ms (+7.33%), while prefill rose from 671.6 ms to
+717.5 ms (+6.84%). The NPU workload remained correct at cosine 1.0 and maximum
+absolute error `9.54e-6`, but its own warm dispatch rose from 8.318 ms alone to
+9.183 ms under overlap (+10.40%).
+
+This proves simultaneous GPU/NPU execution works; it also quantifies shared
+memory/fabric contention. A Gen5 expert-token costs about 0.459 ms under that
+load. Putting even one selected expert per token on XDNA2 at every target layer
+would add a dependency boundary at all 43 layers and cannot outrun the roughly
+1.75 ms mean total verifier budget per layer. Do not implement that partition.
+The already-separated speculative head is not a useful fallback: its entire
+measured budget is only 1.7 ms and its fused GPU graph is dominated by the
+4096x129280 target LM head, a shape the current fixed AIE kernels do not
+support. The NPU remains useful as a zero-copy-capable experimental coprocessor,
+but no measured serving-critical stage currently has a positive offload
+budget.
+
+The layer-major prefill shared expert was checked as the final plausible
+serving role because every token uses the same weights. A cached dense Gen5
+run with five tokens and one expert passed at cosine 1.0 and maximum absolute
+error `2.38e-6`, but took 2.171 ms, or 0.434 ms per token. That is only about a
+15% per-row improvement over the 0.513 ms single-row dense result. Repeating it
+over 43 layers would spend roughly 18.7 ms per prompt token on the shared
+expert alone; the reference all-GPU sparse-prefill result completes the entire
+model in about 4 ms per token. Larger sequential XRT runlists cannot close that
+gap. A useful prefill role would require a genuinely batched AIE matrix kernel
+that reuses resident weights across token columns, not another extension of
+Gen5's one-row expert commands.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host
@@ -415,10 +451,10 @@ Before treating the path as usable on gfx1151 hardware:
 5. Keep Gen5 target-MoE offload opt-in: its trained baseline passed the initial
    token check, but its warm end-to-end decode reached only 10.20 tok/s versus
    22.65 tok/s for production.
-6. Preserve the rejected DSpark-drafter result. A future verifier partition
-   must use ordinary HIP activation buffers through the validated dma-buf seam
-   and beat the monolithic target graph end to end before it can become a
-   serving option.
+6. Preserve the rejected DSpark-drafter and per-layer-verifier results. A future
+   serving partition must first identify a stage whose removed GPU time exceeds
+   both its NPU execution and the measured shared-fabric penalty; zero-copy
+   transport alone is not sufficient.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.
