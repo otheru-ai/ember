@@ -61,6 +61,12 @@ if(EMBER_XDNA_XRT_PROVIDER)
     HINTS "${EMBER_XRT_ROOT}/include" REQUIRED)
   find_library(EMBER_XRT_COREUTIL xrt_coreutil
     HINTS "${EMBER_XRT_ROOT}/lib" "${EMBER_XRT_ROOT}/lib64" REQUIRED)
+  find_path(EMBER_ROCM_INCLUDE_DIR hip/hip_runtime_api.h
+    HINTS "/opt/rocm/include" REQUIRED)
+  find_library(EMBER_HIP_RUNTIME amdhip64
+    HINTS "/opt/rocm/lib" "/opt/rocm/lib64" REQUIRED)
+  find_library(EMBER_HSA_RUNTIME hsa-runtime64
+    HINTS "/opt/rocm/lib" "/opt/rocm/lib64" REQUIRED)
   add_library(ember_xdna_moe_xrt MODULE
     providers/xdna2/provider_xrt.cpp
     providers/xdna2/rocmfp2_pack.cpp)
@@ -74,6 +80,21 @@ if(EMBER_XDNA_XRT_PROVIDER)
   set_target_properties(ember_xdna_moe_xrt PROPERTIES
     PREFIX ""
     OUTPUT_NAME "libember_xdna_moe")
+  add_executable(ember-xdna-gpu-interop
+    providers/xdna2/validate_gpu_interop.cpp
+    providers/xdna2/rocmfp2_pack.cpp)
+  target_include_directories(ember-xdna-gpu-interop PRIVATE
+    providers/xdna2
+    engine/ggml/include
+    engine/ggml/src
+    "${EMBER_XRT_INCLUDE_DIR}"
+    "${EMBER_ROCM_INCLUDE_DIR}")
+  target_compile_definitions(ember-xdna-gpu-interop PRIVATE
+    __HIP_PLATFORM_AMD__=1)
+  target_link_libraries(ember-xdna-gpu-interop PRIVATE
+    "${EMBER_XRT_COREUTIL}"
+    "${EMBER_HIP_RUNTIME}"
+    "${EMBER_HSA_RUNTIME}")
 endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────

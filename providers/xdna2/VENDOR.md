@@ -47,3 +47,16 @@ queued task completes, while `driver/src/global/xaie2ipugbl_reginit.c` marks
 that start-queue field available on AIE2IPU. These are research references,
 not vendored dependencies. Ember's activation contract and accuracy thresholds
 remain independent.
+
+The host/kernel optimization audit also consulted, without copying source
+from, the public llama.cpp XDNA2 backend and its corrected performance record:
+
+- repository: <https://github.com/BrandedTamarasu-glitch/OllamaAMDNPU>
+- commit inspected: `9bfe13a0a78415806e81d22748478aeade0b4bd6`
+- relevant paths: `ggml/src/ggml-xdna/` and `docs/xdna-npu/phase12.html`
+- license: MIT
+
+Its useful transferable result is the measured importance of balanced AIE
+microtiles and instruction-stream length. Its earlier NPU-decode headline was
+later corrected by the project itself as accidental Vulkan execution, so
+Ember does not use that number as evidence of NPU decode performance.

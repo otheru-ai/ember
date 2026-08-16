@@ -336,14 +336,10 @@ disables both the single fused target graph and DSpark, so Gen5's roughly
 Do not spend the next iteration optimizing cold packing in this target-hybrid
 design: even its warm upper bound is less than half the production baseline.
 
-The next useful NPU boundary is the three-layer DSpark drafter, not the
-43-layer target. Keep the target and verifier monolithic on the GPU, retain the
-CPU as scheduler/packer, and prototype batched drafter expert work on XDNA2.
-AIE-RT's repeat-count start queue plus explicit per-task completion-token
-contract is directly relevant there: the drafter's fixed five-row block can
-amortize one host submission without splitting the target graph, while target
-verification remains capped at q<=4. This remains a proposed Gen6 experiment,
-not a performance claim.
+The next boundary investigated was the three-layer DSpark drafter rather than
+the 43-layer target. AIE-RT's repeat-count start queue and explicit per-task
+completion-token contract made the fixed five-row draft block a plausible way
+to amortize host submission without splitting the target graph.
 
 The provider-side prerequisite is implemented and hardware-validated. Gen5
 accepts up to five tokens and submits every token/expert pair through one XRT
@@ -352,8 +348,55 @@ five-token/four-expert probe with different activation rows passed at cosine
 1.0 and maximum absolute error `9.54e-6`. Its warm provider time was 8.432 ms;
 the corresponding one-token/four-expert probe was 1.778 ms, or about 8.89 ms
 when repeated five times. Queue amortization therefore saves only about 5%.
-The next experiment must replace the GPU drafter's MoE work with this path to
-have a plausible end-to-end benefit; rebatching the same work is insufficient.
+Rebatching the same work is insufficient.
+
+The requested draft/head/verify ceiling measurement then rejected drafter
+offload. Two identical 32-token production-config DSpark requests were run on
+the physical Strix Halo with `DFLASH_DS4_TIMING=1`; the normal service was
+restored healthy afterward. The warm request reported 82.2 ms per speculative
+step: 5.1 ms draft, 1.7 ms head, and 75.4 ms target verification. End-to-end
+decode remained 22.65 tok/s. Even deleting the draft entirely could improve
+this step by only about 6%, while measured Gen5 execution for three layers of
+five-token/top-k expert work is tens of milliseconds. Do not split the DSpark
+drafter around XDNA2: it would replace a 5.1 ms GPU stage with a slower NPU
+stage and add three GPU/NPU synchronization points.
+
+An external implementation audit reinforced that decision. The public
+[OllamaAMDNPU](https://github.com/BrandedTamarasu-glitch/OllamaAMDNPU) backend
+corrected its original 43.7 tok/s NPU-decode claim after discovering that the
+benchmark had executed on Vulkan. Its measured XDNA2-only decode reached 1.40
+tok/s after a useful 23% kernel-side improvement from balanced
+128x128x16 microtiles; weight pre-staging, sync deduplication, larger host
+tiles, and runlist batching produced little or no throughput gain. Ember
+already uses a 128x64 ROCMFP2 GEMV tile and likewise measured only a 5% gain
+from batching. Optimize AIE instruction/dataflow geometry when working on the
+kernel, but do not infer an end-to-end win from host submission reduction.
+
+### Direct GPU/XDNA buffer interoperability
+
+The current AMD driver contains DRM PRIME import/export support, and ROCr
+exposes `hsa_amd_portable_export_dmabuf`. Ember now packages
+`ember-xdna-gpu-interop` to validate the resulting cross-driver contract. The
+probe allocates input and output with HIP, exports both as dma-buf handles,
+imports them as XRT BOs, runs the existing Gen4 AIE projection, and verifies
+the NPU-written result through HIP. It requires both `/dev/kfd`/`/dev/dri` and
+`/dev/accel/accel0`, plus unlimited memlock.
+
+On the physical gfx1151 host, ordinary `hipMalloc` passed exactly: the NPU read
+the HIP BF16 input and wrote the HIP FP32 output with maximum absolute error
+zero. ROCr exported the output as a subrange at offset 8192, which validates
+the probe's nonzero-offset XRT sub-buffer handling. Import and initial BO sync
+took 0.192 ms once; 20 cached AIE run/wait/output-sync iterations averaged
+0.182 ms each for one 4096x2048 projection. This is a real zero-copy byte path,
+but the CPU still orders the HIP completion, XRT command, and next HIP work.
+
+`hipMallocManaged` failed export with `HSA_STATUS_ERROR_INVALID_ALLOCATION` on
+the same ROCm 7.14/XRT 2.26 stack. Therefore activation and intermediate graph
+buffers can use the direct path when they are ordinary HIP allocations, while
+the large managed target-weight allocation cannot. NPU weights must remain in
+their separately packed XRT cache. The next verifier experiment may use this
+zero-copy activation seam, but it must first prove that splitting the 43-layer
+fused GPU graph costs less than the expert work moved to XDNA2.
 
 Before treating the path as usable on gfx1151 hardware:
 
@@ -372,9 +415,10 @@ Before treating the path as usable on gfx1151 hardware:
 5. Keep Gen5 target-MoE offload opt-in: its trained baseline passed the initial
    token check, but its warm end-to-end decode reached only 10.20 tok/s versus
    22.65 tok/s for production.
-6. Prototype Gen6 against the three-layer DSpark drafter while retaining the
-   monolithic target. Measure draft, head, verify, and total token latency
-   independently; reject it unless total decode improves.
+6. Preserve the rejected DSpark-drafter result. A future verifier partition
+   must use ordinary HIP activation buffers through the validated dma-buf seam
+   and beat the monolithic target graph end to end before it can become a
+   serving option.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.
