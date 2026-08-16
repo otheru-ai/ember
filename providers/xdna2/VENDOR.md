@@ -48,6 +48,22 @@ that start-queue field available on AIE2IPU. These are research references,
 not vendored dependencies. Ember's activation contract and accuracy thresholds
 remain independent.
 
+Generation 6's weight-reusing batch topology also consulted, without copying
+source from, the official MLIR-AIE whole-array matrix examples:
+
+- repository: <https://github.com/Xilinx/mlir-aie>
+- commit inspected: `c95544269f0c074d6d3e213ee43cc34dc4100801`
+- relevant path:
+  `programming_examples/ml/block_datatypes/matrix_multiplication/whole_array_mixed/`
+- license: Apache-2.0 with LLVM exception
+
+The transferable design is to distribute output ownership, broadcast reused
+inputs, and keep partial sums local. Ember's ROCMFP2 decode, four-row shared
+expert shape, packet replay, and accuracy contract are independent. A native
+AIE2P BF16 matrix-instruction experiment derived from the public AIE API was
+hardware-rejected after timing out and is not present in the shipped Gen6
+microkernel.
+
 The host/kernel optimization audit also consulted, without copying source
 from, the public llama.cpp XDNA2 backend and its corrected performance record:
 

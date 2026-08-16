@@ -7,9 +7,11 @@
 // XRT runlist for all selected gate/up projections plus one for all downs. Gen5
 // keeps all three projections and exact clamped SwiGLU in one resident spatial
 // graph per selected expert. It accepts up to five activation rows so a DSpark
-// draft block can enter one XRT runlist without cross-token accumulation. The
-// provider stays opt-in until trained-weight equivalence and end-to-end speedup
-// are measured; UMA is not treated as implicit ROCm/XRT coherence.
+// draft block can enter one XRT runlist without cross-token accumulation. Gen6
+// is a fixed four-row shared-expert graph: every 128x64 ROCMFP2 tile is decoded
+// once and reused across all four activation rows. The provider stays opt-in
+// until trained-weight equivalence and end-to-end speedup are measured; UMA is
+// not treated as implicit ROCm/XRT coherence.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -42,6 +44,7 @@ namespace {
 
 using ProviderClock = std::chrono::steady_clock;
 constexpr int kGen5MaxBatchTokens = 5;
+constexpr int kGen6BatchTokens = 4;
 
 double elapsed_ms(ProviderClock::time_point begin,
                   ProviderClock::time_point end) {
@@ -112,7 +115,9 @@ int kernel_generation() {
     if (std::strcmp(raw, "3") == 0) return 3;
     if (std::strcmp(raw, "4") == 0) return 4;
     if (std::strcmp(raw, "5") == 0) return 5;
-    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, 4, or 5");
+    if (std::strcmp(raw, "6") == 0) return 6;
+    throw std::runtime_error(
+        "EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, 4, 5, or 6");
 }
 
 std::string artifact_directory() {
@@ -458,6 +463,124 @@ private:
     std::unique_ptr<xrt::bo> dummy7_;
 };
 
+class BatchExpertProgram {
+public:
+    explicit BatchExpertProgram(xrt::device & device) : device_(device) {
+        const std::string base = artifact_directory() +
+            "/expert_v6_4096x2048x4096_b4";
+        xclbin_ = std::make_unique<xrt::xclbin>(base + ".xclbin");
+        const auto kernels = xclbin_->get_kernels();
+        const auto found = std::find_if(kernels.begin(), kernels.end(),
+            [](const xrt::xclbin::kernel & kernel) {
+                return kernel.get_name().rfind("MLIR_AIE", 0) == 0;
+            });
+        if (found == kernels.end())
+            throw std::runtime_error("Gen6 kernel absent");
+        device_.register_xclbin(*xclbin_);
+        context_ = std::make_unique<xrt::hw_context>(device_, xclbin_->get_uuid());
+        kernel_ = std::make_unique<xrt::kernel>(*context_, found->get_name());
+        instructions_ = read_instructions(base + ".insts");
+        instruction_bo_ = std::make_unique<xrt::bo>(
+            device_, instructions_.size() * sizeof(uint32_t),
+            XCL_BO_FLAGS_CACHEABLE, kernel_->group_id(1));
+        std::memcpy(instruction_bo_->map<void *>(), instructions_.data(),
+                    instructions_.size() * sizeof(uint32_t));
+        instruction_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        input_bo_ = std::make_unique<xrt::bo>(
+            device_, static_cast<size_t>(kGen6BatchTokens) * (4096 + 128) *
+                         sizeof(uint16_t),
+            XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(3));
+        staging_bo_ = std::make_unique<xrt::bo>(
+            device_, static_cast<size_t>(kGen6BatchTokens) * 8192 *
+                         sizeof(uint16_t),
+            XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(5));
+        dummy6_ = std::make_unique<xrt::bo>(
+            device_, 1, XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(6));
+        dummy7_ = std::make_unique<xrt::bo>(
+            device_, 1, XRT_BO_FLAGS_HOST_ONLY, kernel_->group_id(7));
+    }
+
+    std::unique_ptr<xrt::bo> make_weight_bo(
+            const std::vector<uint8_t> & packed) {
+        auto result = std::make_unique<xrt::bo>(
+            device_, packed.size(), XRT_BO_FLAGS_HOST_ONLY,
+            kernel_->group_id(4));
+        std::memcpy(result->map<void *>(), packed.data(), packed.size());
+        result->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        return result;
+    }
+
+    void run(const float * input_rows, xrt::bo & weights,
+             float gate_scale, float up_scale, float clamp,
+             float * output_rows) {
+        if (!input_rows || !output_rows)
+            throw std::runtime_error("invalid XDNA2 Gen6 invocation");
+        auto raw_float = [](uint16_t * destination, float value) {
+            std::memcpy(destination, &value, sizeof(value));
+        };
+        uint16_t * input = input_bo_->map<uint16_t *>();
+        for (int token = 0; token < kGen6BatchTokens; ++token) {
+            uint16_t * row = input + static_cast<size_t>(token) * (4096 + 128);
+            for (int i = 0; i < 4096; ++i) {
+                row[i] = float_to_bf16(
+                    input_rows[static_cast<size_t>(token) * 4096 + i]);
+            }
+            std::fill(row + 4096, row + 4096 + 128, 0);
+            raw_float(row + 4096, gate_scale);
+            raw_float(row + 4098, up_scale);
+            raw_float(row + 4100, clamp);
+        }
+        input_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+        xrt::run run(*kernel_);
+        run.set_arg(0, 3);
+        run.set_arg(1, *instruction_bo_);
+        run.set_arg(2, static_cast<uint32_t>(instructions_.size()));
+        run.set_arg(3, *input_bo_);
+        run.set_arg(4, weights);
+        run.set_arg(5, *staging_bo_);
+        run.set_arg(6, *dummy6_);
+        run.set_arg(7, *dummy7_);
+        run.start();
+        if (run.wait() != ERT_CMD_STATE_COMPLETED)
+            throw std::runtime_error("XDNA2 Gen6 command did not complete");
+        staging_bo_->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+
+        const uint16_t * staging = staging_bo_->map<uint16_t *>();
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 8; ++col) {
+                const size_t core = static_cast<size_t>(row * 8 + col);
+                for (int token = 0; token < kGen6BatchTokens; ++token) {
+                    const float * packet = reinterpret_cast<const float *>(
+                        staging + core * kGen6BatchTokens * 256 +
+                        static_cast<size_t>(token) * 256);
+                    for (int group = 0; group < 2; ++group) {
+                        for (int lane = 0; lane < 64; ++lane) {
+                            const size_t output =
+                                static_cast<size_t>(token) * 4096 +
+                                static_cast<size_t>(group * 2048 +
+                                    row * 8 * 64 + col * 64 + lane);
+                            output_rows[output] = packet[group * 64 + lane];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+private:
+    xrt::device & device_;
+    std::unique_ptr<xrt::xclbin> xclbin_;
+    std::unique_ptr<xrt::hw_context> context_;
+    std::unique_ptr<xrt::kernel> kernel_;
+    std::vector<uint32_t> instructions_;
+    std::unique_ptr<xrt::bo> instruction_bo_;
+    std::unique_ptr<xrt::bo> input_bo_;
+    std::unique_ptr<xrt::bo> staging_bo_;
+    std::unique_ptr<xrt::bo> dummy6_;
+    std::unique_ptr<xrt::bo> dummy7_;
+};
+
 struct WeightKey {
     const void * source = nullptr;
     size_t bytes = 0;
@@ -523,7 +646,11 @@ public:
             !rocmfp2_supported_shape(config.n_ff_exp, config.n_embd)) {
             throw std::runtime_error("model dimensions are unsupported by XDNA2 GEMV");
         }
-        if (generation_ == 5) {
+        if (generation_ == 6) {
+            if (config.n_embd != 4096 || config.n_ff_exp != 2048)
+                throw std::runtime_error("Gen6 requires 4096x2048 experts");
+            batch_expert_ = std::make_unique<BatchExpertProgram>(device_);
+        } else if (generation_ == 5) {
             if (config.n_embd != 4096 || config.n_ff_exp != 2048)
                 throw std::runtime_error("Gen5 requires 4096x2048 experts");
             expert_ = std::make_unique<ExpertProgram>(
@@ -552,11 +679,19 @@ public:
             if (error) *error = "unsupported or invalid XDNA2 batch";
             return 0;
         }
-        if ((generation_ == 5 && batch.n_tokens > kGen5MaxBatchTokens) ||
-            (generation_ != 5 && batch.n_tokens != 1)) {
-            if (error) *error = generation_ == 5
-                ? "XDNA2 Gen5 supports at most five tokens"
-                : "XDNA2 Gen1-4 require one token";
+        const bool invalid_shape =
+            (generation_ == 6 &&
+             (batch.n_tokens != kGen6BatchTokens || batch.n_selected != 1)) ||
+            (generation_ == 5 && batch.n_tokens > kGen5MaxBatchTokens) ||
+            (generation_ < 5 && batch.n_tokens != 1);
+        if (invalid_shape) {
+            if (error) {
+                *error = generation_ == 6
+                    ? "XDNA2 Gen6 requires exactly four tokens and one expert"
+                    : generation_ == 5
+                        ? "XDNA2 Gen5 supports at most five tokens"
+                        : "XDNA2 Gen1-4 require one token";
+            }
             return 0;
         }
 
@@ -592,6 +727,78 @@ public:
             std::vector<std::shared_ptr<CachedWeight>> up_weights(selected);
             std::vector<std::shared_ptr<CachedWeight>> down_weights(selected);
             const auto buffers_ready = ProviderClock::now();
+
+            if (generation_ == 6) {
+                const auto & first = batch.expert_weights[0];
+                if (!batch.expert_ids ||
+                    first.struct_size < sizeof(ember_xdna_moe_weight_view_v1) ||
+                    first.fused_gate_up || !first.gate || !first.up || !first.down ||
+                    first.gate_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2 ||
+                    first.up_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2 ||
+                    first.down_format != EMBER_XDNA_MOE_WEIGHT_ROCMFP2) {
+                    if (error) *error = "Gen6 shared expert is not separate ROCMFP2";
+                    return 0;
+                }
+                for (size_t slot = 1; slot < slots; ++slot) {
+                    const auto & view = batch.expert_weights[slot];
+                    if (view.struct_size <
+                            sizeof(ember_xdna_moe_weight_view_v1) ||
+                        batch.expert_ids[slot] != batch.expert_ids[0] ||
+                        view.gate != first.gate || view.up != first.up ||
+                        view.down != first.down ||
+                        view.gate_bytes != first.gate_bytes ||
+                        view.up_bytes != first.up_bytes ||
+                        view.down_bytes != first.down_bytes ||
+                        view.gate_scale != first.gate_scale ||
+                        view.up_scale != first.up_scale ||
+                        view.down_scale != first.down_scale) {
+                        if (error) *error =
+                            "Gen6 requires one shared expert across all rows";
+                        return 0;
+                    }
+                }
+                const std::shared_ptr<CachedWeight> packed = expert_weight(first);
+                const auto weights_ready = ProviderClock::now();
+                projected.resize(tokens * embd);
+                batch_expert_->run(
+                    batch.input, *packed->bo, first.gate_scale, first.up_scale,
+                    config_.swiglu_clamp, projected.data());
+                const auto execution_ready = ProviderClock::now();
+                for (size_t token = 0; token < tokens; ++token) {
+                    bool finite = false;
+                    (void)finite_max_abs(projected.data() + token * embd,
+                                         embd, &finite);
+                    if (!finite) {
+                        if (error) *error = "non-finite XDNA Gen6 output";
+                        return 0;
+                    }
+                    const float scale = first.down_scale *
+                        batch.router_weights[token];
+                    for (int i = 0; i < batch.n_embd; ++i) {
+                        batch.output[token * embd + static_cast<size_t>(i)] =
+                            projected[token * embd + static_cast<size_t>(i)] *
+                            scale;
+                    }
+                    ++experts_;
+                }
+                const auto accumulated = ProviderClock::now();
+                kernel_runs_ += tokens;
+                ++submissions_;
+                if (trace) {
+                    std::fprintf(stderr,
+                        "[xdna2-xrt] generation=6 layer=%d tokens=%d "
+                        "setup_ms=%.3f pack_ms=%.3f execute_ms=%.3f "
+                        "accum_ms=%.3f total_ms=%.3f\n",
+                        batch.layer_idx, batch.n_tokens,
+                        elapsed_ms(start, buffers_ready),
+                        elapsed_ms(buffers_ready, weights_ready),
+                        elapsed_ms(weights_ready, execution_ready),
+                        elapsed_ms(execution_ready, accumulated),
+                        elapsed_ms(start, accumulated));
+                }
+                ++calls_;
+                return 1;
+            }
 
             if (generation_ == 5) {
                 std::vector<std::shared_ptr<CachedWeight>> expert_weights(slots);
@@ -826,7 +1033,7 @@ private:
             throw std::runtime_error(pack_error);
         }
         if (packed.size() > capacity_)
-            throw std::runtime_error("one Gen5 expert exceeds XDNA2 cache");
+            throw std::runtime_error("one fused expert exceeds XDNA2 cache");
         while (cache_bytes_ + packed.size() > capacity_ &&
                !expert_cache_.empty()) {
             const auto victim = std::min_element(
@@ -838,7 +1045,9 @@ private:
             expert_cache_.erase(victim);
         }
         auto entry = std::make_shared<CachedWeight>();
-        entry->bo = expert_->make_weight_bo(packed);
+        entry->bo = generation_ == 6
+            ? batch_expert_->make_weight_bo(packed)
+            : expert_->make_weight_bo(packed);
         entry->bytes = packed.size();
         entry->last_use = ++clock_;
         cache_bytes_ += entry->bytes;
@@ -897,6 +1106,7 @@ private:
     std::unique_ptr<GemvProgram> gate_up_;
     std::unique_ptr<GemvProgram> down_;
     std::unique_ptr<ExpertProgram> expert_;
+    std::unique_ptr<BatchExpertProgram> batch_expert_;
     const size_t capacity_;
     size_t cache_bytes_ = 0;
     uint64_t clock_ = 0;

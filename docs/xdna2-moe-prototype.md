@@ -137,7 +137,7 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`-`5`; Gen5 fused expert remains explicit opt-in |
+| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`-`6`; Gen5 is opt-in and Gen6 is validator-only |
 | `EMBER_XDNA_VALIDATION_WARM_RUNS` | `1` | Repeat cached validation dispatches for sustained-load and overlap measurements |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
 | `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
@@ -434,6 +434,53 @@ gap. A useful prefill role would require a genuinely batched AIE matrix kernel
 that reuses resident weights across token columns, not another extension of
 Gen5's one-row expert commands.
 
+### Gen6 batched shared expert
+
+Gen6 implements that missing weight-reuse property for a fixed four-token
+batch. Its 4x8 spatial graph consumes four BF16 activation rows together. Each
+core decodes a 128x64 ROCMFP2 tile once, reuses the decoded BF16 tile for all
+four rows, retains four independent FP32 accumulators, and carries the four
+hidden rows through the same fused clamped-SwiGLU and two-pass down projection.
+The host submits one XRT command for the complete four-row shared expert.
+`EMBER_XDNA_KERNEL_GEN=6` accepts exactly four tokens and one expert so an
+unsupported runtime shape fails closed instead of silently losing the reuse.
+
+The current engine ABI supplies only cold routed experts to this provider; the
+model's real shared expert remains part of the hot GPU graph. Consequently the
+four-row/single-expert shape is currently reachable through the packaged
+validator, not normal DeepSeek top-k serving. Selecting Gen6 for the existing
+top-k-4 serving path will fail closed. An engine seam for shared-expert offload
+was deliberately not added after the hardware timing showed that even the
+improved kernel cannot meet the GPU prefill budget.
+
+The topology follows the official MLIR-AIE whole-array examples' useful
+pattern: split output ownership across cores, broadcast a weight stream over
+the rows which reuse it, and retain partial results at the owning core. The
+low-level replay keeps the AIE-RT completion-token rule discovered during
+Gen5: every MM2S task which is subsequently waited upon requests a completion
+token.
+
+On the physical Strix Halo, three packaged dense four-token/one-expert validator
+runs measured 247.218-248.089 ms for the CPU reference, 26.603-26.697 ms cold
+including packing, and 0.840-0.853 ms averaged over 100 cached hardware runs.
+All passed at cosine 1.0 with maximum absolute error `2.38e-6`. The warm result
+is 0.210-0.213 ms per token, about 2.1x faster per row than Gen5's five-row
+shared-expert runlist. This is the first AIE kernel in the prototype to obtain
+a material gain from batching the arithmetic rather than only batching host
+submissions.
+
+That kernel gain is still not an inference win. Repeating 0.211 ms over all 43
+target layers would spend about 9.1 ms per prompt token on the shared expert
+alone, while the all-GPU reference completes the entire sparse model in about
+4 ms per prompt token. Gen6 therefore remains a packaged experiment and Gen4
+remains the provider default.
+
+A follow-up AIE2P `mmul<4,8,8>` BF16 implementation compiled and routed into a
+valid xclbin, but its command timed out on the physical NPU. That variant was
+rejected and is not shipped; Gen6 retains the hardware-proven vector
+accumulation above. Revisit native matrix instructions only with an isolated
+tile-level layout/conformance test, not in the full expert graph.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host
@@ -448,9 +495,11 @@ Before treating the path as usable on gfx1151 hardware:
    packing separated from warm steady state. Record provider launch/sync time,
    total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
    and `xrt-smi` partition activity.
-5. Keep Gen5 target-MoE offload opt-in: its trained baseline passed the initial
-   token check, but its warm end-to-end decode reached only 10.20 tok/s versus
-   22.65 tok/s for production.
+5. Keep Gen5 target-MoE offload opt-in and Gen6 validator-only. Gen5's trained
+   baseline passed the initial token check, but its warm end-to-end decode
+   reached only 10.20 tok/s versus 22.65 tok/s for production; Gen6 improves
+   the standalone shared expert but still exceeds the entire GPU prefill
+   budget before accounting for any other layer work.
 6. Preserve the rejected DSpark-drafter and per-layer-verifier results. A future
    serving partition must first identify a stage whose removed GPU time exceeds
    both its NPU execution and the measured shared-fabric penalty; zero-copy

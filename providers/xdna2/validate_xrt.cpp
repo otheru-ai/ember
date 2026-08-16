@@ -218,9 +218,10 @@ int main(int argc, char ** argv) {
         else if (std::strcmp(raw, "3") == 0) generation = 3;
         else if (std::strcmp(raw, "4") == 0) generation = 4;
         else if (std::strcmp(raw, "5") == 0) generation = 5;
+        else if (std::strcmp(raw, "6") == 0) generation = 6;
         else if (std::strcmp(raw, "2") != 0) {
             std::fprintf(stderr,
-                         "EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, 4, or 5\n");
+                         "EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, 4, 5, or 6\n");
             dlclose(library);
             return 1;
         }
@@ -250,9 +251,16 @@ int main(int argc, char ** argv) {
         }
         token_count = static_cast<int>(parsed);
     }
-    if (generation != 5 && token_count != 1) {
+    if (generation == 6 &&
+        (token_count != 4 || selected_experts != 1)) {
         std::fprintf(stderr,
-                     "multi-token validation requires EMBER_XDNA_KERNEL_GEN=5\n");
+                     "Gen6 validation requires four tokens and one expert\n");
+        dlclose(library);
+        return 1;
+    }
+    if (generation != 5 && generation != 6 && token_count != 1) {
+        std::fprintf(stderr,
+                     "multi-token validation requires EMBER_XDNA_KERNEL_GEN=5 or 6\n");
         dlclose(library);
         return 1;
     }
@@ -326,7 +334,7 @@ int main(int argc, char ** argv) {
             u = std::max(-clamp, std::min(u, clamp));
             const float value = (g / (1.0f + std::exp(-g))) * u;
             hidden[static_cast<size_t>(i)] =
-                generation == 5 ? bf16_round(value) : value;
+                generation >= 5 ? bf16_round(value) : value;
         }
         if (!gemv_kernel_reference(down, hidden, n_ff, n_embd,
                                    generation, token_expected)) {
