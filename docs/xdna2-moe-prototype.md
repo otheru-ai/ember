@@ -57,7 +57,8 @@ does not replace the byte-exact custom-kernel correctness baseline.
   not parse or remap the 85.3 GiB GGUF; hybrid placement exposes its validated
   mmap regions directly.
 - `rocmfp2_pack.cpp` losslessly permutes GGML output-major blocks into 128x64
-  AIE tiles. Its raw and packed F32 references are tested for exact equality.
+  AIE tiles. Gen4 additionally creates its vector-friendly uint4/BF16 layout.
+  Raw and both packed F32 references are tested for exact equality.
 - `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
   for the exact 4096->2048 and 2048->4096 expert projections.
 - `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. Generation 2 keeps the
@@ -65,8 +66,11 @@ does not replace the byte-exact custom-kernel correctness baseline.
   DMA boundary; generation 1 rounded through its BF16 FIFO after every 128
   inputs. Generation 3 makes the output FIFO and host BO F32, so gate/up and
   down projections cross the CPU phase boundary without another BF16 round.
+- `kernel/rocmfp2_gemv_v4.cc` vector-decodes 64 output lanes at once into a
+  tile-local BF16 scratchpad, then performs native eight-row vector MACs into
+  the Gen3 FP32 boundary.
 - `provider_xrt.cpp` owns persistent XRT contexts/instruction BOs and a bounded
-  LRU of pre-tiled host-only weight BOs. Generations 2 and 3 submit every
+  LRU of pre-tiled host-only weight BOs. Generations 2 through 4 submit every
   selected gate/up projection in one XRT runlist and every down projection in
   a second runlist, with the CPU SwiGLU calculation as the unavoidable phase
   boundary. It accepts q=1 and separate gate/up/down ROCMFP2 tensors only.
@@ -133,7 +137,7 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `3` | Select packaged generation `1`, `2`, or `3` |
+| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`, `2`, `3`, or `4` |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
 | `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
 
@@ -185,6 +189,27 @@ latency was 799.37 ms, maximum absolute error was `4.29e-6`, RMS error was
 therefore fixes the standalone accuracy gate, but deliberately does not claim
 an inference acceleration: scalar ROCMFP2 decode still dominates latency.
 
+Generation 4 replaces the scalar decoder with the vector GEMV structure from
+the pinned TileFuse W4A16 kernel. Cache fill transposes each 128x64 tile to
+K-major order, expands two FP2 codes into uint4 nibbles, and converts UE4M3
+scale/offset metadata to exact BF16. Each AIE core vector-unpacks and
+dequantizes all 64 output lanes into a 16 KiB tile-local scratchpad, then uses
+eight-row `aie::accumulate` operations with an FP32 accumulator. The linked hot
+function is `0x370` bytes and contains native unpack, vector multiply/subtract,
+and vector MAC instructions with none of the scalar `__mulsf3`, `__divsf3`, or
+`__floatunsisf` helpers. Packed cache size doubles from 7.5 MiB to 15 MiB per
+complete three-projection expert, remaining below BFP16's 27 MiB and BF16's
+48 MiB.
+
+On the same Strix Halo hardware, Gen4's one-expert structured case was bit
+exact at 6.58 ms warm. Its dense case retained Gen3's maximum absolute error
+`7.75e-7`, RMS error `1.43e-7`, and cosine 1.0 at 6.44 ms warm: a 21.7x
+improvement over Gen3's 139.94 ms. The six-expert dense runlist passed at
+8.32 ms warm with maximum absolute error `4.29e-6`, RMS error `8.74e-7`, and
+cosine 1.0. Cold times were 27.11 ms for one expert and 29.15 ms for the
+six-slot repeated-weight validator; distinct trained experts must still report
+their larger cache-fill cost separately.
+
 The trained 85.3 GiB DeepSeek-V4-Flash model then ran with the provider marked
 required, a 32 GiB hot-expert budget, exact prefill, and runtime top-k 4. This
 proved all 43 mmap-backed expert layers can reach XRT without fallback. A
@@ -209,30 +234,20 @@ CPU/GPU/NPU acceleration yet.
 
 ### What the NPU should do next
 
-Generation 3 establishes that an F32 output FIFO is correct when the AIE FIFO,
-runtime sequence, XRT BO size, and host mapping change as one contract. Direct
-scalar ROCMFP2 decode is still the wrong steady-state role. A trial that
-constructed BF16 vectors inside the tile and used elementwise vector MACs
-compiled, but returned non-finite down-projection output on hardware and was
-rejected. More importantly, decoding each 2-bit weight into a vector register
-still spends scalar instructions in the inner loop.
+Gen4 clears the standalone correctness and kernel-latency gates without a
+persistent BF16/BFP16 expert expansion. The next optimization should eliminate
+the remaining host phase boundary: keep gate and up results on the array, apply
+clamped SwiGLU with a vector kernel, and feed the down projection without an
+XRT-to-host-to-XRT round trip. The official
+[IRON kernel library](https://xilinx.github.io/mlir-aie/dev/api/kernels/)
+contains a BF16 SwiGLU implementation, but its tanh approximation must be
+compared against Ember's exact sigmoid contract before reuse.
 
-The next useful prototype should prepack a bounded hot set into a native AIE2P
-matrix layout and use the supported BF16/BFP16 matrix-multiply path. The
-[official IRON kernel library](https://xilinx.github.io/mlir-aie/dev/api/kernels/)
-already exposes vectorized `mm`/`mv` kernels and an AIE2P option that implements
-BF16 MMUL with BFP16. That trades cache memory
-and first-use conversion for hardware MAC utilization, so it must report both
-cold conversion and warm resident latency. Fuse gate, up, SwiGLU, and down in
-one persistent graph if the local-memory budget permits; otherwise the two
-runlist phases in generation 2 remain the minimum correct boundary.
-
-Until that matrix-native kernel beats HIP, the NPU should stay off the token
-critical path. The safer eventual role is coarse, asynchronous work that can
-overlap the GPU—such as a compact speculative drafter or background embedding
-pipeline—not fine-grained per-layer assistance. UMA makes the bytes physically
-reachable, but XRT and ROCm ownership transitions still make small ping-pong
-workloads expensive.
+After fusion, measure trained-model cache-fill cost and routing locality with
+the 2x packed representation. Native BFP16 matrix multiplication remains a
+fallback experiment if vector GEMV stops scaling, not the immediate next step.
+UMA can remove byte copies through dual-registered host pages, but the current
+XRT/ROCm stack still requires CPU ownership transitions and fences.
 
 The same session exposed a separate hybrid-path snapshot issue in the HIP
 control: its fresh run matched its baseline, but restored decoding diverged at
@@ -253,11 +268,9 @@ Before treating the path as usable on gfx1151 hardware:
    packing separated from warm steady state. Record provider launch/sync time,
    total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
    and `xrt-smi` partition activity.
-5. Replace scalar ROCMFP2 decode with a matrix-native packed kernel and compare
-   cold conversion, warm cache residency, and end-to-end performance. The
-   generation-2 runlists already prove that submission fusion alone is not
-   enough. Keep the feature off by default unless both output and end-to-end
-   performance pass.
+5. Fuse gate/up, clamped SwiGLU, and down around the Gen4 vector GEMV; compare
+   cold conversion, warm cache residency, and end-to-end performance. Keep the
+   provider opt-in unless both output and end-to-end performance pass.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.

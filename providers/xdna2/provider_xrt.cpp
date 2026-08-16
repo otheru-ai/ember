@@ -1,12 +1,12 @@
 // XRT provider for Ember's experimental XDNA2 selected-expert ABI.
 //
 // Gen2 keeps projection partials in FP32 but rounds each projection through a
-// BF16 output FIFO. Gen3 extends FP32 through that FIFO and its host BO so the
-// CPU SwiGLU phase sees unrounded gate/up values and down results round only at
-// Ember's later model boundary. Both use one atomic XRT runlist for all selected
-// gate/up projections plus one for all downs. The provider stays opt-in until
-// trained-weight equivalence and end-to-end speedup are measured; UMA is not
-// treated as implicit ROCm/XRT coherence.
+// BF16 output FIFO. Gen3 extends FP32 through that FIFO and host BO. Gen4 keeps
+// the FP32 boundary and replaces scalar ROCMFP2 decode with vector uint4 unpack,
+// BF16 dequantization, and 64-lane accumulation. Generations 2-4 use one atomic
+// XRT runlist for all selected gate/up projections plus one for all downs. The
+// provider stays opt-in until trained-weight equivalence and end-to-end speedup
+// are measured; UMA is not treated as implicit ROCm/XRT coherence.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -37,6 +37,7 @@
 namespace {
 
 using ember::xdna2::pack_rocmfp2_gemv;
+using ember::xdna2::pack_rocmfp2_gemv_v4;
 using ember::xdna2::rocmfp2_projection_bytes;
 using ember::xdna2::rocmfp2_supported_shape;
 
@@ -92,17 +93,19 @@ unsigned device_index() {
 
 int kernel_generation() {
     const char * raw = nonempty_env("EMBER_XDNA_KERNEL_GEN");
-    if (!raw) return 3;
+    if (!raw) return 4;
     if (std::strcmp(raw, "1") == 0) return 1;
     if (std::strcmp(raw, "2") == 0) return 2;
     if (std::strcmp(raw, "3") == 0) return 3;
-    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1, 2, or 3");
+    if (std::strcmp(raw, "4") == 0) return 4;
+    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, or 4");
 }
 
 std::string artifact_path(int k, int n, const char * suffix, int generation) {
     const char * directory = nonempty_env("EMBER_XDNA_ARTIFACT_DIR");
     std::string path = directory ? directory : "/usr/local/share/ember/xdna2";
-    if (generation == 3) path += "/gemv_v3_";
+    if (generation == 4) path += "/gemv_v4_";
+    else if (generation == 3) path += "/gemv_v3_";
     else if (generation == 2) path += "/gemv_v2_";
     else path += "/gemv_";
     path += std::to_string(k) + "x" + std::to_string(n) + suffix;
@@ -176,7 +179,7 @@ public:
         instruction_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
         const size_t output_element_bytes =
-            generation_ == 3 ? sizeof(float) : sizeof(uint16_t);
+            generation_ >= 3 ? sizeof(float) : sizeof(uint16_t);
         for (int i = 0; i < max_runs; ++i) {
             input_bos_.push_back(std::make_unique<xrt::bo>(
                 device_, static_cast<size_t>(k_) * sizeof(uint16_t),
@@ -264,7 +267,7 @@ public:
 
         for (size_t run_index = 0; run_index < invocations.size(); ++run_index) {
             output_bos_[run_index]->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
-            if (generation_ == 3) {
+            if (generation_ >= 3) {
                 const float * source = output_bos_[run_index]->map<float *>();
                 std::copy(source, source + n_, invocations[run_index].output);
             } else {
@@ -525,7 +528,10 @@ private:
 
         std::vector<uint8_t> packed;
         std::string pack_error;
-        if (!pack_rocmfp2_gemv(raw, raw_bytes, k, n, packed, &pack_error)) {
+        const bool packed_ok = generation_ == 4
+            ? pack_rocmfp2_gemv_v4(raw, raw_bytes, k, n, packed, &pack_error)
+            : pack_rocmfp2_gemv(raw, raw_bytes, k, n, packed, &pack_error);
+        if (!packed_ok) {
             throw std::runtime_error(pack_error);
         }
         if (packed.size() > capacity_) {
@@ -551,7 +557,7 @@ private:
     }
 
     ember_xdna_moe_config_v1 config_{};
-    int generation_ = 3;
+    int generation_ = 4;
     xrt::device device_;
     GemvProgram gate_up_;
     GemvProgram down_;

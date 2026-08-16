@@ -29,6 +29,7 @@ TILE_N = 64
 AIE_ROWS = 4
 AIE_COLS = 8
 ROCMFP2_TILE_BYTES = TILE_N * (TILE_K // 32) * 10
+ROCMFP2_V4_TILE_BYTES = TILE_K * TILE_N // 2 + 2 * (TILE_K // 32) * TILE_N * 2
 ARRAY_OUTPUTS = TILE_N * AIE_ROWS * AIE_COLS
 
 
@@ -46,36 +47,45 @@ def build_gemv(k_total, n_total, generation):
         @device(AIEDevice.npu2)
         def device_body():
             input_tile_ty = np.ndarray[(TILE_K,), np.dtype[bfloat16]]
-            weight_tile_ty = np.ndarray[(ROCMFP2_TILE_BYTES,), np.dtype[np.uint8]]
+            weight_tile_bytes = (
+                ROCMFP2_V4_TILE_BYTES if generation == 4 else ROCMFP2_TILE_BYTES
+            )
+            weight_tile_ty = np.ndarray[(weight_tile_bytes,), np.dtype[np.uint8]]
             weight_mem_ty = np.ndarray[
-                (ROCMFP2_TILE_BYTES * AIE_ROWS,), np.dtype[np.uint8]
+                (weight_tile_bytes * AIE_ROWS,), np.dtype[np.uint8]
             ]
             accumulator_ty = np.ndarray[(TILE_N,), np.dtype[np.float32]]
             output_tile_ty = (
-                accumulator_ty if generation == 3
+                accumulator_ty if generation >= 3
                 else np.ndarray[(TILE_N,), np.dtype[bfloat16]]
             )
             output_mem_ty = np.ndarray[
                 (TILE_N * AIE_ROWS,),
-                np.dtype[np.float32] if generation == 3 else np.dtype[bfloat16],
+                np.dtype[np.float32] if generation >= 3 else np.dtype[bfloat16],
             ]
             if generation == 1:
                 zero_name = "zero_rocmfp2_bf16"
                 gemv_name = "gemv_rocmfp2_bf16"
-            else:
+            elif generation in (2, 3):
                 zero_name = "zero_rocmfp2_f32"
                 gemv_name = "gemv_rocmfp2_f32"
+            else:
+                zero_name = "zero_rocmfp2_v4_f32"
+                gemv_name = "gemv_rocmfp2_v4_f32"
+            kernel_object = (
+                "rocmfp2_gemv_v4.o" if generation == 4 else "rocmfp2_gemv.o"
+            )
 
             zero = external_func(
                 zero_name,
                 inputs=[output_tile_ty if generation == 1 else accumulator_ty],
-                link_with="rocmfp2_gemv.o",
+                link_with=kernel_object,
             )
             gemv = external_func(
                 gemv_name,
                 inputs=[input_tile_ty, weight_tile_ty,
                         output_tile_ty if generation == 1 else accumulator_ty],
-                link_with="rocmfp2_gemv.o",
+                link_with=kernel_object,
             )
             if generation == 2:
                 store = external_func(
@@ -129,7 +139,7 @@ def build_gemv(k_total, n_total, generation):
                     mem_b[col],
                     [in_b[row][col] for row in range(AIE_ROWS)],
                     [],
-                    [row * ROCMFP2_TILE_BYTES for row in range(AIE_ROWS)],
+                    [row * weight_tile_bytes for row in range(AIE_ROWS)],
                 )
 
                 mem_c[col] = object_fifo(
@@ -183,11 +193,11 @@ def build_gemv(k_total, n_total, generation):
                 np.ndarray[(packed_bytes,), np.dtype[np.uint8]],
                 np.ndarray[
                     (n_total,),
-                    np.dtype[np.float32] if generation == 3 else np.dtype[bfloat16],
+                    np.dtype[np.float32] if generation >= 3 else np.dtype[bfloat16],
                 ],
             )
             def sequence(activation, weights, output):
-                bytes_per_column = k_tiles * AIE_ROWS * ROCMFP2_TILE_BYTES
+                bytes_per_column = k_tiles * AIE_ROWS * weight_tile_bytes
                 for group in range(output_groups):
                     for col in range(AIE_COLS):
                         npu_dma_memcpy_nd(
@@ -221,6 +231,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-K", type=int, required=True)
     parser.add_argument("-N", type=int, required=True)
-    parser.add_argument("--generation", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--generation", type=int, choices=(1, 2, 3, 4), default=1)
     args = parser.parse_args()
     build_gemv(args.K, args.N, args.generation)

@@ -11,10 +11,14 @@ from TileFuse's W4A16 vector-matrix example:
 - license: Apache-2.0 with LLVM exception
 
 Ember changed the packed-weight tile from asymmetric INT4 to the byte-exact
-GGML ROCMFP2 affine block (`32 values + UE4M3 scale + UE4M3 offset`), replaced
-the microkernel, and simplified DMA around Ember's pre-tiled layout. The
-current scalar AIE kernel is a correctness/bring-up implementation, not a
-claim that TileFuse's measured INT4 performance carries over to ROCMFP2.
+GGML ROCMFP2 affine block (`32 values + UE4M3 scale + UE4M3 offset`) and
+simplified DMA around Ember's pre-tiled layout. Generations 1-3 use Ember's
+scalar correctness microkernel. Generation 4 adapts TileFuse's vector
+dequantize-then-accumulate structure from
+`aie_kernels/aie2/vm_mix_int4_64x8.cc`: its cache-time pack expands FP2 codes
+to uint4 nibbles, stores exact BF16 affine metadata, then uses native AIE2P
+unpack/dequantize/vector-MAC instructions. TileFuse's measured INT4 performance
+is not claimed for Ember; Gen4 is measured independently on gfx1151.
 
 The runtime image's XRT base and XDNA shim are built from AMD's driver tree:
 

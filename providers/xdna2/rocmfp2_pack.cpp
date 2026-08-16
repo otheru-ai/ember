@@ -25,6 +25,25 @@ float decode(const uint8_t * block, int index) {
            ue4m3_to_float(block[9]);
 }
 
+uint16_t float_to_bf16(float value) {
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    bits += 0x7fffu + ((bits >> 16) & 1u);
+    return static_cast<uint16_t>(bits >> 16);
+}
+
+float bf16_to_float(uint16_t value) {
+    const uint32_t bits = static_cast<uint32_t>(value) << 16;
+    float result = 0.0f;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+size_t v4_tile_count(int k, int n) {
+    return (static_cast<size_t>(k) / kGemvTileK) *
+           (static_cast<size_t>(n) / kGemvTileN);
+}
+
 }  // namespace
 
 bool rocmfp2_supported_shape(int k, int n) {
@@ -100,6 +119,95 @@ bool pack_rocmfp2_gemv(const void * raw, size_t raw_bytes, int k, int n,
     return destination == expected;
 }
 
+size_t rocmfp2_v4_projection_bytes(int k, int n) {
+    if (!rocmfp2_supported_shape(k, n)) return 0;
+    const size_t tiles = v4_tile_count(k, n);
+    if (tiles > std::numeric_limits<size_t>::max() / kV4PackedTileBytes)
+        return 0;
+    return tiles * kV4PackedTileBytes;
+}
+
+bool pack_rocmfp2_gemv_v4(const void * raw, size_t raw_bytes, int k, int n,
+                          std::vector<uint8_t> & packed,
+                          std::string * error) {
+    size_t expected = 0;
+    const size_t packed_bytes = rocmfp2_v4_projection_bytes(k, n);
+    if (!raw || !checked_projection_size(k, n, &expected) ||
+        packed_bytes == 0) {
+        if (error) *error = "ROCMFP2 Gen4 GEMV requires K%128=0 and N%2048=0";
+        return false;
+    }
+    if (raw_bytes < expected) {
+        if (error) *error = "ROCMFP2 projection is shorter than its shape";
+        return false;
+    }
+
+    const auto * source = static_cast<const uint8_t *>(raw);
+    const int k_tiles = k / kGemvTileK;
+    const int blocks_per_row = k / kRocmfp2BlockWeights;
+    const int output_groups = n / kOutputsPerArrayPass;
+    packed.assign(packed_bytes, 0);
+    size_t tile_index = 0;
+
+    // Preserve the array-pass/column/K-tile/row distribution used by Gen1-3,
+    // but transpose each 128x64 tile to K-major vectors. The code plane stores
+    // two unsigned FP2 codes per byte as uint4 nibbles, so AIE2P can use one
+    // native cast+unpack for all 64 output lanes. Scale and offset are exact
+    // BF16 values: UE4M3 has only three mantissa bits.
+    for (int group = 0; group < output_groups; ++group) {
+        for (int column = 0; column < kAieColumns; ++column) {
+            for (int kt = 0; kt < k_tiles; ++kt) {
+                for (int row = 0; row < kAieRows; ++row, ++tile_index) {
+                    uint8_t * tile = packed.data() + tile_index * kV4PackedTileBytes;
+                    uint8_t * scales = tile + kV4CodeTileBytes;
+                    uint8_t * offsets =
+                        tile + kV4CodeTileBytes + kV4MetadataPlaneBytes;
+                    for (int lane = 0; lane < kGemvTileN; ++lane) {
+                        const int output = group * kOutputsPerArrayPass +
+                                           row * kAieColumns * kGemvTileN +
+                                           column * kGemvTileN + lane;
+                        for (int block = 0;
+                             block < kGemvTileK / kRocmfp2BlockWeights;
+                             ++block) {
+                            const size_t source_block =
+                                static_cast<size_t>(output) *
+                                    static_cast<size_t>(blocks_per_row) +
+                                static_cast<size_t>(kt) *
+                                    (kGemvTileK / kRocmfp2BlockWeights) +
+                                static_cast<size_t>(block);
+                            const uint8_t * q = source +
+                                source_block * kRocmfp2BlockBytes;
+                            const size_t metadata =
+                                static_cast<size_t>(block) * kGemvTileN +
+                                static_cast<size_t>(lane);
+                            const uint16_t scale =
+                                float_to_bf16(ue4m3_to_float(q[8]));
+                            const uint16_t offset =
+                                float_to_bf16(ue4m3_to_float(q[9]));
+                            std::memcpy(scales + metadata * sizeof(scale),
+                                        &scale, sizeof(scale));
+                            std::memcpy(offsets + metadata * sizeof(offset),
+                                        &offset, sizeof(offset));
+                            for (int i = 0; i < kRocmfp2BlockWeights; ++i) {
+                                const uint8_t code = static_cast<uint8_t>(
+                                    (q[i >> 2] >> (2 * (i & 3))) & 3u);
+                                const int input = block * kRocmfp2BlockWeights + i;
+                                uint8_t & pair = tile[
+                                    static_cast<size_t>(input) *
+                                        (kGemvTileN / kRocmfp2V4CodesPerByte) +
+                                    static_cast<size_t>(lane / 2)];
+                                pair |= static_cast<uint8_t>(
+                                    code << (4 * (lane & 1)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return tile_index == v4_tile_count(k, n);
+}
+
 bool rocmfp2_gemv_raw_reference(const void * raw, size_t raw_bytes,
                                 const float * input, int k, int n,
                                 float scale, float * output) {
@@ -157,6 +265,67 @@ bool rocmfp2_gemv_packed_reference(const void * packed, size_t packed_bytes,
                     const int input_index = kt * kGemvTileK +
                                             block * kRocmfp2BlockWeights + i;
                     sum += input[input_index] * decode(q, i);
+                }
+            }
+        }
+        output[out] = sum * scale;
+    }
+    return true;
+}
+
+bool rocmfp2_gemv_v4_packed_reference(const void * packed,
+                                      size_t packed_bytes,
+                                      const float * input, int k, int n,
+                                      float scale, float * output) {
+    const size_t expected = rocmfp2_v4_projection_bytes(k, n);
+    if (!packed || !input || !output || expected == 0 ||
+        packed_bytes < expected) return false;
+    const auto * bytes = static_cast<const uint8_t *>(packed);
+    const int k_tiles = k / kGemvTileK;
+    for (int out = 0; out < n; ++out) {
+        const int group = out / kOutputsPerArrayPass;
+        const int within = out % kOutputsPerArrayPass;
+        const int row = within / (kAieColumns * kGemvTileN);
+        const int column = (within / kGemvTileN) % kAieColumns;
+        const int lane = within % kGemvTileN;
+        float sum = 0.0f;
+        for (int kt = 0; kt < k_tiles; ++kt) {
+            size_t tile_index = static_cast<size_t>(group);
+            tile_index = tile_index * static_cast<size_t>(kAieColumns) +
+                         static_cast<size_t>(column);
+            tile_index = tile_index * static_cast<size_t>(k_tiles) +
+                         static_cast<size_t>(kt);
+            tile_index = tile_index * static_cast<size_t>(kAieRows) +
+                         static_cast<size_t>(row);
+            const uint8_t * tile = bytes + tile_index * kV4PackedTileBytes;
+            const uint8_t * scales = tile + kV4CodeTileBytes;
+            const uint8_t * offsets =
+                tile + kV4CodeTileBytes + kV4MetadataPlaneBytes;
+            for (int block = 0;
+                 block < kGemvTileK / kRocmfp2BlockWeights; ++block) {
+                const size_t metadata =
+                    static_cast<size_t>(block) * kGemvTileN +
+                    static_cast<size_t>(lane);
+                uint16_t scale_bits = 0;
+                uint16_t offset_bits = 0;
+                std::memcpy(&scale_bits, scales + metadata * sizeof(scale_bits),
+                            sizeof(scale_bits));
+                std::memcpy(&offset_bits,
+                            offsets + metadata * sizeof(offset_bits),
+                            sizeof(offset_bits));
+                const float block_scale = bf16_to_float(scale_bits);
+                const float block_offset = bf16_to_float(offset_bits);
+                for (int i = 0; i < kRocmfp2BlockWeights; ++i) {
+                    const int local_input = block * kRocmfp2BlockWeights + i;
+                    const uint8_t pair = tile[
+                        static_cast<size_t>(local_input) *
+                            (kGemvTileN / kRocmfp2V4CodesPerByte) +
+                        static_cast<size_t>(lane / 2)];
+                    const uint8_t code = static_cast<uint8_t>(
+                        (pair >> (4 * (lane & 1))) & 0x0fu);
+                    sum += input[kt * kGemvTileK + local_input] *
+                           (static_cast<float>(code) * block_scale -
+                            block_offset);
                 }
             }
         }

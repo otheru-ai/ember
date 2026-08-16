@@ -14,16 +14,20 @@ KERNEL_FLAGS ?= --target=aie2p-none-unknown-elf -Wno-unknown-attributes \
 MLIR := $(BUILD_DIR)/design.mlir
 MLIR_V2 := $(BUILD_DIR)/design_v2.mlir
 MLIR_V3 := $(BUILD_DIR)/design_v3.mlir
+MLIR_V4 := $(BUILD_DIR)/design_v4.mlir
 OBJECT := $(BUILD_DIR)/rocmfp2_gemv.o
+OBJECT_V4 := $(BUILD_DIR)/rocmfp2_gemv_v4.o
 XCLBIN := $(BUILD_DIR)/gemv_$(K)x$(N).xclbin
 INSTS := $(BUILD_DIR)/gemv_$(K)x$(N).insts
 XCLBIN_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).xclbin
 INSTS_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).insts
 XCLBIN_V3 := $(BUILD_DIR)/gemv_v3_$(K)x$(N).xclbin
 INSTS_V3 := $(BUILD_DIR)/gemv_v3_$(K)x$(N).insts
+XCLBIN_V4 := $(BUILD_DIR)/gemv_v4_$(K)x$(N).xclbin
+INSTS_V4 := $(BUILD_DIR)/gemv_v4_$(K)x$(N).insts
 
 .PHONY: all clean
-all: $(XCLBIN) $(XCLBIN_V2) $(XCLBIN_V3)
+all: $(XCLBIN) $(XCLBIN_V2) $(XCLBIN_V3) $(XCLBIN_V4)
 
 $(MLIR): rocmfp2_gemv.py
 	mkdir -p $(dir $@)
@@ -37,7 +41,15 @@ $(MLIR_V3): rocmfp2_gemv.py
 	mkdir -p $(dir $@)
 	python3 $< -K $(K) -N $(N) --generation 3 > $@
 
+$(MLIR_V4): rocmfp2_gemv.py
+	mkdir -p $(dir $@)
+	python3 $< -K $(K) -N $(N) --generation 4 > $@
+
 $(OBJECT): rocmfp2_gemv.cc
+	mkdir -p $(dir $@)
+	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
+
+$(OBJECT_V4): rocmfp2_gemv_v4.cc
 	mkdir -p $(dir $@)
 	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
 
@@ -67,6 +79,15 @@ $(XCLBIN_V3): $(MLIR_V3) $(OBJECT)
 		--npu-insts-name=$(notdir $(INSTS_V3)) $(notdir $(MLIR_V3))
 	test -s $(XCLBIN_V3)
 	test -s $(INSTS_V3)
+
+$(XCLBIN_V4): $(MLIR_V4) $(OBJECT_V4)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_V4)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_V4)) $(notdir $(MLIR_V4))
+	test -s $(XCLBIN_V4)
+	test -s $(INSTS_V4)
 
 clean:
 	rm -rf build

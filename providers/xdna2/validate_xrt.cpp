@@ -122,7 +122,7 @@ bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
             accumulated = generation == 1 ? bf16_round(sum) : sum;
         }
         output[static_cast<size_t>(out)] =
-            generation == 3 ? accumulated : bf16_round(accumulated);
+            generation >= 3 ? accumulated : bf16_round(accumulated);
     }
     return true;
 }
@@ -212,13 +212,14 @@ int main(int argc, char ** argv) {
     constexpr float up_scale = 0.625f;
     constexpr float down_scale = 0.5f;
     constexpr float route = 0.8f;
-    int generation = 3;
+    int generation = 4;
     if (const char * raw = std::getenv("EMBER_XDNA_KERNEL_GEN")) {
         if (std::strcmp(raw, "1") == 0) generation = 1;
         else if (std::strcmp(raw, "3") == 0) generation = 3;
+        else if (std::strcmp(raw, "4") == 0) generation = 4;
         else if (std::strcmp(raw, "2") != 0) {
             std::fprintf(stderr,
-                         "EMBER_XDNA_KERNEL_GEN must be 1, 2, or 3\n");
+                         "EMBER_XDNA_KERNEL_GEN must be 1, 2, 3, or 4\n");
             dlclose(library);
             return 1;
         }

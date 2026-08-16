@@ -212,6 +212,10 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
       /xdna-artifacts/gemv_v3_4096x2048.xclbin \
  && install -Dm0644 /kernel/build/4096x2048/gemv_v3_4096x2048.insts \
       /xdna-artifacts/gemv_v3_4096x2048.insts \
+ && install -Dm0644 /kernel/build/4096x2048/gemv_v4_4096x2048.xclbin \
+      /xdna-artifacts/gemv_v4_4096x2048.xclbin \
+ && install -Dm0644 /kernel/build/4096x2048/gemv_v4_4096x2048.insts \
+      /xdna-artifacts/gemv_v4_4096x2048.insts \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
       /xdna-artifacts/gemv_2048x4096.xclbin \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
@@ -223,7 +227,11 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
  && install -Dm0644 /kernel/build/2048x4096/gemv_v3_2048x4096.xclbin \
       /xdna-artifacts/gemv_v3_2048x4096.xclbin \
  && install -Dm0644 /kernel/build/2048x4096/gemv_v3_2048x4096.insts \
-      /xdna-artifacts/gemv_v3_2048x4096.insts
+      /xdna-artifacts/gemv_v3_2048x4096.insts \
+ && install -Dm0644 /kernel/build/2048x4096/gemv_v4_2048x4096.xclbin \
+      /xdna-artifacts/gemv_v4_2048x4096.xclbin \
+ && install -Dm0644 /kernel/build/2048x4096/gemv_v4_2048x4096.insts \
+      /xdna-artifacts/gemv_v4_2048x4096.insts
 
 FROM dev AS dev-xdna
 

@@ -75,10 +75,35 @@ int main() {
     }
     CHECK(equal, "packed order preserves every GEMV result exactly");
 
+    std::vector<uint8_t> packed_v4;
+    CHECK(pack_rocmfp2_gemv_v4(raw.data(), raw.size(), k, n,
+                               packed_v4, &error),
+          "valid projection packs for Gen4");
+    CHECK(packed_v4.size() == rocmfp2_v4_projection_bytes(k, n),
+          "Gen4 packing reports its expanded size");
+    CHECK(packed_v4.size() == raw.size() * 2,
+          "Gen4 vector layout is exactly twice the ROCMFP2 source size");
+    std::vector<float> packed_v4_output(n);
+    CHECK(rocmfp2_gemv_v4_packed_reference(
+              packed_v4.data(), packed_v4.size(), input.data(), k, n,
+              0.375f, packed_v4_output.data()),
+          "Gen4 packed reference runs");
+    bool v4_equal = true;
+    for (int i = 0; i < n; ++i) {
+        if (raw_output[(size_t)i] != packed_v4_output[(size_t)i]) {
+            v4_equal = false;
+            break;
+        }
+    }
+    CHECK(v4_equal, "Gen4 nibble/BF16 layout preserves every GEMV result exactly");
+
     std::vector<uint8_t> rejected;
     CHECK(!pack_rocmfp2_gemv(raw.data(), raw.size() - 1, k, n,
                              rejected, &error),
           "truncated projection rejected");
+    CHECK(!pack_rocmfp2_gemv_v4(raw.data(), raw.size() - 1, k, n,
+                                rejected, &error),
+          "truncated Gen4 projection rejected");
 
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
