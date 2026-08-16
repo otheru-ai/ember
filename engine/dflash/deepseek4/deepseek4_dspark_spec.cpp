@@ -1313,7 +1313,10 @@ bool run_deepseek4_dspark_spec_decode(
             "[ds4-spec-t] verify tel/step: hc_pre_a=%.1f attn_b=%.1f attn_c=%.1f attn_r=%.1f "
             "hc_post_a=%.1f hc_pre_f=%.1f route(b/c/r/s)=%.1f/%.1f/%.1f/%.1f "
             "ffn(b/c/r)=%.1f/%.1f/%.1f eval=%.1f hot=%.1f cold=%.1f comb=%.1f part=%.1f "
-            "full(b/s/c/r)=%.1f/%.1f/%.1f/%.1f ghits=%llu gbuilds=%llu ms\n",
+            "full(b/s/c/r)=%.1f/%.1f/%.1f/%.1f "
+            "fused_verify(calls/rows/avg_ms)=%llu/%llu/%.1f "
+            "q2(calls/avg_ms)=%llu/%.1f q3=%llu/%.1f q4=%llu/%.1f "
+            "ghits=%llu gbuilds=%llu ms\n",
             tel.hc_pre_attn_us / s, tel.attn_build_us / s, tel.attn_compute_us / s,
             tel.attn_read_us / s, tel.hc_post_attn_us / s, tel.hc_pre_ffn_us / s,
             tel.route_build_us / s, tel.route_compute_us / s, tel.route_read_us / s,
@@ -1323,6 +1326,23 @@ bool run_deepseek4_dspark_spec_decode(
             tel.ffn_combine_us / s, tel.ffn_partition_us / s,
             tel.full_graph_build_us / s, tel.full_graph_set_us / s,
             tel.full_graph_compute_us / s, tel.full_graph_read_us / s,
+            (unsigned long long) tel.fused_verify_calls,
+            (unsigned long long) tel.fused_verify_rows,
+            tel.fused_verify_calls
+                ? tel.fused_verify_compute_us /
+                    (1000.0 * (double) tel.fused_verify_calls) : 0.0,
+            (unsigned long long) tel.fused_verify_q_calls[2],
+            tel.fused_verify_q_calls[2]
+                ? tel.fused_verify_q_compute_us[2] /
+                    (1000.0 * (double) tel.fused_verify_q_calls[2]) : 0.0,
+            (unsigned long long) tel.fused_verify_q_calls[3],
+            tel.fused_verify_q_calls[3]
+                ? tel.fused_verify_q_compute_us[3] /
+                    (1000.0 * (double) tel.fused_verify_q_calls[3]) : 0.0,
+            (unsigned long long) tel.fused_verify_q_calls[4],
+            tel.fused_verify_q_calls[4]
+                ? tel.fused_verify_q_compute_us[4] /
+                    (1000.0 * (double) tel.fused_verify_q_calls[4]) : 0.0,
             (unsigned long long) tel.ffn_hot_graph_hits,
             (unsigned long long) tel.ffn_hot_graph_builds);
     }

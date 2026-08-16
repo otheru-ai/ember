@@ -87,6 +87,11 @@ struct DeepSeek4StepTelemetry {
     uint64_t full_graph_set_us = 0;
     uint64_t full_graph_compute_us = 0;
     uint64_t full_graph_read_us = 0;
+    uint64_t fused_verify_compute_us = 0;
+    uint64_t fused_verify_calls = 0;
+    uint64_t fused_verify_rows = 0;
+    uint64_t fused_verify_q_compute_us[5] = {};
+    uint64_t fused_verify_q_calls[5] = {};
     int hot_selected = 0;
     int cold_selected = 0;
 };

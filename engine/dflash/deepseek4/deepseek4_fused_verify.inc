@@ -19,6 +19,39 @@ static bool ds4_fused_verify_enabled() {
     return enabled == 1;
 }
 
+enum class Ds4VerifyFfnProfileMode {
+    Full,
+    RoutedOnly,
+    SharedOnly,
+};
+
+// Diagnostic graph surgery, deliberately limited to the opt-in q-wide
+// verifier. It changes model output and exists only to establish whether a
+// GPU/NPU branch split has a positive compute budget. Normal inference and
+// exact q=1 verification never consult this variable.
+static Ds4VerifyFfnProfileMode ds4_verify_ffn_profile_mode() {
+    static const Ds4VerifyFfnProfileMode mode = [] {
+        const char * raw = std::getenv("DFLASH_DS4_PROFILE_VERIFY_FFN");
+        if (!raw || !raw[0] || std::strcmp(raw, "full") == 0)
+            return Ds4VerifyFfnProfileMode::Full;
+        if (std::strcmp(raw, "routed-only") == 0) {
+            std::fprintf(stderr,
+                         "[ds4-fused-verify] PROFILE mode=routed-only; output is non-authoritative\n");
+            return Ds4VerifyFfnProfileMode::RoutedOnly;
+        }
+        if (std::strcmp(raw, "shared-only") == 0) {
+            std::fprintf(stderr,
+                         "[ds4-fused-verify] PROFILE mode=shared-only; output is non-authoritative\n");
+            return Ds4VerifyFfnProfileMode::SharedOnly;
+        }
+        std::fprintf(stderr,
+                     "[ds4-fused-verify] invalid DFLASH_DS4_PROFILE_VERIFY_FFN='%s'; using full\n",
+                     raw);
+        return Ds4VerifyFfnProfileMode::Full;
+    }();
+    return mode;
+}
+
 struct Ds4FusedVerifyCache {
     const ggml_context * owner_ctx = nullptr;
     ggml_backend_t backend = nullptr;
@@ -125,6 +158,12 @@ static bool ds4_build_fused_verify_graph(
 
     std::vector<ggml_tensor *> capture_pieces(
         capture_ids.size() * (size_t) q, nullptr);   // order [ci][t]
+    const Ds4VerifyFfnProfileMode profile_mode =
+        ds4_verify_ffn_profile_mode();
+    const bool include_shared =
+        profile_mode != Ds4VerifyFfnProfileMode::RoutedOnly;
+    const bool include_routed =
+        profile_mode != Ds4VerifyFfnProfileMode::SharedOnly;
 
     for (int il = 0; il < w.n_layer; ++il) {
         const DeepSeek4Layer & L = w.layers[(size_t) il];
@@ -222,13 +261,16 @@ static bool ds4_build_fused_verify_graph(
                                                   ffn_normed->nb[1], (size_t) t * ffn_normed->nb[1]);
                 ggml_tensor * hcol = ggml_view_2d(ctx, hids, n_used, 1,
                                                   hids->nb[1], (size_t) t * hids->nb[1]);
-                ggml_tensor * fo = ds4_build_hash_routed_ffn(
-                    ctx, w, L, ggml_cont(ctx, fcol), hcol, 1);
+                ggml_tensor * fo = ds4_build_hash_routed_ffn_parts(
+                    ctx, w, L, ggml_cont(ctx, fcol), hcol, 1,
+                    include_shared, include_routed);
                 if (!fo) { ffn_out = nullptr; break; }
                 ffn_out = ffn_out ? ggml_concat(ctx, ffn_out, fo, 1) : fo;
             }
         } else {
-            ffn_out = build_moe_ffn(ctx, ffn_normed, w, L, il, q);
+            ffn_out = build_moe_ffn_parts(
+                ctx, ffn_normed, w, L, il, q,
+                include_shared, include_routed);
         }
         if (!ffn_out) return false;
 
@@ -477,7 +519,11 @@ static int ds4_try_fused_verify_step(
         ds4_fv_set(fg->mask_bundle, maskv.data(), sizeof(float) * maskv.size());
     }
 
-    if (token_ids) {
+    // In shared-only profiling the hash-id placeholders are intentionally
+    // disconnected from the allocated graph. Do not upload routing inputs to
+    // tensors that have no backend buffer.
+    if (token_ids &&
+        ds4_verify_ffn_profile_mode() != Ds4VerifyFfnProfileMode::SharedOnly) {
         for (int il = 0; il < w.n_layer; ++il) {
             ggml_tensor * hids = fg->hash_ids[(size_t) il];
             if (!hids) continue;
@@ -512,7 +558,16 @@ static int ds4_try_fused_verify_step(
         return -1;
     }
     if (telemetry) {
-        telemetry->full_graph_compute_us += ds4_elapsed_us(compute_t0, Ds4TimingClock::now());
+        const uint64_t compute_us =
+            ds4_elapsed_us(compute_t0, Ds4TimingClock::now());
+        telemetry->full_graph_compute_us += compute_us;
+        telemetry->fused_verify_compute_us += compute_us;
+        telemetry->fused_verify_calls++;
+        telemetry->fused_verify_rows += (uint64_t) q;
+        if (q >= 0 && q < 5) {
+            telemetry->fused_verify_q_compute_us[q] += compute_us;
+            telemetry->fused_verify_q_calls[q]++;
+        }
     }
 
     const auto read_t0 = Ds4TimingClock::now();

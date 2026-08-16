@@ -3145,21 +3145,26 @@ static Ds4MoeRouting build_moe_routing(
     return out;
 }
 
-static ggml_tensor * build_moe_ffn(
+static ggml_tensor * build_moe_ffn_parts(
         ggml_context * ctx,
         ggml_tensor * cur,
         const DeepSeek4Weights & w,
         const DeepSeek4Layer & L,
         int layer_idx,
-        int n_tokens) {
+        int n_tokens,
+        bool include_shared,
+        bool include_routed) {
 
     const int n_embd = w.n_embd;
     int n_used = w.n_expert_used;
     const int n_ff_exp = w.n_ff_exp;
-    ggml_tensor * shared_out = build_shared_ffn(ctx, cur, w, L);
+    ggml_tensor * shared_out = include_shared
+        ? build_shared_ffn(ctx, cur, w, L) : nullptr;
     ggml_tensor * routed_out = nullptr;
 
-    if (layer_idx < w.n_hash_layer && L.ffn_gate_tid2eid) {
+    if (!include_routed) {
+        routed_out = nullptr;
+    } else if (layer_idx < w.n_hash_layer && L.ffn_gate_tid2eid) {
         routed_out = ggml_scale(ctx, cur, 0.0f);
     } else {
         Ds4MoeRouting routing = build_moe_routing(ctx, cur, w, L, n_tokens);
@@ -3182,7 +3187,19 @@ static ggml_tensor * build_moe_ffn(
         routed_out = ggml_reshape_2d(ctx, routed_out, n_embd, n_tokens);
     }
 
-    return ggml_add(ctx, shared_out, routed_out);
+    if (shared_out && routed_out) return ggml_add(ctx, shared_out, routed_out);
+    return shared_out ? shared_out : routed_out;
+}
+
+static ggml_tensor * build_moe_ffn(
+        ggml_context * ctx,
+        ggml_tensor * cur,
+        const DeepSeek4Weights & w,
+        const DeepSeek4Layer & L,
+        int layer_idx,
+        int n_tokens) {
+    return build_moe_ffn_parts(
+        ctx, cur, w, L, layer_idx, n_tokens, true, true);
 }
 
 // ─── HC (Hierarchical Controller) Pre ───────────────────────────────────
@@ -4724,14 +4741,18 @@ static ggml_tensor * ds4_build_fused_hc_pre(
     return ggml_view_1d(ctx, pre, w.n_embd, 0);
 }
 
-static ggml_tensor * ds4_build_hash_routed_ffn(
+static ggml_tensor * ds4_build_hash_routed_ffn_parts(
         ggml_context * ctx,
         const DeepSeek4Weights & w,
         const DeepSeek4Layer & L,
         ggml_tensor * ffn_normed,
         ggml_tensor * hash_ids,
-        int n_tokens) {
-    ggml_tensor * shared_out = build_shared_ffn(ctx, ffn_normed, w, L);
+        int n_tokens,
+        bool include_shared,
+        bool include_routed) {
+    ggml_tensor * shared_out = include_shared
+        ? build_shared_ffn(ctx, ffn_normed, w, L) : nullptr;
+    if (!include_routed) return shared_out;
     ggml_tensor * logits = ggml_mul_mat(ctx, L.ffn_gate_inp, ffn_normed);
     ggml_tensor * probs = ggml_sqrt(ctx, ggml_softplus(ctx, logits));
 
@@ -4773,7 +4794,18 @@ static ggml_tensor * ds4_build_hash_routed_ffn(
         routed_out = ggml_reshape_2d(
             ctx, routed_out, w.n_embd, n_tokens);
     }
-    return ggml_add(ctx, shared_out, routed_out);
+    return shared_out ? ggml_add(ctx, shared_out, routed_out) : routed_out;
+}
+
+static ggml_tensor * ds4_build_hash_routed_ffn(
+        ggml_context * ctx,
+        const DeepSeek4Weights & w,
+        const DeepSeek4Layer & L,
+        ggml_tensor * ffn_normed,
+        ggml_tensor * hash_ids,
+        int n_tokens) {
+    return ds4_build_hash_routed_ffn_parts(
+        ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true);
 }
 
 static bool ds4_fused_ensure_fn_mirrors(

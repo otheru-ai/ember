@@ -481,6 +481,43 @@ rejected and is not shipped; Gen6 retains the hardware-proven vector
 accumulation above. Revisit native matrix instructions only with an isolated
 tile-level layout/conformance test, not in the full expert graph.
 
+### Fused-verifier shared-expert budget
+
+The q-wide DSpark verifier was then measured by diagnostic graph surgery, not
+kernel-name inference. `DFLASH_DS4_PROFILE_VERIFY_FFN=routed-only` removes the
+shared branch and `shared-only` removes the routed branch from the opt-in fused
+verifier. Both modes deliberately change model output and are non-authoritative;
+normal inference defaults to `full`. Telemetry records fused compute separately
+for q=2, q=3, and q=4 so changed acceptance cannot masquerade as a branch-cost
+change.
+
+On the physical gfx1151, with adaptive width and the profitability scheduler
+disabled for the profiling request, per-call whole-model GPU compute was:
+
+| verifier width | full | routed-only | shared-only | shared marginal |
+| --- | ---: | ---: | ---: | ---: |
+| q=2 | 62.9 ms | 54.6 ms | 40.9 ms | 8.3 ms |
+| q=3 | 74.0 ms | 65.8 ms | 45.2 ms | 8.2 ms |
+| q=4 | 81.7 ms | 76.2 ms | 48.9 ms | 5.5 ms |
+
+The marginal column is `full - routed-only`: all 43 GPU shared experts cost
+only about 0.13 ms per layer at q=4 inside the fused graph. The separately
+measured Gen6 NPU path costs about 0.84 ms per layer, or 36 ms across the model,
+before adding a production-weight decoder. More importantly, the production
+shared tensors are `GGML_TYPE_Q4_0_ROCMFP4_FAST` (type 101), while Gen6 accepts
+`GGML_TYPE_Q2_0_ROCMFP2` (type 107). A real shared-expert port therefore needs
+a new FP4 packer and AIE kernel; it cannot reuse Gen6 weights directly.
+
+Do not build that FP4 serving port under the current architecture. Even a
+perfectly overlapped NPU branch can recover at most the 5.5 ms q=4 marginal,
+roughly a 1-2% request-level ceiling in the measured 96-token run. Producing
+each next layer's hidden state also requires 43 dependency barriers, which
+would split the whole-model GPU graph that made the marginal so small. That is
+before the already measured 7.33% GPU slowdown under concurrent NPU memory
+traffic. Reconsider only if a future engine exposes a coarse independent
+branch whose measured removed GPU time is materially larger, or if hardware
+supports device-side cross-engine scheduling without per-layer host barriers.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host

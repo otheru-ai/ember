@@ -197,6 +197,13 @@ static void add_step_tel(DeepSeek4StepTelemetry & dst, const DeepSeek4StepTeleme
     dst.full_graph_set_us += src.full_graph_set_us;
     dst.full_graph_compute_us += src.full_graph_compute_us;
     dst.full_graph_read_us += src.full_graph_read_us;
+    dst.fused_verify_compute_us += src.fused_verify_compute_us;
+    dst.fused_verify_calls += src.fused_verify_calls;
+    dst.fused_verify_rows += src.fused_verify_rows;
+    for (int q = 0; q < 5; ++q) {
+        dst.fused_verify_q_compute_us[q] += src.fused_verify_q_compute_us[q];
+        dst.fused_verify_q_calls[q] += src.fused_verify_q_calls[q];
+    }
     dst.hot_selected += src.hot_selected;
     dst.cold_selected += src.cold_selected;
 }
