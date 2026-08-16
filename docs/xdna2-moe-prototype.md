@@ -293,9 +293,10 @@ remain required.
 
 The packaged provider validator reproduced the result: one dense expert was
 `0.569` ms warm (`26.42` ms cold including fused weight packing), and a
-six-entry dense runlist was `2.583` ms warm. Both passed at cosine 1.0; the
-six-entry maximum absolute error was `4.29e-6`. The six-entry kernel path is
-3.2x faster than Gen4's `8.32` ms, while retaining Gen4 as the default.
+six-entry repeated-weight dense runlist was `2.583` ms warm. Both passed at
+cosine 1.0; the six-entry maximum absolute error was `4.29e-6`. The six-entry
+kernel path is 3.2x faster than Gen4's `8.32` ms, while retaining Gen4 as the
+default.
 
 After fusion, measure trained-model cache-fill cost and routing locality with
 the 2x packed representation. Native BFP16 matrix multiplication remains a

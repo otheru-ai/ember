@@ -30,7 +30,7 @@ The runtime image's XRT base and XDNA shim are built from AMD's driver tree:
 Only userspace XRT and the XDNA shim belong in the container. The kernel driver
 and firmware belong on the host and `/dev/accel/accel0` is passed through.
 
-Generation 4's fused-expert investigation also consulted, without copying
+Generation 5's fused-expert investigation also consulted, without copying
 source from, AMD's current IRON operator and sequencing examples:
 
 - repository: <https://github.com/amd/IRON>
