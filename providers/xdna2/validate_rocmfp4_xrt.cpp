@@ -2,7 +2,8 @@
 //
 // This is intentionally separate from the target-model ROCMFP2 provider. It
 // proves compact signed-codebook decode, packing, five-row reuse, fused SwiGLU,
-// and XRT execution before the draft provider grows a full three-layer graph.
+// route masking, resident expert sub-buffer selection, and XRT execution before
+// the draft provider grows a full three-layer graph.
 
 #include "rocmfp4_pack.h"
 
@@ -10,6 +11,7 @@
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_hw_context.h>
 #include <xrt/xrt_kernel.h>
+#include <xrt/experimental/xrt_kernel.h>
 
 #include <algorithm>
 #include <chrono>
@@ -153,6 +155,36 @@ int main(int argc, char ** argv) {
         return 2;
     }
     try {
+        const bool route_aware = std::string(argv[1]).find("expert_v8_") !=
+                                 std::string::npos;
+        int active_rows = kBatch;
+        if (const char * raw = std::getenv("EMBER_XDNA_ROUTE_ROWS")) {
+            char * end = nullptr;
+            const long parsed = std::strtol(raw, &end, 10);
+            if (end == raw || *end != '\0' || parsed < 1 || parsed > kBatch)
+                throw std::runtime_error("EMBER_XDNA_ROUTE_ROWS must be in [1,5]");
+            active_rows = static_cast<int>(parsed);
+        }
+        if (!route_aware && active_rows != kBatch)
+            throw std::runtime_error("route masking requires a Gen8 image");
+        int route_experts = 1;
+        if (const char * raw = std::getenv("EMBER_XDNA_ROUTE_EXPERTS")) {
+            char * end = nullptr;
+            const long parsed = std::strtol(raw, &end, 10);
+            if (end == raw || *end != '\0' || parsed < 1 || parsed > 64)
+                throw std::runtime_error(
+                    "EMBER_XDNA_ROUTE_EXPERTS must be in [1,64]");
+            route_experts = static_cast<int>(parsed);
+        }
+        bool distinct_weights = false;
+        if (const char * raw = std::getenv("EMBER_XDNA_DISTINCT_WEIGHTS")) {
+            if (!std::strcmp(raw, "1")) distinct_weights = true;
+            else if (std::strcmp(raw, "0"))
+                throw std::runtime_error(
+                    "EMBER_XDNA_DISTINCT_WEIGHTS must be 0 or 1");
+        }
+        if (distinct_weights && !route_aware)
+            throw std::runtime_error("distinct weights require a Gen8 image");
         constexpr float gate_scale = 0.125f;
         constexpr float up_scale = 0.125f;
         constexpr float down_scale = 0.25f;
@@ -187,6 +219,9 @@ int main(int argc, char ** argv) {
         std::vector<float> expected;
         expected.reserve(static_cast<size_t>(kBatch) * kEmbd);
         for (int token = 0; token < kBatch; ++token) {
+            const float route = route_aware && token < active_rows
+                ? 0.25f + static_cast<float>(token) * 0.125f
+                : route_aware ? 0.0f : 1.0f;
             const float * row = input.data() + static_cast<size_t>(token) * kEmbd;
             std::vector<float> gate_out(kFf), up_out(kFf), hidden(kFf), result(kEmbd);
             if (!ember::xdna2::rocmfp4_gemm_raw_reference(
@@ -201,7 +236,7 @@ int main(int argc, char ** argv) {
                 const float g = std::min(gate_out[lane], clamp);
                 const float u = std::max(-clamp, std::min(up_out[lane], clamp));
                 hidden[lane] = bf16_round(
-                    (g / (1.0f + exp_approx(-g))) * u);
+                    (g / (1.0f + exp_approx(-g))) * u * route);
             }
             if (!ember::xdna2::rocmfp4_gemm_raw_reference(
                     down.data(), down.size(), hidden.data(), kFf, kEmbd,
@@ -232,8 +267,17 @@ int main(int argc, char ** argv) {
         xrt::bo input_bo(device,
             static_cast<size_t>(kBatch) * (kEmbd + 128) * sizeof(uint16_t),
             XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
-        xrt::bo weight_bo(device, packed.size(), XRT_BO_FLAGS_HOST_ONLY,
-                          kernel.group_id(4));
+        const size_t resident_experts = distinct_weights
+            ? static_cast<size_t>(route_experts) : 1u;
+        if (packed.size() > SIZE_MAX / resident_experts)
+            throw std::runtime_error("resident expert allocation overflow");
+        xrt::bo weight_parent(device, packed.size() * resident_experts,
+                              XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(4));
+        std::vector<xrt::bo> weight_views;
+        weight_views.reserve(resident_experts);
+        for (size_t expert = 0; expert < resident_experts; ++expert)
+            weight_views.emplace_back(weight_parent, packed.size(),
+                                      expert * packed.size());
         xrt::bo staging_bo(device,
             static_cast<size_t>(kBatch) * 8192 * sizeof(uint16_t),
             XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
@@ -252,24 +296,45 @@ int main(int argc, char ** argv) {
             store_raw_float(destination + kEmbd, gate_scale);
             store_raw_float(destination + kEmbd + 2, up_scale);
             store_raw_float(destination + kEmbd + 4, clamp);
+            const float route = route_aware && token < active_rows
+                ? 0.25f + static_cast<float>(token) * 0.125f
+                : route_aware ? 0.0f : 1.0f;
+            store_raw_float(destination + kEmbd + 6, route);
         }
-        std::memcpy(weight_bo.map<void *>(), packed.data(), packed.size());
+        auto * resident_weights = weight_parent.map<uint8_t *>();
+        for (size_t expert = 0; expert < resident_experts; ++expert)
+            std::memcpy(resident_weights + expert * packed.size(),
+                        packed.data(), packed.size());
         input_bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-        weight_bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        weight_parent.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        auto run_once = [&]() {
+        auto configure_run = [&](int expert) {
             xrt::run run(kernel);
             run.set_arg(0, 3);
             run.set_arg(1, instruction_bo);
             run.set_arg(2, static_cast<uint32_t>(instructions.size()));
             run.set_arg(3, input_bo);
-            run.set_arg(4, weight_bo);
+            const size_t view = distinct_weights
+                ? static_cast<size_t>(expert) : 0u;
+            run.set_arg(4, weight_views[view]);
             run.set_arg(5, staging_bo);
             run.set_arg(6, dummy6);
             run.set_arg(7, dummy7);
-            run.start();
-            if (run.wait() != ERT_CMD_STATE_COMPLETED)
-                throw std::runtime_error("Gen7 command did not complete");
+            return run;
+        };
+        auto run_once = [&]() {
+            if (route_experts == 1) {
+                xrt::run run = configure_run(0);
+                run.start();
+                if (run.wait() != ERT_CMD_STATE_COMPLETED)
+                    throw std::runtime_error("ROCMFP4 command did not complete");
+                return;
+            }
+            xrt::runlist list(context);
+            for (int expert = 0; expert < route_experts; ++expert)
+                list.add(configure_run(expert));
+            list.execute();
+            list.wait();
         };
         run_once();
         constexpr int timed_runs = 20;
@@ -301,13 +366,19 @@ int main(int argc, char ** argv) {
         }
 
         const Metrics metrics = compare(actual, expected);
-        std::printf("gen7 tokens=5 packed_bytes=%zu warm_ms=%.6f "
+        std::printf("gen%d tokens=5 active_rows=%d route_experts=%d "
+                    "weight_mode=%s resident_weight_bytes=%zu "
+                    "packed_bytes=%zu sequence_ms=%.6f per_expert_ms=%.6f "
                     "max_abs=%.8g mean_abs=%.8g cosine=%.10f max_index=%d\n",
-                    packed.size(), milliseconds, metrics.max_abs,
+                    route_aware ? 8 : 7, active_rows, route_experts,
+                    distinct_weights ? "distinct" : "cache-hot",
+                    packed.size() * resident_experts,
+                    packed.size(), milliseconds,
+                    milliseconds / static_cast<double>(route_experts), metrics.max_abs,
                     metrics.mean_abs, metrics.cosine, metrics.max_index);
         return metrics.cosine >= 0.99999 && metrics.max_abs <= 0.01f ? 0 : 1;
     } catch (const std::exception & exception) {
-        std::fprintf(stderr, "Gen7 validation failed: %s\n", exception.what());
+        std::fprintf(stderr, "ROCMFP4 validation failed: %s\n", exception.what());
         return 1;
     }
 }

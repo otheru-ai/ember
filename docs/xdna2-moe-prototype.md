@@ -599,15 +599,64 @@ five-row expert, with 14,155,776 packed weight bytes. The server stayed active
 and healthy during the test. This is close to Gen6's roughly 0.84 ms four-row
 FP2 result, proving that compact signed FP4 decode is not the limiting cost.
 
-The result does **not** justify launching one Gen7 graph for every routed
+The result does **not** justify launching the dense Gen7 graph for every routed
 expert. Five tokens select up to 30 routed expert rows per layer, and most
-expert ids will be unique; a one-expert/five-row launch would compute four
-unselected rows in that common case. The next kernel must consume the five-row
-routing table, stream each selected expert only for its owning rows, multiply
-by router weights, and accumulate directly into five output rows. Shared
-experts can still use the existing five-row reuse. This route-fused graph is
-the useful optimization because it preserves the coarse whole-draft boundary
-while eliminating both wasted rows and per-expert output materialization.
+expert ids can be unique; a one-expert/five-row launch would compute four
+unselected down-projection rows in that common case. Gen8 addresses this
+selection waste while keeping the same coarse whole-draft boundary.
+
+### Gen8 route-masked resident-expert primitive
+
+Gen8 carries each row's router weight in the existing activation parameter
+packet. Gate/up still consume the five rows because the fixed DMA stream sends
+that packet last, but the fused SwiGLU writes an exact-zero BF16 hidden row for
+tokens that do not select the current expert. The down microkernel detects that
+zero tile and skips its MACs. For selected rows it applies the router weight
+before the linear down projection, so the output is already the weighted
+partial that the draft layer must accumulate.
+
+Two more obvious control designs failed and are deliberately not shipped. A
+separate routing FIFO exceeded the two shim-to-array DMA channels already used
+by activations and weights. Holding the activation parameter object across the
+hidden replay compiled but deadlocked on hardware because it prevented the
+sequenced object FIFO from advancing. Reusing the parameter packet normally
+and encoding inactive rows in the hidden data keeps the completion-token and
+descriptor-reuse boundaries established by Gen5/Gen6.
+
+The XRT host proof uses the public sub-buffer constructor to retain many packed
+experts in one parent BO and select an expert by changing only the run's weight
+view. A single runlist can therefore dispatch all unique experts without
+repacking or synchronizing weights. `EMBER_XDNA_ROUTE_ROWS` selects the active
+rows, `EMBER_XDNA_ROUTE_EXPERTS` repeats the route-aware command, and
+`EMBER_XDNA_DISTINCT_WEIGHTS=1` makes every command address a different
+resident expert-sized slab.
+
+Physical Strix Halo results were exact (`max_abs=0`, cosine 1.0):
+
+| Gen8 workload | warm sequence | per expert |
+| --- | ---: | ---: |
+| one expert, five active rows | 0.984 ms | 0.984 ms |
+| one expert, one active row | 0.464 ms | 0.464 ms |
+| 30 one-row experts, cache-hot address | 11.788 ms | 0.393 ms |
+| 30 one-row experts, 30 distinct resident slabs | 11.786 ms | 0.393 ms |
+
+The distinct test retained 424,673,280 packed weight bytes. Each slab held the
+same structured correctness fixture so the final output stayed comparable, but
+every command used a different page-aligned address. Its parity with the
+same-address run rules out a cache-hot replay artifact and proves the dynamic
+expert-address pattern needed by a resident 256-expert layer. The worst-case
+routed portion is therefore about 11.8 ms per layer. Three shared five-row
+experts add about 3.0 ms across the three-layer draft, putting draft MoE near
+38.3 ms before attention, normalization, routing, and residual work. That is
+slower than the roughly 5 ms GPU drafter in isolation, but it fits beneath the
+measured 63--82 ms GPU verifier window with roughly 25--44 ms left for those
+dense stages. It remains a cross-session throughput hypothesis, not an
+end-to-end acceleration claim.
+
+`expert_v8_4096x2048x4096_b5.{xclbin,insts}` is packaged with Gen7 in the
+opt-in `release-xdna` image. The next correctness step is a route scheduler
+which accumulates different trained expert partials per row; the next
+performance gate is the complete asynchronous three-layer draft provider.
 
 The scheduling target is deliberately cross-session and coarse: while the GPU
 verifies session A (roughly 63-82 ms for q=2..4 in the measurements above), the

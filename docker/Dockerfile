@@ -202,6 +202,7 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v5 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v6 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v7 \
+ && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v8 \
  && make -C /kernel K=2048 N=4096 BUILD_DIR=/kernel/build/2048x4096 \
  && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.xclbin \
       /xdna-artifacts/gemv_4096x2048.xclbin \
@@ -231,6 +232,10 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
       /xdna-artifacts/expert_v7_4096x2048x4096_b5.xclbin \
  && install -Dm0644 /kernel/build/4096x2048/expert_v7_4096x2048x4096_b5.insts \
       /xdna-artifacts/expert_v7_4096x2048x4096_b5.insts \
+ && install -Dm0644 /kernel/build/4096x2048/expert_v8_4096x2048x4096_b5.xclbin \
+      /xdna-artifacts/expert_v8_4096x2048x4096_b5.xclbin \
+ && install -Dm0644 /kernel/build/4096x2048/expert_v8_4096x2048x4096_b5.insts \
+      /xdna-artifacts/expert_v8_4096x2048x4096_b5.insts \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
       /xdna-artifacts/gemv_2048x4096.xclbin \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
