@@ -1,10 +1,12 @@
 // XRT provider for Ember's experimental XDNA2 selected-expert ABI.
 //
-// Gen2 keeps weights in persistent host-only BOs, carries projection partials
-// in FP32, and uses one atomic XRT runlist for all selected gate/up projections
-// plus one for all downs.  SwiGLU remains the synchronization boundary.  The
-// provider stays opt-in until trained-weight equivalence and end-to-end speedup
-// are measured; UMA is not treated as implicit ROCm/XRT coherence.
+// Gen2 keeps projection partials in FP32 but rounds each projection through a
+// BF16 output FIFO. Gen3 extends FP32 through that FIFO and its host BO so the
+// CPU SwiGLU phase sees unrounded gate/up values and down results round only at
+// Ember's later model boundary. Both use one atomic XRT runlist for all selected
+// gate/up projections plus one for all downs. The provider stays opt-in until
+// trained-weight equivalence and end-to-end speedup are measured; UMA is not
+// treated as implicit ROCm/XRT coherence.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -90,16 +92,19 @@ unsigned device_index() {
 
 int kernel_generation() {
     const char * raw = nonempty_env("EMBER_XDNA_KERNEL_GEN");
-    if (!raw) return 2;
+    if (!raw) return 3;
     if (std::strcmp(raw, "1") == 0) return 1;
     if (std::strcmp(raw, "2") == 0) return 2;
-    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1 or 2");
+    if (std::strcmp(raw, "3") == 0) return 3;
+    throw std::runtime_error("EMBER_XDNA_KERNEL_GEN must be 1, 2, or 3");
 }
 
 std::string artifact_path(int k, int n, const char * suffix, int generation) {
     const char * directory = nonempty_env("EMBER_XDNA_ARTIFACT_DIR");
     std::string path = directory ? directory : "/usr/local/share/ember/xdna2";
-    path += generation == 2 ? "/gemv_v2_" : "/gemv_";
+    if (generation == 3) path += "/gemv_v3_";
+    else if (generation == 2) path += "/gemv_v2_";
+    else path += "/gemv_";
     path += std::to_string(k) + "x" + std::to_string(n) + suffix;
     return path;
 }
@@ -170,7 +175,8 @@ public:
                     instructions_.size() * sizeof(uint32_t));
         instruction_bo_->sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        const size_t output_element_bytes = sizeof(uint16_t);
+        const size_t output_element_bytes =
+            generation_ == 3 ? sizeof(float) : sizeof(uint16_t);
         for (int i = 0; i < max_runs; ++i) {
             input_bos_.push_back(std::make_unique<xrt::bo>(
                 device_, static_cast<size_t>(k_) * sizeof(uint16_t),
@@ -237,7 +243,7 @@ public:
             return run;
         };
 
-        if (generation_ == 2) {
+        if (generation_ >= 2) {
             // XRT 2.26 runlists submit the phase atomically and wait once.  The
             // runs still execute in order on one AIE context, but host dispatch
             // and synchronization no longer scale with selected-expert count.
@@ -258,9 +264,15 @@ public:
 
         for (size_t run_index = 0; run_index < invocations.size(); ++run_index) {
             output_bos_[run_index]->sync(XCL_BO_SYNC_BO_FROM_DEVICE);
-            const uint16_t * source = output_bos_[run_index]->map<uint16_t *>();
-            for (int i = 0; i < n_; ++i)
-                invocations[run_index].output[i] = bf16_to_float(source[i]);
+            if (generation_ == 3) {
+                const float * source = output_bos_[run_index]->map<float *>();
+                std::copy(source, source + n_, invocations[run_index].output);
+            } else {
+                const uint16_t * source =
+                    output_bos_[run_index]->map<uint16_t *>();
+                for (int i = 0; i < n_; ++i)
+                    invocations[run_index].output[i] = bf16_to_float(source[i]);
+            }
         }
     }
 
@@ -454,7 +466,7 @@ public:
                 ++experts_;
             }
             kernel_runs_ += selected * 3;
-            submissions_ += generation_ == 2 ? 2 : selected * 3;
+            submissions_ += generation_ >= 2 ? 2 : selected * 3;
             bool output_finite = false;
             const float output_max = finite_max_abs(
                 batch.output, static_cast<size_t>(batch.n_embd), &output_finite);
@@ -539,7 +551,7 @@ private:
     }
 
     ember_xdna_moe_config_v1 config_{};
-    int generation_ = 2;
+    int generation_ = 3;
     xrt::device device_;
     GemvProgram gate_up_;
     GemvProgram down_;
@@ -597,7 +609,7 @@ void destroy_provider(void * context) {
 const ember_xdna_moe_provider_v1 kProvider = {
     EMBER_XDNA_MOE_PROVIDER_ABI_VERSION,
     sizeof(ember_xdna_moe_provider_v1),
-    "xrt-iron-rocmfp2-gen2",
+    "xrt-iron-rocmfp2-multigen",
     create_provider,
     compute_provider,
     healthy_provider,

@@ -61,17 +61,19 @@ does not replace the byte-exact custom-kernel correctness baseline.
 - `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
   for the exact 4096->2048 and 2048->4096 expert projections.
 - `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. Generation 2 keeps the
-  K-tile carry in a tile-local F32 buffer and converts to BF16 only at the DMA
-  boundary; generation 1 rounded through its BF16 output FIFO after every
-  128 inputs.
+  K-tile carry in a tile-local F32 buffer and converts to BF16 at the output
+  DMA boundary; generation 1 rounded through its BF16 FIFO after every 128
+  inputs. Generation 3 makes the output FIFO and host BO F32, so gate/up and
+  down projections cross the CPU phase boundary without another BF16 round.
 - `provider_xrt.cpp` owns persistent XRT contexts/instruction BOs and a bounded
-  LRU of pre-tiled host-only weight BOs. Generation 2 submits every selected
-  gate/up projection in one XRT runlist and every down projection in a second
-  runlist, with the CPU SwiGLU calculation as the unavoidable phase boundary.
-  It accepts q=1 and separate gate/up/down ROCMFP2 tensors only.
+  LRU of pre-tiled host-only weight BOs. Generations 2 and 3 submit every
+  selected gate/up projection in one XRT runlist and every down projection in
+  a second runlist, with the CPU SwiGLU calculation as the unavoidable phase
+  boundary. It accepts q=1 and separate gate/up/down ROCMFP2 tensors only.
 - The optional `release-xdna` image builds XRT plus the XDNA userspace shim from
-  the pinned `amd/xdna-driver` tree, builds both AOT kernels with Peano, and
-  packages the plugin and artifacts. It never packages a kernel module.
+  the pinned `amd/xdna-driver` tree, builds every generation for both projection
+  shapes with Peano, and packages the plugin and artifacts. It never packages
+  a kernel module.
 
 ## Build and run the image
 
@@ -131,14 +133,14 @@ is optional by default so a failure falls back to the baseline path. Use
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 | `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `2` | Select packaged generation `1` or `2` |
+| `EMBER_XDNA_KERNEL_GEN` | `3` | Select packaged generation `1`, `2`, or `3` |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
 | `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
 
 `DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
 all routed experts are resident on the GPU, the provider has no work.
 
-## Hardware validation status (2026-08-15)
+## Hardware validation status (2026-08-15 through 2026-08-16)
 
 The prototype was exercised on the target gfx1151 Strix Halo host after
 enabling IOMMU. XRT identified `RyzenAI-npu5`, AIE2P 6x8, firmware 1.1.2.65.
@@ -160,12 +162,28 @@ RMS reduction, but the dense probe still deliberately fails the strict
 attempt appeared to run in roughly 54 ms but produced cosine similarity near
 0.01 because its host/DMA layout was wrong.
 
+Generation 3 corrects that layout end to end: its output object FIFO, runtime
+sequence type, XRT BO allocation, and host decode are all F32. The one-expert
+structured case remained bit-exact at 99.17 ms warm. The one-expert dense case
+passed the strict gate with maximum absolute error `7.75e-7`, RMS error
+`1.43e-7`, and cosine similarity 1.0 at 139.94 ms warm. This is about 16,100x
+lower maximum error and 29,800x lower RMS error than generation 2, without a
+measurable latency regression. The cost is twice the result-DMA and host-BO
+footprint for each projection; at these vector sizes scalar compute still
+dominates that extra transfer.
+
 The model-default six-expert runlist also passed the structured reference. Two
 calls executed 36 projection kernels through four host submissions, instead of
 36 submissions, but warm latency was still 560.25 ms. The six-expert dense
 case took 799.73 ms warm and accumulated 0.075 maximum absolute error. XRT
 runlists therefore solve submission scaling but do not solve scalar kernel
 throughput.
+
+Generation 3 also passed the six-expert structured and dense gates. Dense warm
+latency was 799.37 ms, maximum absolute error was `4.29e-6`, RMS error was
+`8.74e-7`, and cosine similarity was 1.0. The output-boundary optimization
+therefore fixes the standalone accuracy gate, but deliberately does not claim
+an inference acceleration: scalar ROCMFP2 decode still dominates latency.
 
 The trained 85.3 GiB DeepSeek-V4-Flash model then ran with the provider marked
 required, a 32 GiB hot-expert budget, exact prefill, and runtime top-k 4. This
@@ -191,7 +209,9 @@ CPU/GPU/NPU acceleration yet.
 
 ### What the NPU should do next
 
-Direct scalar ROCMFP2 decode is the wrong steady-state role. A trial that
+Generation 3 establishes that an F32 output FIFO is correct when the AIE FIFO,
+runtime sequence, XRT BO size, and host mapping change as one contract. Direct
+scalar ROCMFP2 decode is still the wrong steady-state role. A trial that
 constructed BF16 vectors inside the tile and used elementwise vector MACs
 compiled, but returned non-finite down-projection output on hardware and was
 rejected. More importantly, decoding each 2-bit weight into a vector register

@@ -2,8 +2,8 @@
 //
 // This deliberately enters through the public provider ABI. It validates the
 // packaged xclbins, XRT BO plumbing, weight pre-tiling, affine ROCMFP2 decode,
-// BF16 tile accumulation, clamped SwiGLU, routing, and the persistent weight
-// cache without loading the full model.
+// generation-specific projection boundaries, clamped SwiGLU, routing, and the
+// persistent weight cache without loading the full model.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -86,7 +86,7 @@ void fill_projection(std::vector<uint8_t> & raw, int k, int n, uint32_t salt,
 
 bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
                            const std::vector<float> & input,
-                           int k, int n, bool bf16_partials,
+                           int k, int n, int generation,
                            std::vector<float> & output) {
     const size_t expected = ember::xdna2::rocmfp2_projection_bytes(k, n);
     if (raw.size() != expected || input.size() != static_cast<size_t>(k))
@@ -119,10 +119,10 @@ bool gemv_kernel_reference(const std::vector<uint8_t> & raw,
                     sum += input_bf16[static_cast<size_t>(input_index)] * decode(q, i);
                 }
             }
-            accumulated = bf16_partials ? bf16_round(sum) : sum;
+            accumulated = generation == 1 ? bf16_round(sum) : sum;
         }
         output[static_cast<size_t>(out)] =
-            bf16_partials ? accumulated : bf16_round(accumulated);
+            generation == 3 ? accumulated : bf16_round(accumulated);
     }
     return true;
 }
@@ -212,16 +212,17 @@ int main(int argc, char ** argv) {
     constexpr float up_scale = 0.625f;
     constexpr float down_scale = 0.5f;
     constexpr float route = 0.8f;
-    int generation = 2;
+    int generation = 3;
     if (const char * raw = std::getenv("EMBER_XDNA_KERNEL_GEN")) {
         if (std::strcmp(raw, "1") == 0) generation = 1;
+        else if (std::strcmp(raw, "3") == 0) generation = 3;
         else if (std::strcmp(raw, "2") != 0) {
-            std::fprintf(stderr, "EMBER_XDNA_KERNEL_GEN must be 1 or 2\n");
+            std::fprintf(stderr,
+                         "EMBER_XDNA_KERNEL_GEN must be 1, 2, or 3\n");
             dlclose(library);
             return 1;
         }
     }
-    const bool bf16_partials = generation == 1;
     const bool dense = std::getenv("EMBER_XDNA_VALIDATION_DENSE") != nullptr;
     int selected_experts = 1;
     if (const char * raw = std::getenv("EMBER_XDNA_VALIDATION_EXPERTS")) {
@@ -268,9 +269,9 @@ int main(int argc, char ** argv) {
     const auto reference_start = std::chrono::steady_clock::now();
     std::vector<float> gate_out, up_out, hidden(n_ff), expected;
     if (!gemv_kernel_reference(gate, input, n_embd, n_ff,
-                               bf16_partials, gate_out) ||
+                               generation, gate_out) ||
         !gemv_kernel_reference(up, input, n_embd, n_ff,
-                               bf16_partials, up_out)) {
+                               generation, up_out)) {
         std::fprintf(stderr, "reference gate/up failed\n");
         provider->destroy(context);
         dlclose(library);
@@ -284,7 +285,7 @@ int main(int argc, char ** argv) {
         hidden[static_cast<size_t>(i)] = (g / (1.0f + std::exp(-g))) * u;
     }
     if (!gemv_kernel_reference(down, hidden, n_ff, n_embd,
-                               bf16_partials, expected)) {
+                               generation, expected)) {
         std::fprintf(stderr, "reference down failed\n");
         provider->destroy(context);
         dlclose(library);

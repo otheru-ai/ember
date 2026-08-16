@@ -50,11 +50,15 @@ def build_gemv(k_total, n_total, generation):
             weight_mem_ty = np.ndarray[
                 (ROCMFP2_TILE_BYTES * AIE_ROWS,), np.dtype[np.uint8]
             ]
-            output_tile_ty = np.ndarray[(TILE_N,), np.dtype[bfloat16]]
-            output_mem_ty = np.ndarray[
-                (TILE_N * AIE_ROWS,), np.dtype[bfloat16]
-            ]
             accumulator_ty = np.ndarray[(TILE_N,), np.dtype[np.float32]]
+            output_tile_ty = (
+                accumulator_ty if generation == 3
+                else np.ndarray[(TILE_N,), np.dtype[bfloat16]]
+            )
+            output_mem_ty = np.ndarray[
+                (TILE_N * AIE_ROWS,),
+                np.dtype[np.float32] if generation == 3 else np.dtype[bfloat16],
+            ]
             if generation == 1:
                 zero_name = "zero_rocmfp2_bf16"
                 gemv_name = "gemv_rocmfp2_bf16"
@@ -154,7 +158,11 @@ def build_gemv(k_total, n_total, generation):
                             output = out_c[row][col].acquire(
                                 ObjectFifoPort.Produce, 1
                             )
-                            partial = output if generation == 1 else accumulator
+                            # Gen3 makes the object FIFO itself F32, preserving
+                            # projection results across the host SwiGLU boundary.
+                            # Gen2 needs a separate F32 tile buffer because its
+                            # externally visible FIFO remains BF16.
+                            partial = accumulator if generation == 2 else output
                             zero(partial)
                             for _ in range_(k_tiles):
                                 activation = in_a[col].acquire(
@@ -173,7 +181,10 @@ def build_gemv(k_total, n_total, generation):
             @runtime_sequence(
                 np.ndarray[(k_total,), np.dtype[bfloat16]],
                 np.ndarray[(packed_bytes,), np.dtype[np.uint8]],
-                np.ndarray[(n_total,), np.dtype[bfloat16]],
+                np.ndarray[
+                    (n_total,),
+                    np.dtype[np.float32] if generation == 3 else np.dtype[bfloat16],
+                ],
             )
             def sequence(activation, weights, output):
                 bytes_per_column = k_tiles * AIE_ROWS * ROCMFP2_TILE_BYTES
@@ -210,6 +221,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-K", type=int, required=True)
     parser.add_argument("-N", type=int, required=True)
-    parser.add_argument("--generation", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--generation", type=int, choices=(1, 2, 3), default=1)
     args = parser.parse_args()
     build_gemv(args.K, args.N, args.generation)
