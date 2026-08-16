@@ -6,9 +6,10 @@
 // BF16 dequantization, and 64-lane accumulation. Generations 2-4 use one atomic
 // XRT runlist for all selected gate/up projections plus one for all downs. Gen5
 // keeps all three projections and exact clamped SwiGLU in one resident spatial
-// graph per selected expert. The provider stays opt-in until trained-weight
-// equivalence and end-to-end speedup are measured; UMA is not treated as
-// implicit ROCm/XRT coherence.
+// graph per selected expert. It accepts up to five activation rows so a DSpark
+// draft block can enter one XRT runlist without cross-token accumulation. The
+// provider stays opt-in until trained-weight equivalence and end-to-end speedup
+// are measured; UMA is not treated as implicit ROCm/XRT coherence.
 
 #include "moe_expert_compute_xdna.h"
 #include "rocmfp2_pack.h"
@@ -40,6 +41,7 @@
 namespace {
 
 using ProviderClock = std::chrono::steady_clock;
+constexpr int kGen5MaxBatchTokens = 5;
 
 double elapsed_ms(ProviderClock::time_point begin,
                   ProviderClock::time_point end) {
@@ -525,7 +527,8 @@ public:
             if (config.n_embd != 4096 || config.n_ff_exp != 2048)
                 throw std::runtime_error("Gen5 requires 4096x2048 experts");
             expert_ = std::make_unique<ExpertProgram>(
-                device_, std::max(1, config.n_expert_used));
+                device_, std::max(1, config.n_expert_used) *
+                             kGen5MaxBatchTokens);
         } else {
             gate_up_ = std::make_unique<GemvProgram>(
                 device_, config.n_embd, config.n_ff_exp,
@@ -542,11 +545,18 @@ public:
             if (error) *error = "XDNA2 provider is unhealthy";
             return 0;
         }
-        if (batch.n_tokens != 1 || batch.n_selected <= 0 || !batch.input ||
+        if (batch.n_tokens <= 0 || batch.n_selected <= 0 || !batch.input ||
             !batch.router_weights || !batch.output || !batch.expert_weights ||
             batch.n_selected > config_.n_expert_used ||
             batch.n_embd != config_.n_embd || batch.n_ff_exp != config_.n_ff_exp) {
             if (error) *error = "unsupported or invalid XDNA2 batch";
+            return 0;
+        }
+        if ((generation_ == 5 && batch.n_tokens > kGen5MaxBatchTokens) ||
+            (generation_ != 5 && batch.n_tokens != 1)) {
+            if (error) *error = generation_ == 5
+                ? "XDNA2 Gen5 supports at most five tokens"
+                : "XDNA2 Gen1-4 require one token";
             return 0;
         }
 
@@ -555,14 +565,23 @@ public:
             const auto start = ProviderClock::now();
             bool input_finite = false;
             const float input_max = finite_max_abs(
-                batch.input, static_cast<size_t>(batch.n_embd), &input_finite);
+                batch.input,
+                static_cast<size_t>(batch.n_tokens) *
+                    static_cast<size_t>(batch.n_embd),
+                &input_finite);
             if (!input_finite) {
                 if (error) *error = "non-finite XDNA input at layer " +
                     std::to_string(batch.layer_idx);
                 return 0;
             }
-            std::fill(batch.output, batch.output + batch.n_embd, 0.0f);
+            std::fill(batch.output,
+                      batch.output +
+                          static_cast<size_t>(batch.n_tokens) *
+                              static_cast<size_t>(batch.n_embd),
+                      0.0f);
             const size_t selected = static_cast<size_t>(batch.n_selected);
+            const size_t tokens = static_cast<size_t>(batch.n_tokens);
+            const size_t slots = tokens * selected;
             const size_t ff = static_cast<size_t>(batch.n_ff_exp);
             const size_t embd = static_cast<size_t>(batch.n_embd);
             std::vector<float> gate(selected * ff);
@@ -575,8 +594,8 @@ public:
             const auto buffers_ready = ProviderClock::now();
 
             if (generation_ == 5) {
-                std::vector<std::shared_ptr<CachedWeight>> expert_weights(selected);
-                for (int slot = 0; slot < batch.n_selected; ++slot) {
+                std::vector<std::shared_ptr<CachedWeight>> expert_weights(slots);
+                for (size_t slot = 0; slot < slots; ++slot) {
                     const auto & view = batch.expert_weights[slot];
                     if (view.struct_size < sizeof(ember_xdna_moe_weight_view_v1) ||
                         view.fused_gate_up || !view.gate || !view.up || !view.down ||
@@ -586,23 +605,25 @@ public:
                         if (error) *error = "selected expert is not separate ROCMFP2";
                         return 0;
                     }
-                    expert_weights[static_cast<size_t>(slot)] = expert_weight(view);
+                    expert_weights[slot] = expert_weight(view);
                 }
                 const auto weights_ready = ProviderClock::now();
+                projected.resize(slots * embd);
                 std::vector<ExpertProgram::Invocation> runs;
-                runs.reserve(selected);
-                for (size_t slot = 0; slot < selected; ++slot) {
+                runs.reserve(slots);
+                for (size_t slot = 0; slot < slots; ++slot) {
                     const auto & view = batch.expert_weights[slot];
-                    runs.push_back({batch.input, expert_weights[slot]->bo.get(),
+                    const size_t token = slot / selected;
+                    runs.push_back({batch.input + token * embd,
+                                    expert_weights[slot]->bo.get(),
                                     view.gate_scale, view.up_scale,
                                     config_.swiglu_clamp,
                                     projected.data() + slot * embd});
                 }
                 expert_->run_many(runs);
                 const auto execution_ready = ProviderClock::now();
-                for (int slot = 0; slot < batch.n_selected; ++slot) {
-                    const size_t index = static_cast<size_t>(slot);
-                    const auto & view = batch.expert_weights[slot];
+                for (size_t index = 0; index < slots; ++index) {
+                    const auto & view = batch.expert_weights[index];
                     bool finite = false;
                     (void)finite_max_abs(projected.data() + index * embd,
                                          embd, &finite);
@@ -610,21 +631,24 @@ public:
                         if (error) *error = "non-finite XDNA Gen5 output";
                         return 0;
                     }
-                    const float scale = view.down_scale * batch.router_weights[slot];
+                    const size_t token = index / selected;
+                    const float scale = view.down_scale *
+                        batch.router_weights[index];
                     for (int i = 0; i < batch.n_embd; ++i)
-                        batch.output[i] += projected[index * embd +
-                            static_cast<size_t>(i)] * scale;
+                        batch.output[token * embd + static_cast<size_t>(i)] +=
+                            projected[index * embd + static_cast<size_t>(i)] *
+                            scale;
                     ++experts_;
                 }
                 const auto accumulated = ProviderClock::now();
-                kernel_runs_ += selected;
+                kernel_runs_ += slots;
                 ++submissions_;
                 if (trace) {
                     std::fprintf(stderr,
-                        "[xdna2-xrt] generation=5 layer=%d experts=%d "
+                        "[xdna2-xrt] generation=5 layer=%d tokens=%d experts=%d "
                         "setup_ms=%.3f pack_ms=%.3f execute_ms=%.3f "
                         "accum_ms=%.3f total_ms=%.3f\n",
-                        batch.layer_idx, batch.n_selected,
+                        batch.layer_idx, batch.n_tokens, batch.n_selected,
                         elapsed_ms(start, buffers_ready),
                         elapsed_ms(buffers_ready, weights_ready),
                         elapsed_ms(weights_ready, execution_ready),

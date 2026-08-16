@@ -238,6 +238,24 @@ int main(int argc, char ** argv) {
         }
         selected_experts = static_cast<int>(parsed);
     }
+    int token_count = 1;
+    if (const char * raw = std::getenv("EMBER_XDNA_VALIDATION_TOKENS")) {
+        char * end = nullptr;
+        const long parsed = std::strtol(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 1 || parsed > 5) {
+            std::fprintf(stderr,
+                         "EMBER_XDNA_VALIDATION_TOKENS must be in [1,5]\n");
+            dlclose(library);
+            return 1;
+        }
+        token_count = static_cast<int>(parsed);
+    }
+    if (generation != 5 && token_count != 1) {
+        std::fprintf(stderr,
+                     "multi-token validation requires EMBER_XDNA_KERNEL_GEN=5\n");
+        dlclose(library);
+        return 1;
+    }
 
     ember_xdna_moe_config_v1 config{};
     config.abi_version = EMBER_XDNA_MOE_PROVIDER_ABI_VERSION;
@@ -263,40 +281,54 @@ int main(int argc, char ** argv) {
     fill_projection(up, n_embd, n_ff, 0x2468ace0u, dense);
     fill_projection(down, n_ff, n_embd, 0xdeadbeefu, dense);
 
-    std::vector<float> input(n_embd);
-    for (int i = 0; i < n_embd; ++i)
-        input[static_cast<size_t>(i)] =
-            static_cast<float>((i * 37) % 257 - 128) / 256.0f;
+    std::vector<float> input(static_cast<size_t>(token_count) * n_embd);
+    for (int token = 0; token < token_count; ++token) {
+        for (int i = 0; i < n_embd; ++i) {
+            input[static_cast<size_t>(token) * n_embd +
+                  static_cast<size_t>(i)] =
+                static_cast<float>((i * 37 + token * 53) % 257 - 128) /
+                256.0f;
+        }
+    }
 
     const auto reference_start = std::chrono::steady_clock::now();
-    std::vector<float> gate_out, up_out, hidden(n_ff), expected;
-    if (!gemv_kernel_reference(gate, input, n_embd, n_ff,
-                               generation, gate_out) ||
-        !gemv_kernel_reference(up, input, n_embd, n_ff,
-                               generation, up_out)) {
-        std::fprintf(stderr, "reference gate/up failed\n");
-        provider->destroy(context);
-        dlclose(library);
-        return 1;
+    std::vector<float> expected;
+    expected.reserve(static_cast<size_t>(token_count) * n_embd);
+    for (int token = 0; token < token_count; ++token) {
+        const auto begin = input.begin() + static_cast<size_t>(token) * n_embd;
+        std::vector<float> token_input(begin, begin + n_embd);
+        std::vector<float> gate_out, up_out, hidden(n_ff), token_expected;
+        if (!gemv_kernel_reference(gate, token_input, n_embd, n_ff,
+                                   generation, gate_out) ||
+            !gemv_kernel_reference(up, token_input, n_embd, n_ff,
+                                   generation, up_out)) {
+            std::fprintf(stderr, "reference gate/up failed\n");
+            provider->destroy(context);
+            dlclose(library);
+            return 1;
+        }
+        for (int i = 0; i < n_ff; ++i) {
+            float g = gate_out[static_cast<size_t>(i)] * gate_scale;
+            float u = up_out[static_cast<size_t>(i)] * up_scale;
+            g = std::min(g, clamp);
+            u = std::max(-clamp, std::min(u, clamp));
+            const float value = (g / (1.0f + std::exp(-g))) * u;
+            hidden[static_cast<size_t>(i)] =
+                generation == 5 ? bf16_round(value) : value;
+        }
+        if (!gemv_kernel_reference(down, hidden, n_ff, n_embd,
+                                   generation, token_expected)) {
+            std::fprintf(stderr, "reference down failed\n");
+            provider->destroy(context);
+            dlclose(library);
+            return 1;
+        }
+        for (float & value : token_expected)
+            value *= down_scale * route *
+                     static_cast<float>(selected_experts);
+        expected.insert(expected.end(), token_expected.begin(),
+                        token_expected.end());
     }
-    for (int i = 0; i < n_ff; ++i) {
-        float g = gate_out[static_cast<size_t>(i)] * gate_scale;
-        float u = up_out[static_cast<size_t>(i)] * up_scale;
-        g = std::min(g, clamp);
-        u = std::max(-clamp, std::min(u, clamp));
-        const float value = (g / (1.0f + std::exp(-g))) * u;
-        hidden[static_cast<size_t>(i)] =
-            generation == 5 ? bf16_round(value) : value;
-    }
-    if (!gemv_kernel_reference(down, hidden, n_ff, n_embd,
-                               generation, expected)) {
-        std::fprintf(stderr, "reference down failed\n");
-        provider->destroy(context);
-        dlclose(library);
-        return 1;
-    }
-    for (float & value : expected)
-        value *= down_scale * route * static_cast<float>(selected_experts);
     const double reference_ms = milliseconds(reference_start);
 
     ember_xdna_moe_weight_view_v1 view{};
@@ -314,17 +346,24 @@ int main(int argc, char ** argv) {
     view.up_scale = up_scale;
     view.down_scale = down_scale;
 
-    std::vector<int32_t> expert_ids(static_cast<size_t>(selected_experts));
-    std::vector<float> router_weights(static_cast<size_t>(selected_experts), route);
+    const size_t slots = static_cast<size_t>(token_count) *
+                         static_cast<size_t>(selected_experts);
+    std::vector<int32_t> expert_ids(slots);
+    std::vector<float> router_weights(slots, route);
     std::vector<ember_xdna_moe_weight_view_v1> views(
-        static_cast<size_t>(selected_experts), view);
-    for (int slot = 0; slot < selected_experts; ++slot)
-        expert_ids[static_cast<size_t>(slot)] = 17 + slot;
-    std::vector<float> actual(n_embd, std::numeric_limits<float>::quiet_NaN());
+        slots, view);
+    for (int token = 0; token < token_count; ++token) {
+        for (int slot = 0; slot < selected_experts; ++slot) {
+            expert_ids[static_cast<size_t>(token) * selected_experts +
+                       static_cast<size_t>(slot)] = 17 + slot;
+        }
+    }
+    std::vector<float> actual(static_cast<size_t>(token_count) * n_embd,
+                              std::numeric_limits<float>::quiet_NaN());
     ember_xdna_moe_batch_v1 batch{};
     batch.abi_version = EMBER_XDNA_MOE_PROVIDER_ABI_VERSION;
     batch.struct_size = sizeof(batch);
-    batch.n_tokens = 1;
+    batch.n_tokens = token_count;
     batch.n_selected = selected_experts;
     batch.n_embd = n_embd;
     batch.n_ff_exp = n_ff;
@@ -362,11 +401,12 @@ int main(int argc, char ** argv) {
     const bool pass = finite && cold.max_abs <= 1.0e-4f &&
                       warm.max_abs <= 1.0e-4f;
 
-    std::printf("provider=%s generation=%d mode=%s experts=%d outputs=%d "
+    std::printf("provider=%s generation=%d mode=%s tokens=%d experts=%d outputs=%zu "
                 "reference_ms=%.3f cold_ms=%.3f "
                 "warm_ms=%.3f\n",
                 provider->name ? provider->name : "(unnamed)", generation,
-                dense ? "dense" : "structured", selected_experts, n_embd,
+                dense ? "dense" : "structured", token_count,
+                selected_experts, actual.size(),
                 reference_ms, cold_ms, warm_ms);
     std::printf("cold max_abs=%.9g max_rel=%.9g mean_abs=%.9g rms=%.9g "
                 "cosine=%.9g actual_range=%.9g expected_range=%.9g "

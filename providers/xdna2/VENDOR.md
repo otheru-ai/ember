@@ -41,5 +41,9 @@ source from, AMD's current IRON operator and sequencing examples:
 
 The low-level DMA/task-queue contract was checked against AIE-RT branch
 `release/main_aig` at commit `8849e208bdcc533b20a0ed3f95c1ce961dee9c3a`.
-These are research references, not vendored dependencies. Ember's activation
-contract and accuracy thresholds remain independent.
+In particular, `driver/src/dma/xaie_dma.c` documents
+`XAie_DmaChannelSetStartQueue(..., EnTokenIssue)` as issuing a token when the
+queued task completes, while `driver/src/global/xaie2ipugbl_reginit.c` marks
+that start-queue field available on AIE2IPU. These are research references,
+not vendored dependencies. Ember's activation contract and accuracy thresholds
+remain independent.

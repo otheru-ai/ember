@@ -181,6 +181,12 @@ def build_expert(gate_only=False, down_groups=2):
                             bd_id=2, mem=staging,
                             sizes=[1, 1, ROWS * COLS, TILE_N],
                             strides=[0, 0, 4 * TILE_N, 1],
+                            # AIE-RT release/main_aig:
+                            # XAie_DmaChannelSetStartQueue() makes completion
+                            # token issuance a property of every queued task.
+                            # dma_wait consumes that token, so descriptor reuse
+                            # must request a new one rather than inheriting the
+                            # token state of the original host-input transfer.
                             issue_token=True)
                     # AIE-RT task queues can chain both replays, but waiting
                     # each phase makes the producer/consumer dependency

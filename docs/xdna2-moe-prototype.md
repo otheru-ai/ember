@@ -317,6 +317,44 @@ control: its fresh run matched its baseline, but restored decoding diverged at
 token index 2. That must be fixed before the hybrid differential validator can
 serve as a clean oracle for later XDNA work.
 
+The packaged Gen5 provider subsequently reached all 43 layers with the trained
+85.3 GiB model, a 32 GiB resident-GPU expert budget, exact prefill, and runtime
+top-k 4. Its baseline and fresh replay began with the same tokens as the
+authoritative monolithic HIP run (`372, 223`); the restored hybrid path alone
+changed the second token to `28231`. This localizes the observed differential
+failure to the existing hybrid snapshot restore path rather than Gen5 expert
+math, although a longer trained-output comparison remains required after that
+restore defect is fixed.
+
+End-to-end serving rejects the current target-MoE placement despite the fast
+kernel. The exact-prompt cold request measured 26.09 s prefill and 1.58 tok/s
+decode; repeating it with packed weights resident improved to 1.74 s prefill
+and 10.20 tok/s. The production monolithic fused-GPU/DSpark path on the same
+machine measured 671.5 ms prefill and 22.65 tok/s decode. Hybrid placement
+disables both the single fused target graph and DSpark, so Gen5's roughly
+0.5 ms warm expert execution cannot recover the lost graph-level throughput.
+Do not spend the next iteration optimizing cold packing in this target-hybrid
+design: even its warm upper bound is less than half the production baseline.
+
+The next useful NPU boundary is the three-layer DSpark drafter, not the
+43-layer target. Keep the target and verifier monolithic on the GPU, retain the
+CPU as scheduler/packer, and prototype batched drafter expert work on XDNA2.
+AIE-RT's repeat-count start queue plus explicit per-task completion-token
+contract is directly relevant there: the drafter's fixed five-row block can
+amortize one host submission without splitting the target graph, while target
+verification remains capped at q<=4. This remains a proposed Gen6 experiment,
+not a performance claim.
+
+The provider-side prerequisite is implemented and hardware-validated. Gen5
+accepts up to five tokens and submits every token/expert pair through one XRT
+runlist, keeping input and accumulation surfaces token-private. A dense
+five-token/four-expert probe with different activation rows passed at cosine
+1.0 and maximum absolute error `9.54e-6`. Its warm provider time was 8.432 ms;
+the corresponding one-token/four-expert probe was 1.778 ms, or about 8.89 ms
+when repeated five times. Queue amortization therefore saves only about 5%.
+The next experiment must replace the GPU drafter's MoE work with this path to
+have a plausible end-to-end benefit; rebatching the same work is insufficient.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host
@@ -331,9 +369,12 @@ Before treating the path as usable on gfx1151 hardware:
    packing separated from warm steady state. Record provider launch/sync time,
    total package power, GPU slowdown while XDNA runs, thermals, cache hit rate,
    and `xrt-smi` partition activity.
-5. Run the new Gen5 fused expert through trained-weight cache residency and
-   end-to-end performance tests. Keep the provider opt-in unless both output
-   and end-to-end performance pass.
+5. Keep Gen5 target-MoE offload opt-in: its trained baseline passed the initial
+   token check, but its warm end-to-end decode reached only 10.20 tok/s versus
+   22.65 tok/s for production.
+6. Prototype Gen6 against the three-layer DSpark drafter while retaining the
+   monolithic target. Measure draft, head, verify, and total token latency
+   independently; reject it unless total decode improves.
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.
