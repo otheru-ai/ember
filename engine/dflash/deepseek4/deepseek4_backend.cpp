@@ -780,6 +780,44 @@ bool DeepSeek4Backend::load_spec_drafter() {
     }
 
     spec_drafter_ = std::move(drafter);
+    const char * xdna_plugin = std::getenv("DFLASH_DSPARK_XDNA_PLUGIN");
+    const bool xdna_required =
+        env_flag_enabled("DFLASH_DSPARK_XDNA_REQUIRED");
+    if (xdna_required && (!xdna_plugin || !*xdna_plugin)) {
+        std::fprintf(stderr,
+                     "[xdna-dspark] DFLASH_DSPARK_XDNA_REQUIRED needs "
+                     "DFLASH_DSPARK_XDNA_PLUGIN\n");
+        free_deepseek4_dspark_drafter(*spec_drafter_);
+        spec_drafter_.reset();
+        return false;
+    }
+    if (xdna_plugin && *xdna_plugin) {
+        XdnaDSparkDraftConfig config;
+        config.plugin_path = xdna_plugin;
+        config.draft_model_path = spec_draft_path_;
+        config.n_embd = d.core.n_embd;
+        config.n_target_layers = d.n_target_layers;
+        config.block_size = d.block_size;
+        config.n_swa = w_.n_swa;
+        config.required = xdna_required;
+        std::string error;
+        spec_xdna_draft_compute_ =
+            make_xdna_dspark_draft_compute(config, &error);
+        if (!spec_xdna_draft_compute_) {
+            std::fprintf(stderr, "[xdna-dspark] %s%s\n", error.c_str(),
+                         config.required ? " (required)" :
+                                           "; using GPU drafter");
+            if (config.required) {
+                free_deepseek4_dspark_drafter(*spec_drafter_);
+                spec_drafter_.reset();
+                return false;
+            }
+        } else {
+            std::fprintf(stderr, "[xdna-dspark] provider ready: %s%s\n",
+                         spec_xdna_draft_compute_->name(),
+                         config.required ? " required" : "");
+        }
+    }
     spec_enabled_ = true;
     spec_drafter_parked_ = false;
     std::fprintf(stderr, "[deepseek4] DSpark spec-decode ENABLED (drafter=%s)\n",
@@ -788,6 +826,7 @@ bool DeepSeek4Backend::load_spec_drafter() {
 }
 
 void DeepSeek4Backend::release_spec_drafter(bool mark_parked) {
+    spec_xdna_draft_compute_.reset();
     if (spec_drafter_) {
         free_deepseek4_dspark_drafter(*spec_drafter_);
     }
@@ -859,7 +898,11 @@ bool DeepSeek4Backend::init() {
                              "[deepseek4] DSpark spec-decode requires monolithic model "
                              "placement; disabled for hybrid expert placement\n");
             } else {
-                (void) load_spec_drafter();
+                const bool loaded = load_spec_drafter();
+                if (!loaded &&
+                    env_flag_enabled("DFLASH_DSPARK_XDNA_REQUIRED")) {
+                    return false;
+                }
             }
         } else {
             std::fprintf(stderr, "[deepseek4] DFLASH_DS4_SPEC set but DFLASH_DS4_DRAFT gguf missing\n");
@@ -1920,7 +1963,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                     backend_, cfg_.device.gpu, w_, cache_, *spec_drafter_, committed, seed,
                     spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr, win_len,
-                    spec_toks, &accept_rate,
+                    spec_toks, &accept_rate, spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t tok) {
                         if (out_io.cancelled) return false;
@@ -2329,6 +2372,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                     committed, seed, spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr,
                     win_len, spec_tokens, &accept_rate,
+                    spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t token) {
                         if (out_io.cancelled) return false;

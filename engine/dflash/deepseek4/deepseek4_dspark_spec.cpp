@@ -29,6 +29,7 @@
 
 #include "deepseek4_dspark.h"
 #include "deepseek4_dspark_scheduler.h"
+#include "common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "internal.h"
 #include "common/dspark_head.h"
@@ -669,6 +670,7 @@ bool run_deepseek4_dspark_spec_decode(
         int win_len,
         std::vector<int32_t> & out_tokens,
         float * accept_rate_out,
+        XdnaDSparkDraftCompute * xdna_draft_compute,
         const std::function<bool(int32_t)> & on_token) {
     const int n_embd = target_w.n_embd;
     const int n_tgt = drafter.n_target_layers;
@@ -900,11 +902,46 @@ bool run_deepseek4_dspark_spec_decode(
             }
 
             // Drafter forward -> normalized states for token logits plus the
-            // pre-output-norm states expected by the confidence head.
-            if (!deepseek4_dspark_draft_forward(backend, drafter, noise_embed.data(),
-                                                ctx_len > 0 ? feat_win.data() : nullptr,
-                                                ctx_len, pos, local_hidden,
-                                                use_confidence_width ? &confidence_hidden : nullptr)) {
+            // pre-output-norm states expected by the confidence head. The XDNA
+            // seam is one whole support-model submission, following the
+            // persistent/minimal-reconfiguration design in arXiv:2504.03083.
+            // This monolithic loop collects immediately; resident batching can
+            // retain the returned job while the GPU verifies another session.
+            bool draft_ok = false;
+            if (xdna_draft_compute && xdna_draft_compute->healthy()) {
+                XdnaDSparkDraftRequest request;
+                request.committed = pos;
+                request.ctx_len = ctx_len;
+                request.noise_embed = noise_embed.data();
+                request.ctx_features = ctx_len > 0 ? feat_win.data() : nullptr;
+                std::string provider_error;
+                auto job = xdna_draft_compute->submit(request, &provider_error);
+                XdnaDSparkDraftOutput provider_output;
+                if (job && job->wait(provider_output, &provider_error)) {
+                    local_hidden = std::move(provider_output.hidden);
+                    confidence_hidden = std::move(
+                        provider_output.confidence_hidden);
+                    draft_ok = true;
+                } else {
+                    std::fprintf(stderr,
+                                 "[ds4-spec] XDNA drafter failed: %s%s\n",
+                                 provider_error.c_str(),
+                                 xdna_draft_compute->failure_is_fatal()
+                                     ? " (required)" : "; falling back to GPU");
+                    if (xdna_draft_compute->failure_is_fatal()) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (!draft_ok) {
+                draft_ok = deepseek4_dspark_draft_forward(
+                    backend, drafter, noise_embed.data(),
+                    ctx_len > 0 ? feat_win.data() : nullptr,
+                    ctx_len, pos, local_hidden,
+                    use_confidence_width ? &confidence_hidden : nullptr);
+            }
+            if (!draft_ok) {
                 std::fprintf(stderr, "[ds4-spec] drafter forward failed\n");
                 ok = false;
                 break;

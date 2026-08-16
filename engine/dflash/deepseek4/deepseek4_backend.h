@@ -14,6 +14,7 @@
 #include "../common/moe_hybrid_storage.h"
 #include "../common/moe_hybrid_stream.h"
 #include "../common/moe_expert_compute_xdna.h"
+#include "../common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
 
@@ -127,6 +128,7 @@ private:
     bool                           spec_drafter_parked_ = false;
     std::string                    spec_draft_path_;
     std::unique_ptr<DSparkDrafter> spec_drafter_;
+    std::unique_ptr<XdnaDSparkDraftCompute> spec_xdna_draft_compute_;
     std::vector<float>             spec_feat_window_;
 
     bool load_spec_drafter();

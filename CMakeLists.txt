@@ -268,7 +268,9 @@ target_include_directories(test_resident_batch_coordinator PRIVATE
   engine/ggml/include)
 add_test(NAME resident_batch_coordinator COMMAND test_resident_batch_coordinator)
 
-add_library(mock_xdna_moe_provider MODULE test/mock_xdna_moe_provider.cpp)
+add_library(mock_xdna_moe_provider MODULE
+  test/mock_xdna_moe_provider.cpp
+  test/mock_xdna_dspark_provider.cpp)
 target_include_directories(mock_xdna_moe_provider PRIVATE
   engine/dflash/common engine/ggml/include engine/ggml/src)
 set_target_properties(mock_xdna_moe_provider PROPERTIES PREFIX "")
@@ -280,6 +282,15 @@ target_include_directories(test_xdna_moe_provider PRIVATE
   engine/dflash/common engine/ggml/include engine/ggml/src)
 target_link_libraries(test_xdna_moe_provider PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME xdna_moe_provider COMMAND test_xdna_moe_provider
+  $<TARGET_FILE:mock_xdna_moe_provider>)
+
+add_executable(test_xdna_dspark_provider
+  test/test_xdna_dspark_provider.cpp
+  engine/dflash/common/dspark_draft_compute_xdna.cpp)
+target_include_directories(test_xdna_dspark_provider PRIVATE
+  engine/dflash/common)
+target_link_libraries(test_xdna_dspark_provider PRIVATE ${CMAKE_DL_LIBS})
+add_test(NAME xdna_dspark_provider COMMAND test_xdna_dspark_provider
   $<TARGET_FILE:mock_xdna_moe_provider>)
 
 add_executable(test_xdna_rocmfp2_pack
@@ -309,6 +320,7 @@ set(EMBER_C_TESTS
   compaction gguf model_card kv_cache qa dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator xdna_moe_provider
+  xdna_dspark_provider
   xdna_rocmfp2_pack)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 

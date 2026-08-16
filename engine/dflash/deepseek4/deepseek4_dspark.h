@@ -37,6 +37,8 @@
 
 namespace dflash::common {
 
+class XdnaDSparkDraftCompute;
+
 // The drafter weights. `core` reuses DeepSeek4Weights for the n_layer decoder
 // blocks + per-layer tensors + metadata + out_norm + output_hc_* tail; its
 // tok_embd/output stay null (tied to target). The DSpark-specific tensors below
@@ -177,6 +179,7 @@ bool run_deepseek4_dspark_spec_decode(
         int win_len,
         std::vector<int32_t> & out_tokens,
         float * accept_rate_out,
+        XdnaDSparkDraftCompute * xdna_draft_compute = nullptr,
         const std::function<bool(int32_t)> & on_token = {});
 
 }  // namespace dflash::common

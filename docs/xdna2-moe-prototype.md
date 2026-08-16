@@ -529,6 +529,54 @@ traffic. Reconsider only if a future engine exposes a coarse independent
 branch whose measured removed GPU time is materially larger, or if hardware
 supports device-side cross-engine scheduling without per-layer host barriers.
 
+### Coarse DSpark proposal seam
+
+The next prototype moves the synchronization boundary from a target layer to a
+complete DSpark support-model forward. This follows the useful parts of
+[the bare-metal Ryzen NPU GPT-2 work](https://arxiv.org/html/2504.03083v1): keep
+the AIE program resident, specialize the fixed shapes, double-buffer DMA and
+compute, and change only runtime parameters instead of reconfiguring the array.
+That paper measured full-array reconfiguration as 3.5x slower on the first
+invocation of a new shape and identified the CPU-to-NPU-to-CPU round trip at
+each kernel as a major remaining cost. Its conclusion also matches Ember's
+Gen5/Gen6 measurements: a whole data-flow pipeline is the path to NPU utility;
+many individually offloaded kernels are not.
+
+`dspark_draft_compute_xdna.h` now defines an asynchronous provider ABI for one
+complete three-layer draft forward. `submit()` must retain its input before it
+returns, and the returned job can be waited or cancelled later. The output is
+the normalized five-row hidden block plus the separate pre-output-norm state
+used by the confidence head. Ember intentionally keeps the tied target LM,
+Markov, and confidence heads outside the provider: this avoids duplicating the
+129280-wide target output matrix in the first NPU artifact and leaves only a
+short GPU head between NPU proposal completion and target verification.
+
+The monolithic DSpark loop is wired through this provider first. It currently
+submits and collects immediately, which is a correctness/qualification stage,
+not yet an overlap claim. Optional failure falls back to the existing GPU
+drafter; `DFLASH_DSPARK_XDNA_REQUIRED=1` fails closed. Configuration is:
+
+```text
+DFLASH_DSPARK_XDNA_PLUGIN=/usr/local/lib/libember_xdna_dspark.so
+DFLASH_DSPARK_XDNA_REQUIRED=1
+```
+
+GPU-free coverage loads a mock provider, submits two session proposals, mutates
+the caller's buffers after submission, and waits in reverse order. This proves
+the lifetime and session-isolation contract without XRT. The shipped XRT module
+does not yet export the DSpark symbol: a hardware provider needs the complete
+fixed-shape draft AIE graph and trained-weight packer before the environment
+variables are usable in production.
+
+The scheduling target is deliberately cross-session and coarse: while the GPU
+verifies session A (roughly 63-82 ms for q=2..4 in the measurements above), the
+NPU prepares session B's five-row draft hidden block. The CPU owns admission,
+proposal-job bookkeeping, and completion. This can hide an NPU drafter much
+slower than the current roughly 5 ms GPU drafter without splitting the fused
+target graph. It still must beat the measured shared-fabric contention in an
+aggregate two-session benchmark; UMA removes a copy opportunity, not bandwidth
+competition or XRT/ROCm allocation-coherence requirements.
+
 Before treating the path as usable on gfx1151 hardware:
 
 1. Compare both individual projection outputs against the F32 ROCMFP2 host

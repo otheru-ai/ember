@@ -115,6 +115,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/common/peer_access.cpp
   ${DFLASH}/common/moe_expert_compute.cpp
   ${DFLASH}/common/moe_expert_compute_xdna.cpp
+  ${DFLASH}/common/dspark_draft_compute_xdna.cpp
   ${DFLASH}/common/moe_hybrid_ffn_eval.cpp
   ${DFLASH}/common/moe_hybrid_placement.cpp
   ${DFLASH}/common/moe_hybrid_routing_stats.cpp

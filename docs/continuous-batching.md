@@ -149,4 +149,8 @@ output launches as the backend permits.
 
 After that graph is validated, DSpark needs the same per-session treatment for
 its draft cache, feature window, verifier rollback state, and profitability
-scheduler before speculative resident batching can be enabled.
+scheduler before speculative resident batching can be enabled. The XDNA2
+prototype now has an asynchronous whole-draft-forward provider contract with
+two-job session-isolation coverage. The monolithic path collects it
+immediately; the resident implementation must retain one proposal job per
+session and schedule GPU verify for a different ready session before waiting.
