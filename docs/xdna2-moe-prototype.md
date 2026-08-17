@@ -818,6 +818,71 @@ docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
   1024 32768 /models/dspark-draft.gguf blk.0.attn_q_b.weight
 ```
 
+### Gen12 weight-reusing 128-row Q8 context GEMM
+
+Gen11 measured the five proposal rows but did not include DSpark's dense
+context path. The draft first projects up to 128 concatenated target-layer
+features through `dflash.fc.weight`, and every draft layer projects the same
+context rows through `blk.N.attn_kv.weight`. The deployed GGUF stores both as
+ordinary Q8_0. Treating those operations as five-row GEMVs materially
+under-counted the draft cost.
+
+Gen12 follows the full-array BF16 GEMM topology in AMD IRON's
+`aie_kernels/aie2p/mm.cc`: four AIE rows each own 32 input rows, eight columns
+each own 64 output columns, and the `mmul<4,8,8>` kernel expands two M blocks
+by two N blocks to keep four FP32 accumulators live. Activations multicast
+across each compute row and corrected Q8 weights multicast down each column.
+Each dequantized weight remains a BF16 high term plus BF16 residual, so this
+changes reuse and scheduling without weakening Gen10/11's trained numerical
+contract.
+
+The larger graph exposed three additional descriptor rules in the pinned
+MLIR-AIE/AIE-RT flow:
+
+- aggregating four compute-row outputs in the memory tile is necessary to stay
+  within each shim's input-channel count;
+- no DMA dimension may encode 1024 elements, so 8--32 KiB objects are expressed
+  as 512-element subdimensions;
+- the shim repeat field accepts at most 64 objects. K is consequently divided
+  into 32-tile runs, and a four-byte sentinel after every corrected weight tile
+  prevents adjacent 32 KiB objects from coalescing into an illegal transfer.
+
+For the eight-output-group main projection, the 3 MiB activation is replicated
+in host-visible staging for each output group (about 25 MiB total). This makes
+the descriptor sequence affine and is far cheaper than duplicating or
+re-reading the 201 MiB corrected weights.
+
+Physical Strix Halo results against trained tensors were:
+
+| DSpark tensor | M x K x N | warm sequence | packed bytes | maximum error | cosine |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `blk.0.attn_kv.weight` | 128 x 4096 x 512 | 0.673 ms | 8,389,632 | `2.19e-5` | 1.0 |
+| `dflash.fc.weight` | 128 x 12288 x 4096 | 13.929 ms | 201,351,168 | `5.53e-5` | 1.0 |
+
+The context-KV graph processes 25.6 times as many rows as Gen11's five-row
+0.261 ms projection in only 2.58 times the sequence time, roughly a 9.9x
+per-row throughput improvement from weight reuse. The main projection plus
+three layer-local context-KV projections nevertheless costs 15.95 ms. Adding
+that previously missing work to Gen11's roughly 68.0 ms subtotal produces an
+83.95 ms full-context draft floor before HC, RMSNorm, router, attention
+reductions, and tail collapse. It cannot be completely hidden by the measured
+q=4 verifier window of about 81.7 ms, so Gen12 is a successful kernel but an
+end-to-end scheduling rejection in its current compensated form. Reducing the
+13.9 ms main projection is the next performance gate.
+
+Both `q8_gemm_m32_v4_{4096x512,12288x4096}_b128.{xclbin,insts}` artifacts and
+`ember-xdna-q8-gemm-m32-validate` are packaged in `release-xdna`. A trained
+main-projection check is:
+
+```bash
+docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-xdna-q8-gemm-m32-validate ember:xdna-local \
+  /usr/local/share/ember/xdna2/q8_gemm_m32_v4_12288x4096_b128.xclbin \
+  /usr/local/share/ember/xdna2/q8_gemm_m32_v4_12288x4096_b128.insts \
+  12288 4096 /models/dspark-draft.gguf dflash.fc.weight
+```
+
 Run the same trained check from the opt-in image with:
 
 ```bash

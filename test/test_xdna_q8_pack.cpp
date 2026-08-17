@@ -244,6 +244,69 @@ int main() {
     }
     CHECK(task_layout, "column-major task layout retains every corrected tile");
 
+    std::vector<uint8_t> gemm_packed;
+    CHECK(pack_q8_gemm_m32_corrected_bf16(
+              task_raw.data(), task_raw.size(), task_k, n,
+              gemm_packed, &error) &&
+              gemm_packed.size() ==
+                  q8_gemm_m32_packed_bytes(task_k, n),
+          "m32 GEMM weights pack into blocked MMUL tasks");
+    bool gemm_layout = true;
+    constexpr int gemm_groups = n / kQ8OutputsPerRow;
+    constexpr size_t gemm_tile_stride =
+        kQ8CorrectedTileBytes + 2 * sizeof(uint16_t);
+    for (int output_group = 0;
+         output_group < gemm_groups && gemm_layout; ++output_group) {
+        const int source_group = output_group / kQ8AieRows;
+        const int source_row = output_group % kQ8AieRows;
+        for (int column = 0;
+             column < kQ8AieColumns && gemm_layout; ++column) {
+            for (int kt = 0; kt < k_tiles && gemm_layout; ++kt) {
+                const size_t source_tile =
+                    (((static_cast<size_t>(source_group) * kQ8AieColumns +
+                       static_cast<size_t>(column)) * k_tiles +
+                      static_cast<size_t>(kt)) * kQ8AieRows +
+                     static_cast<size_t>(source_row));
+                const auto * source_high = reinterpret_cast<const uint16_t *>(
+                    task_group_major.data() +
+                        source_tile * kQ8CorrectedTileBytes);
+                const auto * destination_high =
+                    reinterpret_cast<const uint16_t *>(
+                        gemm_packed.data() +
+                        ((static_cast<size_t>(column) * gemm_groups +
+                          static_cast<size_t>(output_group)) * k_tiles +
+                         static_cast<size_t>(kt)) * gemm_tile_stride);
+                for (int input_lane = 0;
+                     input_lane < kQ8TileK && gemm_layout; ++input_lane) {
+                    for (int output_lane = 0; output_lane < kQ8TileN;
+                         ++output_lane) {
+                        const int kb = input_lane / 8;
+                        const int ir = input_lane % 8;
+                        const int nb = output_lane / 8;
+                        const int jn = output_lane % 8;
+                        const size_t blocked =
+                            (static_cast<size_t>(kb * 8 + nb) * 8 +
+                             static_cast<size_t>(ir)) * 8 +
+                            static_cast<size_t>(jn);
+                        const size_t linear =
+                            static_cast<size_t>(input_lane) * kQ8TileN +
+                            static_cast<size_t>(output_lane);
+                        if (destination_high[blocked] != source_high[linear]) {
+                            gemm_layout = false;
+                            break;
+                        }
+                    }
+                }
+                const uint16_t * sentinel = reinterpret_cast<const uint16_t *>(
+                    reinterpret_cast<const uint8_t *>(destination_high) +
+                    kQ8CorrectedTileBytes);
+                if (sentinel[0] != 0 || sentinel[1] != 0)
+                    gemm_layout = false;
+            }
+        }
+    }
+    CHECK(gemm_layout, "m32 MMUL blocking preserves every high-plane weight");
+
     CHECK(!pack_q8_gemm_bf16(raw.data(), raw.size() - 1, k, n,
                              packed, &error) &&
               error.find("shorter") != std::string::npos,

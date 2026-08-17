@@ -47,6 +47,11 @@ bool pack_q8_projection_corrected_bf16(const void * raw, size_t raw_bytes,
                                        std::vector<uint8_t> & packed,
                                        std::string * error = nullptr);
 size_t q8_projection_task_packed_bytes(int k, int n);
+bool pack_q8_gemm_m32_corrected_bf16(const void * raw, size_t raw_bytes,
+                                     int k, int n,
+                                     std::vector<uint8_t> & packed,
+                                     std::string * error = nullptr);
+size_t q8_gemm_m32_packed_bytes(int k, int n);
 
 size_t q8_expert_v1_bytes();
 bool pack_q8_expert_v1(const void * gate, size_t gate_bytes,

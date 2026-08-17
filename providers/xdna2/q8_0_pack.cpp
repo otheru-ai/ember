@@ -305,6 +305,98 @@ size_t q8_projection_task_packed_bytes(int k, int n) {
     return tasks * (payload + 2 * sizeof(uint16_t));
 }
 
+size_t q8_gemm_m32_packed_bytes(int k, int n) {
+    if (!q8_supported_shape(k, n) || k % 512 != 0 ||
+        n % kQ8OutputsPerRow != 0) return 0;
+    const size_t groups = static_cast<size_t>(n / kQ8OutputsPerRow);
+    const size_t tiles_per_group = static_cast<size_t>(k / kQ8TileK);
+    const size_t tiles = static_cast<size_t>(kQ8AieColumns) * groups *
+                         tiles_per_group;
+    const size_t tile_stride = kQ8CorrectedTileBytes +
+                               2 * sizeof(uint16_t);
+    if (tiles > std::numeric_limits<size_t>::max() / tile_stride) return 0;
+    return tiles * tile_stride;
+}
+
+bool pack_q8_gemm_m32_corrected_bf16(const void * raw, size_t raw_bytes,
+                                     int k, int n,
+                                     std::vector<uint8_t> & packed,
+                                     std::string * error) {
+    std::vector<uint8_t> source;
+    if (!pack_q8_gemm_corrected_bf16(raw, raw_bytes, k, n, source,
+                                     error)) return false;
+    const size_t packed_bytes = q8_gemm_m32_packed_bytes(k, n);
+    if (!packed_bytes) {
+        if (error) *error =
+            "Q8 m32 GEMM packing requires K%512=0 and N%512=0";
+        return false;
+    }
+    constexpr int block_k = 8;
+    constexpr int block_n = 8;
+    constexpr int k_blocks = kQ8TileK / block_k;
+    constexpr int n_blocks = kQ8TileN / block_n;
+    const int k_tiles = k / kQ8TileK;
+    const int output_groups = n / kQ8OutputsPerRow;
+    const int source_rows = projection_rows(n);
+    const size_t tile_stride = kQ8CorrectedTileBytes +
+                               2 * sizeof(uint16_t);
+    packed.assign(packed_bytes, 0);
+
+    for (int column = 0; column < kQ8AieColumns; ++column) {
+        for (int output_group = 0; output_group < output_groups;
+             ++output_group) {
+            const int source_group = output_group / source_rows;
+            const int source_row = output_group % source_rows;
+            for (int kt = 0; kt < k_tiles; ++kt) {
+                const size_t destination_tile =
+                    ((static_cast<size_t>(column) *
+                          static_cast<size_t>(output_groups) +
+                      static_cast<size_t>(output_group)) *
+                         static_cast<size_t>(k_tiles) +
+                     static_cast<size_t>(kt)) * tile_stride;
+                size_t source_tile = static_cast<size_t>(source_group);
+                source_tile = source_tile * kQ8AieColumns +
+                              static_cast<size_t>(column);
+                source_tile = source_tile * static_cast<size_t>(k_tiles) +
+                              static_cast<size_t>(kt);
+                source_tile = source_tile * static_cast<size_t>(source_rows) +
+                              static_cast<size_t>(source_row);
+                const auto * source_high =
+                    reinterpret_cast<const uint16_t *>(
+                        source.data() + source_tile * kQ8CorrectedTileBytes);
+                const uint16_t * source_low = source_high +
+                    static_cast<size_t>(kQ8TileK) * kQ8TileN;
+                auto * destination_high = reinterpret_cast<uint16_t *>(
+                    packed.data() + destination_tile);
+                uint16_t * destination_low = destination_high +
+                    static_cast<size_t>(kQ8TileK) * kQ8TileN;
+                for (int kb = 0; kb < k_blocks; ++kb) {
+                    for (int nb = 0; nb < n_blocks; ++nb) {
+                        for (int ir = 0; ir < block_k; ++ir) {
+                            for (int jn = 0; jn < block_n; ++jn) {
+                                const size_t source_index =
+                                    static_cast<size_t>(kb * block_k + ir) *
+                                        kQ8TileN +
+                                    static_cast<size_t>(nb * block_n + jn);
+                                const size_t destination_index =
+                                    (static_cast<size_t>(kb * n_blocks + nb) *
+                                         block_k +
+                                     static_cast<size_t>(ir)) * block_n +
+                                    static_cast<size_t>(jn);
+                                destination_high[destination_index] =
+                                    source_high[source_index];
+                                destination_low[destination_index] =
+                                    source_low[source_index];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 size_t q8_expert_v1_bytes() {
     const size_t first = q8_packed_projection_bytes(4096, 2048);
     const size_t down = q8_packed_projection_bytes(2048, 4096);
