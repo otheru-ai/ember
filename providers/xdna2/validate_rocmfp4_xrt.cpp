@@ -6,6 +6,7 @@
 // the draft provider grows a full three-layer graph.
 
 #include "rocmfp4_pack.h"
+#include "rocmfp4_model_weights.h"
 #include "rocmfp4_route_plan.h"
 
 #include <xrt/xrt_bo.h>
@@ -156,11 +157,24 @@ Metrics compare(const std::vector<float> & actual,
 }  // namespace
 
 int main(int argc, char ** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s IMAGE.xclbin IMAGE.insts\n", argv[0]);
+    if (argc < 3 || argc > 5) {
+        std::fprintf(stderr,
+            "usage: %s IMAGE.xclbin IMAGE.insts [DRAFT.gguf [LAYER]]\n",
+            argv[0]);
         return 2;
     }
     try {
+        const bool model_mode = argc >= 4;
+        int model_layer = 0;
+        if (argc == 5) {
+            char * end = nullptr;
+            const long parsed = std::strtol(argv[4], &end, 10);
+            if (end == argv[4] || *end != '\0' || parsed < 0 ||
+                parsed >= ember::xdna2::kRocmfp4ModelLayers) {
+                throw std::runtime_error("model layer must be in [0,2]");
+            }
+            model_layer = static_cast<int>(parsed);
+        }
         const bool route_aware = std::string(argv[1]).find("expert_v8_") !=
                                  std::string::npos;
         int active_rows = kBatch;
@@ -199,6 +213,8 @@ int main(int argc, char ** argv) {
         }
         if (route_plan_mode && !route_aware)
             throw std::runtime_error("route-plan validation requires Gen8");
+        if (model_mode && !route_aware)
+            throw std::runtime_error("trained-weight validation requires Gen8");
 
         ember::xdna2::Rocmfp4RoutePlan route_plan;
         if (route_plan_mode) {
@@ -224,9 +240,12 @@ int main(int argc, char ** argv) {
             route_experts = static_cast<int>(route_plan.runs.size());
             active_rows = 1;
         }
-        constexpr float gate_scale = 0.125f;
-        constexpr float up_scale = 0.125f;
-        constexpr float down_scale = 0.25f;
+        if (model_mode && route_experts != 1 && !route_plan_mode)
+            throw std::runtime_error(
+                "multiple trained experts require EMBER_XDNA_ROUTE_PLAN=1");
+        const float gate_scale = model_mode ? 1.0f : 0.125f;
+        const float up_scale = model_mode ? 1.0f : 0.125f;
+        const float down_scale = model_mode ? 1.0f : 0.25f;
         constexpr float clamp = 10.0f;
 
         std::vector<uint8_t> gate(
@@ -246,6 +265,36 @@ int main(int argc, char ** argv) {
             throw std::runtime_error(pack_error);
         }
 
+        std::vector<ember::xdna2::Rocmfp4ModelExpert> model_experts;
+        if (model_mode) {
+            std::vector<int> expert_ids;
+            if (route_plan_mode) {
+                expert_ids.reserve(route_plan.runs.size());
+                for (const auto & run : route_plan.runs)
+                    expert_ids.push_back(run.expert_id);
+            } else {
+                int model_expert = 0;
+                if (const char * raw = std::getenv("EMBER_XDNA_MODEL_EXPERT")) {
+                    char * end = nullptr;
+                    const long parsed = std::strtol(raw, &end, 10);
+                    if (end == raw || *end != '\0' || parsed < 0 ||
+                        parsed >= ember::xdna2::kRocmfp4ModelExperts) {
+                        throw std::runtime_error(
+                            "EMBER_XDNA_MODEL_EXPERT must be in [0,255]");
+                    }
+                    model_expert = static_cast<int>(parsed);
+                }
+                expert_ids.push_back(model_expert);
+            }
+            std::string load_error;
+            if (!ember::xdna2::load_rocmfp4_model_experts(
+                    argv[3], model_layer, expert_ids, model_experts,
+                    &load_error)) {
+                throw std::runtime_error(load_error);
+            }
+            distinct_weights = true;
+        }
+
         std::vector<float> input(static_cast<size_t>(kBatch) * kEmbd);
         for (int token = 0; token < kBatch; ++token) {
             for (int lane = 0; lane < kEmbd; ++lane) {
@@ -256,19 +305,15 @@ int main(int argc, char ** argv) {
         }
 
         std::vector<float> expected(static_cast<size_t>(kBatch) * kEmbd, 0.0f);
-        for (int token = 0; token < kBatch; ++token) {
-            const float * row = input.data() + static_cast<size_t>(token) * kEmbd;
-            std::vector<float> gate_out(kFf), up_out(kFf);
-            if (!ember::xdna2::rocmfp4_gemm_raw_reference(
-                    gate.data(), gate.size(), row, kEmbd, kFf,
-                    gate_scale, gate_out.data()) ||
-                !ember::xdna2::rocmfp4_gemm_raw_reference(
-                    up.data(), up.size(), row, kEmbd, kFf,
-                    up_scale, up_out.data())) {
-                throw std::runtime_error("gate/up reference failed");
-            }
-            const int reference_runs = route_plan_mode ? route_experts : 1;
-            for (int run = 0; run < reference_runs; ++run) {
+        const int reference_runs = route_plan_mode ? route_experts : 1;
+        for (int run = 0; run < reference_runs; ++run) {
+            const std::vector<uint8_t> & run_gate = model_mode
+                ? model_experts[static_cast<size_t>(run)].gate : gate;
+            const std::vector<uint8_t> & run_up = model_mode
+                ? model_experts[static_cast<size_t>(run)].up : up;
+            const std::vector<uint8_t> & run_down = model_mode
+                ? model_experts[static_cast<size_t>(run)].down : down;
+            for (int token = 0; token < kBatch; ++token) {
                 const float route = route_plan_mode
                     ? route_plan.runs[static_cast<size_t>(run)]
                           .row_weights[static_cast<size_t>(token)]
@@ -276,6 +321,17 @@ int main(int argc, char ** argv) {
                         ? 0.25f + static_cast<float>(token) * 0.125f
                         : route_aware ? 0.0f : 1.0f;
                 if (route == 0.0f) continue;
+                const float * row = input.data() +
+                    static_cast<size_t>(token) * kEmbd;
+                std::vector<float> gate_out(kFf), up_out(kFf);
+                if (!ember::xdna2::rocmfp4_gemm_raw_reference(
+                        run_gate.data(), run_gate.size(), row, kEmbd, kFf,
+                        gate_scale, gate_out.data()) ||
+                    !ember::xdna2::rocmfp4_gemm_raw_reference(
+                        run_up.data(), run_up.size(), row, kEmbd, kFf,
+                        up_scale, up_out.data())) {
+                    throw std::runtime_error("gate/up reference failed");
+                }
                 std::vector<float> hidden(kFf), result(kEmbd);
                 for (int lane = 0; lane < kFf; ++lane) {
                     const float g = std::min(gate_out[lane], clamp);
@@ -285,7 +341,7 @@ int main(int argc, char ** argv) {
                         (g / (1.0f + exp_approx(-g))) * u * route);
                 }
                 if (!ember::xdna2::rocmfp4_gemm_raw_reference(
-                        down.data(), down.size(), hidden.data(), kFf, kEmbd,
+                        run_down.data(), run_down.size(), hidden.data(), kFf, kEmbd,
                         down_scale, result.data())) {
                     throw std::runtime_error("down reference failed");
                 }
@@ -378,9 +434,12 @@ int main(int argc, char ** argv) {
             }
         }
         auto * resident_weights = weight_parent.map<uint8_t *>();
-        for (size_t expert = 0; expert < resident_experts; ++expert)
+        for (size_t expert = 0; expert < resident_experts; ++expert) {
+            const std::vector<uint8_t> & expert_packed = model_mode
+                ? model_experts[expert].packed : packed;
             std::memcpy(resident_weights + expert * packed.size(),
-                        packed.data(), packed.size());
+                        expert_packed.data(), expert_packed.size());
+        }
         input_parent.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         weight_parent.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
@@ -457,13 +516,16 @@ int main(int argc, char ** argv) {
         const Metrics metrics = compare(actual, expected);
         std::printf("gen%d tokens=5 active_rows=%d route_experts=%d "
                     "route_plan=%s weight_mode=%s resident_weight_bytes=%zu "
+                    "model_layer=%d "
                     "packed_bytes=%zu sequence_ms=%.6f per_expert_ms=%.6f "
                     "read_accumulate_ms=%.6f "
                     "max_abs=%.8g mean_abs=%.8g cosine=%.10f max_index=%d\n",
                     route_aware ? 8 : 7, active_rows, route_experts,
                     route_plan_mode ? "yes" : "no",
-                    distinct_weights ? "distinct" : "cache-hot",
+                    model_mode ? "trained" :
+                        distinct_weights ? "distinct" : "cache-hot",
                     packed.size() * resident_experts,
+                    model_mode ? model_layer : -1,
                     packed.size(), milliseconds,
                     milliseconds / static_cast<double>(route_experts),
                     read_accumulate_ms, metrics.max_abs,

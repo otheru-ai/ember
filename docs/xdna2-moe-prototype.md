@@ -682,9 +682,42 @@ CPU accumulation is retained for the first trained differential because its
 roughly 0.9 ms cost across three draft layers is small relative to the NPU MoE
 work. An AIE accumulation stage is worthwhile only after trained outputs pass
 and the complete provider shows that this read is on the critical path. The
-next correctness gate is different trained expert data and real router
-selections; the next performance gate remains the complete asynchronous
-three-layer draft provider.
+trained-data gate now passes. `rocmfp4_model_weights.cpp` bounds-checks the
+DSpark GGUF architecture, layer/expert metadata, type-101 tensor shapes, full
+tensor extents, and requested expert IDs before using `pread` to extract only
+the three selected 4,456,448-byte projection slices. It retains those raw
+slices for the independent scalar reference and losslessly packs each expert
+into its 14,155,776-byte resident image. A sparse 3.2 GiB GGUF fixture gives
+this path GPU-free coverage without materializing the unused tensor pages.
+
+The packaged validator read the deployed 10 GiB DSpark draft directly. Three
+five-row runs covered layer 0/expert 0, layer 1/expert 127, and layer 2/expert
+255. All had cosine 1.0; maximum absolute errors were `1.14e-5`, `1.34e-5`,
+and `1.53e-5`, with warm times of 0.972, 1.000, and 0.909 ms respectively.
+The layer-0 worst-case route plan then loaded and addressed 30 different
+trained experts, applied the six normalized weights for each of five tokens,
+and matched the accumulated scalar reference at `9.54e-6` maximum error and
+cosine 1.0. Its NPU sequence was 11.885 ms, followed by 0.234 ms for the one
+2.4 MiB read and CPU accumulation. Production remained active and healthy,
+and the host IOMMU group reported translated `DMA-FQ` mode.
+
+Run the same trained check from the opt-in image with:
+
+```bash
+EMBER_XDNA_ROUTE_PLAN=1 docker run --rm --privileged --ipc=host \
+  --ulimit memlock=-1 -e EMBER_XDNA_ROUTE_PLAN \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-xdna-rocmfp4-validate ember:xdna-local \
+  /usr/local/share/ember/xdna2/expert_v8_4096x2048x4096_b5.xclbin \
+  /usr/local/share/ember/xdna2/expert_v8_4096x2048x4096_b5.insts \
+  /models/dspark-draft.gguf 0
+```
+
+Without `EMBER_XDNA_ROUTE_PLAN=1`, `EMBER_XDNA_MODEL_EXPERT` selects one
+expert (default 0) and the final positional argument selects layer 0--2. The
+remaining performance gate is the complete asynchronous three-layer draft
+provider; real router selections will then be captured from that provider's
+input rather than synthesized by the standalone route planner.
 
 The scheduling target is deliberately cross-session and coarse: while the GPU
 verifies session A (roughly 63-82 ms for q=2..4 in the measurements above), the
@@ -697,11 +730,11 @@ competition or XRT/ROCm allocation-coherence requirements.
 
 Before treating the path as usable on gfx1151 hardware:
 
-1. Compare both individual projection outputs against the F32 ROCMFP2 host
-   reference with signed, trained-model activations; include cache hit/miss
-   cases and every output lane.
-2. Compare the full selected expert (clamped SwiGLU and router weighting) to the
-   HIP baseline. Define explicit BF16 tolerances and fail closed.
+1. Keep the passing trained ROCMFP4 expert and weighted-runlist gate in CI and
+   hardware qualification; every output lane is compared and failures close.
+2. Compare the complete three-layer draft provider (attention, HC, norms,
+   routing, shared and routed experts) to the HIP drafter at its hidden-state
+   and head boundaries before enabling asynchronous scheduling.
 3. Run Ember's differential validator with
    `DFLASH_MOE_XDNA_REQUIRED=1`, snapshot restore, disk round-trip, two resident
    sessions, and DSpark when configured.
