@@ -24,6 +24,8 @@ OBJECT_GEMM_V7 := $(BUILD_DIR)/rocmfp4_gemm_v7.o
 OBJECT_EXPERT_V7 := $(BUILD_DIR)/rocmfp4_expert_v7.o
 OBJECT_GEMM_V8 := $(BUILD_DIR)/rocmfp4_gemm_v8.o
 OBJECT_EXPERT_V8 := $(BUILD_DIR)/rocmfp4_expert_v8.o
+OBJECT_GEMM_Q8_V1 := $(BUILD_DIR)/q8_gemm_v1.o
+OBJECT_GEMM_Q8_V2 := $(BUILD_DIR)/q8_gemm_v2.o
 XCLBIN := $(BUILD_DIR)/gemv_$(K)x$(N).xclbin
 INSTS := $(BUILD_DIR)/gemv_$(K)x$(N).insts
 XCLBIN_V2 := $(BUILD_DIR)/gemv_v2_$(K)x$(N).xclbin
@@ -44,6 +46,12 @@ INSTS_EXPERT_V7 := $(BUILD_DIR)/expert_v7_4096x2048x4096_b5.insts
 MLIR_EXPERT_V8 := $(BUILD_DIR)/expert_v8.mlir
 XCLBIN_EXPERT_V8 := $(BUILD_DIR)/expert_v8_4096x2048x4096_b5.xclbin
 INSTS_EXPERT_V8 := $(BUILD_DIR)/expert_v8_4096x2048x4096_b5.insts
+MLIR_SHARED_Q8_V1 := $(BUILD_DIR)/shared_q8_v1.mlir
+XCLBIN_SHARED_Q8_V1 := $(BUILD_DIR)/shared_q8_v1_4096x2048x4096_b5.xclbin
+INSTS_SHARED_Q8_V1 := $(BUILD_DIR)/shared_q8_v1_4096x2048x4096_b5.insts
+MLIR_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2.mlir
+XCLBIN_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2_4096x2048x4096_b5.xclbin
+INSTS_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2_4096x2048x4096_b5.insts
 MLIR_GATE_V5 := $(BUILD_DIR)/gate_v5.mlir
 XCLBIN_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.xclbin
 INSTS_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.insts
@@ -51,12 +59,14 @@ MLIR_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5.mlir
 XCLBIN_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.xclbin
 INSTS_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.insts
 
-.PHONY: all expert-v5 expert-v6 expert-v7 expert-v8 gate-v5 one-down-v5 clean
+.PHONY: all expert-v5 expert-v6 expert-v7 expert-v8 shared-q8-v1 shared-q8-v2 gate-v5 one-down-v5 clean
 all: $(XCLBIN) $(XCLBIN_V2) $(XCLBIN_V3) $(XCLBIN_V4)
 expert-v5: $(XCLBIN_EXPERT_V5)
 expert-v6: $(XCLBIN_EXPERT_V6)
 expert-v7: $(XCLBIN_EXPERT_V7)
 expert-v8: $(XCLBIN_EXPERT_V8)
+shared-q8-v1: $(XCLBIN_SHARED_Q8_V1)
+shared-q8-v2: $(XCLBIN_SHARED_Q8_V2)
 gate-v5: $(XCLBIN_GATE_V5)
 one-down-v5: $(XCLBIN_ONE_DOWN_V5)
 
@@ -112,6 +122,14 @@ $(OBJECT_EXPERT_V8): rocmfp4_expert_v8.cc
 	mkdir -p $(dir $@)
 	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
 
+$(OBJECT_GEMM_Q8_V1): q8_gemm_v1.cc
+	mkdir -p $(dir $@)
+	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
+
+$(OBJECT_GEMM_Q8_V2): q8_gemm_v2.cc
+	mkdir -p $(dir $@)
+	$(KERNEL_CC) $(KERNEL_FLAGS) -c $< -o $@
+
 $(MLIR_EXPERT_V5): rocmfp2_expert_v5.py
 	mkdir -p $(dir $@)
 	python3 $< > $@
@@ -125,6 +143,14 @@ $(MLIR_EXPERT_V7): rocmfp4_expert_v7.py
 	python3 $< > $@
 
 $(MLIR_EXPERT_V8): rocmfp4_expert_v8.py
+	mkdir -p $(dir $@)
+	python3 $< > $@
+
+$(MLIR_SHARED_Q8_V1): q8_shared_expert_v1.py
+	mkdir -p $(dir $@)
+	python3 $< > $@
+
+$(MLIR_SHARED_Q8_V2): q8_shared_expert_v2.py
 	mkdir -p $(dir $@)
 	python3 $< > $@
 
@@ -207,6 +233,24 @@ $(XCLBIN_EXPERT_V8): $(MLIR_EXPERT_V8) $(OBJECT_GEMM_V8) $(OBJECT_EXPERT_V8)
 		--npu-insts-name=$(notdir $(INSTS_EXPERT_V8)) $(notdir $(MLIR_EXPERT_V8))
 	test -s $(XCLBIN_EXPERT_V8)
 	test -s $(INSTS_EXPERT_V8)
+
+$(XCLBIN_SHARED_Q8_V1): $(MLIR_SHARED_Q8_V1) $(OBJECT_GEMM_Q8_V1) $(OBJECT_EXPERT_V8)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_SHARED_Q8_V1)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_SHARED_Q8_V1)) $(notdir $(MLIR_SHARED_Q8_V1))
+	test -s $(XCLBIN_SHARED_Q8_V1)
+	test -s $(INSTS_SHARED_Q8_V1)
+
+$(XCLBIN_SHARED_Q8_V2): $(MLIR_SHARED_Q8_V2) $(OBJECT_GEMM_Q8_V2) $(OBJECT_EXPERT_V8)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_SHARED_Q8_V2)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_SHARED_Q8_V2)) $(notdir $(MLIR_SHARED_Q8_V2))
+	test -s $(XCLBIN_SHARED_Q8_V2)
+	test -s $(INSTS_SHARED_Q8_V2)
 
 $(XCLBIN_GATE_V5): $(MLIR_GATE_V5) $(OBJECT_V4) $(OBJECT_EXPERT_V5)
 	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \

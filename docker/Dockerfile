@@ -203,6 +203,7 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v6 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v7 \
  && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v8 \
+ && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 shared-q8-v2 \
  && make -C /kernel K=2048 N=4096 BUILD_DIR=/kernel/build/2048x4096 \
  && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.xclbin \
       /xdna-artifacts/gemv_4096x2048.xclbin \
@@ -236,6 +237,10 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
       /xdna-artifacts/expert_v8_4096x2048x4096_b5.xclbin \
  && install -Dm0644 /kernel/build/4096x2048/expert_v8_4096x2048x4096_b5.insts \
       /xdna-artifacts/expert_v8_4096x2048x4096_b5.insts \
+ && install -Dm0644 /kernel/build/4096x2048/shared_q8_v2_4096x2048x4096_b5.xclbin \
+      /xdna-artifacts/shared_q8_v2_4096x2048x4096_b5.xclbin \
+ && install -Dm0644 /kernel/build/4096x2048/shared_q8_v2_4096x2048x4096_b5.insts \
+      /xdna-artifacts/shared_q8_v2_4096x2048x4096_b5.insts \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
       /xdna-artifacts/gemv_2048x4096.xclbin \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
@@ -269,6 +274,8 @@ RUN apt-get update \
  && cmake --build /ember/build-xdna-provider \
       --target ember_xdna_moe_xrt ember-xdna-validate \
       ember-xdna-gpu-interop ember-xdna-rocmfp4-validate -j"$(nproc)" \
+ && cmake --build /ember/build-xdna-provider \
+      --target ember-xdna-q8-validate -j"$(nproc)" \
  && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
       /xdna-provider/libember_xdna_moe.so \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-validate \
@@ -276,7 +283,9 @@ RUN apt-get update \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-gpu-interop \
       /xdna-provider/ember-xdna-gpu-interop \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-rocmfp4-validate \
-      /xdna-provider/ember-xdna-rocmfp4-validate
+      /xdna-provider/ember-xdna-rocmfp4-validate \
+ && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-validate \
+      /xdna-provider/ember-xdna-q8-validate
 
 FROM release AS release-xdna
 
@@ -297,6 +306,8 @@ COPY --from=dev-xdna /xdna-provider/ember-xdna-gpu-interop \
   /usr/local/bin/ember-xdna-gpu-interop
 COPY --from=dev-xdna /xdna-provider/ember-xdna-rocmfp4-validate \
   /usr/local/bin/ember-xdna-rocmfp4-validate
+COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-validate \
+  /usr/local/bin/ember-xdna-q8-validate
 COPY --from=xdna-kernel-build /xdna-artifacts/ \
   /usr/local/share/ember/xdna2/
 COPY providers/xdna2/VENDOR.md \
@@ -312,6 +323,7 @@ RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
  && ! ldd /usr/local/bin/ember-xdna-validate | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-gpu-interop | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-rocmfp4-validate | grep -q 'not found' \
+ && ! ldd /usr/local/bin/ember-xdna-q8-validate | grep -q 'not found' \
  && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
  && /opt/xilinx/xrt/bin/xrt-smi --version
 

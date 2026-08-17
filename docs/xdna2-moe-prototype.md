@@ -645,13 +645,13 @@ same structured correctness fixture so the final output stayed comparable, but
 every command used a different page-aligned address. Its parity with the
 same-address run rules out a cache-hot replay artifact and proves the dynamic
 expert-address pattern needed by a resident 256-expert layer. The worst-case
-routed portion is therefore about 11.8 ms per layer. Three shared five-row
-experts add about 3.0 ms across the three-layer draft, putting draft MoE near
-38.3 ms before attention, normalization, routing, and residual work. That is
+routed portion is therefore about 11.8 ms per layer. The later trained Q8
+shared-expert measurement adds 7.14 ms across the three-layer draft, putting
+draft MoE near 43.5 ms including the three CPU reads/accumulations. That is
 slower than the roughly 5 ms GPU drafter in isolation, but it fits beneath the
-measured 63--82 ms GPU verifier window with roughly 25--44 ms left for those
-dense stages. It remains a cross-session throughput hypothesis, not an
-end-to-end acceleration claim.
+measured 63--82 ms GPU verifier window with roughly 19--38 ms left for
+attention, normalization, routing, HC, and residual work. It remains a
+cross-session throughput hypothesis, not an end-to-end acceleration claim.
 
 `expert_v8_4096x2048x4096_b5.{xclbin,insts}` is packaged with Gen7 in the
 opt-in `release-xdna` image.
@@ -700,6 +700,74 @@ and matched the accumulated scalar reference at `9.54e-6` maximum error and
 cosine 1.0. Its NPU sequence was 11.885 ms, followed by 0.234 ms for the one
 2.4 MiB read and CPU accumulation. Production remained active and healthy,
 and the host IOMMU group reported translated `DMA-FQ` mode.
+
+### Gen10 compensated Q8 draft shared expert
+
+The deployed DSpark manifest establishes a separate quantization path for the
+dense/shared branch. Its three layers store
+`blk.N.ffn_{gate,up,down}_shexp.weight` as standard GGML Q8_0 (type 8), while
+the routed experts above are ROCMFP4_FAST (type 101). The strict loader checks
+the `deepseek4-dflash-draft` architecture, three-layer metadata, tensor names,
+type, dimensions, extents, and file bounds before packing any bytes. A sparse
+fixture covers those checks without constructing a 10 GiB test file.
+
+Two numerically attractive shortcuts were hardware-rejected. The first
+expanded every Q8 weight once to one BF16 value (50,331,648 bytes per shared
+expert). Its synthetic fixture was exact at 1.478 ms, but trained layer 0 had
+`0.108` maximum error and cosine `0.9999946`; the three trained layers ranged
+from `0.0699` to `0.1169` maximum error. Rounding the FP16 block scale into one
+BF16 product is therefore not release quality. The second retained int8 codes
+and exact F32 scales (28,311,552 bytes). It appeared compact and timed at
+1.114 ms, but failed even the synthetic fixture at `0.140` maximum error and
+negative cosine. Peano disassembly showed why: AIE2P vector FP32 multiplication
+was lowered through BF16 operand conversions, rounding every 32-input partial
+before scale application. Exact storage did not imply exact executed math.
+
+The accepted kernel stores each dequantized Q8 weight as a BF16 high term plus
+a BF16 residual. Both 128x64 planes feed native BF16 MACs into the same FP32
+accumulator, avoiding the unsupported vector-FP32 operation. The representation
+is 100,663,296 bytes per expert and requires a single-buffered weight FIFO to
+fit each 64 KiB compute tile; activations and results remain double buffered.
+The complete 4x8 graph retains gate/up, exact clamped SwiGLU, hidden replay,
+both down groups, and all five draft rows under one XRT command.
+
+Sequential physical Strix Halo results from the packaged artifact were:
+
+| Q8 shared expert | warm sequence | maximum absolute error | cosine |
+| --- | ---: | ---: | ---: |
+| synthetic | 2.374 ms | `1.49e-8` | 1.0 |
+| trained layer 0 | 2.383 ms | `4.94e-4` | `0.9999999999` |
+| trained layer 1 | 2.380 ms | `5.40e-3` | `0.9999999921` |
+| trained layer 2 | 2.381 ms | `4.41e-3` | `0.9999999972` |
+
+All runs satisfy the unchanged cosine `>=0.99999` and maximum-error `<=0.01`
+gate. The three trained shared experts total 7.144 ms. Adding Gen9's measured
+35.655 ms routed sequences and about 0.70 ms of CPU reads/weighted sums puts
+the measured draft-MoE subtotal at about 43.5 ms for five proposal rows. This
+still leaves a positive 19--38 ms overlap budget under the measured q=2..4
+GPU verifier, but only a complete provider and aggregate two-session benchmark
+can determine whether attention/HC/dense work and shared-fabric contention fit.
+
+`shared_q8_v2_4096x2048x4096_b5.{xclbin,insts}` and
+`ember-xdna-q8-validate` are packaged in `release-xdna`; the rejected variants
+are not selected by the image (the one-plane BF16 baseline remains an explicit
+research build target). The graph topology follows the same full-array
+principles as IRON's BF16 GEMM, MHA, RMSNorm, and transformer examples, but its
+compensated Q8 numerical contract is Ember-specific. AIE-RT remains
+compiler-side: `aiecc.py` emits the immutable instruction stream, while the
+runtime image executes it through XRT rather than linking a second
+`libxaiengine` transaction generator.
+
+Run the trained Q8 check with:
+
+```bash
+docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-xdna-q8-validate ember:xdna-local \
+  /usr/local/share/ember/xdna2/shared_q8_v2_4096x2048x4096_b5.xclbin \
+  /usr/local/share/ember/xdna2/shared_q8_v2_4096x2048x4096_b5.insts \
+  /models/dspark-draft.gguf 0
+```
 
 Run the same trained check from the opt-in image with:
 

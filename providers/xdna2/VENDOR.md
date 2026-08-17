@@ -35,7 +35,8 @@ source from, AMD's current IRON operator and sequencing examples:
 
 - repository: <https://github.com/amd/IRON>
 - commit: `cdc48e93fd2c8776105780790c46ba4bca1bc40e`
-- relevant paths: `iron/operators/swiglu_decode/`,
+- relevant paths: `iron/operators/swiglu_decode/`, `iron/operators/gemm/`,
+  `iron/operators/mha/`, `iron/operators/rms_norm/`,
   `iron/common/compilation/sequence.py`, and `aie_kernels/aie2p/silu.cc`
 - license: Apache-2.0
 
@@ -47,6 +48,17 @@ queued task completes, while `driver/src/global/xaie2ipugbl_reginit.c` marks
 that start-queue field available on AIE2IPU. These are research references,
 not vendored dependencies. Ember's activation contract and accuracy thresholds
 remain independent.
+
+MLIR-AIE itself vendors that AIE-RT branch as a **compiler-side** register and
+transaction source, with local fixes for backend selection and ELF `.bss`
+zero-fill.  Ember therefore keeps AIE-RT out of the runtime image: `aiecc.py`
+serializes configuration into the packaged `.insts`, and XRT/amdnpu executes
+that immutable stream.  This boundary is also a compatibility safeguard.  The
+current MLIR-AIE source explicitly warns that its NPU firmware transaction
+opcodes are newer than the enum in the pinned AIE-RT source; dynamically
+building a second transaction stream from `libxaiengine` would risk mixing the
+two layouts.  Kernel artifacts, compiler wheel, XRT userspace, and host driver
+must be validated as one tuple instead.
 
 Generations 7 and 8 also use only the public AIE API operations demonstrated by the
 official MLIR-AIE tree (uint4 unpack, vector masks/select, BF16 conversion and

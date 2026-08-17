@@ -107,6 +107,15 @@ if(EMBER_XDNA_XRT_PROVIDER)
     "${EMBER_XRT_INCLUDE_DIR}")
   target_link_libraries(ember-xdna-rocmfp4-validate PRIVATE
     "${EMBER_XRT_COREUTIL}")
+  add_executable(ember-xdna-q8-validate
+    providers/xdna2/validate_q8_xrt.cpp
+    providers/xdna2/q8_model_weights.cpp
+    providers/xdna2/q8_0_pack.cpp
+    src/model/gguf.c)
+  target_include_directories(ember-xdna-q8-validate PRIVATE
+    providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
+  target_link_libraries(ember-xdna-q8-validate PRIVATE
+    "${EMBER_XRT_COREUTIL}")
 endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────
@@ -339,6 +348,23 @@ add_test(NAME xdna_rocmfp4_model_weights
   COMMAND test_xdna_rocmfp4_model_weights)
 ember_strict(test_xdna_rocmfp4_model_weights)
 
+add_executable(test_xdna_q8_pack
+  test/test_xdna_q8_pack.cpp
+  providers/xdna2/q8_0_pack.cpp)
+target_include_directories(test_xdna_q8_pack PRIVATE providers/xdna2)
+add_test(NAME xdna_q8_pack COMMAND test_xdna_q8_pack)
+ember_strict(test_xdna_q8_pack)
+
+add_executable(test_xdna_q8_model_weights
+  test/test_xdna_q8_model_weights.cpp
+  providers/xdna2/q8_model_weights.cpp
+  providers/xdna2/q8_0_pack.cpp
+  src/model/gguf.c)
+target_include_directories(test_xdna_q8_model_weights PRIVATE
+  providers/xdna2 src/model)
+add_test(NAME xdna_q8_model_weights COMMAND test_xdna_q8_model_weights)
+ember_strict(test_xdna_q8_model_weights)
+
 # Every C/C++ test gets a wall-clock ceiling. Without one a hung test blocks
 # ctest forever: `test_api_adapters` builds a socketpair and pthread_join()s a
 # reader thread, so a reader that never sees EOF deadlocks the whole run rather
@@ -361,7 +387,7 @@ set(EMBER_C_TESTS
   continuous_batch_executor resident_batch_coordinator xdna_moe_provider
   xdna_dspark_provider
   xdna_rocmfp2_pack xdna_rocmfp4_pack xdna_rocmfp4_route_plan
-  xdna_rocmfp4_model_weights)
+  xdna_rocmfp4_model_weights xdna_q8_pack xdna_q8_model_weights)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 
 # ── ember-server binary ──
