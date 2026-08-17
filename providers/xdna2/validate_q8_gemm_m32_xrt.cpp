@@ -27,7 +27,6 @@ namespace {
 
 constexpr int kBatch = 128;
 constexpr int kMPerRow = 32;
-constexpr int kMmulM = 4;
 constexpr int kMmulK = 8;
 constexpr int kMmulN = 8;
 constexpr int kOutputTile = kMPerRow * ember::xdna2::kQ8TileN;
@@ -147,6 +146,9 @@ int main(int argc, char ** argv) {
         const int k_tiles = k / ember::xdna2::kQ8TileK;
         const int groups = n / ember::xdna2::kQ8OutputsPerRow;
         const bool trained = argc == 7;
+        const bool bfp16_mmul =
+            std::getenv("EMBER_XDNA_Q8_BFP16_MMUL") != nullptr;
+        const int mmul_m = bfp16_mmul ? 8 : 4;
 
         std::vector<uint8_t> raw;
         std::vector<uint8_t> packed;
@@ -215,36 +217,40 @@ int main(int argc, char ** argv) {
         xrt::bo dummy7(device, 1, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(7));
 
         auto * blocked_input = input_bo.map<uint16_t *>();
-        constexpr int m_blocks = kMPerRow / kMmulM;
+        const int m_blocks = kMPerRow / mmul_m;
         constexpr int k_blocks = ember::xdna2::kQ8TileK / kMmulK;
         for (int row = 0; row < ember::xdna2::kQ8AieRows; ++row) {
             for (int group = 0; group < groups; ++group) {
-              for (int kt = 0; kt < k_tiles; ++kt) {
-                for (int mb = 0; mb < m_blocks; ++mb) {
-                    for (int kb = 0; kb < k_blocks; ++kb) {
-                        for (int ir = 0; ir < kMmulM; ++ir) {
-                            for (int ik = 0; ik < kMmulK; ++ik) {
-                                const int token = row * kMPerRow +
-                                                  mb * kMmulM + ir;
-                                const int lane = kt * ember::xdna2::kQ8TileK +
-                                                 kb * kMmulK + ik;
-                                size_t destination =
-                                    static_cast<size_t>(
-                                        (row * groups + group) * k_tiles +
-                                        kt) *
-                                        kMPerRow * ember::xdna2::kQ8TileK;
-                                destination +=
-                                    static_cast<size_t>(mb * k_blocks + kb) *
-                                        kMmulM * kMmulK +
-                                    static_cast<size_t>(ir * kMmulK + ik);
-                                blocked_input[destination] = float_to_bf16(
-                                    input[static_cast<size_t>(token) * k +
-                                          static_cast<size_t>(lane)]);
+                for (int kt = 0; kt < k_tiles; ++kt) {
+                    for (int mb = 0; mb < m_blocks; ++mb) {
+                        for (int kb = 0; kb < k_blocks; ++kb) {
+                            for (int ir = 0; ir < mmul_m; ++ir) {
+                                for (int ik = 0; ik < kMmulK; ++ik) {
+                                    const int token = row * kMPerRow +
+                                                      mb * mmul_m + ir;
+                                    const int lane =
+                                        kt * ember::xdna2::kQ8TileK +
+                                        kb * kMmulK + ik;
+                                    size_t destination =
+                                        static_cast<size_t>(
+                                            (row * groups + group) * k_tiles +
+                                            kt) *
+                                            kMPerRow *
+                                            ember::xdna2::kQ8TileK;
+                                    destination +=
+                                        static_cast<size_t>(
+                                            mb * k_blocks + kb) *
+                                            static_cast<size_t>(mmul_m) *
+                                            kMmulK +
+                                        static_cast<size_t>(ir * kMmulK + ik);
+                                    blocked_input[destination] = float_to_bf16(
+                                        input[static_cast<size_t>(token) * k +
+                                              static_cast<size_t>(lane)]);
+                                }
                             }
                         }
                     }
                 }
-            }
             }
         }
         std::memcpy(weight_bo.map<void *>(), packed.data(), packed.size());
@@ -279,8 +285,8 @@ int main(int argc, char ** argv) {
             const int token = kReferenceTokens[sample];
             const int row = token / kMPerRow;
             const int local_token = token % kMPerRow;
-            const int mb = local_token / kMmulM;
-            const int ir = local_token % kMmulM;
+            const int mb = local_token / mmul_m;
+            const int ir = local_token % mmul_m;
             for (int group = 0; group < groups; ++group) {
                 for (int col = 0; col < ember::xdna2::kQ8AieColumns; ++col) {
                     for (int lane = 0; lane < ember::xdna2::kQ8TileN;
@@ -294,7 +300,7 @@ int main(int argc, char ** argv) {
                                 kOutputTile;
                         source +=
                             static_cast<size_t>(mb * 8 + nb) *
-                                kMmulM * kMmulN +
+                                static_cast<size_t>(mmul_m) * kMmulN +
                             static_cast<size_t>(ir * kMmulN + jn);
                         const size_t output =
                             sample * static_cast<size_t>(n) +
@@ -308,11 +314,12 @@ int main(int argc, char ** argv) {
         }
         const Metrics metrics = compare(actual, expected);
         std::printf(
-            "q8_gemm_m32 mode=%s tensor=%s M=%d K=%d N=%d groups=%d "
+            "q8_gemm_m32 mode=%s mmul=%s tensor=%s M=%d K=%d N=%d groups=%d "
             "packed_bytes=%zu sequence_ms=%.6f max_abs=%.8g "
             "mean_abs=%.8g cosine=%.10f\n",
-            trained ? "trained" : "synthetic", trained ? argv[6] : "-",
-            kBatch, k, n, groups, packed.size(), milliseconds,
+            trained ? "trained" : "synthetic",
+            bfp16_mmul ? "bfp16-8x8x8" : "native-4x8x8",
+            trained ? argv[6] : "-", kBatch, k, n, groups, packed.size(), milliseconds,
             metrics.max_abs, metrics.mean_abs, metrics.cosine);
         return metrics.cosine >= 0.99999 && metrics.max_abs <= 0.05f ? 0 : 1;
     } catch (const std::exception & exception) {

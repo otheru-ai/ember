@@ -883,6 +883,41 @@ docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
   12288 4096 /models/dspark-draft.gguf dflash.fc.weight
 ```
 
+### Gen13 AIE-RT/IRON BFP16 MMUL rejection
+
+AMD IRON's current AIE2P GEMM enables
+`AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16` by default. The corresponding
+[AIE-RT `release/main_aig` branch](https://github.com/Xilinx/aie-rt/tree/release/main_aig)
+exposes the descriptor/runtime layer used by that graph. On Strix Halo the
+emulation changes the BF16 matrix tile from native `mmul<4,8,8>` to
+`mmul<8,8,8>`. Gen13 reproduces that choice in `q8_gemm_m32_v5` while keeping
+Gen12's compensated BF16 high-plus-residual weight representation and FP32
+accumulators.
+
+The trained result is fast but does not pass Ember's unchanged numerical gate:
+
+| DSpark tensor | native Gen12 | BFP16 Gen13 | maximum error | mean error | cosine | gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `blk.0.attn_kv.weight` | 0.673 ms | 0.289 ms | `0.07212` | `0.01158` | 0.9999818 | fail |
+| `dflash.fc.weight` | 13.929 ms | 4.621 ms | `0.08729` | `0.01588` | 0.9999826 | fail |
+
+The maximum-error limit is 0.05 and the cosine limit is 0.99999. BFP16 MMUL
+therefore is not packaged, selected, or used by the provider. The v5 source,
+build target, and validator mode remain as reproducible negative evidence; run
+the validator with `EMBER_XDNA_Q8_BFP16_MMUL=1` against a separately built v5
+artifact.
+
+This rejection also changes the heterogeneous placement decision. Moving the
+201 MiB `dflash.fc.weight` projection to the NPU is unnecessary: the GPU can
+compute that one main-context projection as a short dependency pre-stage, then
+the NPU can consume its normalized `main_x` while the GPU verifies another
+resident session. Keeping the NPU on native compensated Q8 removes 13.929 ms
+from its measured draft subtotal, reducing the known floor from 83.95 ms to
+about 70.02 ms before HC transforms, norms, routing, attention reductions, and
+tail collapse. That leaves about 11.7 ms under the measured q=4 verifier
+window for the missing work and makes GPU-prestage/NPU-body the next prototype
+boundary.
+
 Run the same trained check from the opt-in image with:
 
 ```bash

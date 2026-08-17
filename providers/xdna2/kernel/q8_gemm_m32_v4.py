@@ -32,13 +32,19 @@ CORRECTED_TILE_BF16 = 2 * TILE_K * TILE_N
 OUTPUT_TILE_F32 = M_TILE * TILE_N
 
 
-def build_gemm(k, n):
+def build_gemm(k, n, generation=4):
     if k <= 0 or k % 4096 or n <= 0 or n % (COLS * TILE_N):
         raise ValueError("K must be a multiple of 4096; N of 512")
     k_tiles = k // TILE_K
     descriptor_k_tiles = 32
     k_tile_blocks = k_tiles // descriptor_k_tiles
     groups = n // (COLS * TILE_N)
+    if generation not in (4, 5):
+        raise ValueError("generation must be 4 or 5")
+    suffix = "v5" if generation == 5 else "v4"
+    object_name = (
+        "q8_gemm_m32_v5.o" if generation == 5 else "q8_gemm_m32_v4.o"
+    )
     # Gap every 32-KiB corrected tile. Without this sentinel, canonicalization
     # coalesces four adjacent objects into a 128-KiB shim transfer, beyond the
     # 64-KiB contiguous descriptor field used by this graph.
@@ -62,13 +68,13 @@ def build_gemm(k, n):
             ]
 
             zero = external_func(
-                "zero_q8_v4_f32_m32", inputs=[output_ty],
-                link_with="q8_gemm_m32_v4.o",
+                f"zero_q8_{suffix}_f32_m32", inputs=[output_ty],
+                link_with=object_name,
             )
             gemm = external_func(
-                "gemm_q8_v4_f32_m32",
+                f"gemm_q8_{suffix}_f32_m32",
                 inputs=[activation_ty, weight_ty, output_ty],
-                link_with="q8_gemm_m32_v4.o",
+                link_with=object_name,
             )
 
             shims = [tile(col, 0) for col in range(COLS)]
@@ -86,21 +92,23 @@ def build_gemm(k, n):
                 # Even shim columns give each activation multicast its own
                 # physical source while preserving one source per AIE row.
                 in_a[row] = object_fifo(
-                    f"q8v4_A_{row}", shims[2 * row], cores[row], 1,
+                    f"q8{suffix}_A_{row}", shims[2 * row], cores[row], 1,
                     activation_ty,
                 )
             for col in range(COLS):
                 destinations = [cores[row][col] for row in range(ROWS)]
                 in_w[col] = object_fifo(
-                    f"q8v4_W_{col}", shims[col], destinations, 1, weight_ty,
+                    f"q8{suffix}_W_{col}", shims[col], destinations, 1,
+                    weight_ty,
                 )
                 mem_o[col] = object_fifo(
-                    f"q8v4_mem_O_{col}", mems[col], shims[col], 1,
+                    f"q8{suffix}_mem_O_{col}", mems[col], shims[col], 1,
                     output_mem_ty,
                 )
                 for row in range(ROWS):
                     out_o[row][col] = object_fifo(
-                        f"q8v4_O_{row}_{col}", cores[row][col], mems[col],
+                        f"q8{suffix}_O_{row}_{col}", cores[row][col],
+                        mems[col],
                         1, output_ty,
                     )
                 object_fifo_link(
@@ -200,5 +208,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-K", type=int, required=True)
     parser.add_argument("-N", type=int, required=True)
+    parser.add_argument("--generation", type=int, choices=(4, 5), default=4)
     args = parser.parse_args()
-    build_gemm(args.K, args.N)
+    build_gemm(args.K, args.N, args.generation)
