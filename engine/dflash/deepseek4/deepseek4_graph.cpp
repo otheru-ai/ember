@@ -7920,6 +7920,43 @@ static void ds4_read_f32(ggml_tensor * t, float * dst, int k) {
 // drafter instance) and re-set only the inputs per call.
 namespace {
 
+struct DsparkMainProjectionCache {
+    int ctx_len = -1;
+    const void * drafter = nullptr;
+    ggml_backend_t backend = nullptr;
+    std::vector<uint8_t> arena;
+    ggml_context * ctx = nullptr;
+    ggml_gallocr_t alloc = nullptr;
+    ggml_cgraph * gf = nullptr;
+    ggml_tensor * inp_ctx = nullptr;
+    ggml_tensor * out = nullptr;
+
+    DsparkMainProjectionCache() = default;
+    DsparkMainProjectionCache(const DsparkMainProjectionCache &) = delete;
+    DsparkMainProjectionCache & operator=(
+        const DsparkMainProjectionCache &) = delete;
+
+    void destroy() {
+        if (alloc) {
+            ggml_gallocr_free(alloc);
+            alloc = nullptr;
+        }
+        if (ctx) {
+            ggml_free(ctx);
+            ctx = nullptr;
+        }
+        ctx_len = -1;
+        drafter = nullptr;
+        backend = nullptr;
+        gf = nullptr;
+        inp_ctx = nullptr;
+        out = nullptr;
+        std::vector<uint8_t>().swap(arena);
+    }
+
+    ~DsparkMainProjectionCache() { destroy(); }
+};
+
 struct DsparkDraftCache {
     int ctx_len = -1;
     int block   = -1;
@@ -7976,12 +8013,88 @@ struct DsparkDraftCache {
     ~DsparkDraftCache() { destroy(); }
 };
 
+thread_local DsparkMainProjectionCache g_dspark_main_projection_cache;
 thread_local DsparkDraftCache g_dspark_draft_cache;
 
 }  // namespace
 
 void reset_deepseek4_dspark_runtime_cache() {
+    g_dspark_main_projection_cache.destroy();
     g_dspark_draft_cache.destroy();
+}
+
+bool deepseek4_dspark_project_main_context(
+        ggml_backend_t backend,
+        const DSparkDrafter & d,
+        const float * ctx_features,
+        int ctx_len,
+        std::vector<float> & main_context) {
+    main_context.clear();
+    if (ctx_len == 0) return true;
+    if (!backend || !ctx_features || ctx_len < 0 || !d.main_proj ||
+        !d.main_norm || d.core.n_embd <= 0 || d.n_target_layers <= 0) {
+        return false;
+    }
+
+    const int n_embd = d.core.n_embd;
+    const int fc_in = d.n_target_layers * n_embd;
+    DsparkMainProjectionCache & C = g_dspark_main_projection_cache;
+    if (!C.ctx || C.ctx_len != ctx_len ||
+        C.drafter != static_cast<const void *>(&d) || C.backend != backend) {
+        C.destroy();
+        C.arena.resize(8u * 1024 * 1024);
+        ggml_init_params params{};
+        params.mem_size = C.arena.size();
+        params.mem_buffer = C.arena.data();
+        params.no_alloc = true;
+        C.ctx = ggml_init(params);
+        if (!C.ctx) {
+            C.destroy();
+            return false;
+        }
+
+        C.gf = ggml_new_graph_custom(C.ctx, 64, false);
+        C.inp_ctx = ggml_new_tensor_2d(
+            C.ctx, GGML_TYPE_F32, fc_in, ctx_len);
+        ggml_set_input(C.inp_ctx);
+        // The trained checkpoint stores this projection as Q8_0. Feature
+        // pre-normalization prevents its quantized activation path from
+        // overflowing; the following weighted RMSNorm makes the rescaling
+        // mathematically immaterial.
+        ggml_tensor * normalized = ggml_rms_norm(
+            C.ctx, C.inp_ctx, d.core.rms_eps);
+        ggml_tensor * projected = ggml_mul_mat(
+            C.ctx, d.main_proj, normalized);
+        C.out = build_rms_norm(
+            C.ctx, projected, d.main_norm, d.core.rms_eps);
+        ggml_set_output(C.out);
+        ggml_build_forward_expand(C.gf, C.out);
+
+        C.alloc = ggml_gallocr_new(
+            ggml_backend_get_default_buffer_type(backend));
+        if (!C.alloc || !ggml_gallocr_alloc_graph(C.alloc, C.gf)) {
+            C.destroy();
+            return false;
+        }
+        C.ctx_len = ctx_len;
+        C.drafter = static_cast<const void *>(&d);
+        C.backend = backend;
+    }
+
+    ggml_backend_tensor_set(
+        C.inp_ctx, ctx_features, 0,
+        sizeof(float) * static_cast<size_t>(fc_in) *
+            static_cast<size_t>(ctx_len));
+    if (ggml_backend_graph_compute(backend, C.gf) != GGML_STATUS_SUCCESS) {
+        C.destroy();
+        return false;
+    }
+    main_context.resize(
+        static_cast<size_t>(n_embd) * static_cast<size_t>(ctx_len));
+    ggml_backend_tensor_get(
+        C.out, main_context.data(), 0,
+        sizeof(float) * main_context.size());
+    return true;
 }
 
 bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
@@ -8060,7 +8173,7 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
         ggml_tensor * main_x = nullptr;
         if (ctx_len > 0) {
             // Captured target features have large magnitude (rms ~1e3 — HC streams
-            // accumulate over 40+ layers). main_proj is rocmfp4-quantized and its
+            // accumulate over 40+ layers). main_proj is quantized and its
             // activation quantization overflows on inputs that big -> NaN. Since
             // main_norm (RMSNorm) normalizes main_proj's output and RMSNorm is
             // scale-invariant, pre-normalizing the features to unit RMS gives a

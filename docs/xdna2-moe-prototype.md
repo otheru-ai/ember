@@ -559,14 +559,25 @@ drafter; `DFLASH_DSPARK_XDNA_REQUIRED=1` fails closed. Configuration is:
 ```text
 DFLASH_DSPARK_XDNA_PLUGIN=/usr/local/lib/libember_xdna_dspark.so
 DFLASH_DSPARK_XDNA_REQUIRED=1
+DFLASH_DSPARK_XDNA_GPU_MAIN=1
 ```
 
+`DFLASH_DSPARK_XDNA_GPU_MAIN=1` selects the Gen13 placement boundary. Ember
+runs the drafter's Q8_0 `main_proj` and `main_norm` as a small cached GPU graph,
+then submits only the resulting `[ctx_len, n_embd]` `main_context` to the NPU
+provider instead of the raw `[ctx_len, 3*n_embd]` captured features. The v1
+request ABI adds this as a size-guarded tail field, so providers can continue
+to consume the original prefix. The first implementation uses host-visible
+staging between HIP and XRT; a shared BO/import path can replace that copy
+without changing the provider's mathematical boundary.
+
 GPU-free coverage loads a mock provider, submits two session proposals, mutates
-the caller's buffers after submission, and waits in reverse order. This proves
-the lifetime and session-isolation contract without XRT. The shipped XRT module
-does not yet export the DSpark symbol: a hardware provider needs the complete
-fixed-shape draft AIE graph and trained-weight packer before the environment
-variables are usable in production.
+the caller's raw and preprojected buffers after submission, and waits in reverse
+order. This proves the lifetime, alternate-input, and session-isolation contract
+without XRT. The shipped XRT module does not yet export the DSpark symbol: a
+hardware provider needs the complete fixed-shape draft AIE graph and
+trained-weight packer before the environment variables are usable in
+production.
 
 ### Gen7 ROCMFP4 draft-expert primitive
 

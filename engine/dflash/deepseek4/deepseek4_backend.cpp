@@ -816,6 +816,11 @@ bool DeepSeek4Backend::load_spec_drafter() {
             std::fprintf(stderr, "[xdna-dspark] provider ready: %s%s\n",
                          spec_xdna_draft_compute_->name(),
                          config.required ? " required" : "");
+            if (env_flag_enabled("DFLASH_DSPARK_XDNA_GPU_MAIN")) {
+                std::fprintf(stderr,
+                             "[xdna-dspark] placement: GPU main projection, "
+                             "XDNA draft-layer body\n");
+            }
         }
     }
     spec_enabled_ = true;

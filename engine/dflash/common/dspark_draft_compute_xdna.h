@@ -13,6 +13,9 @@
 // implementation does not have to duplicate the 129280-wide target output
 // matrix.  Inputs are valid only during submit(); a successful provider must
 // have copied or otherwise retained everything needed before submit returns.
+// The optional main_context tail field preserves the v1 prefix: providers must
+// use struct_size before reading it. It is the GPU-preprojected replacement for
+// ctx_features, not an additional required input.
 #pragma once
 
 #include <cstddef>
@@ -48,7 +51,11 @@ typedef struct ember_xdna_dspark_request_v1 {
     int32_t n_target_layers;
     int32_t block_size;
     const float * noise_embed;   // [block_size, n_embd]
-    const float * ctx_features;  // [ctx_len, n_target_layers*n_embd]
+    const float * ctx_features;  // optional [ctx_len, n_target_layers*n_embd]
+    // Optional post-main_norm GPU pre-stage, [ctx_len, n_embd]. A request with
+    // context must provide ctx_features or main_context. This tail extension
+    // may be read only when struct_size covers the field.
+    const float * main_context;
 } ember_xdna_dspark_request_v1;
 
 typedef struct ember_xdna_dspark_result_v1 {
@@ -103,6 +110,7 @@ struct XdnaDSparkDraftRequest {
     int ctx_len = 0;
     const float * noise_embed = nullptr;
     const float * ctx_features = nullptr;
+    const float * main_context = nullptr;
 };
 
 struct XdnaDSparkDraftOutput {

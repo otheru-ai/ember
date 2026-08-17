@@ -680,6 +680,8 @@ bool run_deepseek4_dspark_spec_decode(
 
     const bool debug = spec_env_flag("DFLASH_DS4_DSPARK_DEBUG");
     const bool timing = spec_env_flag("DFLASH_DS4_TIMING");
+    const bool xdna_gpu_main =
+        spec_env_flag("DFLASH_DSPARK_XDNA_GPU_MAIN");
     // Exact target-authoritative verification is the production default.
     // The q-wide graph remains opt-in because its different reduction shape
     // can change near-tied target logits. DFLASH_DS4_APPROX_VERIFY is kept as
@@ -829,6 +831,7 @@ bool run_deepseek4_dspark_spec_decode(
     bool stop_requested = false;
 
     std::vector<float> noise_embed((size_t) n_embd * block);
+    std::vector<float> xdna_main_context;
     std::vector<int32_t> noise_ids(block);
     std::vector<float> local_hidden, confidence_hidden;
     std::vector<float> padded_hidden((size_t) n_embd * (block + 1), 0.0f);
@@ -909,20 +912,39 @@ bool run_deepseek4_dspark_spec_decode(
             // retain the returned job while the GPU verifies another session.
             bool draft_ok = false;
             if (xdna_draft_compute && xdna_draft_compute->healthy()) {
-                XdnaDSparkDraftRequest request;
-                request.committed = pos;
-                request.ctx_len = ctx_len;
-                request.noise_embed = noise_embed.data();
-                request.ctx_features = ctx_len > 0 ? feat_win.data() : nullptr;
                 std::string provider_error;
-                auto job = xdna_draft_compute->submit(request, &provider_error);
-                XdnaDSparkDraftOutput provider_output;
-                if (job && job->wait(provider_output, &provider_error)) {
-                    local_hidden = std::move(provider_output.hidden);
-                    confidence_hidden = std::move(
-                        provider_output.confidence_hidden);
-                    draft_ok = true;
-                } else {
+                bool provider_ready = true;
+                if (xdna_gpu_main && ctx_len > 0) {
+                    provider_ready = deepseek4_dspark_project_main_context(
+                        backend, drafter, feat_win.data(), ctx_len,
+                        xdna_main_context);
+                    if (!provider_ready) {
+                        provider_error =
+                            "GPU main-context projection failed";
+                    }
+                }
+
+                if (provider_ready) {
+                    XdnaDSparkDraftRequest request;
+                    request.committed = pos;
+                    request.ctx_len = ctx_len;
+                    request.noise_embed = noise_embed.data();
+                    request.ctx_features = xdna_gpu_main || ctx_len == 0
+                        ? nullptr : feat_win.data();
+                    request.main_context =
+                        xdna_gpu_main && ctx_len > 0
+                            ? xdna_main_context.data() : nullptr;
+                    auto job = xdna_draft_compute->submit(
+                        request, &provider_error);
+                    XdnaDSparkDraftOutput provider_output;
+                    if (job && job->wait(provider_output, &provider_error)) {
+                        local_hidden = std::move(provider_output.hidden);
+                        confidence_hidden = std::move(
+                            provider_output.confidence_hidden);
+                        draft_ok = true;
+                    }
+                }
+                if (!draft_ok) {
                     std::fprintf(stderr,
                                  "[ds4-spec] XDNA drafter failed: %s%s\n",
                                  provider_error.c_str(),

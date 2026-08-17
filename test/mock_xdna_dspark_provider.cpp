@@ -22,6 +22,7 @@ struct MockJob {
     int block_size;
     std::vector<float> noise;
     std::vector<float> features;
+    std::vector<float> main_context;
     bool cancelled = false;
 };
 
@@ -56,7 +57,8 @@ void * submit(void * raw, const ember_xdna_dspark_request_v1 * request,
         request->n_embd != context->n_embd ||
         request->n_target_layers != context->n_target_layers ||
         request->block_size != context->block_size || !request->noise_embed ||
-        (request->ctx_len > 0 && !request->ctx_features)) {
+        (request->ctx_len > 0 && !request->ctx_features &&
+         !request->main_context)) {
         set_error(error, capacity, "invalid mock DSpark request");
         return nullptr;
     }
@@ -72,9 +74,15 @@ void * submit(void * raw, const ember_xdna_dspark_request_v1 * request,
     const size_t feature_count = static_cast<size_t>(request->ctx_len) *
                                  static_cast<size_t>(request->n_target_layers) *
                                  static_cast<size_t>(request->n_embd);
-    if (feature_count) {
+    if (feature_count && request->ctx_features) {
         job->features.assign(request->ctx_features,
                              request->ctx_features + feature_count);
+    }
+    const size_t main_count = static_cast<size_t>(request->ctx_len) *
+                              static_cast<size_t>(request->n_embd);
+    if (main_count && request->main_context) {
+        job->main_context.assign(request->main_context,
+                                 request->main_context + main_count);
     }
     return job;
 }
@@ -92,7 +100,9 @@ int wait(void *, void * raw_job, ember_xdna_dspark_result_v1 * result,
         set_error(error, capacity, "invalid mock DSpark wait");
         return 0;
     }
-    const float feature = job->features.empty() ? 0.0f : job->features.back();
+    const float feature = !job->main_context.empty()
+        ? job->main_context.back()
+        : (job->features.empty() ? 0.0f : job->features.back());
     for (size_t i = 0; i < count; ++i) {
         result->hidden[i] = job->noise[i] + feature + (float)job->committed;
         result->confidence_hidden[i] = result->hidden[i] + 0.5f;

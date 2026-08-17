@@ -38,17 +38,19 @@ int main(int argc, char ** argv) {
 
     float noise_a[20];
     float noise_b[20];
-    float features_a[24];
     float features_b[12];
+    float main_context_a[8];
     for (int i = 0; i < 20; ++i) {
         noise_a[i] = (float)i;
         noise_b[i] = (float)(100 + i);
     }
-    for (int i = 0; i < 24; ++i) features_a[i] = (float)(200 + i);
     for (int i = 0; i < 12; ++i) features_b[i] = (float)(300 + i);
+    for (int i = 0; i < 8; ++i) main_context_a[i] = (float)(400 + i);
 
-    XdnaDSparkDraftRequest request_a{7, 2, noise_a, features_a};
-    XdnaDSparkDraftRequest request_b{11, 1, noise_b, features_b};
+    XdnaDSparkDraftRequest request_a{
+        7, 2, noise_a, nullptr, main_context_a};
+    XdnaDSparkDraftRequest request_b{
+        11, 1, noise_b, features_b, nullptr};
     auto job_a = compute->submit(request_a, &error);
     auto job_b = compute->submit(request_b, &error);
     CHECK(job_a != nullptr && job_b != nullptr,
@@ -57,7 +59,7 @@ int main(int argc, char ** argv) {
     // submit() owns its inputs: changing the caller buffers cannot affect an
     // outstanding proposal. Wait out of order to exercise session isolation.
     noise_a[0] = -999.0f;
-    features_a[23] = -999.0f;
+    main_context_a[7] = -999.0f;
     XdnaDSparkDraftOutput output_b;
     CHECK(job_b && job_b->wait(output_b, &error),
           "second session completes first");
@@ -72,8 +74,8 @@ int main(int argc, char ** argv) {
     CHECK(job_a && job_a->wait(output_a, &error),
           "first session completes after second");
     CHECK(output_a.hidden.size() == 20 &&
-          std::fabs(output_a.hidden[0] - 230.0f) < 1e-6f,
-          "first session input lifetime is independent");
+          std::fabs(output_a.hidden[0] - 414.0f) < 1e-6f,
+          "preprojected context lifetime is independent");
     CHECK(job_a && !job_a->wait(output_a, &error),
           "a completed proposal cannot be consumed twice");
 
@@ -81,6 +83,12 @@ int main(int argc, char ** argv) {
     invalid.ctx_len = 9;
     CHECK(!compute->submit(invalid, &error),
           "feature windows beyond n_swa fail closed");
+
+    invalid = request_a;
+    invalid.ctx_features = nullptr;
+    invalid.main_context = nullptr;
+    CHECK(!compute->submit(invalid, &error),
+          "context requests require raw or preprojected input");
 
     XdnaDSparkDraftConfig bad = config;
     bad.plugin_path += ".missing";

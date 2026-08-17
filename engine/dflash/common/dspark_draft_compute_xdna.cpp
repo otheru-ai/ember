@@ -134,7 +134,8 @@ std::unique_ptr<XdnaDSparkDraftJob> XdnaDSparkDraftCompute::submit(
     size_t output_elements = 0;
     if (!healthy() || request.committed < 0 || request.ctx_len < 0 ||
         request.ctx_len > impl_->config.n_swa || !request.noise_embed ||
-        (request.ctx_len > 0 && !request.ctx_features) ||
+        (request.ctx_len > 0 && !request.ctx_features &&
+         !request.main_context) ||
         !checked_product(impl_->config.n_embd, impl_->config.block_size,
                          &output_elements)) {
         if (error) *error = "invalid XDNA DSpark request";
@@ -150,6 +151,7 @@ std::unique_ptr<XdnaDSparkDraftJob> XdnaDSparkDraftCompute::submit(
     provider_request.block_size = impl_->config.block_size;
     provider_request.noise_embed = request.noise_embed;
     provider_request.ctx_features = request.ctx_features;
+    provider_request.main_context = request.main_context;
     char provider_error[512] = {};
     void * raw_job = impl_->state->provider->submit(
         impl_->state->context, &provider_request,
