@@ -6,6 +6,7 @@
 // the draft provider grows a full three-layer graph.
 
 #include "rocmfp4_pack.h"
+#include "rocmfp4_route_plan.h"
 
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_device.h>
@@ -30,6 +31,11 @@ constexpr int kBatch = 5;
 constexpr int kEmbd = 4096;
 constexpr int kFf = 2048;
 constexpr int kPacketBf16 = 256;
+constexpr size_t kPageBytes = 4096;
+
+size_t page_aligned(size_t bytes) {
+    return (bytes + kPageBytes - 1) / kPageBytes * kPageBytes;
+}
 
 uint16_t float_to_bf16(float value) {
     uint32_t bits = 0;
@@ -185,6 +191,39 @@ int main(int argc, char ** argv) {
         }
         if (distinct_weights && !route_aware)
             throw std::runtime_error("distinct weights require a Gen8 image");
+        bool route_plan_mode = false;
+        if (const char * raw = std::getenv("EMBER_XDNA_ROUTE_PLAN")) {
+            if (!std::strcmp(raw, "1")) route_plan_mode = true;
+            else if (std::strcmp(raw, "0"))
+                throw std::runtime_error("EMBER_XDNA_ROUTE_PLAN must be 0 or 1");
+        }
+        if (route_plan_mode && !route_aware)
+            throw std::runtime_error("route-plan validation requires Gen8");
+
+        ember::xdna2::Rocmfp4RoutePlan route_plan;
+        if (route_plan_mode) {
+            int32_t selected[kBatch * ember::xdna2::kRocmfp4RouteMaxTopK];
+            float weights[kBatch * ember::xdna2::kRocmfp4RouteMaxTopK];
+            for (int token = 0; token < kBatch; ++token) {
+                for (int slot = 0;
+                     slot < ember::xdna2::kRocmfp4RouteMaxTopK; ++slot) {
+                    const int index = token *
+                        ember::xdna2::kRocmfp4RouteMaxTopK + slot;
+                    selected[index] = index;  // worst case: 30 unique experts
+                    weights[index] = static_cast<float>(slot + 1) / 14.0f;
+                }
+            }
+            std::string route_error;
+            if (!ember::xdna2::build_rocmfp4_route_plan(
+                    selected, weights, kBatch,
+                    ember::xdna2::kRocmfp4RouteMaxTopK,
+                    ember::xdna2::kRocmfp4RouteMaxExperts,
+                    route_plan, &route_error)) {
+                throw std::runtime_error(route_error);
+            }
+            route_experts = static_cast<int>(route_plan.runs.size());
+            active_rows = 1;
+        }
         constexpr float gate_scale = 0.125f;
         constexpr float up_scale = 0.125f;
         constexpr float down_scale = 0.25f;
@@ -216,14 +255,10 @@ int main(int argc, char ** argv) {
             }
         }
 
-        std::vector<float> expected;
-        expected.reserve(static_cast<size_t>(kBatch) * kEmbd);
+        std::vector<float> expected(static_cast<size_t>(kBatch) * kEmbd, 0.0f);
         for (int token = 0; token < kBatch; ++token) {
-            const float route = route_aware && token < active_rows
-                ? 0.25f + static_cast<float>(token) * 0.125f
-                : route_aware ? 0.0f : 1.0f;
             const float * row = input.data() + static_cast<size_t>(token) * kEmbd;
-            std::vector<float> gate_out(kFf), up_out(kFf), hidden(kFf), result(kEmbd);
+            std::vector<float> gate_out(kFf), up_out(kFf);
             if (!ember::xdna2::rocmfp4_gemm_raw_reference(
                     gate.data(), gate.size(), row, kEmbd, kFf,
                     gate_scale, gate_out.data()) ||
@@ -232,18 +267,33 @@ int main(int argc, char ** argv) {
                     up_scale, up_out.data())) {
                 throw std::runtime_error("gate/up reference failed");
             }
-            for (int lane = 0; lane < kFf; ++lane) {
-                const float g = std::min(gate_out[lane], clamp);
-                const float u = std::max(-clamp, std::min(up_out[lane], clamp));
-                hidden[lane] = bf16_round(
-                    (g / (1.0f + exp_approx(-g))) * u * route);
+            const int reference_runs = route_plan_mode ? route_experts : 1;
+            for (int run = 0; run < reference_runs; ++run) {
+                const float route = route_plan_mode
+                    ? route_plan.runs[static_cast<size_t>(run)]
+                          .row_weights[static_cast<size_t>(token)]
+                    : route_aware && token < active_rows
+                        ? 0.25f + static_cast<float>(token) * 0.125f
+                        : route_aware ? 0.0f : 1.0f;
+                if (route == 0.0f) continue;
+                std::vector<float> hidden(kFf), result(kEmbd);
+                for (int lane = 0; lane < kFf; ++lane) {
+                    const float g = std::min(gate_out[lane], clamp);
+                    const float u = std::max(
+                        -clamp, std::min(up_out[lane], clamp));
+                    hidden[static_cast<size_t>(lane)] = bf16_round(
+                        (g / (1.0f + exp_approx(-g))) * u * route);
+                }
+                if (!ember::xdna2::rocmfp4_gemm_raw_reference(
+                        down.data(), down.size(), hidden.data(), kFf, kEmbd,
+                        down_scale, result.data())) {
+                    throw std::runtime_error("down reference failed");
+                }
+                float * expected_row = expected.data() +
+                    static_cast<size_t>(token) * kEmbd;
+                for (int lane = 0; lane < kEmbd; ++lane)
+                    expected_row[lane] += result[static_cast<size_t>(lane)];
             }
-            if (!ember::xdna2::rocmfp4_gemm_raw_reference(
-                    down.data(), down.size(), hidden.data(), kFf, kEmbd,
-                    down_scale, result.data())) {
-                throw std::runtime_error("down reference failed");
-            }
-            expected.insert(expected.end(), result.begin(), result.end());
         }
 
         xrt::device device(0);
@@ -264,9 +314,24 @@ int main(int argc, char ** argv) {
         std::memcpy(instruction_bo.map<void *>(), instructions.data(),
                     instructions.size() * sizeof(uint32_t));
         instruction_bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-        xrt::bo input_bo(device,
-            static_cast<size_t>(kBatch) * (kEmbd + 128) * sizeof(uint16_t),
-            XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
+        const size_t input_bytes = static_cast<size_t>(kBatch) *
+            (kEmbd + 128) * sizeof(uint16_t);
+        const size_t staging_bytes = static_cast<size_t>(kBatch) *
+            8192 * sizeof(uint16_t);
+        const size_t buffer_runs = route_plan_mode
+            ? static_cast<size_t>(route_experts) : 1u;
+        const size_t input_stride = page_aligned(input_bytes);
+        const size_t staging_stride = page_aligned(staging_bytes);
+        if (input_stride > SIZE_MAX / buffer_runs ||
+            staging_stride > SIZE_MAX / buffer_runs)
+            throw std::runtime_error("route buffer allocation overflow");
+        xrt::bo input_parent(device, input_stride * buffer_runs,
+                             XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(3));
+        std::vector<xrt::bo> input_views;
+        input_views.reserve(buffer_runs);
+        for (size_t run = 0; run < buffer_runs; ++run)
+            input_views.emplace_back(input_parent, input_bytes,
+                                     run * input_stride);
         const size_t resident_experts = distinct_weights
             ? static_cast<size_t>(route_experts) : 1u;
         if (packed.size() > SIZE_MAX / resident_experts)
@@ -278,34 +343,45 @@ int main(int argc, char ** argv) {
         for (size_t expert = 0; expert < resident_experts; ++expert)
             weight_views.emplace_back(weight_parent, packed.size(),
                                       expert * packed.size());
-        xrt::bo staging_bo(device,
-            static_cast<size_t>(kBatch) * 8192 * sizeof(uint16_t),
-            XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+        xrt::bo staging_parent(device, staging_stride * buffer_runs,
+                               XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(5));
+        std::vector<xrt::bo> staging_views;
+        staging_views.reserve(buffer_runs);
+        for (size_t run = 0; run < buffer_runs; ++run)
+            staging_views.emplace_back(staging_parent, staging_bytes,
+                                       run * staging_stride);
         xrt::bo dummy6(device, 1, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(6));
         xrt::bo dummy7(device, 1, XRT_BO_FLAGS_HOST_ONLY, kernel.group_id(7));
 
-        uint16_t * device_input = input_bo.map<uint16_t *>();
-        for (int token = 0; token < kBatch; ++token) {
-            uint16_t * destination = device_input +
-                static_cast<size_t>(token) * (kEmbd + 128);
-            for (int lane = 0; lane < kEmbd; ++lane) {
-                destination[lane] = float_to_bf16(
-                    input[static_cast<size_t>(token) * kEmbd + lane]);
+        auto * input_base = input_parent.map<uint8_t *>();
+        for (size_t run = 0; run < buffer_runs; ++run) {
+            auto * device_input = reinterpret_cast<uint16_t *>(
+                input_base + run * input_stride);
+            for (int token = 0; token < kBatch; ++token) {
+                uint16_t * destination = device_input +
+                    static_cast<size_t>(token) * (kEmbd + 128);
+                for (int lane = 0; lane < kEmbd; ++lane) {
+                    destination[lane] = float_to_bf16(
+                        input[static_cast<size_t>(token) * kEmbd + lane]);
+                }
+                std::fill(destination + kEmbd, destination + kEmbd + 128, 0);
+                store_raw_float(destination + kEmbd, gate_scale);
+                store_raw_float(destination + kEmbd + 2, up_scale);
+                store_raw_float(destination + kEmbd + 4, clamp);
+                const float route = route_plan_mode
+                    ? route_plan.runs[run]
+                          .row_weights[static_cast<size_t>(token)]
+                    : route_aware && token < active_rows
+                        ? 0.25f + static_cast<float>(token) * 0.125f
+                        : route_aware ? 0.0f : 1.0f;
+                store_raw_float(destination + kEmbd + 6, route);
             }
-            std::fill(destination + kEmbd, destination + kEmbd + 128, 0);
-            store_raw_float(destination + kEmbd, gate_scale);
-            store_raw_float(destination + kEmbd + 2, up_scale);
-            store_raw_float(destination + kEmbd + 4, clamp);
-            const float route = route_aware && token < active_rows
-                ? 0.25f + static_cast<float>(token) * 0.125f
-                : route_aware ? 0.0f : 1.0f;
-            store_raw_float(destination + kEmbd + 6, route);
         }
         auto * resident_weights = weight_parent.map<uint8_t *>();
         for (size_t expert = 0; expert < resident_experts; ++expert)
             std::memcpy(resident_weights + expert * packed.size(),
                         packed.data(), packed.size());
-        input_bo.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        input_parent.sync(XCL_BO_SYNC_BO_TO_DEVICE);
         weight_parent.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
         auto configure_run = [&](int expert) {
@@ -313,11 +389,13 @@ int main(int argc, char ** argv) {
             run.set_arg(0, 3);
             run.set_arg(1, instruction_bo);
             run.set_arg(2, static_cast<uint32_t>(instructions.size()));
-            run.set_arg(3, input_bo);
+            const size_t buffer_view = route_plan_mode
+                ? static_cast<size_t>(expert) : 0u;
+            run.set_arg(3, input_views[buffer_view]);
             const size_t view = distinct_weights
                 ? static_cast<size_t>(expert) : 0u;
             run.set_arg(4, weight_views[view]);
-            run.set_arg(5, staging_bo);
+            run.set_arg(5, staging_views[buffer_view]);
             run.set_arg(6, dummy6);
             run.set_arg(7, dummy7);
             return run;
@@ -342,39 +420,53 @@ int main(int argc, char ** argv) {
         for (int iteration = 0; iteration < timed_runs; ++iteration) run_once();
         const double milliseconds = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - begin).count() / timed_runs;
-        staging_bo.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+        const auto read_begin = std::chrono::steady_clock::now();
+        staging_parent.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
 
-        std::vector<float> actual(static_cast<size_t>(kBatch) * kEmbd);
-        const uint16_t * staging = staging_bo.map<uint16_t *>();
-        for (int row = 0; row < 4; ++row) {
-            for (int col = 0; col < 8; ++col) {
-                const size_t core = static_cast<size_t>(row * 8 + col);
-                for (int token = 0; token < kBatch; ++token) {
-                    const float * packet = reinterpret_cast<const float *>(
-                        staging + core * kBatch * kPacketBf16 +
-                        static_cast<size_t>(token) * kPacketBf16);
-                    for (int group = 0; group < 2; ++group) {
-                        for (int lane = 0; lane < 64; ++lane) {
-                            const size_t output = static_cast<size_t>(token) * kEmbd +
-                                static_cast<size_t>(group * 2048 +
-                                    row * 8 * 64 + col * 64 + lane);
-                            actual[output] = packet[group * 64 + lane] * down_scale;
+        std::vector<float> actual(static_cast<size_t>(kBatch) * kEmbd, 0.0f);
+        const auto * staging_base = staging_parent.map<const uint8_t *>();
+        const size_t output_runs = route_plan_mode ? buffer_runs : 1u;
+        for (size_t run = 0; run < output_runs; ++run) {
+            const auto * staging = reinterpret_cast<const uint16_t *>(
+                staging_base + run * staging_stride);
+            for (int row = 0; row < 4; ++row) {
+                for (int col = 0; col < 8; ++col) {
+                    const size_t core = static_cast<size_t>(row * 8 + col);
+                    for (int token = 0; token < kBatch; ++token) {
+                        const float * packet = reinterpret_cast<const float *>(
+                            staging + core * kBatch * kPacketBf16 +
+                            static_cast<size_t>(token) * kPacketBf16);
+                        for (int group = 0; group < 2; ++group) {
+                            for (int lane = 0; lane < 64; ++lane) {
+                                const size_t output =
+                                    static_cast<size_t>(token) * kEmbd +
+                                    static_cast<size_t>(group * 2048 +
+                                        row * 8 * 64 + col * 64 + lane);
+                                actual[output] +=
+                                    packet[group * 64 + lane] * down_scale;
+                            }
                         }
                     }
                 }
             }
         }
+        const double read_accumulate_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - read_begin).count();
 
         const Metrics metrics = compare(actual, expected);
         std::printf("gen%d tokens=5 active_rows=%d route_experts=%d "
-                    "weight_mode=%s resident_weight_bytes=%zu "
+                    "route_plan=%s weight_mode=%s resident_weight_bytes=%zu "
                     "packed_bytes=%zu sequence_ms=%.6f per_expert_ms=%.6f "
+                    "read_accumulate_ms=%.6f "
                     "max_abs=%.8g mean_abs=%.8g cosine=%.10f max_index=%d\n",
                     route_aware ? 8 : 7, active_rows, route_experts,
+                    route_plan_mode ? "yes" : "no",
                     distinct_weights ? "distinct" : "cache-hot",
                     packed.size() * resident_experts,
                     packed.size(), milliseconds,
-                    milliseconds / static_cast<double>(route_experts), metrics.max_abs,
+                    milliseconds / static_cast<double>(route_experts),
+                    read_accumulate_ms, metrics.max_abs,
                     metrics.mean_abs, metrics.cosine, metrics.max_index);
         return metrics.cosine >= 0.99999 && metrics.max_abs <= 0.01f ? 0 : 1;
     } catch (const std::exception & exception) {

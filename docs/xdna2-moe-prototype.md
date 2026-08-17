@@ -654,9 +654,37 @@ dense stages. It remains a cross-session throughput hypothesis, not an
 end-to-end acceleration claim.
 
 `expert_v8_4096x2048x4096_b5.{xclbin,insts}` is packaged with Gen7 in the
-opt-in `release-xdna` image. The next correctness step is a route scheduler
-which accumulates different trained expert partials per row; the next
-performance gate is the complete asynchronous three-layer draft provider.
+opt-in `release-xdna` image.
+
+### Gen9 route plan and weighted accumulation
+
+`rocmfp4_route_plan.cpp` implements the deterministic host-control step between
+the score router and Gen8. It accepts token-major top-k IDs and weights, rejects
+invalid IDs, duplicates, negative/non-finite weights and empty plans, groups
+collisions across tokens, and emits one expert-ID-ordered five-row mask per
+unique resident expert. GPU-free tests cover collisions and the 30-unique
+worst case. The inputs match DS4's router contract: the graph computes
+`sqrt(softplus(logit))`, adds the optional bias only for top-k selection, then
+normalizes the unbiased selected values and applies the model's 1.5 scale.
+
+The hardware validator gives each planned run its own page-aligned input and
+output sub-buffer. It executes the 30 commands in one XRT runlist, synchronizes
+the 2.4 MiB output parent once, and accumulates every weighted expert partial
+into the five final rows on the CPU. Two physical Strix Halo runs, including
+the exact validator binary extracted from the release image, were exact
+(`max_abs=0`, cosine 1.0): 11.814--11.824 ms NPU sequence time plus
+0.247--0.305 ms for the single read/sum. The test uses six weights per token
+whose sum is 1.5 and a different resident weight address per expert, so it
+exercises the complete route-plan semantics rather than merely replaying
+independent commands.
+
+CPU accumulation is retained for the first trained differential because its
+roughly 0.9 ms cost across three draft layers is small relative to the NPU MoE
+work. An AIE accumulation stage is worthwhile only after trained outputs pass
+and the complete provider shows that this read is on the critical path. The
+next correctness gate is different trained expert data and real router
+selections; the next performance gate remains the complete asynchronous
+three-layer draft provider.
 
 The scheduling target is deliberately cross-session and coarse: while the GPU
 verifies session A (roughly 63-82 ms for q=2..4 in the measurements above), the

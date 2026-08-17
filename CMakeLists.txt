@@ -98,6 +98,7 @@ if(EMBER_XDNA_XRT_PROVIDER)
   add_executable(ember-xdna-rocmfp4-validate
     providers/xdna2/validate_rocmfp4_xrt.cpp
     providers/xdna2/rocmfp4_pack.cpp
+    providers/xdna2/rocmfp4_route_plan.cpp
     providers/xdna2/rocmfp2_pack.cpp)
   target_include_directories(ember-xdna-rocmfp4-validate PRIVATE
     providers/xdna2
@@ -317,6 +318,13 @@ target_include_directories(test_xdna_rocmfp4_pack PRIVATE providers/xdna2)
 add_test(NAME xdna_rocmfp4_pack COMMAND test_xdna_rocmfp4_pack)
 ember_strict(test_xdna_rocmfp4_pack)
 
+add_executable(test_xdna_rocmfp4_route_plan
+  test/test_xdna_rocmfp4_route_plan.cpp
+  providers/xdna2/rocmfp4_route_plan.cpp)
+target_include_directories(test_xdna_rocmfp4_route_plan PRIVATE providers/xdna2)
+add_test(NAME xdna_rocmfp4_route_plan COMMAND test_xdna_rocmfp4_route_plan)
+ember_strict(test_xdna_rocmfp4_route_plan)
+
 # Every C/C++ test gets a wall-clock ceiling. Without one a hung test blocks
 # ctest forever: `test_api_adapters` builds a socketpair and pthread_join()s a
 # reader thread, so a reader that never sees EOF deadlocks the whole run rather
@@ -338,7 +346,7 @@ set(EMBER_C_TESTS
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator xdna_moe_provider
   xdna_dspark_provider
-  xdna_rocmfp2_pack xdna_rocmfp4_pack)
+  xdna_rocmfp2_pack xdna_rocmfp4_pack xdna_rocmfp4_route_plan)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 
 # ── ember-server binary ──
