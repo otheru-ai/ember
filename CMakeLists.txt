@@ -526,6 +526,23 @@ if(EMBER_ENGINE)
   endif()
   add_subdirectory(engine)
 
+  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
+    # Narrow placement diagnostic: loads only the trained DSpark main Q8_0
+    # tensor and measures the exact GPU pre-stage graph at proposal and context
+    # widths. It avoids a second resident target-model allocation on gfx1151.
+    add_executable(ember-dspark-main-bench
+      providers/xdna2/benchmark_dspark_main_gpu.cpp
+      providers/xdna2/q8_model_weights.cpp
+      providers/xdna2/q8_0_pack.cpp
+      src/model/gguf.c)
+    target_include_directories(ember-dspark-main-bench PRIVATE
+      providers/xdna2
+      engine/ggml/include
+      engine/ggml/src)
+    target_link_libraries(ember-dspark-main-bench PRIVATE
+      ggml ggml-base ggml-hip ggml-cpu m)
+  endif()
+
   # Metadata-only tokenizer probe.  Keep it independent of ember_engine so a
   # production GGUF can be inspected without loading weights or touching the
   # GPU; this is the direct parity surface for ds4's tokenizer utility.

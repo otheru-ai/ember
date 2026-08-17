@@ -924,10 +924,36 @@ compute that one main-context projection as a short dependency pre-stage, then
 the NPU can consume its normalized `main_x` while the GPU verifies another
 resident session. Keeping the NPU on native compensated Q8 removes 13.929 ms
 from its measured draft subtotal, reducing the known floor from 83.95 ms to
-about 70.02 ms before HC transforms, norms, routing, attention reductions, and
-tail collapse. That leaves about 11.7 ms under the measured q=4 verifier
-window for the missing work and makes GPU-prestage/NPU-body the next prototype
-boundary.
+about 70.02 ms before the GPU pre-stage, HC transforms, norms, routing,
+attention reductions, and tail collapse.
+
+The packaged `ember-dspark-main-bench` measures the exact graph topology and
+host-visible handoff used by `deepseek4_dspark_project_main_context()` without
+allocating the 85 GiB target model. Physical gfx1151 results with the trained
+Q8_0 projection were:
+
+| context rows | upload mean | GPU graph mean | download mean | staged total mean | staged total median |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 0.014 ms | 0.278 ms | 0.011 ms | 0.303 ms | 0.300 ms |
+| 128 | 0.109 ms | 0.697 ms | 0.034 ms | 0.841 ms | 0.833 ms |
+
+This is 16.6x faster than Gen12's numerically valid 13.929 ms NPU main
+projection, including both host transfers, and 5.5x faster than the rejected
+4.621 ms BFP16 result. The measured draft floor is therefore about 70.86 ms,
+leaving about 10.84 ms under the measured 81.7 ms q=4 verifier window for the
+missing work. Upload plus download is only 0.144 ms at 128 rows. A direct
+GPU/XRT buffer handoff can recover at most that amount here, and projecting
+only four appended rows can recover at most roughly 0.54 ms. Neither is the
+next performance gate; completing and measuring the asynchronous NPU body is.
+
+Run the isolated placement check from the opt-in image with:
+
+```bash
+docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-dspark-main-bench ember:xdna-local \
+  /models/dspark-draft.gguf 20
+```
 
 Run the same trained check from the opt-in image with:
 
