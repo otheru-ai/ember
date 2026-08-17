@@ -52,8 +52,14 @@ int main() {
           "three-projection expert size");
     CHECK(q8_expert_v2_bytes() == 100663296,
           "corrected expert size");
+    CHECK(q8_supported_shape(128, 512) && q8_projection_rows(512) == 1 &&
+          q8_supported_shape(128, 1024) && q8_projection_rows(1024) == 2 &&
+          q8_supported_shape(128, 1536) && q8_projection_rows(1536) == 3 &&
+          q8_projection_rows(2048) == 4,
+          "narrow projections use only active AIE rows");
     CHECK(!q8_supported_shape(127, 2048) &&
-          !q8_supported_shape(128, 1024),
+          !q8_supported_shape(128, 256) &&
+          !q8_supported_shape(128, 2560),
           "unsupported tile shapes rejected");
 
     constexpr int k = 128;
@@ -149,6 +155,94 @@ int main() {
     }
     CHECK(corrected_layout,
           "corrected planes reconstruct dequantized weights");
+
+    constexpr int narrow_n = 512;
+    std::vector<uint8_t> narrow_raw(
+        q8_projection_bytes(k, narrow_n), 0);
+    std::copy_n(raw.begin(), narrow_raw.size(),
+              narrow_raw.begin());
+    std::vector<uint8_t> narrow_packed;
+    CHECK(pack_q8_gemm_bf16(narrow_raw.data(), narrow_raw.size(), k,
+                            narrow_n, narrow_packed, &error) &&
+              narrow_packed.size() ==
+                  q8_packed_projection_bytes(k, narrow_n),
+          "one-row projection packs without padding to four rows");
+    std::vector<float> narrow_raw_output(narrow_n);
+    std::vector<float> narrow_packed_output(narrow_n);
+    CHECK(q8_gemm_raw_reference(narrow_raw.data(), narrow_raw.size(),
+                                input.data(), k, narrow_n,
+                                narrow_raw_output.data()) &&
+          q8_gemm_packed_bf16_reference(
+              narrow_packed.data(), narrow_packed.size(), input.data(), k,
+              narrow_n, narrow_packed_output.data()),
+          "one-row packed reference evaluates");
+    double narrow_dot = 0.0, narrow_raw_sq = 0.0, narrow_packed_sq = 0.0;
+    for (size_t i = 0; i < static_cast<size_t>(narrow_n); ++i) {
+        narrow_dot += static_cast<double>(narrow_raw_output[i]) *
+                      narrow_packed_output[i];
+        narrow_raw_sq += static_cast<double>(narrow_raw_output[i]) *
+                         narrow_raw_output[i];
+        narrow_packed_sq += static_cast<double>(narrow_packed_output[i]) *
+                            narrow_packed_output[i];
+    }
+    CHECK(narrow_dot / std::sqrt(narrow_raw_sq * narrow_packed_sq) > 0.99999,
+          "one-row layout preserves projection fidelity");
+
+    std::vector<uint8_t> task_packed;
+    CHECK(!pack_q8_projection_corrected_bf16(
+              raw.data(), raw.size(), k, n, task_packed, &error) &&
+              error.find("multiple of 512") != std::string::npos,
+          "task projection rejects a sub-descriptor K shape");
+    constexpr int task_k = 512;
+    std::vector<uint8_t> task_raw(q8_projection_bytes(task_k, n), 0);
+    for (size_t block = 0;
+         block < task_raw.size() / kQ8BlockBytes; ++block) {
+        std::memcpy(task_raw.data() + block * kQ8BlockBytes,
+                    raw.data() + (block % (raw.size() / kQ8BlockBytes)) *
+                        kQ8BlockBytes,
+                    kQ8BlockBytes);
+    }
+    std::vector<uint8_t> task_group_major;
+    CHECK(pack_q8_gemm_corrected_bf16(
+              task_raw.data(), task_raw.size(), task_k, n,
+              task_group_major, &error) &&
+          pack_q8_projection_corrected_bf16(
+              task_raw.data(), task_raw.size(), task_k, n,
+              task_packed, &error) &&
+              task_packed.size() ==
+                  q8_projection_task_packed_bytes(task_k, n),
+          "task projection packs in column-major DMA order");
+    bool task_layout = true;
+    constexpr int k_tiles = task_k / kQ8TileK;
+    constexpr int groups = n / kQ8OutputsPerPass;
+    constexpr size_t task_stride =
+        static_cast<size_t>(k_tiles * kQ8AieRows) *
+            kQ8CorrectedTileBytes + 2 * sizeof(uint16_t);
+    for (int column = 0; column < kQ8AieColumns && task_layout; ++column) {
+        for (int group = 0; group < groups && task_layout; ++group) {
+            for (int kt = 0; kt < k_tiles && task_layout; ++kt) {
+                for (int row = 0; row < kQ8AieRows; ++row) {
+                    const size_t source =
+                        (((static_cast<size_t>(group) * kQ8AieColumns +
+                           static_cast<size_t>(column)) * k_tiles +
+                          static_cast<size_t>(kt)) * kQ8AieRows +
+                         static_cast<size_t>(row)) * kQ8CorrectedTileBytes;
+                    const size_t destination =
+                        (static_cast<size_t>(column) * groups +
+                         static_cast<size_t>(group)) * task_stride +
+                        static_cast<size_t>(kt * kQ8AieRows + row) *
+                            kQ8CorrectedTileBytes;
+                    if (std::memcmp(task_group_major.data() + source,
+                                    task_packed.data() + destination,
+                                    kQ8CorrectedTileBytes) != 0) {
+                        task_layout = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(task_layout, "column-major task layout retains every corrected tile");
 
     CHECK(!pack_q8_gemm_bf16(raw.data(), raw.size() - 1, k, n,
                              packed, &error) &&

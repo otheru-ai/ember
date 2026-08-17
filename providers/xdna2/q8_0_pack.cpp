@@ -65,11 +65,20 @@ size_t tile_count(int k, int n) {
            static_cast<size_t>(n / kQ8TileN);
 }
 
+int projection_rows(int n) {
+    if (n <= 0 || n % kQ8OutputsPerRow != 0) return 0;
+    if (n < kQ8OutputsPerPass) return n / kQ8OutputsPerRow;
+    return n % kQ8OutputsPerPass == 0 ? kQ8AieRows : 0;
+}
+
 }  // namespace
 
 bool q8_supported_shape(int k, int n) {
-    return k > 0 && n > 0 && k % kQ8TileK == 0 &&
-           n % kQ8OutputsPerPass == 0;
+    return k > 0 && k % kQ8TileK == 0 && projection_rows(n) != 0;
+}
+
+int q8_projection_rows(int n) {
+    return projection_rows(n);
 }
 
 size_t q8_projection_bytes(int k, int n) {
@@ -98,7 +107,9 @@ bool pack_q8_gemm_bf16(const void * raw, size_t raw_bytes, int k, int n,
     size_t expected = 0;
     const size_t packed_bytes = q8_packed_projection_bytes(k, n);
     if (!raw || !checked_raw_size(k, n, &expected) || !packed_bytes) {
-        if (error) *error = "Q8 AIE packing requires K%128=0 and N%2048=0";
+        if (error) *error =
+            "Q8 AIE packing requires K%128=0 and N in {512,1024,1536} "
+            "or N%2048=0";
         return false;
     }
     if (raw_bytes < expected) {
@@ -108,13 +119,15 @@ bool pack_q8_gemm_bf16(const void * raw, size_t raw_bytes, int k, int n,
     const auto * source = static_cast<const uint8_t *>(raw);
     const int blocks_per_output = k / kQ8BlockWeights;
     const int k_tiles = k / kQ8TileK;
-    const int groups = n / kQ8OutputsPerPass;
+    const int rows = projection_rows(n);
+    const int outputs_per_group = rows * kQ8OutputsPerRow;
+    const int groups = n / outputs_per_group;
     packed.resize(packed_bytes);
     size_t tile_index = 0;
     for (int group = 0; group < groups; ++group) {
         for (int column = 0; column < kQ8AieColumns; ++column) {
             for (int kt = 0; kt < k_tiles; ++kt) {
-                for (int row = 0; row < kQ8AieRows; ++row, ++tile_index) {
+                for (int row = 0; row < rows; ++row, ++tile_index) {
                     auto * tile = reinterpret_cast<uint16_t *>(
                         packed.data() + tile_index * kQ8PackedTileBytes);
                     for (int input = 0; input < kQ8TileK; ++input) {
@@ -123,7 +136,7 @@ bool pack_q8_gemm_bf16(const void * raw, size_t raw_bytes, int k, int n,
                         const int lane = global_input % kQ8BlockWeights;
                         for (int output_lane = 0; output_lane < kQ8TileN;
                              ++output_lane) {
-                            const int output = group * kQ8OutputsPerPass +
+                            const int output = group * outputs_per_group +
                                 row * kQ8AieColumns * kQ8TileN +
                                 column * kQ8TileN + output_lane;
                             const uint8_t * q = source +
@@ -155,7 +168,8 @@ bool pack_q8_gemm_corrected_bf16(const void * raw, size_t raw_bytes,
     const size_t packed_bytes = q8_corrected_packed_projection_bytes(k, n);
     if (!raw || !checked_raw_size(k, n, &expected) || !packed_bytes) {
         if (error) *error =
-            "corrected Q8 AIE packing requires K%128=0 and N%2048=0";
+            "corrected Q8 AIE packing requires K%128=0 and N in "
+            "{512,1024,1536} or N%2048=0";
         return false;
     }
     if (raw_bytes < expected) {
@@ -165,13 +179,15 @@ bool pack_q8_gemm_corrected_bf16(const void * raw, size_t raw_bytes,
     const auto * source = static_cast<const uint8_t *>(raw);
     const int blocks_per_output = k / kQ8BlockWeights;
     const int k_tiles = k / kQ8TileK;
-    const int groups = n / kQ8OutputsPerPass;
+    const int rows = projection_rows(n);
+    const int outputs_per_group = rows * kQ8OutputsPerRow;
+    const int groups = n / outputs_per_group;
     packed.resize(packed_bytes);
     size_t tile_index = 0;
     for (int group = 0; group < groups; ++group) {
         for (int column = 0; column < kQ8AieColumns; ++column) {
             for (int kt = 0; kt < k_tiles; ++kt) {
-                for (int row = 0; row < kQ8AieRows; ++row, ++tile_index) {
+                for (int row = 0; row < rows; ++row, ++tile_index) {
                     auto * high = reinterpret_cast<uint16_t *>(
                         packed.data() +
                         tile_index * kQ8CorrectedTileBytes);
@@ -183,7 +199,7 @@ bool pack_q8_gemm_corrected_bf16(const void * raw, size_t raw_bytes,
                         const int lane = global_input % kQ8BlockWeights;
                         for (int output_lane = 0; output_lane < kQ8TileN;
                              ++output_lane) {
-                            const int output = group * kQ8OutputsPerPass +
+                            const int output = group * outputs_per_group +
                                 row * kQ8AieColumns * kQ8TileN +
                                 column * kQ8TileN + output_lane;
                             const uint8_t * q = source +
@@ -211,6 +227,82 @@ bool pack_q8_gemm_corrected_bf16(const void * raw, size_t raw_bytes,
         }
     }
     return tile_index == tile_count(k, n);
+}
+
+bool pack_q8_projection_corrected_bf16(const void * raw, size_t raw_bytes,
+                                       int k, int n,
+                                       std::vector<uint8_t> & packed,
+                                       std::string * error) {
+    std::vector<uint8_t> group_major;
+    if (!pack_q8_gemm_corrected_bf16(raw, raw_bytes, k, n, group_major,
+                                     error)) return false;
+    const int rows = projection_rows(n);
+    const int k_tiles = k / kQ8TileK;
+    const int groups = n / (rows * kQ8OutputsPerRow);
+    constexpr int task_k_tiles = 4;
+    if (k_tiles % task_k_tiles != 0) {
+        if (error) *error =
+            "Q8 projection tasks require K to be a multiple of 512";
+        return false;
+    }
+    const int tasks_per_group = k_tiles / task_k_tiles;
+    const size_t task_payload = static_cast<size_t>(task_k_tiles) *
+                                static_cast<size_t>(rows) *
+                                kQ8CorrectedTileBytes;
+    const size_t task_stride = task_payload + 2 * sizeof(uint16_t);
+    const size_t packed_bytes = q8_projection_task_packed_bytes(k, n);
+    if (!packed_bytes) return false;
+    packed.assign(packed_bytes, 0);
+    for (int column = 0; column < kQ8AieColumns; ++column) {
+        for (int group = 0; group < groups; ++group) {
+            for (int task = 0; task < tasks_per_group; ++task) {
+                const size_t destination_task =
+                    (static_cast<size_t>(column) *
+                         static_cast<size_t>(groups) *
+                         static_cast<size_t>(tasks_per_group) +
+                     static_cast<size_t>(group) *
+                         static_cast<size_t>(tasks_per_group) +
+                     static_cast<size_t>(task)) * task_stride;
+                for (int within = 0; within < task_k_tiles; ++within) {
+                    const int kt = task * task_k_tiles + within;
+                    for (int row = 0; row < rows; ++row) {
+                        size_t source_tile = static_cast<size_t>(group);
+                        source_tile = source_tile * kQ8AieColumns +
+                                      static_cast<size_t>(column);
+                        source_tile = source_tile *
+                                      static_cast<size_t>(k_tiles) +
+                                      static_cast<size_t>(kt);
+                        source_tile = source_tile * static_cast<size_t>(rows) +
+                                      static_cast<size_t>(row);
+                        const size_t destination_tile =
+                            static_cast<size_t>(within * rows + row);
+                        std::memcpy(
+                            packed.data() + destination_task +
+                                destination_tile * kQ8CorrectedTileBytes,
+                            group_major.data() +
+                                source_tile * kQ8CorrectedTileBytes,
+                            kQ8CorrectedTileBytes);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+size_t q8_projection_task_packed_bytes(int k, int n) {
+    if (!q8_supported_shape(k, n) || k % 512 != 0) return 0;
+    const int rows = projection_rows(n);
+    const int groups = n / (rows * kQ8OutputsPerRow);
+    const int tasks_per_group = (k / kQ8TileK) / 4;
+    const size_t payload = static_cast<size_t>(4 * rows) *
+                           kQ8CorrectedTileBytes;
+    const size_t tasks = static_cast<size_t>(kQ8AieColumns) *
+                         static_cast<size_t>(groups) *
+                         static_cast<size_t>(tasks_per_group);
+    if (tasks > std::numeric_limits<size_t>::max() /
+                    (payload + 2 * sizeof(uint16_t))) return 0;
+    return tasks * (payload + 2 * sizeof(uint16_t));
 }
 
 size_t q8_expert_v1_bytes() {
@@ -371,9 +463,11 @@ bool q8_gemm_packed_bf16_reference(const void * packed, size_t packed_bytes,
         return false;
     const auto * bytes = static_cast<const uint8_t *>(packed);
     const int k_tiles = k / kQ8TileK;
+    const int rows = projection_rows(n);
+    const int outputs_per_group = rows * kQ8OutputsPerRow;
     for (int out = 0; out < n; ++out) {
-        const int group = out / kQ8OutputsPerPass;
-        const int within = out % kQ8OutputsPerPass;
+        const int group = out / outputs_per_group;
+        const int within = out % outputs_per_group;
         const int row = within / (kQ8AieColumns * kQ8TileN);
         const int column = (within / kQ8TileN) % kQ8AieColumns;
         const int lane = within % kQ8TileN;
@@ -383,7 +477,8 @@ bool q8_gemm_packed_bf16_reference(const void * packed, size_t packed_bytes,
             tile = tile * kQ8AieColumns + static_cast<size_t>(column);
             tile = tile * static_cast<size_t>(k_tiles) +
                    static_cast<size_t>(kt);
-            tile = tile * kQ8AieRows + static_cast<size_t>(row);
+            tile = tile * static_cast<size_t>(rows) +
+                   static_cast<size_t>(row);
             const auto * values = reinterpret_cast<const uint16_t *>(
                 bytes + tile * kQ8PackedTileBytes);
             for (int i = 0; i < kQ8TileK; ++i) {

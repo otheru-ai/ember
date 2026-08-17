@@ -22,12 +22,14 @@ constexpr int kQ8TileK = 128;
 constexpr int kQ8TileN = 64;
 constexpr int kQ8AieRows = 4;
 constexpr int kQ8AieColumns = 8;
+constexpr int kQ8OutputsPerRow = kQ8TileN * kQ8AieColumns;
 constexpr int kQ8OutputsPerPass = kQ8TileN * kQ8AieRows * kQ8AieColumns;
 constexpr size_t kQ8PackedTileBytes =
     static_cast<size_t>(kQ8TileK) * kQ8TileN * sizeof(uint16_t);
 constexpr size_t kQ8CorrectedTileBytes = 2 * kQ8PackedTileBytes;
 
 bool q8_supported_shape(int k, int n);
+int q8_projection_rows(int n);
 size_t q8_projection_bytes(int k, int n);
 size_t q8_packed_projection_bytes(int k, int n);
 
@@ -40,6 +42,11 @@ bool pack_q8_gemm_corrected_bf16(const void * raw, size_t raw_bytes,
                                  int k, int n,
                                  std::vector<uint8_t> & packed,
                                  std::string * error = nullptr);
+bool pack_q8_projection_corrected_bf16(const void * raw, size_t raw_bytes,
+                                       int k, int n,
+                                       std::vector<uint8_t> & packed,
+                                       std::string * error = nullptr);
+size_t q8_projection_task_packed_bytes(int k, int n);
 
 size_t q8_expert_v1_bytes();
 bool pack_q8_expert_v1(const void * gate, size_t gate_bytes,

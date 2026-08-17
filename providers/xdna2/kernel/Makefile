@@ -52,6 +52,9 @@ INSTS_SHARED_Q8_V1 := $(BUILD_DIR)/shared_q8_v1_4096x2048x4096_b5.insts
 MLIR_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2.mlir
 XCLBIN_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2_4096x2048x4096_b5.xclbin
 INSTS_SHARED_Q8_V2 := $(BUILD_DIR)/shared_q8_v2_4096x2048x4096_b5.insts
+MLIR_Q8_PROJECTION_V3 := $(BUILD_DIR)/q8_projection_v3.mlir
+XCLBIN_Q8_PROJECTION_V3 := $(BUILD_DIR)/q8_projection_v3_$(K)x$(N)_b5.xclbin
+INSTS_Q8_PROJECTION_V3 := $(BUILD_DIR)/q8_projection_v3_$(K)x$(N)_b5.insts
 MLIR_GATE_V5 := $(BUILD_DIR)/gate_v5.mlir
 XCLBIN_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.xclbin
 INSTS_GATE_V5 := $(BUILD_DIR)/gate_v5_4096x2048.insts
@@ -59,7 +62,7 @@ MLIR_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5.mlir
 XCLBIN_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.xclbin
 INSTS_ONE_DOWN_V5 := $(BUILD_DIR)/one_down_v5_4096x2048.insts
 
-.PHONY: all expert-v5 expert-v6 expert-v7 expert-v8 shared-q8-v1 shared-q8-v2 gate-v5 one-down-v5 clean
+.PHONY: all expert-v5 expert-v6 expert-v7 expert-v8 shared-q8-v1 shared-q8-v2 q8-projection-v3 gate-v5 one-down-v5 clean
 all: $(XCLBIN) $(XCLBIN_V2) $(XCLBIN_V3) $(XCLBIN_V4)
 expert-v5: $(XCLBIN_EXPERT_V5)
 expert-v6: $(XCLBIN_EXPERT_V6)
@@ -67,6 +70,7 @@ expert-v7: $(XCLBIN_EXPERT_V7)
 expert-v8: $(XCLBIN_EXPERT_V8)
 shared-q8-v1: $(XCLBIN_SHARED_Q8_V1)
 shared-q8-v2: $(XCLBIN_SHARED_Q8_V2)
+q8-projection-v3: $(XCLBIN_Q8_PROJECTION_V3)
 gate-v5: $(XCLBIN_GATE_V5)
 one-down-v5: $(XCLBIN_ONE_DOWN_V5)
 
@@ -153,6 +157,10 @@ $(MLIR_SHARED_Q8_V1): q8_shared_expert_v1.py
 $(MLIR_SHARED_Q8_V2): q8_shared_expert_v2.py
 	mkdir -p $(dir $@)
 	python3 $< > $@
+
+$(MLIR_Q8_PROJECTION_V3): q8_projection_v3.py
+	mkdir -p $(dir $@)
+	python3 $< -K $(K) -N $(N) > $@
 
 $(MLIR_GATE_V5): rocmfp2_expert_v5.py
 	mkdir -p $(dir $@)
@@ -251,6 +259,15 @@ $(XCLBIN_SHARED_Q8_V2): $(MLIR_SHARED_Q8_V2) $(OBJECT_GEMM_Q8_V2) $(OBJECT_EXPER
 		--npu-insts-name=$(notdir $(INSTS_SHARED_Q8_V2)) $(notdir $(MLIR_SHARED_Q8_V2))
 	test -s $(XCLBIN_SHARED_Q8_V2)
 	test -s $(INSTS_SHARED_Q8_V2)
+
+$(XCLBIN_Q8_PROJECTION_V3): $(MLIR_Q8_PROJECTION_V3) $(OBJECT_GEMM_Q8_V2)
+	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \
+		--aie-generate-xclbin --no-compile-host \
+		--xclbin-name=$(notdir $(XCLBIN_Q8_PROJECTION_V3)) --no-xchesscc --no-xbridge \
+		--peano=$(PEANO_INSTALL_DIR) --aie-generate-npu-insts \
+		--npu-insts-name=$(notdir $(INSTS_Q8_PROJECTION_V3)) $(notdir $(MLIR_Q8_PROJECTION_V3))
+	test -s $(XCLBIN_Q8_PROJECTION_V3)
+	test -s $(INSTS_Q8_PROJECTION_V3)
 
 $(XCLBIN_GATE_V5): $(MLIR_GATE_V5) $(OBJECT_V4) $(OBJECT_EXPERT_V5)
 	cd $(BUILD_DIR) && aiecc.py --alloc-scheme=basic-sequential \

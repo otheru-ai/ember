@@ -95,6 +95,62 @@ bool pread_all(int fd, uint64_t offset, std::vector<uint8_t> & destination,
 
 }  // namespace
 
+bool load_q8_model_projection(const char * path,
+                              const char * tensor_name,
+                              int k,
+                              int n,
+                              Q8ModelProjection & projection,
+                              std::string * error) {
+    projection = {};
+    if (!path || !path[0]) return fail(error, "model path is empty");
+    if (!tensor_name || !tensor_name[0])
+        return fail(error, "tensor name is empty");
+    const size_t raw_bytes = q8_projection_bytes(k, n);
+    if (!raw_bytes || !q8_supported_shape(k, n))
+        return fail(error, "unsupported Q8 AIE projection shape");
+
+    GgufOwner file(gguf_open(path), &gguf_free);
+    if (!file) return fail(error, std::string("cannot parse GGUF: ") + path);
+    if (std::strcmp(gguf_get_str(file.get(), "general.architecture", ""),
+                    "deepseek4-dflash-draft") != 0) {
+        return fail(error, "GGUF is not a deepseek4-dflash-draft model");
+    }
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return fail(error, std::string("cannot open model: ") +
+                     std::strerror(errno));
+    struct FdOwner {
+        int fd;
+        ~FdOwner() { if (fd >= 0) ::close(fd); }
+    } fd_owner{fd};
+    struct stat status {};
+    if (::fstat(fd, &status) != 0 || status.st_size < 0)
+        return fail(error, "cannot determine model file size");
+
+    const gguf_tensor * tensor = nullptr;
+    if (!validate_projection(file.get(), static_cast<uint64_t>(status.st_size),
+                             tensor_name, static_cast<uint64_t>(k),
+                             static_cast<uint64_t>(n), raw_bytes, &tensor,
+                             error)) return false;
+    projection.name = tensor_name;
+    projection.k = k;
+    projection.n = n;
+    projection.raw.resize(raw_bytes);
+    if (!pread_all(fd, file->data_offset + tensor->offset, projection.raw,
+                   tensor->name, error)) {
+        projection = {};
+        return false;
+    }
+    std::string pack_error;
+    if (!pack_q8_projection_corrected_bf16(
+            projection.raw.data(), projection.raw.size(), k, n,
+            projection.packed, &pack_error)) {
+        projection = {};
+        return fail(error, "cannot pack projection: " + pack_error);
+    }
+    return true;
+}
+
 bool load_q8_model_shared_expert(const char * path,
                                  int layer,
                                  Q8ModelSharedExpert & expert,

@@ -49,6 +49,13 @@ that start-queue field available on AIE2IPU. These are research references,
 not vendored dependencies. Ember's activation contract and accuracy thresholds
 remain independent.
 
+Gen11's generic Q8 projection graph additionally relies on the shim DMA
+descriptor limits enforced by that stack: strides and contiguous tasks must
+fit the one-MiB encoding range and shim addresses are 32-bit aligned. Ember's
+column-major, four-K-tile, two-BF16-gap host packing is an original layout that
+keeps every generated task within those limits; the gap is never delivered to
+an AIE core.
+
 MLIR-AIE itself vendors that AIE-RT branch as a **compiler-side** register and
 transaction source, with local fixes for backend selection and ELF `.bss`
 zero-fill.  Ember therefore keeps AIE-RT out of the runtime image: `aiecc.py`

@@ -149,6 +149,27 @@ int main() {
               expected, &error) && loaded.packed == expected,
           "loader packing matches independent pack call");
 
+    ember::xdna2::Q8ModelProjection projection;
+    CHECK(ember::xdna2::load_q8_model_projection(
+              fixture.path.c_str(), "blk.0.ffn_gate_shexp.weight", 4096,
+              2048, projection, &error),
+          "named trained Q8 projection loads");
+    CHECK(projection.name == "blk.0.ffn_gate_shexp.weight" &&
+              projection.k == 4096 && projection.n == 2048 &&
+              projection.raw == fixture.gate,
+          "named projection identity and raw bytes retained");
+    std::vector<uint8_t> expected_projection;
+    CHECK(ember::xdna2::pack_q8_projection_corrected_bf16(
+              fixture.gate.data(), fixture.gate.size(), 4096, 2048,
+              expected_projection, &error) &&
+              projection.packed == expected_projection,
+          "named projection uses compensated graph layout");
+    CHECK(!ember::xdna2::load_q8_model_projection(
+              fixture.path.c_str(), "blk.0.ffn_gate_shexp.weight", 4096,
+              1024, projection, &error) &&
+              error.find("shape") != std::string::npos,
+          "named projection rejects a mismatched caller shape");
+
     CHECK(!ember::xdna2::load_q8_model_shared_expert(
               fixture.path.c_str(), 3, loaded, &error) &&
               error.find("[0,2]") != std::string::npos,

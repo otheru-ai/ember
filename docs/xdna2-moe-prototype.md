@@ -769,6 +769,55 @@ docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
   /models/dspark-draft.gguf 0
 ```
 
+### Gen11 task-blocked Q8 attention projections
+
+The same compensated arithmetic now covers the five Q8_0 matrices in each
+DSpark MLA layer. The generic graph activates only the required AIE rows for
+512- and 1024-wide outputs, then distributes wider output groups over the full
+4x8 array. Its weight stream is packed column-major so one shim task feeds one
+column without the 8 MiB stride produced by a group-major layout.
+
+Compiler validation exposed two AIE DMA constraints that are easy to miss at
+the IRON level but explicit in the AIE-RT descriptor contract: a shim stride
+cannot exceed one MiB, and the compiler must not coalesce a contiguous transfer
+past the same ceiling. The final pack divides each column into four-K-tile
+tasks and inserts two BF16 sentinels between tasks. The four-byte-aligned gap
+prevents coalescing; it adds at most 1 KiB to a 128 MiB packed projection and
+does not enter the compute stream. No AIE-RT library is linked at runtime.
+
+Layer-0 trained results on the physical Strix Halo were:
+
+| DSpark tensor | K x N | warm sequence | packed bytes | maximum error | cosine |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `attn_q_a` | 4096 x 1024 | 0.392 ms | 16,777,472 | `2.00e-5` | 1.0 |
+| `attn_q_b` | 1024 x 32768 | 2.501 ms | 134,218,752 | `1.04e-5` | 1.0 |
+| `attn_kv` | 4096 x 512 | 0.261 ms | 8,388,864 | `1.38e-5` | 1.0 |
+| `attn_output_a` | 4096 x 8192 | 2.514 ms | 134,218,752 | `2.96e-5` | 1.0 |
+| `attn_output_b` | 8192 x 4096 | 2.500 ms | 134,218,752 | `4.20e-5` | 1.0 |
+
+The five trained projections total 8.168 ms per same-shaped layer, replacing
+the earlier bandwidth-only estimate. Repeating that measured shape cost over
+three layers adds about 24.50 ms to Gen10's 43.5 ms MoE subtotal, for roughly
+68.0 ms before MLA dot/softmax/context, RMSNorm, the F32 HC transforms, router,
+and tail collapse. This materially narrows the viable coarse-overlap target:
+q=2's 62.9 ms verifier cannot hide the current draft floor; q=3 leaves about
+6 ms and q=4 about 14 ms. Therefore Gen11 is an accuracy- and bandwidth-proven
+building block, not yet evidence of an end-to-end throughput win. Fusing the
+two small 4096-input projections and measuring the remaining attention/HC path
+are the next gates.
+
+The five `q8_projection_v3_*_b5.{xclbin,insts}` artifacts and
+`ember-xdna-q8-projection-validate` are packaged in `release-xdna`. For example:
+
+```bash
+docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-xdna-q8-projection-validate ember:xdna-local \
+  /usr/local/share/ember/xdna2/q8_projection_v3_1024x32768_b5.xclbin \
+  /usr/local/share/ember/xdna2/q8_projection_v3_1024x32768_b5.insts \
+  1024 32768 /models/dspark-draft.gguf blk.0.attn_q_b.weight
+```
+
 Run the same trained check from the opt-in image with:
 
 ```bash

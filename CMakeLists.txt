@@ -116,6 +116,15 @@ if(EMBER_XDNA_XRT_PROVIDER)
     providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
   target_link_libraries(ember-xdna-q8-validate PRIVATE
     "${EMBER_XRT_COREUTIL}")
+  add_executable(ember-xdna-q8-projection-validate
+    providers/xdna2/validate_q8_projection_xrt.cpp
+    providers/xdna2/q8_model_weights.cpp
+    providers/xdna2/q8_0_pack.cpp
+    src/model/gguf.c)
+  target_include_directories(ember-xdna-q8-projection-validate PRIVATE
+    providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
+  target_link_libraries(ember-xdna-q8-projection-validate PRIVATE
+    "${EMBER_XRT_COREUTIL}")
 endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────
