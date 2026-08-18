@@ -5,6 +5,10 @@
 #include <cstring>
 #include <limits>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
 namespace ember::xdna2 {
 namespace {
 
@@ -47,6 +51,55 @@ uint8_t block_code(const uint8_t * block, int index) {
         ? static_cast<uint8_t>(block[index] & 0x0fu)
         : static_cast<uint8_t>((block[index - 16] >> 4) & 0x0fu);
 }
+
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+// GCC 12 implements several unmasked AVX-512 intrinsics in terms of an
+// undefined masked merge operand and then diagnoses its own header expansion.
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+__attribute__((target("avx512f")))
+bool rocmfp4_gemm_avx512(const uint8_t * bytes, const float * input,
+                         int k, int n, float scale, float * output) {
+    const int blocks_per_row = k / kRocmfp4BlockWeights;
+    const __m512i codebook = _mm512_setr_epi32(
+        0, 1, 2, 3, 4, 6, 8, 10, 0, -1, -2, -3, -4, -6, -8, -10);
+    const __m512i nibble_mask = _mm512_set1_epi32(0x0f);
+    for (int out = 0; out < n; ++out) {
+        float sum = 0.0f;
+        for (int block = 0; block < blocks_per_row; ++block) {
+            const uint8_t * q = bytes +
+                (static_cast<size_t>(out) *
+                     static_cast<size_t>(blocks_per_row) +
+                 static_cast<size_t>(block)) * kRocmfp4BlockBytes;
+            const __m128i packed = _mm_loadu_si128(
+                reinterpret_cast<const __m128i *>(q));
+            const __m512i lanes = _mm512_cvtepu8_epi32(packed);
+            const __m512i low_codes = _mm512_and_si512(lanes, nibble_mask);
+            const __m512i high_codes = _mm512_and_si512(
+                _mm512_srli_epi32(lanes, 4), nibble_mask);
+            const __m512 low = _mm512_cvtepi32_ps(
+                _mm512_permutexvar_epi32(low_codes, codebook));
+            const __m512 high = _mm512_cvtepi32_ps(
+                _mm512_permutexvar_epi32(high_codes, codebook));
+            const float * activation = input +
+                static_cast<size_t>(block) * kRocmfp4BlockWeights;
+            const __m512 input_low = _mm512_loadu_ps(activation);
+            const __m512 input_high = _mm512_loadu_ps(activation + 16);
+            const float dot = _mm512_reduce_add_ps(
+                _mm512_mul_ps(input_low, low)) +
+                _mm512_reduce_add_ps(_mm512_mul_ps(input_high, high));
+            sum += dot * ue4m3_to_float(q[16]);
+        }
+        output[out] = sum * scale;
+    }
+    return true;
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#endif
 
 size_t tile_count(int k, int n) {
     return (static_cast<size_t>(k) / kRocmfp4TileK) *
@@ -236,6 +289,22 @@ bool rocmfp4_gemm_raw_reference(const void * raw, size_t raw_bytes,
         output[out] = sum * scale;
     }
     return true;
+}
+
+bool rocmfp4_gemm_cpu(const void * raw, size_t raw_bytes,
+                      const float * input, int k, int n,
+                      float scale, float * output) {
+    const size_t expected = rocmfp4_projection_bytes(k, n);
+    if (!raw || !input || !output || !expected || raw_bytes < expected)
+        return false;
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+    if (__builtin_cpu_supports("avx512f")) {
+        return rocmfp4_gemm_avx512(
+            static_cast<const uint8_t *>(raw), input, k, n, scale, output);
+    }
+#endif
+    return rocmfp4_gemm_raw_reference(
+        raw, raw_bytes, input, k, n, scale, output);
 }
 
 bool rocmfp4_gemm_packed_reference(const void * packed, size_t packed_bytes,

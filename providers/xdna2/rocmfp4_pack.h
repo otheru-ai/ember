@@ -47,6 +47,11 @@ bool pack_rocmfp4_expert_v7(const void * gate, size_t gate_bytes,
 bool rocmfp4_gemm_raw_reference(const void * raw, size_t raw_bytes,
                                 const float * input, int k, int n,
                                 float scale, float * output);
+// Host routed-expert decoder. Dispatches to an AVX-512 signed-codebook path on
+// Strix Halo and retains the scalar reference on other build/test hosts.
+bool rocmfp4_gemm_cpu(const void * raw, size_t raw_bytes,
+                      const float * input, int k, int n,
+                      float scale, float * output);
 bool rocmfp4_gemm_packed_reference(const void * packed, size_t packed_bytes,
                                    const float * input, int k, int n,
                                    float scale, float * output);

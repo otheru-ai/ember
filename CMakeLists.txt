@@ -374,6 +374,18 @@ target_include_directories(ember-dspark-cpu-bench PRIVATE providers/xdna2)
 target_link_libraries(ember-dspark-cpu-bench PRIVATE m)
 ember_strict(ember-dspark-cpu-bench)
 
+add_executable(ember-dspark-rocmfp4-cpu-bench
+  providers/xdna2/benchmark_rocmfp4_cpu.cpp
+  providers/xdna2/rocmfp4_model_weights.cpp
+  providers/xdna2/rocmfp4_pack.cpp
+  providers/xdna2/rocmfp2_pack.cpp
+  src/model/gguf.c)
+target_include_directories(ember-dspark-rocmfp4-cpu-bench PRIVATE
+  providers/xdna2 src/model)
+target_link_libraries(ember-dspark-rocmfp4-cpu-bench PRIVATE
+  Threads::Threads m)
+ember_strict(ember-dspark-rocmfp4-cpu-bench)
+
 add_executable(test_xdna_rocmfp2_pack
   test/test_xdna_rocmfp2_pack.cpp
   providers/xdna2/rocmfp2_pack.cpp)

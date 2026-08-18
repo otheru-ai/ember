@@ -1234,15 +1234,54 @@ expert from about 14.2 MB to roughly 100 MB and erase its performance value.
 That rejection sharpens the useful heterogeneous placement:
 
 - NPU: resident Q8 projections and the Q8 shared expert;
-- GPU: the routed ROCMFP4 draft expert and target verifier;
-- CPU: routing, attention reductions, HC sequencing, and asynchronous job
-  coordination.
+- GPU: the target verifier;
+- CPU: routed ROCMFP4 draft experts, routing, attention reductions, HC
+  sequencing, and asynchronous job coordination.
 
 The routed decision is measured, not merely a compiler workaround: the NPU's
 30-expert route-plan experiment was about 11.8 ms per layer, while the complete
 HIP drafter is about 5 ms. The next useful generation is therefore the
 asynchronous three-layer provider and two-session aggregate benchmark, not a
 larger resident PDI.
+
+### Gen19 AVX-512 routed-expert placement
+
+The routed-expert decision was re-measured after adding a host ROCMFP4 decoder
+that maps the signed 4-bit codebook through AVX-512 and retains the byte-exact
+scalar path as its fallback.  The standalone probe loads only selected trained
+expert slices and excludes that cold file load from its reported compute time;
+the complete provider must borrow the drafter's already-resident tensor views
+rather than duplicate the 11-GiB draft model in unified memory.
+
+On the physical Ryzen AI MAX+ 395, with 16 worker threads and 20 warm
+repeats, the conservative layer-0 case used 30 distinct experts: one route for
+each of six experts across five draft rows.  It measured 5.564 ms for the 60
+gate/up projections plus SwiGLU, 1.781 ms for 30 down projections, and 7.345 ms
+total.  The trained output agreed with the scalar decoder to `9.54e-05` maximum
+absolute error and cosine `1.0000000000`.  Earlier uncontended measurements of
+layers 0--2 were 7.369, 7.503, and 7.393 ms respectively; the newer layer-0
+result is the current reproducible bound.  An isolated thread sweep measured
+12.055, 9.102, 7.415, 7.469, 7.166, and 6.450 ms at 8, 12, 16, 20, 24, and 32
+threads over five repeats; a longer 32-thread run measured 6.907 ms.  Saturating
+all SMT threads bought only about 6% over the 16-thread bound, so the complete
+provider must tune for aggregate throughput rather than consuming every CPU.
+Running layers concurrently caused large shared-fabric contention and is not a
+valid single-layer timing.
+
+The packaged reproduction command is:
+
+```bash
+EMBER_DSPARK_CPU_THREADS=16 ember-dspark-rocmfp4-cpu-bench \
+  /models/dspark-draft.gguf 0 0 5 30 1
+```
+
+This makes CPU-routed/NPU-dense/GPU-verifier the most useful Gen19 placement,
+but it is still a primitive benchmark.  Before enabling it, the complete
+three-layer provider must use persistent CPU workers, compare its hidden and
+head boundaries against HIP, and measure aggregate two-session throughput while
+the CPU, NPU, and GPU contend for the same memory fabric.  AVX-512 changes
+reduction order, so draft-verifier acceptance and confidence-width metrics are
+release gates even though the trained numerical check passes.
 
 ### 2026-08-18 XRT scheduling and buffer-sharing audit
 

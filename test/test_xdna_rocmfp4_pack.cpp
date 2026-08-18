@@ -1,5 +1,7 @@
 #include "rocmfp4_pack.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -63,11 +65,16 @@ int main() {
     for (int i = 0; i < k; ++i)
         input[static_cast<size_t>(i)] = static_cast<float>((i % 23) - 11) / 19.0f;
     std::vector<float> raw_output(n);
+    std::vector<float> cpu_output(n);
     std::vector<float> packed_output(n);
     CHECK(rocmfp4_gemm_raw_reference(
               raw.data(), raw.size(), input.data(), k, n,
               0.625f, raw_output.data()),
           "raw ROCMFP4 reference runs");
+    CHECK(rocmfp4_gemm_cpu(
+              raw.data(), raw.size(), input.data(), k, n,
+              0.625f, cpu_output.data()),
+          "host ROCMFP4 decoder runs");
     CHECK(rocmfp4_gemm_packed_reference(
               packed.data(), packed.size(), input.data(), k, n,
               0.625f, packed_output.data()),
@@ -81,6 +88,16 @@ int main() {
         }
     }
     CHECK(equal, "packing preserves every signed-codebook GEMM result");
+    float cpu_max_abs = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        cpu_max_abs = std::max(
+            cpu_max_abs,
+            std::fabs(raw_output[static_cast<size_t>(i)] -
+                      cpu_output[static_cast<size_t>(i)]));
+    }
+    std::printf("host ROCMFP4 max abs: %.9g\n", cpu_max_abs);
+    CHECK(cpu_max_abs <= 3.0e-4f,
+          "host ROCMFP4 decoder preserves scalar arithmetic");
 
     std::vector<uint8_t> rejected;
     CHECK(!pack_rocmfp4_gemm(raw.data(), raw.size() - 1, k, n,
