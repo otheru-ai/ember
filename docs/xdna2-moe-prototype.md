@@ -991,6 +991,59 @@ window for provider orchestration and shared-fabric interference. This is the
 first complete shape-based result that fits, but the margin is too small to
 claim an end-to-end win without the aggregate concurrent run.
 
+### Gen15 fixed-overlay scheduling
+
+Gen11--14 timed every XDNA graph warm and in isolation. That hid the cost of
+changing full-array xclbins inside one draft layer. The Linux amdxdna driver
+supports temporal scheduling, but an xclbin still carries the AIE partition's
+overlay while the instruction BO carries its per-run control program. The
+[amdxdna kernel interface](https://docs.kernel.org/accel/amdxdna/amdnpu.html)
+and the pinned
+[AIE-RT `release/main_aig` runtime](https://github.com/Xilinx/aie-rt/tree/release/main_aig)
+therefore do not imply that replacing a resident overlay is free. AIE-RT's
+transaction/control-code split is useful here only when Ember preserves the
+tile, memory, and stream topology and changes the run program or BOs.
+
+This is also the main result of the
+[reconfigurable NPU overlay study](https://arxiv.org/html/2504.03083v1): keep
+the L1/L2 tile configuration resident and vary L3/shim instruction streams.
+Gen15 measures that rule directly on Ember's production Strix Halo rather than
+assuming it applies.
+
+The packaged `ember-xdna-overlay-switch-bench` holds both trained projection
+contexts and all BOs alive. It compares repeated Q-a and KV execution with
+alternation. Three 100-pair physical runs produced:
+
+| execution strategy | Q-a | KV | alternating pair | pair overhead | KV cosine |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| separate 4096x1024 / 4096x512 overlays | 0.397--0.401 ms | 0.269--0.271 ms | 2.949--2.970 ms | 2.283--2.302 ms | previously gated |
+| one resident 4096x1024 overlay | 0.382--0.389 ms | 0.379--0.386 ms | 0.756--0.774 ms | -0.006--0.005 ms | 1.0000000000 |
+
+The fixed case pads the trained 512-output KV projection into the resident
+overlay's unused second AIE row and changes only input/weight/output BOs. It is
+3.8--3.9x faster for the pair and saves roughly 2.19 ms net despite doing one
+extra zero-output row of compute. The exact reference cosine proves that the
+task-stride rewrite preserves every real output lane. Production remained
+healthy and idle after all isolated runs.
+
+Consequently, a provider made from the current collection of shape-specific
+xclbins is rejected: a single pair of transitions nearly consumes Gen14's
+entire 2.75 ms q=4 margin. Gen4 must keep a fixed AIE overlay resident. The
+immediate implementation rule is to group independent same-input projections
+such as Q-a and KV on the two-row overlay. The general solution is one
+four-row Q8 projection topology whose runtime control program selects K tiles,
+output groups, and active rows; separate `.insts`/BO sets may vary, but the
+xclbin and hardware context may not change in the hot layer loop.
+
+Run the physical gate with:
+
+```bash
+docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
+  -v /path/to/models:/models:ro --entrypoint \
+  /usr/local/bin/ember-xdna-overlay-switch-bench ember:xdna-local \
+  /usr/local/share/ember/xdna2 /models/dspark-draft.gguf 100
+```
+
 Run the isolated CPU placement check with:
 
 ```bash

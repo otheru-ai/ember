@@ -322,7 +322,8 @@ RUN apt-get update \
  && cmake --build /ember/build-xdna-provider \
       --target ember-xdna-q8-validate \
       ember-xdna-q8-projection-validate \
-      ember-xdna-q8-gemm-m32-validate -j"$(nproc)" \
+      ember-xdna-q8-gemm-m32-validate \
+      ember-xdna-overlay-switch-bench -j"$(nproc)" \
  && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
       /xdna-provider/libember_xdna_moe.so \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-validate \
@@ -336,7 +337,9 @@ RUN apt-get update \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-projection-validate \
       /xdna-provider/ember-xdna-q8-projection-validate \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-gemm-m32-validate \
-      /xdna-provider/ember-xdna-q8-gemm-m32-validate
+      /xdna-provider/ember-xdna-q8-gemm-m32-validate \
+ && install -Dm0755 /ember/build-xdna-provider/ember-xdna-overlay-switch-bench \
+      /xdna-provider/ember-xdna-overlay-switch-bench
 
 FROM release AS release-xdna
 
@@ -363,6 +366,8 @@ COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-projection-validate \
   /usr/local/bin/ember-xdna-q8-projection-validate
 COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-gemm-m32-validate \
   /usr/local/bin/ember-xdna-q8-gemm-m32-validate
+COPY --from=dev-xdna /xdna-provider/ember-xdna-overlay-switch-bench \
+  /usr/local/bin/ember-xdna-overlay-switch-bench
 COPY --from=xdna-kernel-build /xdna-artifacts/ \
   /usr/local/share/ember/xdna2/
 COPY providers/xdna2/VENDOR.md \
@@ -381,6 +386,7 @@ RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
  && ! ldd /usr/local/bin/ember-xdna-q8-validate | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-q8-projection-validate | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-q8-gemm-m32-validate | grep -q 'not found' \
+ && ! ldd /usr/local/bin/ember-xdna-overlay-switch-bench | grep -q 'not found' \
  && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
  && /opt/xilinx/xrt/bin/xrt-smi --version
 

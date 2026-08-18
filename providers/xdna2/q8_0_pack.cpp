@@ -305,6 +305,79 @@ size_t q8_projection_task_packed_bytes(int k, int n) {
     return tasks * (payload + 2 * sizeof(uint16_t));
 }
 
+bool pad_q8_projection_rows(const std::vector<uint8_t> & source,
+                            int k, int source_n, int destination_n,
+                            std::vector<uint8_t> & destination,
+                            std::string * error) {
+    constexpr int task_k_tiles = 4;
+    if (!q8_supported_shape(k, source_n) ||
+        !q8_supported_shape(k, destination_n) || k % 512 != 0) {
+        if (error) *error =
+            "fixed-overlay row padding requires supported K%512 shapes";
+        return false;
+    }
+    const int source_rows = projection_rows(source_n);
+    const int destination_rows = projection_rows(destination_n);
+    const int source_groups =
+        source_n / (source_rows * kQ8OutputsPerRow);
+    const int destination_groups =
+        destination_n / (destination_rows * kQ8OutputsPerRow);
+    if (source_rows > destination_rows ||
+        source_groups != destination_groups) {
+        if (error) *error =
+            "fixed-overlay row padding cannot change output groups or shrink rows";
+        return false;
+    }
+    const size_t expected_source =
+        q8_projection_task_packed_bytes(k, source_n);
+    const size_t expected_destination =
+        q8_projection_task_packed_bytes(k, destination_n);
+    if (source.size() != expected_source || !expected_destination) {
+        if (error) *error = "fixed-overlay source has an invalid packed size";
+        return false;
+    }
+    const int tasks_per_group = (k / kQ8TileK) / task_k_tiles;
+    const size_t source_stride =
+        static_cast<size_t>(task_k_tiles * source_rows) *
+            kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    const size_t destination_stride =
+        static_cast<size_t>(task_k_tiles * destination_rows) *
+            kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    destination.assign(expected_destination, 0);
+    for (int column = 0; column < kQ8AieColumns; ++column) {
+        for (int group = 0; group < source_groups; ++group) {
+            for (int task = 0; task < tasks_per_group; ++task) {
+                const size_t task_index =
+                    (static_cast<size_t>(column) *
+                         static_cast<size_t>(source_groups) +
+                     static_cast<size_t>(group)) *
+                        static_cast<size_t>(tasks_per_group) +
+                    static_cast<size_t>(task);
+                const size_t source_task = task_index * source_stride;
+                const size_t destination_task =
+                    task_index * destination_stride;
+                for (int within = 0; within < task_k_tiles; ++within) {
+                    for (int row = 0; row < source_rows; ++row) {
+                        const size_t source_tile =
+                            static_cast<size_t>(within * source_rows + row);
+                        const size_t destination_tile =
+                            static_cast<size_t>(within * destination_rows + row);
+                        std::memcpy(
+                            destination.data() + destination_task +
+                                destination_tile * kQ8CorrectedTileBytes,
+                            source.data() + source_task +
+                                source_tile * kQ8CorrectedTileBytes,
+                            kQ8CorrectedTileBytes);
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 size_t q8_gemm_m32_packed_bytes(int k, int n) {
     if (!q8_supported_shape(k, n) || k % 512 != 0 ||
         n % kQ8OutputsPerRow != 0) return 0;

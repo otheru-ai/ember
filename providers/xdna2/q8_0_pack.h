@@ -47,6 +47,13 @@ bool pack_q8_projection_corrected_bf16(const void * raw, size_t raw_bytes,
                                        std::vector<uint8_t> & packed,
                                        std::string * error = nullptr);
 size_t q8_projection_task_packed_bytes(int k, int n);
+// Expand a projection into a wider fixed-overlay row layout. Source and
+// destination must have the same output-group count; newly active rows are
+// zero-filled, so the original output lanes remain byte-exact.
+bool pad_q8_projection_rows(const std::vector<uint8_t> & source,
+                            int k, int source_n, int destination_n,
+                            std::vector<uint8_t> & destination,
+                            std::string * error = nullptr);
 bool pack_q8_gemm_m32_corrected_bf16(const void * raw, size_t raw_bytes,
                                      int k, int n,
                                      std::vector<uint8_t> & packed,

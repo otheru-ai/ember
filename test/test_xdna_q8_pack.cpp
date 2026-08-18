@@ -244,6 +244,52 @@ int main() {
     }
     CHECK(task_layout, "column-major task layout retains every corrected tile");
 
+    std::vector<uint8_t> task_narrow_raw(
+        q8_projection_bytes(task_k, narrow_n));
+    std::copy_n(task_raw.begin(), task_narrow_raw.size(),
+                task_narrow_raw.begin());
+    std::vector<uint8_t> task_narrow_packed;
+    std::vector<uint8_t> task_padded;
+    CHECK(pack_q8_projection_corrected_bf16(
+              task_narrow_raw.data(), task_narrow_raw.size(), task_k,
+              narrow_n, task_narrow_packed, &error) &&
+          pad_q8_projection_rows(task_narrow_packed, task_k, narrow_n,
+                                 1024, task_padded, &error) &&
+          task_padded.size() ==
+              q8_projection_task_packed_bytes(task_k, 1024),
+          "one-row projection expands into a fixed two-row overlay");
+    bool padded_layout = true;
+    constexpr size_t narrow_task_stride =
+        static_cast<size_t>(k_tiles) * kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    constexpr size_t padded_task_stride =
+        static_cast<size_t>(k_tiles * 2) * kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    for (int column = 0;
+         column < kQ8AieColumns && padded_layout; ++column) {
+        for (int kt = 0; kt < k_tiles && padded_layout; ++kt) {
+            const uint8_t * source_tile = task_narrow_packed.data() +
+                static_cast<size_t>(column) * narrow_task_stride +
+                static_cast<size_t>(kt) * kQ8CorrectedTileBytes;
+            const uint8_t * real_tile = task_padded.data() +
+                static_cast<size_t>(column) * padded_task_stride +
+                static_cast<size_t>(kt * 2) * kQ8CorrectedTileBytes;
+            const uint8_t * zero_tile = real_tile + kQ8CorrectedTileBytes;
+            if (std::memcmp(source_tile, real_tile,
+                            kQ8CorrectedTileBytes) != 0 ||
+                std::any_of(zero_tile,
+                            zero_tile + kQ8CorrectedTileBytes,
+                            [](uint8_t value) { return value != 0; })) {
+                padded_layout = false;
+            }
+        }
+    }
+    CHECK(padded_layout,
+          "fixed-overlay padding preserves real rows and zeros added rows");
+    CHECK(!pad_q8_projection_rows(task_padded, task_k, 1024, narrow_n,
+                                  task_narrow_packed, &error),
+          "fixed-overlay padding rejects a row shrink");
+
     std::vector<uint8_t> gemm_packed;
     CHECK(pack_q8_gemm_m32_corrected_bf16(
               task_raw.data(), task_raw.size(), task_k, n,
