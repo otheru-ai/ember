@@ -221,6 +221,16 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
  && make -C /kernel K=12288 N=4096 BUILD_DIR=/kernel/build/q8-m32-12288x4096 q8-gemm-m32-v4 \
  && make -C /kernel K=4096 N=8192 BUILD_DIR=/kernel/build/q8-4096x8192 q8-projection-v3 \
  && make -C /kernel K=8192 N=4096 BUILD_DIR=/kernel/build/q8-8192x4096 q8-projection-v3 \
+ && make -C /kernel K=4096 N=1024 BUILD_DIR=/kernel/build/q8u-4096x1024 q8-projection-universal-v4 \
+ && make -C /kernel K=1024 N=32768 BUILD_DIR=/kernel/build/q8u-1024x32768 q8-projection-universal-v4 \
+ && make -C /kernel K=4096 N=8192 BUILD_DIR=/kernel/build/q8u-4096x8192 q8-projection-universal-v4 \
+ && make -C /kernel K=8192 N=4096 BUILD_DIR=/kernel/build/q8u-8192x4096 q8-projection-universal-v4 \
+ && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
+      /kernel/build/q8u-1024x32768/q8_projection_universal_v4.mlir.prj/main.pdi \
+ && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
+      /kernel/build/q8u-4096x8192/q8_projection_universal_v4.mlir.prj/main.pdi \
+ && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
+      /kernel/build/q8u-8192x4096/q8_projection_universal_v4.mlir.prj/main.pdi \
  && make -C /kernel K=2048 N=4096 BUILD_DIR=/kernel/build/2048x4096 \
  && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.xclbin \
       /xdna-artifacts/gemv_4096x2048.xclbin \
@@ -286,6 +296,16 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
       /xdna-artifacts/q8_projection_v3_8192x4096_b5.xclbin \
  && install -Dm0644 /kernel/build/q8-8192x4096/q8_projection_v3_8192x4096_b5.insts \
       /xdna-artifacts/q8_projection_v3_8192x4096_b5.insts \
+ && install -Dm0644 /kernel/build/q8u-4096x1024/q8_projection_universal_v4_4096x1024_b5.xclbin \
+      /xdna-artifacts/q8_projection_universal_v4_b5.xclbin \
+ && install -Dm0644 /kernel/build/q8u-4096x1024/q8_projection_universal_v4_4096x1024_b5.insts \
+      /xdna-artifacts/q8_projection_universal_v4_4096x1024_b5.insts \
+ && install -Dm0644 /kernel/build/q8u-1024x32768/q8_projection_universal_v4_1024x32768_b5.insts \
+      /xdna-artifacts/q8_projection_universal_v4_1024x32768_b5.insts \
+ && install -Dm0644 /kernel/build/q8u-4096x8192/q8_projection_universal_v4_4096x8192_b5.insts \
+      /xdna-artifacts/q8_projection_universal_v4_4096x8192_b5.insts \
+ && install -Dm0644 /kernel/build/q8u-8192x4096/q8_projection_universal_v4_8192x4096_b5.insts \
+      /xdna-artifacts/q8_projection_universal_v4_8192x4096_b5.insts \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
       /xdna-artifacts/gemv_2048x4096.xclbin \
  && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
@@ -323,7 +343,8 @@ RUN apt-get update \
       --target ember-xdna-q8-validate \
       ember-xdna-q8-projection-validate \
       ember-xdna-q8-gemm-m32-validate \
-      ember-xdna-overlay-switch-bench -j"$(nproc)" \
+      ember-xdna-overlay-switch-bench \
+      ember-xdna-q8-universal-validate -j"$(nproc)" \
  && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
       /xdna-provider/libember_xdna_moe.so \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-validate \
@@ -339,7 +360,9 @@ RUN apt-get update \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-gemm-m32-validate \
       /xdna-provider/ember-xdna-q8-gemm-m32-validate \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-overlay-switch-bench \
-      /xdna-provider/ember-xdna-overlay-switch-bench
+      /xdna-provider/ember-xdna-overlay-switch-bench \
+ && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-universal-validate \
+      /xdna-provider/ember-xdna-q8-universal-validate
 
 FROM release AS release-xdna
 
@@ -368,6 +391,8 @@ COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-gemm-m32-validate \
   /usr/local/bin/ember-xdna-q8-gemm-m32-validate
 COPY --from=dev-xdna /xdna-provider/ember-xdna-overlay-switch-bench \
   /usr/local/bin/ember-xdna-overlay-switch-bench
+COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-universal-validate \
+  /usr/local/bin/ember-xdna-q8-universal-validate
 COPY --from=xdna-kernel-build /xdna-artifacts/ \
   /usr/local/share/ember/xdna2/
 COPY providers/xdna2/VENDOR.md \
@@ -387,6 +412,7 @@ RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
  && ! ldd /usr/local/bin/ember-xdna-q8-projection-validate | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-q8-gemm-m32-validate | grep -q 'not found' \
  && ! ldd /usr/local/bin/ember-xdna-overlay-switch-bench | grep -q 'not found' \
+ && ! ldd /usr/local/bin/ember-xdna-q8-universal-validate | grep -q 'not found' \
  && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
  && /opt/xilinx/xrt/bin/xrt-smi --version
 

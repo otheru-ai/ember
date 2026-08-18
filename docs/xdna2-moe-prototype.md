@@ -1044,6 +1044,66 @@ docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
   /usr/local/share/ember/xdna2 /models/dspark-draft.gguf 100
 ```
 
+### Gen16 universal projection overlay
+
+Gen15 proved the scheduling rule with two BO sets of one shape. Gen16 makes
+the rule general. `q8_projection_universal_v4` fixes all 32 AIE cores, memory
+tiles, object FIFOs, and linked core ELFs, then puts two BF16-exact integer
+values in an activation-header object before each dispatch: K tiles and
+four-row output groups. Every core blocks on that header before starting the
+next invocation, so a host cannot race a stale write-RTP value while changing
+control streams.
+
+The build emits one shape-independent xclbin plus four 4,208-byte instruction
+streams. As a release gate, Docker compiles K=4096/group=1,
+K=1024/group=16, K=4096/group=4, and K=8192/group=2 independently and requires
+their generated `main.pdi` files to compare byte-for-byte equal. The xclbin is
+installed once; only the shim DMA instruction BO changes at runtime.
+
+Q-a and block KV both consume the same post-attention-norm `cur` tensor in
+`deepseek4_graph.cpp:7846-7855`. Their two plus one output rows are therefore
+packed into one four-row invocation, with the fourth row zero-filled. Physical
+trained results through one xclbin, one `xrt::hw_context`, and four alternating
+instruction BOs were:
+
+| fused projection | K x real N | padded N | sequence |
+| --- | ---: | ---: | ---: |
+| Q-a + block KV | 4096 x 1536 | 2048 | 0.707 ms |
+| Q-b | 1024 x 32768 | 32768 | 2.495 ms |
+| output A | 4096 x 8192 | 8192 | 2.522 ms |
+| output B | 8192 x 4096 | 4096 | 2.493 ms |
+
+Every trained result had cosine 1.0000000000; the largest maximum absolute
+error was `2.06e-5`. The source-derived Gen22 release image's 100-iteration
+alternating cycle took 8.126 ms versus 8.217 ms for the sum of individually
+timed dispatches, i.e. no measurable control-switch tax. An earlier
+bind-mounted artifact run measured 8.119 versus 8.166 ms. It also slightly
+beats Gen11's 8.168 ms total for five
+shape-specialized warm kernels while eliminating their fatal overlay changes.
+The Gen14 projected draft body consequently remains about 78.90 ms, leaving
+roughly 2.8 ms under the measured q=4 verifier window before shared-fabric
+contention.
+
+`ember-xdna-q8-universal-validate` is the release-image gate for this contract.
+It registers only `q8_projection_universal_v4_b5.xclbin`, executes all trained
+shapes, validates every real lane, and reports the alternating-cycle overhead.
+
+The low-level ordering model agrees with AMD/Xilinx AIE-RT
+`release/main_aig` at commit `8849e208`: its tile-DMA example configures stream
+routes and buffer descriptors once, attaches acquire/release locks to the
+descriptors, pushes BD numbers to the DMA queues, and then enables the
+channels. Gen16 keeps using IRON/XRT rather than opening a second direct-driver
+control path, but carries that lesson forward: Gen17 modes should be selected
+by queued runtime descriptors and tile-local producer/consumer synchronization,
+not by host-driven array reconfiguration between phases.
+
+This solves the dense five-row projection family, not every NPU transition in
+the draft. The 128-row context-KV GEMM and shared/routed expert graphs still
+have different PDIs. The complete provider must either move context-KV into
+the existing GPU pre-stage and add expert modes to the resident AIE program,
+or demonstrate that its remaining coarse phase changes fit the aggregate
+two-session budget. Standalone warm sums are no longer accepted as evidence.
+
 Run the isolated CPU placement check with:
 
 ```bash

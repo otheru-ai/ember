@@ -54,6 +54,14 @@ bool pad_q8_projection_rows(const std::vector<uint8_t> & source,
                             int k, int source_n, int destination_n,
                             std::vector<uint8_t> & destination,
                             std::string * error = nullptr);
+// Fuse two same-input, one-group projections into adjacent rows of one
+// resident-overlay invocation. This is used for DSpark Q-a + KV.
+bool concat_q8_projection_rows(const std::vector<uint8_t> & first,
+                               int k, int first_n,
+                               const std::vector<uint8_t> & second,
+                               int second_n,
+                               std::vector<uint8_t> & destination,
+                               std::string * error = nullptr);
 bool pack_q8_gemm_m32_corrected_bf16(const void * raw, size_t raw_bytes,
                                      int k, int n,
                                      std::vector<uint8_t> & packed,

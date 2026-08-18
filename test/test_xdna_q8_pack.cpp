@@ -289,6 +289,44 @@ int main() {
     CHECK(!pad_q8_projection_rows(task_padded, task_k, 1024, narrow_n,
                                   task_narrow_packed, &error),
           "fixed-overlay padding rejects a row shrink");
+    std::vector<uint8_t> task_concatenated;
+    CHECK(concat_q8_projection_rows(
+              task_padded, task_k, 1024, task_narrow_packed, narrow_n,
+              task_concatenated, &error) &&
+          task_concatenated.size() ==
+              q8_projection_task_packed_bytes(task_k, 1536),
+          "same-input projections concatenate into adjacent overlay rows");
+    bool concatenated_layout = true;
+    constexpr size_t concatenated_task_stride =
+        static_cast<size_t>(k_tiles * 3) * kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    for (int column = 0;
+         column < kQ8AieColumns && concatenated_layout; ++column) {
+        for (int kt = 0; kt < k_tiles && concatenated_layout; ++kt) {
+            const uint8_t * first_rows = task_padded.data() +
+                static_cast<size_t>(column) * padded_task_stride +
+                static_cast<size_t>(kt * 2) * kQ8CorrectedTileBytes;
+            const uint8_t * second_row = task_narrow_packed.data() +
+                static_cast<size_t>(column) * narrow_task_stride +
+                static_cast<size_t>(kt) * kQ8CorrectedTileBytes;
+            const uint8_t * fused_rows = task_concatenated.data() +
+                static_cast<size_t>(column) * concatenated_task_stride +
+                static_cast<size_t>(kt * 3) * kQ8CorrectedTileBytes;
+            if (std::memcmp(first_rows, fused_rows,
+                            2 * kQ8CorrectedTileBytes) != 0 ||
+                std::memcmp(second_row,
+                            fused_rows + 2 * kQ8CorrectedTileBytes,
+                            kQ8CorrectedTileBytes) != 0) {
+                concatenated_layout = false;
+            }
+        }
+    }
+    CHECK(concatenated_layout,
+          "concatenation preserves both projections' corrected tiles");
+    CHECK(!concat_q8_projection_rows(
+              task_packed, task_k, n, task_narrow_packed, narrow_n,
+              task_concatenated, &error),
+          "fixed-overlay concatenation rejects multiple output groups");
 
     std::vector<uint8_t> gemm_packed;
     CHECK(pack_q8_gemm_m32_corrected_bf16(
