@@ -23,12 +23,20 @@ is not claimed for Ember; Gen4 is measured independently on gfx1151.
 The runtime image's XRT base and XDNA shim are built from AMD's driver tree:
 
 - repository: <https://github.com/amd/xdna-driver>
-- commit: `455fc6be78e9cdf8b41a1547eff0e30351f21fec`
-- XRT submodule: `8b60ae7a90bfbc873e181497fd34ca520b4ef504`
+- commit: `cdabc45a546d3e597976e5d70f0445bc5e4dc07d`
+- XRT submodule: `e9db9ab15f10173f8d2fc93ff92ab4c7eb09d2e6`
 - license: Apache-2.0
 
 Only userspace XRT and the XDNA shim belong in the container. The kernel driver
 and firmware belong on the host and `/dev/accel/accel0` is passed through.
+The 2026-08-18 pin includes AMD's `AIESW-41368` fix: nested command BOs now
+snapshot a dynamically sized argument-handle vector instead of flattening each
+nested command into a fixed 64-handle range and rejecting more than 1,024
+handles at submission. That is a correctness prerequisite for Ember's planned
+whole-draft runlists, not a license to create a larger per-layer synchronization
+surface. The same update closes exported and duplicated DMA-BUF descriptors on
+the VE2 import paths; Ember still keeps explicit HIP completion and XRT BO syncs
+at every cross-driver ownership handoff.
 
 Generation 5's fused-expert investigation also consulted, without copying
 source from, AMD's current IRON operator and sequencing examples:

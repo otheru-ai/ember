@@ -1244,6 +1244,31 @@ HIP drafter is about 5 ms. The next useful generation is therefore the
 asynchronous three-layer provider and two-session aggregate benchmark, not a
 larger resident PDI.
 
+### 2026-08-18 XRT scheduling and buffer-sharing audit
+
+The whole-draft scheduler design was rechecked against XRT's current native
+API and AMD's `xdna-driver` main branch before implementation. Three constraints
+are now explicit:
+
+1. `xrt::runlist::execute()` is asynchronous, but a runlist is an atomic,
+   ordered sequence on one `xrt::hw_context`; it cannot be executed again while
+   it is in flight. Ember therefore needs one bounded NPU submission worker and
+   per-session jobs, not concurrent callers mutating one context.
+2. XRT completion callbacks are documented as Alveo-only managed execution.
+   The XDNA2 provider must own a waiter thread/condition variable rather than
+   assuming `xrt::run::add_callback()` works on Ryzen AI.
+3. XRT BO import/export is a DMA-BUF contract, and the pinned amdxdna driver
+   implements PRIME import/export. This supports the already validated
+   ROCr-allocation-to-XRT handoff, but unified physical memory does not remove
+   the required HIP completion and XRT synchronization operations.
+
+The runtime pin moved from AMD driver `455fc6be` / XRT `8b60ae7a` to driver
+`cdabc45b` / XRT `e9db9ab1`. The relevant upstream change removes fixed nested
+command-BO argument limits (`AIESW-41368`) and fixes DMA-BUF descriptor lifetime
+on import. A whole three-layer command list can now grow with its real BO set;
+it must still be measured against the shorter resident phase lists because
+atomic submission does not make a long NPU critical path free.
+
 ### ROCmFPX 2026-08-17 update audit
 
 ROCmFPX main commit `0a59add89b8cba06fb6a0baf25a253a4e45faa78` was compared
