@@ -560,9 +560,10 @@ if(EMBER_ENGINE)
   add_subdirectory(engine)
 
   if(EMBER_ENGINE_BACKEND STREQUAL "hip")
-    # Narrow placement diagnostic: loads only the trained DSpark main Q8_0
-    # tensor and measures the exact GPU pre-stage graph at proposal and context
-    # widths. It avoids a second resident target-model allocation on gfx1151.
+    # Narrow placement diagnostic: loads only the trained DSpark main and three
+    # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
+    # context widths. It avoids a second resident target-model allocation on
+    # gfx1151.
     add_executable(ember-dspark-main-bench
       providers/xdna2/benchmark_dspark_main_gpu.cpp
       providers/xdna2/q8_model_weights.cpp

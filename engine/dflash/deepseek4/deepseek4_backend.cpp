@@ -799,6 +799,7 @@ bool DeepSeek4Backend::load_spec_drafter() {
         config.n_target_layers = d.n_target_layers;
         config.block_size = d.block_size;
         config.n_swa = w_.n_swa;
+        config.head_dim = d.core.head_dim;
         config.required = xdna_required;
         std::string error;
         spec_xdna_draft_compute_ =

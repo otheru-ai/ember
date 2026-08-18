@@ -13,9 +13,11 @@
 // implementation does not have to duplicate the 129280-wide target output
 // matrix.  Inputs are valid only during submit(); a successful provider must
 // have copied or otherwise retained everything needed before submit returns.
-// The optional main_context tail field preserves the v1 prefix: providers must
-// use struct_size before reading it. It is the GPU-preprojected replacement for
-// ctx_features, not an additional required input.
+// Optional tail fields preserve the v1 prefixes: providers must use
+// struct_size before reading them. main_context is the GPU-preprojected
+// replacement for ctx_features. context_kv goes one step further and contains
+// all per-draft-layer normalized context KV rows; a new provider should prefer
+// it when present, while an older v1 provider can continue using main_context.
 #pragma once
 
 #include <cstddef>
@@ -40,6 +42,8 @@ typedef struct ember_xdna_dspark_config_v1 {
     int32_t n_target_layers;
     int32_t block_size;
     int32_t n_swa;
+    // Optional tail: width of each per-layer context KV row.
+    int32_t head_dim;
 } ember_xdna_dspark_config_v1;
 
 typedef struct ember_xdna_dspark_request_v1 {
@@ -53,9 +57,14 @@ typedef struct ember_xdna_dspark_request_v1 {
     const float * noise_embed;   // [block_size, n_embd]
     const float * ctx_features;  // optional [ctx_len, n_target_layers*n_embd]
     // Optional post-main_norm GPU pre-stage, [ctx_len, n_embd]. A request with
-    // context must provide ctx_features or main_context. This tail extension
-    // may be read only when struct_size covers the field.
+    // context must provide ctx_features, main_context, or context_kv. This tail
+    // extension may be read only when struct_size covers the field.
     const float * main_context;
+    // Optional normalized pre-RoPE context KV,
+    // [n_target_layers, ctx_len, head_dim]. This tail may be read only when
+    // struct_size covers the field. main_context remains populated so older v1
+    // providers retain a complete fallback input.
+    const float * context_kv;
 } ember_xdna_dspark_request_v1;
 
 typedef struct ember_xdna_dspark_result_v1 {
@@ -102,6 +111,7 @@ struct XdnaDSparkDraftConfig {
     int n_target_layers = 0;
     int block_size = 0;
     int n_swa = 0;
+    int head_dim = 0;
     bool required = false;
 };
 
@@ -111,6 +121,7 @@ struct XdnaDSparkDraftRequest {
     const float * noise_embed = nullptr;
     const float * ctx_features = nullptr;
     const float * main_context = nullptr;
+    const float * context_kv = nullptr;
 };
 
 struct XdnaDSparkDraftOutput {

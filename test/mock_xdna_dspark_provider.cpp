@@ -12,6 +12,7 @@ struct MockContext {
     int n_target_layers;
     int block_size;
     int n_swa;
+    int head_dim;
 };
 
 struct MockJob {
@@ -23,6 +24,7 @@ struct MockJob {
     std::vector<float> noise;
     std::vector<float> features;
     std::vector<float> main_context;
+    std::vector<float> context_kv;
     bool cancelled = false;
 };
 
@@ -39,12 +41,14 @@ void * create(const ember_xdna_dspark_config_v1 * config,
         config->struct_size < sizeof(*config) || !config->draft_model_path ||
         std::strcmp(config->draft_model_path, "mock-draft.gguf") != 0 ||
         config->n_embd != 4 || config->n_target_layers != 3 ||
-        config->block_size != 5 || config->n_swa != 8) {
+        config->block_size != 5 || config->n_swa != 8 ||
+        config->head_dim != 2) {
         set_error(error, capacity, "unexpected mock DSpark configuration");
         return nullptr;
     }
     return new MockContext{config->n_embd, config->n_target_layers,
-                           config->block_size, config->n_swa};
+                           config->block_size, config->n_swa,
+                           config->head_dim};
 }
 
 void * submit(void * raw, const ember_xdna_dspark_request_v1 * request,
@@ -58,7 +62,7 @@ void * submit(void * raw, const ember_xdna_dspark_request_v1 * request,
         request->n_target_layers != context->n_target_layers ||
         request->block_size != context->block_size || !request->noise_embed ||
         (request->ctx_len > 0 && !request->ctx_features &&
-         !request->main_context)) {
+         !request->main_context && !request->context_kv)) {
         set_error(error, capacity, "invalid mock DSpark request");
         return nullptr;
     }
@@ -84,6 +88,14 @@ void * submit(void * raw, const ember_xdna_dspark_request_v1 * request,
         job->main_context.assign(request->main_context,
                                  request->main_context + main_count);
     }
+    const size_t context_kv_count =
+        static_cast<size_t>(request->ctx_len) *
+        static_cast<size_t>(request->n_target_layers) *
+        static_cast<size_t>(context->head_dim);
+    if (context_kv_count && request->context_kv) {
+        job->context_kv.assign(request->context_kv,
+                               request->context_kv + context_kv_count);
+    }
     return job;
 }
 
@@ -100,7 +112,9 @@ int wait(void *, void * raw_job, ember_xdna_dspark_result_v1 * result,
         set_error(error, capacity, "invalid mock DSpark wait");
         return 0;
     }
-    const float feature = !job->main_context.empty()
+    const float feature = !job->context_kv.empty()
+        ? job->context_kv.back()
+        : !job->main_context.empty()
         ? job->main_context.back()
         : (job->features.empty() ? 0.0f : job->features.back());
     for (size_t i = 0; i < count; ++i) {

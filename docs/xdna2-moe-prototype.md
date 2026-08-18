@@ -1098,11 +1098,37 @@ by queued runtime descriptors and tile-local producer/consumer synchronization,
 not by host-driven array reconfiguration between phases.
 
 This solves the dense five-row projection family, not every NPU transition in
-the draft. The 128-row context-KV GEMM and shared/routed expert graphs still
-have different PDIs. The complete provider must either move context-KV into
+the draft. At this generation the 128-row context-KV GEMM and shared/routed
+expert graphs still have different PDIs. The complete provider must either
+move context-KV into
 the existing GPU pre-stage and add expert modes to the resident AIE program,
 or demonstrate that its remaining coarse phase changes fit the aggregate
 two-session budget. Standalone warm sums are no longer accepted as evidence.
+
+### Gen17 GPU context-KV pre-stage
+
+Gen17 takes the first option. The cached GPU main-context graph now also
+projects and RMS-normalizes all three draft layers' context KV tensors. The
+DSpark provider ABI carries the result as an append-only v1 tail field with
+layout `[layer, context row, head_dim]`; `main_context` remains populated so an
+older v1 provider still has a complete fallback input. Context RoPE stays in
+the CPU attention reduction, so the new handoff is the normalized pre-RoPE
+value and does not duplicate position-dependent work.
+
+Physical gfx1151 timings with the trained Q8_0 main and three KV matrices,
+100 warm repeats, were:
+
+| GPU pre-stage | context rows | total | compute | upload | download |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| main only | 128 | 0.852 ms | 0.708 ms | 0.111 ms | 0.034 ms |
+| main + all context KV | 128 | 1.256 ms | 1.071 ms | 0.109 ms | 0.076 ms |
+
+The three context projections therefore add 0.404 ms to the existing GPU
+stage. The displaced NPU M=128 projections measured about 0.673 ms per layer,
+2.019 ms total, before counting the PDI transition required to enter and leave
+their separate overlay. This placement saves roughly 1.62 ms of arithmetic
+and removes that transition from the draft schedule. The M=4 diagnostic also
+measured 0.481 ms for the fused stage versus 0.305 ms for main only.
 
 Run the isolated CPU placement check with:
 

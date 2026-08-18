@@ -25,6 +25,7 @@ int main(int argc, char ** argv) {
     config.n_target_layers = 3;
     config.block_size = 5;
     config.n_swa = 8;
+    config.head_dim = 2;
 
     std::string error;
     auto compute = make_xdna_dspark_draft_compute(config, &error);
@@ -39,18 +40,24 @@ int main(int argc, char ** argv) {
     float noise_a[20];
     float noise_b[20];
     float features_b[12];
-    float main_context_a[8];
+    float context_kv_a[12];
     for (int i = 0; i < 20; ++i) {
         noise_a[i] = (float)i;
         noise_b[i] = (float)(100 + i);
     }
     for (int i = 0; i < 12; ++i) features_b[i] = (float)(300 + i);
-    for (int i = 0; i < 8; ++i) main_context_a[i] = (float)(400 + i);
+    for (int i = 0; i < 12; ++i) context_kv_a[i] = (float)(500 + i);
 
-    XdnaDSparkDraftRequest request_a{
-        7, 2, noise_a, nullptr, main_context_a};
-    XdnaDSparkDraftRequest request_b{
-        11, 1, noise_b, features_b, nullptr};
+    XdnaDSparkDraftRequest request_a;
+    request_a.committed = 7;
+    request_a.ctx_len = 2;
+    request_a.noise_embed = noise_a;
+    request_a.context_kv = context_kv_a;
+    XdnaDSparkDraftRequest request_b;
+    request_b.committed = 11;
+    request_b.ctx_len = 1;
+    request_b.noise_embed = noise_b;
+    request_b.ctx_features = features_b;
     auto job_a = compute->submit(request_a, &error);
     auto job_b = compute->submit(request_b, &error);
     CHECK(job_a != nullptr && job_b != nullptr,
@@ -59,7 +66,7 @@ int main(int argc, char ** argv) {
     // submit() owns its inputs: changing the caller buffers cannot affect an
     // outstanding proposal. Wait out of order to exercise session isolation.
     noise_a[0] = -999.0f;
-    main_context_a[7] = -999.0f;
+    context_kv_a[11] = -999.0f;
     XdnaDSparkDraftOutput output_b;
     CHECK(job_b && job_b->wait(output_b, &error),
           "second session completes first");
@@ -74,8 +81,8 @@ int main(int argc, char ** argv) {
     CHECK(job_a && job_a->wait(output_a, &error),
           "first session completes after second");
     CHECK(output_a.hidden.size() == 20 &&
-          std::fabs(output_a.hidden[0] - 414.0f) < 1e-6f,
-          "preprojected context lifetime is independent");
+          std::fabs(output_a.hidden[0] - 518.0f) < 1e-6f,
+          "preprojected context-KV lifetime is independent");
     CHECK(job_a && !job_a->wait(output_a, &error),
           "a completed proposal cannot be consumed twice");
 
@@ -87,6 +94,7 @@ int main(int argc, char ** argv) {
     invalid = request_a;
     invalid.ctx_features = nullptr;
     invalid.main_context = nullptr;
+    invalid.context_kv = nullptr;
     CHECK(!compute->submit(invalid, &error),
           "context requests require raw or preprojected input");
 

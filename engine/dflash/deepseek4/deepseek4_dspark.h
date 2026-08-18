@@ -83,7 +83,9 @@ const char * deepseek4_dspark_last_error();
 
 // GPU stage-0 projection for the heterogeneous DSpark split. Converts raw
 // concatenated target features [ctx_len, n_target_layers*n_embd] into the
-// post-main_norm [ctx_len, n_embd] context consumed by every draft layer.
+// post-main_norm [ctx_len, n_embd] context consumed by every draft layer and,
+// when requested, the normalized pre-RoPE context KV rows for all draft layers
+// [n_layer, ctx_len, head_dim].
 // The graph/allocation are generation-worker TLS, like the monolithic draft
 // graph. This is an opt-in placement primitive; the ordinary GPU drafter still
 // accepts raw features and remains the fallback.
@@ -92,7 +94,8 @@ bool deepseek4_dspark_project_main_context(
     const DSparkDrafter & d,
     const float * ctx_features,
     int ctx_len,
-    std::vector<float> & main_context);
+    std::vector<float> & main_context,
+    std::vector<float> * context_kv = nullptr);
 
 // One drafter forward. Produces block_size normed hidden states (the input to
 // the tied lm_head + Markov head), conditioned on a window of captured target

@@ -7930,6 +7930,7 @@ struct DsparkMainProjectionCache {
     ggml_cgraph * gf = nullptr;
     ggml_tensor * inp_ctx = nullptr;
     ggml_tensor * out = nullptr;
+    std::vector<ggml_tensor *> context_kv_out;
 
     DsparkMainProjectionCache() = default;
     DsparkMainProjectionCache(const DsparkMainProjectionCache &) = delete;
@@ -7951,6 +7952,7 @@ struct DsparkMainProjectionCache {
         gf = nullptr;
         inp_ctx = nullptr;
         out = nullptr;
+        std::vector<ggml_tensor *>().swap(context_kv_out);
         std::vector<uint8_t>().swap(arena);
     }
 
@@ -8028,11 +8030,15 @@ bool deepseek4_dspark_project_main_context(
         const DSparkDrafter & d,
         const float * ctx_features,
         int ctx_len,
-        std::vector<float> & main_context) {
+        std::vector<float> & main_context,
+        std::vector<float> * context_kv) {
     main_context.clear();
+    if (context_kv) context_kv->clear();
     if (ctx_len == 0) return true;
     if (!backend || !ctx_features || ctx_len < 0 || !d.main_proj ||
-        !d.main_norm || d.core.n_embd <= 0 || d.n_target_layers <= 0) {
+        !d.main_norm || d.core.n_embd <= 0 || d.n_target_layers <= 0 ||
+        d.core.head_dim <= 0 || d.core.n_layer != d.n_target_layers ||
+        d.core.layers.size() < static_cast<size_t>(d.core.n_layer)) {
         return false;
     }
 
@@ -8069,6 +8075,16 @@ bool deepseek4_dspark_project_main_context(
             C.ctx, projected, d.main_norm, d.core.rms_eps);
         ggml_set_output(C.out);
         ggml_build_forward_expand(C.gf, C.out);
+        C.context_kv_out.reserve(static_cast<size_t>(d.core.n_layer));
+        for (int layer = 0; layer < d.core.n_layer; ++layer) {
+            const DeepSeek4Layer & weights = d.core.layers[layer];
+            ggml_tensor * kv = build_rms_norm(
+                C.ctx, ggml_mul_mat(C.ctx, weights.attn_kv, C.out),
+                weights.attn_kv_a_norm, d.core.rms_eps);
+            ggml_set_output(kv);
+            ggml_build_forward_expand(C.gf, kv);
+            C.context_kv_out.push_back(kv);
+        }
 
         C.alloc = ggml_gallocr_new(
             ggml_backend_get_default_buffer_type(backend));
@@ -8094,6 +8110,20 @@ bool deepseek4_dspark_project_main_context(
     ggml_backend_tensor_get(
         C.out, main_context.data(), 0,
         sizeof(float) * main_context.size());
+    if (context_kv) {
+        const size_t layer_elements =
+            static_cast<size_t>(d.core.head_dim) *
+            static_cast<size_t>(ctx_len);
+        context_kv->resize(
+            static_cast<size_t>(d.core.n_layer) * layer_elements);
+        for (int layer = 0; layer < d.core.n_layer; ++layer) {
+            ggml_backend_tensor_get(
+                C.context_kv_out[static_cast<size_t>(layer)],
+                context_kv->data() + static_cast<size_t>(layer) *
+                    layer_elements,
+                0, sizeof(float) * layer_elements);
+        }
+    }
     return true;
 }
 

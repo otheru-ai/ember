@@ -832,6 +832,7 @@ bool run_deepseek4_dspark_spec_decode(
 
     std::vector<float> noise_embed((size_t) n_embd * block);
     std::vector<float> xdna_main_context;
+    std::vector<float> xdna_context_kv;
     std::vector<int32_t> noise_ids(block);
     std::vector<float> local_hidden, confidence_hidden;
     std::vector<float> padded_hidden((size_t) n_embd * (block + 1), 0.0f);
@@ -917,7 +918,7 @@ bool run_deepseek4_dspark_spec_decode(
                 if (xdna_gpu_main && ctx_len > 0) {
                     provider_ready = deepseek4_dspark_project_main_context(
                         backend, drafter, feat_win.data(), ctx_len,
-                        xdna_main_context);
+                        xdna_main_context, &xdna_context_kv);
                     if (!provider_ready) {
                         provider_error =
                             "GPU main-context projection failed";
@@ -934,6 +935,9 @@ bool run_deepseek4_dspark_spec_decode(
                     request.main_context =
                         xdna_gpu_main && ctx_len > 0
                             ? xdna_main_context.data() : nullptr;
+                    request.context_kv =
+                        xdna_gpu_main && ctx_len > 0
+                            ? xdna_context_kv.data() : nullptr;
                     auto job = xdna_draft_compute->submit(
                         request, &provider_error);
                     XdnaDSparkDraftOutput provider_output;
