@@ -1189,3 +1189,87 @@ Before treating the path as usable on gfx1151 hardware:
 
 DeepSeek's HC update remains sequential at q=1 in this hybrid path. Raising a
 prefill chunk limit without preserving every token boundary is not correct.
+
+### Gen18 resident Q8 projection/shared overlay
+
+Gen18 removes the next coarse NPU transition. One 32-core AIE program contains
+both the dynamic Q8 projection loop and the fixed 4096x2048x4096 Q8 shared
+expert. The cores stay in their header loop; XRT selects work by submitting a
+projection or shared-expert instruction stream through the same xclbin,
+`hw_context`, and kernel. The release build compiles both runtime sequences and
+fails unless their generated `main.pdi` files compare byte-for-byte equal.
+
+The corrected source-derived `ember:xdna-gen24` image packages (the NPU
+artifacts are byte-identical to the physically tested Gen23 build):
+
+- `dspark_resident_q8_v1_b5.xclbin` (`sha256:0d99017c...79613e2`)
+- a 4096x2048 projection instruction stream (`sha256:8d7dae96...643dac`)
+- a 4096x2048x4096 shared-expert stream (`sha256:8cc20c7c...2863df`)
+- `ember-xdna-dspark-resident-validate`
+
+The validator concatenates the trained layer-0 Q-a and KV projections into one
+4096x1536 operation (padded to the overlay's 2048 output lanes), alternates it
+with the trained layer-0 shared expert, and compares every real output lane to
+the raw Q8_0 CPU reference. On the physical gfx1151/XDNA2 host, 100 warm repeats
+measured:
+
+| resident operation | time | max absolute error | cosine |
+| --- | ---: | ---: | ---: |
+| Q-a + KV projection | 0.680 ms | 1.16e-5 | 1.0000000000 |
+| shared expert | 2.353 ms | 4.94e-4 | 0.9999999999 |
+| alternating cycle | 3.026 ms | - | - |
+
+The individually timed sum was 3.033 ms, so the measured descriptor-mode tax
+was -0.007 ms (noise): this is a real resident overlay, not two warm standalone
+PDIs. Production remained healthy and idle before and after the isolated test.
+
+An all-Q8-plus-routed-ROCMFP4 overlay was also compiled far enough to expose the
+actual AIE limits. The 16-KiB core program had only 176 bytes of text headroom
+before the extra routed control path; correct compact FP4 packing needs seven
+tiles per 32-KiB FIFO object, and adding that loop overflowed program memory.
+Smaller common FIFO objects overflowed tile data memory because of bank
+alignment. Padding every FP4 tile to a 32-KiB object would inflate one routed
+expert from about 14.2 MB to roughly 100 MB and erase its performance value.
+
+That rejection sharpens the useful heterogeneous placement:
+
+- NPU: resident Q8 projections and the Q8 shared expert;
+- GPU: the routed ROCMFP4 draft expert and target verifier;
+- CPU: routing, attention reductions, HC sequencing, and asynchronous job
+  coordination.
+
+The routed decision is measured, not merely a compiler workaround: the NPU's
+30-expert route-plan experiment was about 11.8 ms per layer, while the complete
+HIP drafter is about 5 ms. The next useful generation is therefore the
+asynchronous three-layer provider and two-session aggregate benchmark, not a
+larger resident PDI.
+
+### ROCmFPX 2026-08-17 update audit
+
+ROCmFPX main commit `0a59add89b8cba06fb6a0baf25a253a4e45faa78` was compared
+against Ember's vendored gfx1151 path. Four lessons apply:
+
+1. [`8e6277f8`](https://github.com/charlie12345/ROCmFPX/commit/8e6277f855df2a27ce072525ed19f3adc4138c47)
+   removes HIP fast-math because reassociated reductions can flip greedy argmax
+   on RDNA3.5 and finite-math assumptions produced NaN instead of infinity.
+   Ember already omitted the flag; its HIP CMake now records this as an explicit
+   correctness constraint.
+2. [`00d54526`](https://github.com/charlie12345/ROCmFPX/commit/00d54526e24e3aba4c76474e3147cbf9c7cc034c)
+   fixes a zero-size view splitting the final backend allocation chunk. Ember
+   had the same allocator condition, so the fix was ported.
+3. [`5ed0d9ef`](https://github.com/charlie12345/ROCmFPX/commit/5ed0d9ef03b4fba17c1cefa6f987dd5380bf2fef)
+   stops HIP from claiming normalization on non-row-contiguous inputs. Ember
+   had the same unconditional support result, so the fallback guard was ported.
+4. [`a8b5fa90`](https://github.com/charlie12345/ROCmFPX/commit/a8b5fa906ccd13c6a8ca06d55aa287854c376868)
+   dispatches affine FP2 CPU outer products through the existing quantized
+   implementation. Ember's ROCMFP2 type has the same complete dequantization
+   trait, so the equivalent dispatch was added.
+
+Other current changes do not improve this prototype. Ember already forces
+all-quant flash attention; its 85.3-GiB default path uses managed UMA rather
+than the pageable-mmap-to-`hipMalloc` upload fixed by ROCmFPX `d0fae4de`; and
+its DeepSeek runlist/gfx1151 MMVQ kernels are more specialized than ROCmFPX's
+generic ROCMFP2 path. Laguna, NVFP4 conversion, M-RoPE, and llama-server
+rollback patches are different model/server seams. Ember's exact-replay path
+already recomputes accepted-token metrics after a shortened replay. None of
+those paths should be transplanted without a trained gfx1151 A/B.

@@ -152,6 +152,15 @@ if(EMBER_XDNA_XRT_PROVIDER)
     providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
   target_link_libraries(ember-xdna-q8-universal-validate PRIVATE
     "${EMBER_XRT_COREUTIL}")
+  add_executable(ember-xdna-dspark-resident-validate
+    providers/xdna2/validate_dspark_resident_xrt.cpp
+    providers/xdna2/q8_model_weights.cpp
+    providers/xdna2/q8_0_pack.cpp
+    src/model/gguf.c)
+  target_include_directories(ember-xdna-dspark-resident-validate PRIVATE
+    providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
+  target_link_libraries(ember-xdna-dspark-resident-validate PRIVATE
+    "${EMBER_XRT_COREUTIL}")
 endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────

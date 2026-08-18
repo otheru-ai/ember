@@ -107,3 +107,21 @@ Its useful transferable result is the measured importance of balanced AIE
 microtiles and instruction-stream length. Its earlier NPU-decode headline was
 later corrected by the project itself as accidental Vulkan execution, so
 Ember does not use that number as evidence of NPU decode performance.
+
+The gfx1151 ROCmFPX engine was re-audited at its 2026-08-17 main revision:
+
+- repository: <https://github.com/charlie12345/ROCmFPX>
+- commit inspected: `0a59add89b8cba06fb6a0baf25a253a4e45faa78`
+- directly ported fixes: `00d54526` (trailing allocation views), `5ed0d9ef`
+  (row-contiguous HIP norms), and `a8b5fa90` (ROCMFP2 CPU OUT_PROD)
+- correctness constraint retained: `8e6277f8` (no HIP fast-math on gfx1151)
+- license: MIT
+
+ROCmFPX's current generic ROCMFP2 HIP decode is not a replacement for Ember's
+vendored path. Ember already has DeepSeek-specific runlist MoE and explicit
+gfx1151 single-row/four-row MMVQ specializations; changing those kernels needs
+a trained A/B rather than a source-shape transplant. Its pinned pageable-mmap
+upload staging (`d0fae4de`) is also unnecessary on Ember's default 85.3-GiB
+path, which intentionally selects managed UMA instead of uploading the model
+through `hipMalloc`. Laguna, NVFP4 conversion, M-RoPE, and llama-server changes
+are outside Ember's DeepSeek-V4 server/kernel seam.

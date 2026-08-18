@@ -155,3 +155,8 @@ if (GGML_HIP_RCCL)
 endif()
 
 target_link_libraries(ggml-hip PRIVATE ggml-base hip::host roc::rocblas roc::hipblas)
+
+# Keep -ffast-math and -funsafe-math-optimizations off for HIP. ROCmFPX
+# 8e6277f measured that reassociated reductions can flip greedy argmax on
+# RDNA3.5/gfx1151 and make speculative decode diverge; finite-math assumptions
+# also changed an infinity into NaN. Correctness is worth the measured ~2%.

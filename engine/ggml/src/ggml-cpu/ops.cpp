@@ -4416,6 +4416,10 @@ void ggml_compute_forward_out_prod(
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        // ROCmFPX a8b5fa9: the affine ROCMFP2 type has complete
+        // dequantization traits, so the generic quantized OUT_PROD path is
+        // valid and must be selected instead of aborting.
+        case GGML_TYPE_Q2_0_ROCMFP2:
         case GGML_TYPE_Q2_K:
         case GGML_TYPE_Q3_K:
         case GGML_TYPE_Q4_K:
