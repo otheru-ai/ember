@@ -46,7 +46,8 @@ RUN cmake -S /ember -B /ember/build-rocm \
       -DEMBER_ENGINE_BACKEND=hip \
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /ember/build-rocm \
-      --target ember-dflash ember-dspark-main-bench -j"$(nproc)"
+      --target ember-dflash ember-dspark-main-bench \
+      ember-dspark-cpu-bench -j"$(nproc)"
 
 RUN gcc -shared -fPIC -O2 -g \
       -o /usr/local/lib/libsegvtrace.so tools/segvtrace.c -ldl \
@@ -54,10 +55,13 @@ RUN gcc -shared -fPIC -O2 -g \
       /usr/local/bin/ember-dflash \
  && install -Dm0755 -s /ember/build-rocm/ember-dspark-main-bench \
       /usr/local/bin/ember-dspark-main-bench \
+ && install -Dm0755 -s /ember/build-rocm/ember-dspark-cpu-bench \
+      /usr/local/bin/ember-dspark-cpu-bench \
  && strip --strip-unneeded /usr/local/lib/libsegvtrace.so \
  && bash docker/collect-runtime.sh /ember-runtime \
       /usr/local/bin/ember-dflash \
       /usr/local/bin/ember-dspark-main-bench \
+      /usr/local/bin/ember-dspark-cpu-bench \
       /usr/local/lib/libsegvtrace.so \
       /opt/rocm/bin/rocminfo \
  && rocblas_kpack="$(find /opt/rocm -type f \
@@ -120,7 +124,8 @@ COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig \
- && ! ldd /usr/local/bin/ember-dspark-main-bench | grep -q 'not found'
+ && ! ldd /usr/local/bin/ember-dspark-main-bench | grep -q 'not found' \
+ && ! ldd /usr/local/bin/ember-dspark-cpu-bench | grep -q 'not found'
 
 ENV EMBER_MODEL_DIR=/models \
     EMBER_KV_CACHE_DIR=/cache

@@ -955,6 +955,48 @@ docker run --rm --privileged --ipc=host --ulimit memlock=-1 \
   /models/dspark-draft.gguf 20
 ```
 
+### Gen14 CPU control/reduction body
+
+The heterogeneous boundary leaves only operations that are too small or too
+reduction-heavy for the current AIE graphs on the CPU. Gen14 implements that
+side as a provider-independent library: weighted RMSNorm, the exact four-stream
+HC sigmoid/Sinkhorn pre/post/tail equations, unbiased sqrt-softplus router
+top-k, and full-visibility MLA score/sink-softmax/context reduction with tail
+RoPE. A persistent worker pool preserves each dot product's accumulation order
+while parallelizing independent HC rows, experts, and query heads. The same
+code is covered by the GPU-free `xdna_dspark_cpu_ops` test.
+
+The packaged shape benchmark executes three layers of both HC boundaries,
+all 15 layer-local norms plus the final norm, three router selections, three
+5-query by 133-key attention
+reductions, and the final HC collapse/norm. It excludes the large projections
+and expert graphs already measured on XDNA2. On the production Ryzen CPU, the
+warm results were:
+
+| CPU workers | three-layer control/reduction body |
+| ---: | ---: |
+| 4 | 18.057 ms |
+| 8 | 10.073 ms |
+| 12 | 8.885 ms |
+| 16 | 8.087 ms |
+| 20 | 7.853 ms |
+| 24 | 8.043 ms |
+| 32 | 8.028 ms |
+
+Sixteen workers remain the default because the GPU verifier runs concurrently
+and needs package/fabric headroom; `EMBER_DSPARK_CPU_THREADS` permits a measured
+1--64 override. At that default, the projected draft body is about 78.95 ms
+(`70.86 + 8.09`), leaving only about 2.75 ms under the 81.7 ms q=4 verifier
+window for provider orchestration and shared-fabric interference. This is the
+first complete shape-based result that fits, but the margin is too small to
+claim an end-to-end win without the aggregate concurrent run.
+
+Run the isolated CPU placement check with:
+
+```bash
+EMBER_DSPARK_CPU_THREADS=16 ember-dspark-cpu-bench 10
+```
+
 Run the same trained check from the opt-in image with:
 
 ```bash

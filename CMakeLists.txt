@@ -332,6 +332,21 @@ target_link_libraries(test_xdna_dspark_provider PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME xdna_dspark_provider COMMAND test_xdna_dspark_provider
   $<TARGET_FILE:mock_xdna_moe_provider>)
 
+add_executable(test_xdna_dspark_cpu_ops
+  test/test_xdna_dspark_cpu_ops.cpp
+  providers/xdna2/dspark_cpu_ops.cpp)
+target_include_directories(test_xdna_dspark_cpu_ops PRIVATE providers/xdna2)
+target_link_libraries(test_xdna_dspark_cpu_ops PRIVATE m)
+add_test(NAME xdna_dspark_cpu_ops COMMAND test_xdna_dspark_cpu_ops)
+ember_strict(test_xdna_dspark_cpu_ops)
+
+add_executable(ember-dspark-cpu-bench
+  providers/xdna2/benchmark_dspark_cpu_body.cpp
+  providers/xdna2/dspark_cpu_ops.cpp)
+target_include_directories(ember-dspark-cpu-bench PRIVATE providers/xdna2)
+target_link_libraries(ember-dspark-cpu-bench PRIVATE m)
+ember_strict(ember-dspark-cpu-bench)
+
 add_executable(test_xdna_rocmfp2_pack
   test/test_xdna_rocmfp2_pack.cpp
   providers/xdna2/rocmfp2_pack.cpp)
@@ -403,7 +418,7 @@ set(EMBER_C_TESTS
   compaction gguf model_card kv_cache qa dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator xdna_moe_provider
-  xdna_dspark_provider
+  xdna_dspark_provider xdna_dspark_cpu_ops
   xdna_rocmfp2_pack xdna_rocmfp4_pack xdna_rocmfp4_route_plan
   xdna_rocmfp4_model_weights xdna_q8_pack xdna_q8_model_weights)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
