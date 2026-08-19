@@ -1471,21 +1471,27 @@ model, context, and batching options, collect the steady-state comparison with:
 ```bash
 scripts/benchmark_resident.py --model deepseek-v4-flash \
   --prompt-file share/benchmark/resident-throughput.txt \
-  --rounds 5 --concurrency 2 \
+  --rounds 10 --concurrency 2 \
   --output baseline.json
 
 scripts/benchmark_resident.py --model deepseek-v4-flash \
   --prompt-file share/benchmark/resident-throughput.txt \
-  --rounds 5 --concurrency 2 \
-  --reference baseline.json --require-spec --output xdna.json
+  --rounds 10 --concurrency 2 \
+  --reference baseline.json --min-speedup 1.02 \
+  --require-spec --output xdna.json
 ```
 
 The harness releases both requests on a barrier, uses greedy decoding, measures
 aggregate completion tokens against concurrent round wall time, retains Ember's
 per-row decode/acceptance metrics, and compares visible-output SHA-256 sets.
-Promotion requires token-exact output, two speculative rows per round, and an
-aggregate throughput gain outside run-to-run variance. A lower per-request NPU
-latency without that aggregate gain is not sufficient.
+It resamples complete concurrent rounds with a deterministic two-sample
+bootstrap; resampling individual requests would destroy the overlap being
+measured. Promotion requires identical model/prompt/token/concurrency settings,
+token-exact output, two speculative rows per round, and a one-sided 95%
+speedup-confidence lower bound above the requested floor. The example requires
+at least 2% after variance, not merely a 2% point estimate. A lower per-request
+NPU latency without that aggregate gain is not sufficient. Failed comparison
+reports are still written and return exit status 1 so the evidence is retained.
 
 The fixed fixture was measured against the running production GPU-DSpark
 design before the maintenance-window A/B. After one warmup, five greedy

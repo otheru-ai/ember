@@ -12,11 +12,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 import statistics
 import threading
 import time
 import urllib.request
 from pathlib import Path
+
+
+REFERENCE_CONFIG_KEYS = (
+    "model",
+    "prompt_sha256",
+    "max_tokens",
+    "concurrency",
+)
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -132,6 +141,7 @@ def summarize(rounds: list[dict], status_before: dict,
     decode_tps = [row["decode_tokens_per_second"] for row in rows]
     prefill_ms = [row["prefill_ms"] for row in rows]
     accept = [row["accept_rate"] for row in rows if row["spec_ran"]]
+    round_tps = [result["aggregate_tokens_per_second"] for result in rounds]
     before_batch = status_before.get("continuous_batching") or {}
     after_batch = status_after.get("continuous_batching") or {}
     decode_batches_delta = int(after_batch.get("decode_batches", 0)) - int(
@@ -145,7 +155,9 @@ def summarize(rounds: list[dict], status_before: dict,
         "aggregate_tokens_per_second":
             total_tokens / max(total_wall_s, 1e-9),
         "round_tokens_per_second_mean": statistics.fmean(
-            result["aggregate_tokens_per_second"] for result in rounds),
+            round_tps),
+        "round_tokens_per_second_stdev": (
+            statistics.stdev(round_tps) if len(round_tps) > 1 else 0.0),
         "request_latency_ms_mean": statistics.fmean(latency),
         "request_latency_ms_p50": percentile(latency, 0.50),
         "request_latency_ms_p95": percentile(latency, 0.95),
@@ -173,12 +185,94 @@ def output_sets(rounds: list[dict]) -> dict[str, list[str]]:
     return {key: sorted(values) for key, values in sorted(outputs.items())}
 
 
-def compare_reference(outputs: dict[str, list[str]], reference: dict) -> None:
-    expected = reference.get("outputs")
-    if outputs != expected:
-        raise RuntimeError(
-            f"candidate output hashes differ from reference: "
-            f"expected={expected} actual={outputs}")
+def rounds_throughput(rounds: list[dict]) -> float:
+    if not rounds:
+        raise ValueError("throughput comparison requires measured rounds")
+    tokens = sum(int(result.get("completion_tokens", 0)) for result in rounds)
+    wall_s = sum(float(result.get("wall_ms", 0.0)) for result in rounds) / 1000.0
+    if tokens <= 0 or wall_s <= 0.0:
+        raise ValueError("throughput comparison requires positive tokens and time")
+    return tokens / wall_s
+
+
+def bootstrap_speedup(candidate: list[dict], baseline: list[dict],
+                      confidence: float, samples: int,
+                      seed: int = 0x58444E41) -> dict:
+    """Return a deterministic two-sample bootstrap over complete rounds.
+
+    A round is the synchronization unit: all resident requests start together,
+    so resampling individual requests would destroy the overlap being measured.
+    Baseline and candidate run under different server launches and are sampled
+    independently.
+    """
+    if not candidate or not baseline:
+        raise ValueError("bootstrap requires baseline and candidate rounds")
+    if samples < 100:
+        raise ValueError("bootstrap requires at least 100 samples")
+    if not 0.5 < confidence < 1.0:
+        raise ValueError("bootstrap confidence must be between 0.5 and 1.0")
+
+    rng = random.Random(seed)
+    ratios = []
+    for _ in range(samples):
+        candidate_sample = [rng.choice(candidate) for _ in candidate]
+        baseline_sample = [rng.choice(baseline) for _ in baseline]
+        ratios.append(
+            rounds_throughput(candidate_sample) /
+            rounds_throughput(baseline_sample))
+    return {
+        "observed_speedup": (
+            rounds_throughput(candidate) / rounds_throughput(baseline)),
+        "speedup_lower_bound": percentile(ratios, 1.0 - confidence),
+        "speedup_upper_bound": percentile(ratios, confidence),
+        "confidence": confidence,
+        "bootstrap_samples": samples,
+        "bootstrap_seed": seed,
+    }
+
+
+def compare_reference(outputs: dict[str, list[str]], config: dict,
+                      rounds: list[dict], reference: dict,
+                      min_speedup: float, confidence: float,
+                      samples: int) -> dict:
+    reference_config = reference.get("config")
+    reference_rounds = reference.get("round_results")
+    if not isinstance(reference_config, dict):
+        raise ValueError("reference report has no config object")
+    if not isinstance(reference_rounds, list):
+        raise ValueError("reference report has no round_results array")
+
+    config_mismatches = {}
+    for key in REFERENCE_CONFIG_KEYS:
+        actual = config.get(key)
+        expected = reference_config.get(key)
+        if actual != expected:
+            config_mismatches[key] = {
+                "reference": expected,
+                "candidate": actual,
+            }
+    expected_outputs = reference.get("outputs")
+    outputs_exact = outputs == expected_outputs
+    speedup = bootstrap_speedup(
+        rounds, reference_rounds, confidence, samples)
+    failures = []
+    if config_mismatches:
+        failures.append("reference workload configuration differs")
+    if not outputs_exact:
+        failures.append("candidate output hashes differ from reference")
+    if speedup["speedup_lower_bound"] <= min_speedup:
+        failures.append(
+            "speedup confidence lower bound is below the promotion floor")
+    return {
+        "config_exact": not config_mismatches,
+        "config_mismatches": config_mismatches,
+        "outputs_exact": outputs_exact,
+        "reference_outputs": expected_outputs,
+        "required_speedup": min_speedup,
+        **speedup,
+        "promoted": not failures,
+        "failures": failures,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -193,6 +287,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--reference", type=Path)
+    parser.add_argument("--min-speedup", type=float, default=1.0,
+                        help="required one-sided speedup confidence bound")
+    parser.add_argument("--confidence", type=float, default=0.95,
+                        help="one-sided bootstrap confidence (default: 0.95)")
+    parser.add_argument("--bootstrap-samples", type=int, default=20000)
     parser.add_argument("--require-spec", action="store_true")
     parser.add_argument("--allow-unbatched", action="store_true",
                         help="permit a run that never forms a decode batch")
@@ -203,6 +302,14 @@ def main() -> int:
     args = parse_args()
     if args.concurrency < 1 or args.rounds < 1 or args.warmup_rounds < 0:
         raise SystemExit("concurrency/rounds must be positive")
+    if args.max_tokens < 1:
+        raise SystemExit("max-tokens must be positive")
+    if args.reference and args.min_speedup < 1.0:
+        raise SystemExit("min-speedup must be at least 1.0")
+    if not 0.5 < args.confidence < 1.0:
+        raise SystemExit("confidence must be between 0.5 and 1.0")
+    if args.bootstrap_samples < 100:
+        raise SystemExit("bootstrap-samples must be at least 100")
     prompt = args.prompt_file.read_text()
     prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
     body = {
@@ -245,32 +352,37 @@ def main() -> int:
             f"speculation required but ran for {summary['spec_rows']}/"
             f"{args.rounds * args.concurrency} measured rows")
 
+    config = {
+        "url": args.url,
+        "model": args.model,
+        "prompt_sha256": prompt_hash,
+        "max_tokens": args.max_tokens,
+        "concurrency": args.concurrency,
+        "warmup_rounds": args.warmup_rounds,
+        "rounds": args.rounds,
+        "require_spec": args.require_spec,
+        "allow_unbatched": args.allow_unbatched,
+    }
     report = {
-        "schema_version": 1,
-        "config": {
-            "url": args.url,
-            "model": args.model,
-            "prompt_sha256": prompt_hash,
-            "max_tokens": args.max_tokens,
-            "concurrency": args.concurrency,
-            "warmup_rounds": args.warmup_rounds,
-            "rounds": args.rounds,
-            "require_spec": args.require_spec,
-            "allow_unbatched": args.allow_unbatched,
-        },
+        "schema_version": 2,
+        "config": config,
         "summary": summary,
         "outputs": outputs,
         "round_results": rounds,
     }
+    exit_code = 0
     if args.reference:
-        compare_reference(outputs, json.loads(args.reference.read_text()))
+        comparison = compare_reference(
+            outputs, config, rounds, json.loads(args.reference.read_text()),
+            args.min_speedup, args.confidence, args.bootstrap_samples)
         report["reference"] = str(args.reference)
-        report["reference_exact"] = True
+        report["comparison"] = comparison
+        exit_code = 0 if comparison["promoted"] else 1
     encoded = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(encoded)
     print(encoded, end="")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

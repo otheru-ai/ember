@@ -98,13 +98,61 @@ class ResidentBenchmarkTests(unittest.TestCase):
         self.assertEqual(summary["decode_batches_delta"], 2)
         self.assertEqual(summary["mean_decode_batch"], 2.0)
         self.assertEqual(summary["backend_prefill_ms_mean"], 25.0)
+        self.assertAlmostEqual(
+            summary["round_tokens_per_second_stdev"], 28.284271247461902)
 
-    def test_reference_requires_identical_output_hashes(self):
+    @staticmethod
+    def _round(wall_ms):
+        return {
+            "wall_ms": wall_ms,
+            "completion_tokens": 128,
+            "aggregate_tokens_per_second": 128000.0 / wall_ms,
+            "rows": [],
+        }
+
+    def test_reference_promotes_only_confident_exact_speedup(self):
         outputs = {"prompt": ["output"]}
-        BENCH.compare_reference(outputs, {"outputs": outputs})
-        with self.assertRaises(RuntimeError):
-            BENCH.compare_reference(outputs,
-                                    {"outputs": {"prompt": ["different"]}})
+        config = {
+            "model": "model",
+            "prompt_sha256": "prompt",
+            "max_tokens": 64,
+            "concurrency": 2,
+        }
+        baseline = [self._round(value) for value in (200.0, 210.0, 190.0)]
+        candidate = [self._round(value) for value in (100.0, 105.0, 95.0)]
+        reference = {
+            "config": config,
+            "outputs": outputs,
+            "round_results": baseline,
+        }
+        comparison = BENCH.compare_reference(
+            outputs, config, candidate, reference, 1.5, 0.95, 2000)
+        self.assertTrue(comparison["promoted"])
+        self.assertTrue(comparison["config_exact"])
+        self.assertTrue(comparison["outputs_exact"])
+        self.assertAlmostEqual(comparison["observed_speedup"], 2.0)
+        self.assertGreater(comparison["speedup_lower_bound"], 1.5)
+
+        mismatch_config = dict(config)
+        mismatch_config["concurrency"] = 1
+        rejected = BENCH.compare_reference(
+            {"prompt": ["different"]}, mismatch_config, candidate,
+            reference, 2.1, 0.95, 2000)
+        self.assertFalse(rejected["promoted"])
+        self.assertFalse(rejected["config_exact"])
+        self.assertFalse(rejected["outputs_exact"])
+        self.assertEqual(len(rejected["failures"]), 3)
+
+    def test_bootstrap_speedup_is_deterministic(self):
+        baseline = [self._round(value) for value in (100.0, 105.0, 95.0)]
+        candidate = [self._round(value) for value in (90.0, 92.0, 88.0)]
+        first = BENCH.bootstrap_speedup(
+            candidate, baseline, 0.95, 1000)
+        second = BENCH.bootstrap_speedup(
+            candidate, baseline, 0.95, 1000)
+        self.assertEqual(first, second)
+        self.assertGreater(first["observed_speedup"], 1.0)
+        self.assertGreater(first["speedup_lower_bound"], 1.0)
 
     def test_report_is_json_serializable(self):
         report = {"schema_version": 1, "outputs": {"p": ["o"]}}
