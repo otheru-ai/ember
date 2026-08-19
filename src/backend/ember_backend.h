@@ -196,8 +196,10 @@ bool ember_backend_batch_stats_get(const ember_backend *b,
 // Runs a greedy autoregressive baseline, restores the exact prefill snapshot,
 // then runs the normal speculative path from that same state.  When disk KV is
 // enabled and the prompt is large enough to persist, it also round-trips the
-// snapshot through disk and repeats the AR decode.  Intended for an explicit
-// startup validation command, not concurrent serving.
+// snapshot through disk and repeats the AR decode. With resident batching it
+// admits two spec-eligible rows; DFLASH_DSPARK_XDNA_REQUIRED additionally
+// requires both rows to report that speculation actually ran. Intended for an
+// explicit startup validation command, not concurrent serving.
 typedef struct {
     bool   ok;
     bool   snapshot_ok;
@@ -207,15 +209,18 @@ typedef struct {
     bool   disk_exact;
     bool   batch_checked;
     bool   batch_exact;
+    bool   batch_spec_required;
     int    baseline_tokens;
     int    spec_tokens;
     int    disk_tokens;
     int    batch_rows;
     int    batch_tokens;
+    int    batch_spec_rows;
     int    mismatch_index;      // -1 when all compared token streams match
     int32_t expected_token;
     int32_t actual_token;
     double spec_accept_rate;
+    double batch_spec_accept_rate;
     char   detail[192];
 } ember_validation_report;
 

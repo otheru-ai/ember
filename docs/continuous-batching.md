@@ -100,9 +100,21 @@ test that observes two overlapping HTTP generations. DeepSeek and bridge
 translation units also receive a host C++ syntax build when ROCm is unavailable.
 On the ROCm host, `--validate-prompt PATH --batch-sessions 2` runs two resident
 sessions through the coordinator and requires both token streams to match the
-serial autoregressive baseline; its JSON `batch` object records the rows and
-tokens compared. Repeating that oracle across ragged prompts, cancellation, slot
-reuse, and mixed plans remains the hardware acceptance gate.
+serial autoregressive baseline. Resident rows are allowed to speculate, rather
+than inheriting the baseline's `force_ar_decode` flag. Its JSON `batch` object
+records the rows/tokens compared plus `spec_rows` and the mean resident
+acceptance rate. With `DFLASH_DSPARK_XDNA_REQUIRED=1`, validation also fails
+unless every resident row actually ran the XDNA proposal path; this prevents a
+provider fallback from masquerading as heterogeneous correctness. Repeating
+that oracle across ragged prompts, cancellation, slot reuse, and mixed plans
+remains the hardware acceptance gate.
+
+For steady-state performance A/Bs, `scripts/benchmark_resident.py` releases
+simultaneous greedy HTTP requests, reports aggregate wall-clock tokens/second,
+and hashes visible output. Save a target-only run with `--output baseline.json`,
+then pass `--reference baseline.json --require-spec` to the XDNA-enabled run.
+The candidate fails if output changes, any measured row silently uses AR, or
+the scheduler never forms the requested multi-row decode batch.
 
 The first gfx1151 acceptance run passed on 2026-08-09 using exact prefill and
 two resident sessions. A 3,926-token prompt produced 32 baseline tokens and 64

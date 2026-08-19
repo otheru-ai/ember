@@ -516,11 +516,15 @@ if(Python3_Interpreter_FOUND)
     NAME quant_manifest_corpus
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_quant_manifest_corpus.py)
+  add_test(
+    NAME resident_benchmark
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_resident_benchmark.py)
   # Offline analysis scripts — no server, no network. Same 60s ceiling as the
   # C tests; server-spawning tests below keep their tighter 20s.
   set_tests_properties(
     quant_quality_report quant_behavior_eval gguf_tensor_error
-    quant_manifest_corpus
+    quant_manifest_corpus resident_benchmark
     PROPERTIES TIMEOUT 60)
   add_test(
     NAME continuous_batch_server

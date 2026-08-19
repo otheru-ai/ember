@@ -1425,10 +1425,39 @@ would make the wrong decision for aggregate resident throughput. A future
 resident gate must use measured GPU wait time and aggregate tokens/second.
 
 GPU-free tests cover wide-completion accounting and failure recovery. The full
-47-test host gauntlet passes, the ROCm/gfx1151 container build links, and the
+48-test host gauntlet passes, the ROCm/gfx1151 container build links, and the
 `ember:xdna-gen42` release image packages the pinned XRT runtime, provider, AIE
 artifacts, and new server binary. These are build/correctness gates, not a
 performance claim. The remaining decisive test requires exclusive access to
 the 85.3-GiB target model: run the two-session differential validator, then A/B
 resident target-only throughput against resident XDNA proposals while recording
 acceptance, NPU wait exposed on the critical path, and shared-fabric slowdown.
+
+The validator now actually permits its resident rows to speculate. With the
+provider marked required it also requires `batch.spec_rows == batch.rows`, so a
+target-only fallback cannot pass the heterogeneous gate. `DFLASH_DS4_TIMING=1`
+separately reports proposal age, blocking wait at collection, tied-head time,
+and exact-verifier time. Proposal age includes useful overlap; `provider_block`
+is the NPU latency still exposed on the GPU-critical path. Use at least
+`--validate-tokens 32`; resident speculation deliberately does not prepare for
+requests below its 16-token setup-amortization threshold.
+
+After starting the baseline and candidate servers separately with identical
+model, context, and batching options, collect the steady-state comparison with:
+
+```bash
+scripts/benchmark_resident.py --model deepseek-v4-flash \
+  --prompt-file prompt.txt --rounds 5 --concurrency 2 \
+  --output baseline.json
+
+scripts/benchmark_resident.py --model deepseek-v4-flash \
+  --prompt-file prompt.txt --rounds 5 --concurrency 2 \
+  --reference baseline.json --require-spec --output xdna.json
+```
+
+The harness releases both requests on a barrier, uses greedy decoding, measures
+aggregate completion tokens against concurrent round wall time, retains Ember's
+per-row decode/acceptance metrics, and compares visible-output SHA-256 sets.
+Promotion requires token-exact output, two speculative rows per round, and an
+aggregate throughput gain outside run-to-run variance. A lower per-request NPU
+latency without that aggregate gain is not sufficient.

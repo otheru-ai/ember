@@ -4057,7 +4057,9 @@ static int run_backend_validation(ember_backend *be, const char *path,
         "\"spec\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d,"
         "\"accept_rate\":%.6f},"
         "\"disk\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
-        "\"batch\":{\"checked\":%s,\"exact\":%s,\"rows\":%d,\"tokens\":%d},"
+        "\"batch\":{\"checked\":%s,\"exact\":%s,\"rows\":%d,\"tokens\":%d,"
+        "\"spec_required\":%s,\"spec_rows\":%d,"
+        "\"spec_accept_rate\":%.6f},"
         "\"mismatch\":{\"index\":%d,\"expected\":%d,\"actual\":%d},"
         "\"detail\":",
         report.ok ? "true" : "false", n_prompt, n_gen,
@@ -4070,6 +4072,8 @@ static int run_backend_validation(ember_backend *be, const char *path,
         report.batch_checked ? "true" : "false",
         report.batch_exact ? "true" : "false",
         report.batch_rows, report.batch_tokens,
+        report.batch_spec_required ? "true" : "false",
+        report.batch_spec_rows, report.batch_spec_accept_rate,
         report.mismatch_index, report.expected_token, report.actual_token);
     ember_json_escape(&out, report.detail);
     ember_buf_puts(&out, "}\n");

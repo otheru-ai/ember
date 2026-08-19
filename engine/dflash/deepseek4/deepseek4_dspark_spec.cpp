@@ -762,8 +762,10 @@ bool deepseek4_dspark_resident_finish(
     std::unique_ptr<DeepSeek4DSparkResidentProposal::Impl> impl =
         std::move(proposal.impl_);
     XdnaDSparkDraftOutput provider_output;
+    const SpecClock::time_point provider_wait_t0 = SpecClock::now();
     if (!impl->job->wait(provider_output, error)) return false;
-    const double provider_ms = spec_ms_since(impl->submitted_at);
+    const double provider_block_ms = spec_ms_since(provider_wait_t0);
+    const double provider_age_ms = spec_ms_since(impl->submitted_at);
     const int n_embd = target_w.n_embd;
     const size_t hidden_need =
         (size_t)n_embd * (size_t)drafter.block_size;
@@ -784,6 +786,7 @@ bool deepseek4_dspark_resident_finish(
                 provider_output.hidden.data(),
                 hidden_need * sizeof(float));
     std::vector<int32_t> draft_tokens;
+    const SpecClock::time_point head_t0 = SpecClock::now();
     bool head_ok = dspark_markov_correct_greedy_chain_fused(
         draft_weights, backend, target.lm_head_tensor(), padded_hidden.data(),
         impl->q, impl->seed, draft_tokens);
@@ -806,6 +809,7 @@ bool deepseek4_dspark_resident_finish(
     }
     if ((int)draft_tokens.size() > impl->q)
         draft_tokens.resize((size_t)impl->q);
+    const double head_ms = spec_ms_since(head_t0);
 
     std::vector<int32_t> target_argmax;
     int verify_last = -1;
@@ -869,9 +873,10 @@ bool deepseek4_dspark_resident_finish(
     if (spec_env_flag("DFLASH_DS4_TIMING")) {
         std::fprintf(stderr,
                      "[ds4-resident-spec] pos=%d q=%d accept=%d "
-                     "provider_wait=%.1fms verify=%.1fms\n",
+                     "provider_age=%.1fms provider_block=%.1fms "
+                     "head=%.1fms verify=%.1fms\n",
                      impl->committed, impl->q, accept,
-                     provider_ms, verify_ms);
+                     provider_age_ms, provider_block_ms, head_ms, verify_ms);
     }
     return true;
 }

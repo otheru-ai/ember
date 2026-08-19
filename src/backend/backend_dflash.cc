@@ -1219,6 +1219,11 @@ static bool validation_token_trace_enabled() {
     return value && value[0] && std::strcmp(value, "0") != 0;
 }
 
+static bool validation_env_enabled(const char *name) {
+    const char *value = std::getenv(name);
+    return value && value[0] && std::strcmp(value, "0") != 0;
+}
+
 static void trace_validation_tokens(
         const char *path, const std::vector<int32_t> &tokens) {
     if (!validation_token_trace_enabled()) return;
@@ -1314,7 +1319,14 @@ static bool backend_validate_impl(
     report->batch_exact = true;
     if (b->batch_sessions > 1 && b->coordinator) {
         report->batch_checked = true;
+        report->batch_spec_required =
+            validation_env_enabled("DFLASH_DSPARK_XDNA_REQUIRED");
         GenerateRequest resident_request = ar;
+        // Unlike the serial baseline above, these two rows must be allowed to
+        // enter the resident speculative path. Before 2026-08-19 this copied
+        // ar.force_ar_decode=true and the advertised two-session validator
+        // could pass without executing one NPU proposal or target verifier.
+        resident_request.force_ar_decode = false;
         resident_request.snap_slot = -1;
         resident_request.snap_pos = -1;
         std::vector<dflash::common::ContinuousBatchSessionId> ids;
@@ -1350,6 +1362,10 @@ static bool backend_validate_impl(
                 report->batch_exact = false;
             } else {
                 report->batch_tokens += (int)result->tokens.size();
+                if (result->spec_decode_ran) {
+                    ++report->batch_spec_rows;
+                    report->batch_spec_accept_rate += result->accept_rate;
+                }
                 if (!validation_tokens_equal(
                         baseline.tokens, result->tokens, report)) {
                     report->batch_exact = false;
@@ -1359,13 +1375,21 @@ static bool backend_validate_impl(
                 (void)b->coordinator->release(id);
         }
         if (ids.size() != 2) report->batch_exact = false;
+        if (report->batch_spec_rows > 0) {
+            report->batch_spec_accept_rate /= report->batch_spec_rows;
+        }
     }
 
+    const bool required_batch_spec_ran =
+        !report->batch_spec_required ||
+        (report->batch_rows > 0 &&
+         report->batch_spec_rows == report->batch_rows);
     report->ok = report->snapshot_ok && restored_speculative.ok() &&
                  speculative.ok() &&
                  report->spec_exact &&
                  (!report->disk_checked || report->disk_exact) &&
-                 (!report->batch_checked || report->batch_exact);
+                 (!report->batch_checked || report->batch_exact) &&
+                 required_batch_spec_ran;
     if (!restored_speculative.ok() || !speculative.ok()) {
         const GenerateResult & failed = restored_speculative.ok()
             ? speculative
@@ -1374,6 +1398,11 @@ static bool backend_validate_impl(
                       "snapshot restore/spec path failed: %.*s",
                       (int)failed.error_detail().size(),
                       failed.error_detail().data());
+    } else if (!required_batch_spec_ran) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "resident XDNA speculation required but ran for "
+                      "%d/%d rows",
+                      report->batch_spec_rows, report->batch_rows);
     } else if (!report->spec_exact || !report->disk_exact ||
                !report->batch_exact) {
         std::snprintf(report->detail, sizeof(report->detail),
@@ -1385,7 +1414,9 @@ static bool backend_validate_impl(
                       "snapshot/disk exact; DSpark unavailable or did not run");
     } else {
         std::snprintf(report->detail, sizeof(report->detail),
-                      "AR, restored/fresh DSpark, disk, and resident batch are token-exact");
+                      "AR, restored/fresh DSpark, disk, and resident batch "
+                      "are token-exact (%d speculative rows)",
+                      report->batch_spec_rows);
     }
     return true;
 }
