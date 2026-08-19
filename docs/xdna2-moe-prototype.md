@@ -1311,6 +1311,16 @@ two-session acceptance/throughput with the target verifier; optimize a
 particular numerical boundary only if that measurement identifies acceptance
 loss as the limiting term.
 
+A sustained-HIP contention surrogate confirms that useful overlap survives the
+shared fabric. Six cached HIP draft forwards plus one provider forward took
+`89.527 ms` concurrently versus `131.632 ms` measured in isolation, a `1.470x`
+overlap speedup. At nine HIP forwards the corresponding result was `103.658 ms`
+versus `161.399 ms`, or `1.557x`. The provider output remained bit-identical
+under contention. This is positive architecture evidence, but the HIP drafter
+touches only the 10.1-GiB support model; it is not a substitute for the required
+85.3-GiB target-verifier benchmark, whose memory traffic and acceptance rate
+remain the production gate.
+
 ### 2026-08-18 XRT scheduling and buffer-sharing audit
 
 The whole-draft scheduler design was rechecked against XRT's current native
