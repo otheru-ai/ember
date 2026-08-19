@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -5523,6 +5524,7 @@ struct Ds4LayerMajorCachedLayer {
 
 struct Ds4LayerMajorGraphCache {
     const ggml_context * owner_ctx = nullptr;
+    const ggml_context * owner_cache_ctx = nullptr;
     ggml_backend_t backend = nullptr;
     PrefillAttentionMode mode = PrefillAttentionMode::Exact;
     int n_tokens = 0;
@@ -5534,9 +5536,11 @@ struct Ds4LayerMajorGraphCache {
     ggml_tensor * state_b = nullptr;
     std::vector<Ds4LayerMajorCachedLayer> layers;
 
-    bool matches(const DeepSeek4Weights & w, ggml_backend_t b,
+    bool matches(const DeepSeek4Weights & w, const DeepSeek4Cache & cache,
+                 ggml_backend_t b,
                  PrefillAttentionMode m, int tokens, int start) const {
-        return ready && owner_ctx == w.ctx && backend == b && mode == m &&
+        return ready && owner_ctx == w.ctx && owner_cache_ctx == cache.ctx &&
+               backend == b && mode == m &&
                n_tokens == tokens && kv_start == start &&
                layers.size() == (size_t) w.n_layer;
     }
@@ -5555,6 +5559,7 @@ struct Ds4LayerMajorGraphCache {
         state_a = nullptr;
         state_b = nullptr;
         owner_ctx = nullptr;
+        owner_cache_ctx = nullptr;
         backend = nullptr;
         mode = PrefillAttentionMode::Exact;
         n_tokens = 0;
@@ -5570,7 +5575,12 @@ struct Ds4LayerMajorGraphCache {
     ~Ds4LayerMajorGraphCache() { destroy(); }
 };
 
-static thread_local std::array<Ds4LayerMajorGraphCache, 1>
+// A layer-major graph embeds the destination KV tensors. Resident sessions
+// own distinct DeepSeek4Cache contexts, so a model/shape-only hit silently
+// wrote session B's prefill into session A's cache. Keep the two common
+// resident slots hot and include cache ownership in every lookup. More than
+// two sessions remain correct by rebuilding through the fallback slot.
+static thread_local std::array<Ds4LayerMajorGraphCache, 2>
     ds4_layer_major_graph_caches;
 // A separate gallocr scratch arena per shape consumes several GiB and forces
 // the 97-GiB model into managed-memory paging. Every layer executes serially,
@@ -5717,7 +5727,7 @@ static int ds4_try_layer_major_prefill(
     bool cache_build = false;
     if (token_ids) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
-            if (candidate.matches(w, backend, cache.prefill_mode,
+            if (candidate.matches(w, cache, backend, cache.prefill_mode,
                                   n_tokens, kv_start)) {
                 graph_cache = &candidate;
                 cache_hit = true;
@@ -5725,24 +5735,36 @@ static int ds4_try_layer_major_prefill(
             }
         }
         if (!graph_cache) {
-            auto & candidate = ds4_layer_major_graph_caches.front();
+            Ds4LayerMajorGraphCache * candidate =
+                &ds4_layer_major_graph_caches.front();
+            for (auto & slot : ds4_layer_major_graph_caches) {
+                if (!slot.ready) {
+                    candidate = &slot;
+                    break;
+                }
+            }
             // Do not evict a full/larger chunk for an equal-size graph at a
             // later position or for a short tail. Both execute with the shared
             // scratch arena below, but only the dominant topology stays cached.
-            const bool same_owner = candidate.owner_ctx == w.ctx &&
-                                    candidate.backend == backend &&
-                                    candidate.mode == cache.prefill_mode;
+            const bool same_owner = candidate->owner_ctx == w.ctx &&
+                                    candidate->owner_cache_ctx == cache.ctx &&
+                                    candidate->backend == backend &&
+                                    candidate->mode == cache.prefill_mode;
             if (std::getenv("EMBER_GTT_TRACE")) {
-                std::fprintf(stderr, "[gtt] MISS req(n=%d kv=%d mode=%d) cand(ready=%d owner_ok=%d back_ok=%d mode=%d n=%d kv=%d layers=%zu) n_layer=%d\n",
+                std::fprintf(stderr, "[gtt] MISS req(n=%d kv=%d mode=%d) cand(ready=%d owner_ok=%d cache_ok=%d back_ok=%d mode=%d n=%d kv=%d layers=%zu) n_layer=%d\n",
                     n_tokens, kv_start, (int) cache.prefill_mode,
-                    (int) candidate.ready, (int)(candidate.owner_ctx == w.ctx), (int)(candidate.backend == backend),
-                    (int) candidate.mode, candidate.n_tokens, candidate.kv_start, candidate.layers.size(), w.n_layer);
+                    (int) candidate->ready, (int)(candidate->owner_ctx == w.ctx),
+                    (int)(candidate->owner_cache_ctx == cache.ctx),
+                    (int)(candidate->backend == backend),
+                    (int) candidate->mode, candidate->n_tokens,
+                    candidate->kv_start, candidate->layers.size(), w.n_layer);
             }
-            if (!candidate.ready || !same_owner ||
-                n_tokens > candidate.n_tokens) {
-                graph_cache = &candidate;
+            if (!candidate->ready || !same_owner ||
+                n_tokens > candidate->n_tokens) {
+                graph_cache = candidate;
                 graph_cache->destroy();
                 graph_cache->owner_ctx = w.ctx;
+                graph_cache->owner_cache_ctx = cache.ctx;
                 graph_cache->backend = backend;
                 graph_cache->mode = cache.prefill_mode;
                 graph_cache->n_tokens = n_tokens;

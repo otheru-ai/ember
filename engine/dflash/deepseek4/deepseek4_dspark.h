@@ -203,7 +203,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend bool deepseek4_dspark_resident_prepare(
-        const DeepSeek4Weights &, const DSparkDrafter &,
+        ggml_backend_t, const DeepSeek4Weights &, const DSparkDrafter &,
         const std::vector<float> &, int, int32_t, int,
         XdnaDSparkDraftCompute &, DeepSeek4DSparkResidentProposal &,
         std::string *);
@@ -231,6 +231,7 @@ struct DeepSeek4DSparkResidentTiming {
 // max_commit_tokens includes the seed and bounds both target mutation and the
 // number of tokens later reported to the continuous-batch scheduler.
 bool deepseek4_dspark_resident_prepare(
+    ggml_backend_t backend,
     const DeepSeek4Weights & target_w,
     const DSparkDrafter & drafter,
     const std::vector<float> & feature_window,

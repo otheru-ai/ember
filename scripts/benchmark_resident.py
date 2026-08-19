@@ -25,6 +25,7 @@ REFERENCE_CONFIG_KEYS = (
     "prompt_sha256",
     "max_tokens",
     "concurrency",
+    "enable_thinking",
 )
 
 
@@ -340,6 +341,11 @@ def main() -> int:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": args.max_tokens,
         "temperature": 0.0,
+        # Keep the throughput corpus in the visible answer channel.  With the
+        # OpenAI-compatible default (thinking enabled), a short max_tokens cap
+        # can end while the model is still reasoning and legitimately yield an
+        # empty content string, which is not a useful correctness oracle.
+        "enable_thinking": False,
         "stream": False,
     }
     endpoint = args.url.rstrip("/") + "/v1/chat/completions"
@@ -381,6 +387,7 @@ def main() -> int:
         "prompt_sha256": prompt_hash,
         "max_tokens": args.max_tokens,
         "concurrency": args.concurrency,
+        "enable_thinking": False,
         "warmup_rounds": args.warmup_rounds,
         "rounds": args.rounds,
         "require_spec": args.require_spec,

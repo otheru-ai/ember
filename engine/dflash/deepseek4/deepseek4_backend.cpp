@@ -679,7 +679,7 @@ bool DeepSeek4Backend::resident_submit_spec(
     const int cap = resident_spec_commit_cap(session);
     if (cap < 2) return false;
     if (!deepseek4_dspark_resident_prepare(
-            w_, *spec_drafter_, session.spec_feat_window,
+            backend_, w_, *spec_drafter_, session.spec_feat_window,
             session.cache.cur_pos, session.pending_token, cap,
             *spec_xdna_draft_compute_, session.spec_proposal, error)) {
         return false;

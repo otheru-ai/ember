@@ -679,6 +679,7 @@ void DeepSeek4DSparkResidentProposal::cancel() noexcept {
 }
 
 bool deepseek4_dspark_resident_prepare(
+        ggml_backend_t backend,
         const DeepSeek4Weights & target_w,
         const DSparkDrafter & drafter,
         const std::vector<float> & feature_window,
@@ -722,11 +723,27 @@ bool deepseek4_dspark_resident_prepare(
     }
 
     const int ctx_len = (int)(feature_window.size() / (size_t)feat_row);
+    const bool xdna_gpu_main =
+        spec_env_flag("DFLASH_DSPARK_XDNA_GPU_MAIN");
+    std::vector<float> main_context;
+    std::vector<float> context_kv;
+    if (xdna_gpu_main && ctx_len > 0 &&
+        !deepseek4_dspark_project_main_context(
+            backend, drafter, feature_window.data(), ctx_len,
+            main_context, &context_kv)) {
+        if (error) *error = "resident GPU main-context projection failed";
+        return false;
+    }
     XdnaDSparkDraftRequest request;
     request.committed = committed;
     request.ctx_len = ctx_len;
     request.noise_embed = impl->noise_embed.data();
-    request.ctx_features = ctx_len > 0 ? feature_window.data() : nullptr;
+    request.ctx_features = xdna_gpu_main || ctx_len == 0
+        ? nullptr : feature_window.data();
+    request.main_context = xdna_gpu_main && ctx_len > 0
+        ? main_context.data() : nullptr;
+    request.context_kv = xdna_gpu_main && ctx_len > 0
+        ? context_kv.data() : nullptr;
     impl->submitted_at = SpecClock::now();
     impl->job = xdna_draft_compute.submit(request, error);
     if (!impl->job) return false;

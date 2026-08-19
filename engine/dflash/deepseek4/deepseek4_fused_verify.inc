@@ -391,7 +391,12 @@ static int ds4_try_fused_verify_step(
     const int q = n_tokens;
     const int token_pos = kv_start + q - 1;
     std::vector<int64_t> key;
-    key.reserve((size_t) w.n_layer + hooks->capture_layer_ids->size() + 4);
+    key.reserve((size_t) w.n_layer + hooks->capture_layer_ids->size() + 5);
+    // Verify graphs embed this session's KV tensors. Shape equality alone is
+    // insufficient when resident sessions alternate on the coordinator
+    // thread; keep cache identity in the key so one session can never verify
+    // against another session's frontier.
+    key.push_back((int64_t) reinterpret_cast<std::uintptr_t>(cache.ctx));
     key.push_back(w.n_swa);
     key.push_back(q);
     key.push_back(token_ids ? 1 : 0);
