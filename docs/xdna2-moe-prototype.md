@@ -1403,6 +1403,29 @@ published affine FP2 model or lucebox's gfx1151-specialized kernels. The
 research result is therefore to keep the tuned GPU target intact and improve
 the independent proposal pipeline, not replace the target engine.
 
+The upstream heads were checked again on 2026-08-19 after the resident
+pipeline was built. Triton-XDNA's end-to-end Qwen example is especially useful:
+its `hetero-fast` policy assigns the NPU MLP tail during prefill but returns
+single-token decode to the GPU, and its viable NPU path stitches the residual,
+RMSNorm, gate/up, SwiGLU, down, and next-layer normalization into one persistent
+hardware context and one dispatch. Its cached direct launch also avoids the
+full JIT/runtime path after the first invocation. This independently supports
+Ember's two choices: keep target decode on gfx1151, and amortize a large,
+resident NPU unit of work rather than alternate HIP and XRT at each operator.
+The current [example and routing table](https://github.com/amd/Triton-XDNA/tree/7c7c41819413e63602fcdeedde831c860b8d6d61/examples/qwen2_5)
+were inspected at `7c7c4181`.
+
+`xdna-driver` advanced to `d1adfd0a` after Ember's audit. The only runtime-side
+change is a POSIX `::close` qualification in the cross-process BO import path;
+its XRT submodule updates add DTBO tooling and an I/O-bound trace metric. None
+changes same-process dispatch latency, runlist ordering, or HIP/XRT ownership,
+so the validated Ember pin remains intentional. IRON `devel`, AIE-RT
+`release/main_aig`, and ROCmFPX `main` remain exactly at the audited commits.
+MLIR-AIE moved to `7e00b579`; its intervening fixes concern compiler-side
+dynamic ObjectFIFO lowering, HRX lifetime, and transform correctness rather
+than the immutable instruction streams Ember already validated. A compiler
+tuple upgrade therefore needs a kernel A/B and is not a free runtime gain.
+
 The resulting resident-session prototype gives every eligible session an
 opaque asynchronous XDNA proposal job and its own captured target-feature
 window. At a decode scheduling boundary Ember first fills the bounded provider
@@ -1447,11 +1470,13 @@ model, context, and batching options, collect the steady-state comparison with:
 
 ```bash
 scripts/benchmark_resident.py --model deepseek-v4-flash \
-  --prompt-file prompt.txt --rounds 5 --concurrency 2 \
+  --prompt-file share/benchmark/resident-throughput.txt \
+  --rounds 5 --concurrency 2 \
   --output baseline.json
 
 scripts/benchmark_resident.py --model deepseek-v4-flash \
-  --prompt-file prompt.txt --rounds 5 --concurrency 2 \
+  --prompt-file share/benchmark/resident-throughput.txt \
+  --rounds 5 --concurrency 2 \
   --reference baseline.json --require-spec --output xdna.json
 ```
 
@@ -1461,3 +1486,22 @@ per-row decode/acceptance metrics, and compares visible-output SHA-256 sets.
 Promotion requires token-exact output, two speculative rows per round, and an
 aggregate throughput gain outside run-to-run variance. A lower per-request NPU
 latency without that aggregate gain is not sufficient.
+
+The fixed fixture was measured against the running production GPU-DSpark
+design before the maintenance-window A/B. After one warmup, five greedy
+64-token requests produced one identical output hash and the following control:
+
+| current single-session GPU DSpark | mean |
+| --- | ---: |
+| acceptance | 0.833 |
+| exact-prefill time | 1,244.2 ms |
+| backend decode | 22.466 tok/s |
+| request wall throughput | 15.634 tok/s |
+| request wall latency | 4,093.6 ms |
+
+The raw report remains staged on the gfx1151 host as
+`/tmp/ember-xdna-gen42/current-gpu-dspark.json`. Production remained healthy.
+The candidate must beat both this current-design wall rate and the
+maintenance-window two-session target-only control. Beating only the
+single-session control would demonstrate batching capacity, not that the NPU
+proposal role is useful.

@@ -23,6 +23,8 @@ class ResidentBenchmarkTests(unittest.TestCase):
                 "completion_tokens": 4,
                 "accept_rate": 0.75,
                 "timings": {
+                    "prefill_ms": 12.5,
+                    "prefill_tokens_per_sec": 1000.0,
                     "decode_ms": 20.0,
                     "decode_tokens_per_sec": 200.0,
                 },
@@ -32,6 +34,7 @@ class ResidentBenchmarkTests(unittest.TestCase):
         row = BENCH.response_metrics(payload, 0.025, "prompt")
         self.assertEqual(row["completion_tokens"], 4)
         self.assertEqual(row["request_wall_ms"], 25.0)
+        self.assertEqual(row["prefill_ms"], 12.5)
         self.assertTrue(row["spec_ran"])
         self.assertEqual(row["prefill_mode"], "exact")
 
@@ -44,12 +47,14 @@ class ResidentBenchmarkTests(unittest.TestCase):
                 "rows": [
                     {
                         "request_wall_ms": 90.0,
+                        "prefill_ms": 10.0,
                         "decode_tokens_per_second": 50.0,
                         "accept_rate": 0.5,
                         "spec_ran": True,
                     },
                     {
                         "request_wall_ms": 100.0,
+                        "prefill_ms": 20.0,
                         "decode_tokens_per_second": 40.0,
                         "accept_rate": 0.75,
                         "spec_ran": True,
@@ -63,12 +68,14 @@ class ResidentBenchmarkTests(unittest.TestCase):
                 "rows": [
                     {
                         "request_wall_ms": 180.0,
+                        "prefill_ms": 30.0,
                         "decode_tokens_per_second": 30.0,
                         "accept_rate": 0.25,
                         "spec_ran": True,
                     },
                     {
                         "request_wall_ms": 200.0,
+                        "prefill_ms": 40.0,
                         "decode_tokens_per_second": 20.0,
                         "accept_rate": 0.0,
                         "spec_ran": False,
@@ -90,6 +97,7 @@ class ResidentBenchmarkTests(unittest.TestCase):
         self.assertEqual(summary["max_decode_batch_after"], 2)
         self.assertEqual(summary["decode_batches_delta"], 2)
         self.assertEqual(summary["mean_decode_batch"], 2.0)
+        self.assertEqual(summary["backend_prefill_ms_mean"], 25.0)
 
     def test_reference_requires_identical_output_hashes(self):
         outputs = {"prompt": ["output"]}

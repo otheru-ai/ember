@@ -52,6 +52,9 @@ def response_metrics(payload: dict, elapsed_s: float,
         "output_sha256": hashlib.sha256(text.encode()).hexdigest(),
         "completion_tokens": int(usage.get("completion_tokens", 0)),
         "request_wall_ms": elapsed_s * 1000.0,
+        "prefill_ms": float(timings.get("prefill_ms", 0.0)),
+        "prefill_tokens_per_second": float(
+            timings.get("prefill_tokens_per_sec", 0.0)),
         "decode_ms": float(timings.get("decode_ms", 0.0)),
         "decode_tokens_per_second": float(
             timings.get("decode_tokens_per_sec", 0.0)),
@@ -127,6 +130,7 @@ def summarize(rounds: list[dict], status_before: dict,
     total_wall_s = sum(result["wall_ms"] for result in rounds) / 1000.0
     latency = [row["request_wall_ms"] for row in rows]
     decode_tps = [row["decode_tokens_per_second"] for row in rows]
+    prefill_ms = [row["prefill_ms"] for row in rows]
     accept = [row["accept_rate"] for row in rows if row["spec_ran"]]
     before_batch = status_before.get("continuous_batching") or {}
     after_batch = status_after.get("continuous_batching") or {}
@@ -146,6 +150,7 @@ def summarize(rounds: list[dict], status_before: dict,
         "request_latency_ms_p50": percentile(latency, 0.50),
         "request_latency_ms_p95": percentile(latency, 0.95),
         "backend_decode_tokens_per_second_mean": statistics.fmean(decode_tps),
+        "backend_prefill_ms_mean": statistics.fmean(prefill_ms),
         "spec_rows": sum(1 for row in rows if row["spec_ran"]),
         "accept_rate_mean": statistics.fmean(accept) if accept else 0.0,
         "max_decode_batch_before": int(
@@ -211,7 +216,9 @@ def main() -> int:
     status_url = args.url.rstrip("/") + "/status"
     initial_status = get_json(status_url, args.timeout)
     batch = initial_status.get("continuous_batching") or {}
-    if not batch.get("enabled") or int(batch.get("capacity", 0)) < args.concurrency:
+    if (args.concurrency > 1 and
+            (not batch.get("enabled") or
+             int(batch.get("capacity", 0)) < args.concurrency)):
         raise RuntimeError(
             "server continuous-batching capacity is below requested concurrency")
 
