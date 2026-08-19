@@ -727,6 +727,11 @@ static ember_gen_result map_generate_result(
              res.termination_reason.c_str());
     r.empty_visible_output    = res.empty_visible_output;
     r.spec_decode_ran         = res.spec_decode_ran;
+    r.spec_cycles             = res.spec_cycles;
+    r.spec_provider_age_s     = res.spec_provider_age_s;
+    r.spec_provider_block_s   = res.spec_provider_block_s;
+    r.spec_head_s             = res.spec_head_s;
+    r.spec_verify_s           = res.spec_verify_s;
     snprintf(r.prefill_mode, sizeof(r.prefill_mode), "%s",
              res.prefill_mode.c_str());
     snprintf(r.prefill_reason, sizeof(r.prefill_reason), "%s",

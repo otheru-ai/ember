@@ -555,6 +555,11 @@ struct DeepSeek4Backend::ResidentSession {
     double decode_s = 0.0;
     long spec_offered = 0;
     long spec_accepted = 0;
+    int spec_cycles = 0;
+    double spec_provider_age_s = 0.0;
+    double spec_provider_block_s = 0.0;
+    double spec_head_s = 0.0;
+    double spec_verify_s = 0.0;
     std::string error;
 };
 
@@ -2695,6 +2700,11 @@ GenerateResult DeepSeek4Backend::resident_session_result(
     result.accept_rate = session.spec_offered > 0
         ? (float)session.spec_accepted / (float)session.spec_offered
         : 0.0f;
+    result.spec_cycles = session.spec_cycles;
+    result.spec_provider_age_s = session.spec_provider_age_s;
+    result.spec_provider_block_s = session.spec_provider_block_s;
+    result.spec_head_s = session.spec_head_s;
+    result.spec_verify_s = session.spec_verify_s;
     return result;
 }
 
@@ -2845,13 +2855,15 @@ DeepSeek4Backend::decode_batch(
             int32_t next_token = -1;
             int offered = 0;
             int accepted = 0;
+            DeepSeek4DSparkResidentTiming spec_timing;
             std::string spec_error;
             const auto finish_t0 = Clock::now();
             if (!deepseek4_dspark_resident_finish(
                     backend_, cfg_.device.gpu, w_, session.cache,
                     *spec_drafter_, session.spec_feat_window,
                     session.spec_proposal, committed_tokens, next_token,
-                    frontier_logits, offered, accepted, &spec_error) ||
+                    frontier_logits, offered, accepted, spec_timing,
+                    &spec_error) ||
                 committed_tokens.empty()) {
                 session.failed = true;
                 session.error = spec_error.empty()
@@ -2863,6 +2875,11 @@ DeepSeek4Backend::decode_batch(
             session.spec_ran = true;
             session.spec_offered += offered;
             session.spec_accepted += accepted;
+            ++session.spec_cycles;
+            session.spec_provider_age_s += spec_timing.provider_age_s;
+            session.spec_provider_block_s += spec_timing.provider_block_s;
+            session.spec_head_s += spec_timing.head_s;
+            session.spec_verify_s += spec_timing.verify_s;
 
             session.pending_ready = false;
             session.pending_forced_close_token = false;

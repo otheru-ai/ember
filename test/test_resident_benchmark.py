@@ -27,6 +27,11 @@ class ResidentBenchmarkTests(unittest.TestCase):
                     "prefill_tokens_per_sec": 1000.0,
                     "decode_ms": 20.0,
                     "decode_tokens_per_sec": 200.0,
+                    "spec_cycles": 2,
+                    "spec_provider_age_ms": 160.0,
+                    "spec_provider_block_ms": 20.0,
+                    "spec_head_ms": 6.0,
+                    "spec_verify_ms": 120.0,
                 },
                 "backend": {"spec_ran": True, "prefill_mode": "exact"},
             },
@@ -35,6 +40,7 @@ class ResidentBenchmarkTests(unittest.TestCase):
         self.assertEqual(row["completion_tokens"], 4)
         self.assertEqual(row["request_wall_ms"], 25.0)
         self.assertEqual(row["prefill_ms"], 12.5)
+        self.assertEqual(row["spec_provider_block_ms"], 20.0)
         self.assertTrue(row["spec_ran"])
         self.assertEqual(row["prefill_mode"], "exact")
 
@@ -51,6 +57,11 @@ class ResidentBenchmarkTests(unittest.TestCase):
                         "decode_tokens_per_second": 50.0,
                         "accept_rate": 0.5,
                         "spec_ran": True,
+                        "spec_cycles": 2,
+                        "spec_provider_age_ms": 160.0,
+                        "spec_provider_block_ms": 20.0,
+                        "spec_head_ms": 6.0,
+                        "spec_verify_ms": 120.0,
                     },
                     {
                         "request_wall_ms": 100.0,
@@ -58,6 +69,11 @@ class ResidentBenchmarkTests(unittest.TestCase):
                         "decode_tokens_per_second": 40.0,
                         "accept_rate": 0.75,
                         "spec_ran": True,
+                        "spec_cycles": 2,
+                        "spec_provider_age_ms": 180.0,
+                        "spec_provider_block_ms": 40.0,
+                        "spec_head_ms": 8.0,
+                        "spec_verify_ms": 140.0,
                     },
                 ],
             },
@@ -72,6 +88,11 @@ class ResidentBenchmarkTests(unittest.TestCase):
                         "decode_tokens_per_second": 30.0,
                         "accept_rate": 0.25,
                         "spec_ran": True,
+                        "spec_cycles": 2,
+                        "spec_provider_age_ms": 200.0,
+                        "spec_provider_block_ms": 60.0,
+                        "spec_head_ms": 10.0,
+                        "spec_verify_ms": 160.0,
                     },
                     {
                         "request_wall_ms": 200.0,
@@ -79,6 +100,11 @@ class ResidentBenchmarkTests(unittest.TestCase):
                         "decode_tokens_per_second": 20.0,
                         "accept_rate": 0.0,
                         "spec_ran": False,
+                        "spec_cycles": 0,
+                        "spec_provider_age_ms": 0.0,
+                        "spec_provider_block_ms": 0.0,
+                        "spec_head_ms": 0.0,
+                        "spec_verify_ms": 0.0,
                     },
                 ],
             },
@@ -100,6 +126,10 @@ class ResidentBenchmarkTests(unittest.TestCase):
         self.assertEqual(summary["backend_prefill_ms_mean"], 25.0)
         self.assertAlmostEqual(
             summary["round_tokens_per_second_stdev"], 28.284271247461902)
+        self.assertEqual(summary["spec_cycles"], 6)
+        self.assertEqual(summary["spec_provider_block_ms_total"], 120.0)
+        self.assertEqual(summary["spec_provider_block_ms_per_cycle"], 20.0)
+        self.assertEqual(summary["spec_verify_ms_per_cycle"], 70.0)
 
     @staticmethod
     def _round(wall_ms):

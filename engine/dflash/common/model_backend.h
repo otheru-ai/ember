@@ -293,6 +293,14 @@ struct GenerateResult {
     float                      accept_rate     = 0.0f;
     // True when spec decode actually ran (accept_rate==0 still needs a bandit update).
     bool                       spec_decode_ran = false;
+    // Resident XDNA proposal-pipeline attribution. These are zero for ordinary
+    // AR and monolithic DSpark. Provider age includes hidden overlap; provider
+    // block is the portion paid on this request's critical path.
+    int                        spec_cycles = 0;
+    double                     spec_provider_age_s = 0.0;
+    double                     spec_provider_block_s = 0.0;
+    double                     spec_head_s = 0.0;
+    double                     spec_verify_s = 0.0;
     // True when decode emitted only tokens that the API layer suppresses
     // (for example an immediate EOS/EOT). This is semantically equivalent
     // to zero output for clients and should take the same AR retry path as

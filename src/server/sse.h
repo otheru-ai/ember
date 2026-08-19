@@ -50,6 +50,11 @@ typedef struct {
     double       prefill_s;
     double       decode_s;
     double       accept_rate;
+    int          spec_cycles;
+    double       spec_provider_age_s;
+    double       spec_provider_block_s;
+    double       spec_head_s;
+    double       spec_verify_s;
     const char  *prefill_mode;    // borrowed backend execution label
     const char  *prefill_reason;  // borrowed backend policy label
     const char  *termination_reason; // borrowed progress-watchdog cause, or ""

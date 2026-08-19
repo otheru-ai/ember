@@ -1464,6 +1464,11 @@ static bool continue_tool_started_in_think(
     second.prefill_s += first.prefill_s;
     second.decode_s += first.decode_s;
     second.prefill_tokens += first.prefill_tokens;
+    second.spec_cycles += first.spec_cycles;
+    second.spec_provider_age_s += first.spec_provider_age_s;
+    second.spec_provider_block_s += first.spec_provider_block_s;
+    second.spec_head_s += first.spec_head_s;
+    second.spec_verify_s += first.spec_verify_s;
     second.budget_forced_close =
         first.budget_forced_close || second.budget_forced_close;
     second.degenerate_decode_close =
@@ -2747,6 +2752,11 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             st.prefill_s = res.prefill_s;
             st.decode_s = res.decode_s;
             st.accept_rate = res.accept_rate;
+            st.spec_cycles = res.spec_cycles;
+            st.spec_provider_age_s = res.spec_provider_age_s;
+            st.spec_provider_block_s = res.spec_provider_block_s;
+            st.spec_head_s = res.spec_head_s;
+            st.spec_verify_s = res.spec_verify_s;
             st.prefill_mode = res.prefill_mode;
             st.prefill_reason = res.prefill_reason;
             st.termination_reason = res.termination_reason;
@@ -3367,7 +3377,10 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             "\"prompt_tokens_details\":{\"cached_tokens\":%d},\"timings\":{"
             "\"prefill_ms\":%.1f,\"prefill_tokens\":%d,"
             "\"prefill_tokens_per_sec\":%.1f,"
-            "\"decode_ms\":%.1f,\"decode_tokens_per_sec\":%.2f},"
+            "\"decode_ms\":%.1f,\"decode_tokens_per_sec\":%.2f,"
+            "\"spec_cycles\":%d,\"spec_provider_age_ms\":%.1f,"
+            "\"spec_provider_block_ms\":%.1f,\"spec_head_ms\":%.1f,"
+            "\"spec_verify_ms\":%.1f},"
             "\"accept_rate\":%.3f,\"restored_prefix\":%d,"
             "\"backend\":{\"forced_close\":%s,\"degenerate\":%s,"
             "\"empty\":%s,\"spec_ran\":%s,\"prefill_mode\":\"%s\","
@@ -3375,7 +3388,11 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             client_prompt_tokens, completion_tokens,
             client_prompt_tokens + completion_tokens, restore_len,
             res.prefill_s * 1000.0, res.prefill_tokens, ptps,
-            res.decode_s * 1000.0, dtps, res.accept_rate, restore_len,
+            res.decode_s * 1000.0, dtps, res.spec_cycles,
+            res.spec_provider_age_s * 1000.0,
+            res.spec_provider_block_s * 1000.0,
+            res.spec_head_s * 1000.0, res.spec_verify_s * 1000.0,
+            res.accept_rate, restore_len,
             res.budget_forced_close ? "true" : "false",
             res.degenerate_decode_close ? "true" : "false",
             res.empty_visible_output ? "true" : "false",

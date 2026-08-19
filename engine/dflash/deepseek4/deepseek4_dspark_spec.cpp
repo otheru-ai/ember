@@ -747,6 +747,7 @@ bool deepseek4_dspark_resident_finish(
         std::vector<float> & last_logits,
         int & offered_candidates,
         int & accepted_candidates,
+        DeepSeek4DSparkResidentTiming & timing,
         std::string * error) {
     if (error) error->clear();
     committed_tokens.clear();
@@ -754,6 +755,7 @@ bool deepseek4_dspark_resident_finish(
     next_token = -1;
     offered_candidates = 0;
     accepted_candidates = 0;
+    timing = {};
     if (!proposal.impl_ || !proposal.impl_->job) {
         if (error) *error = "resident DSpark proposal is not pending";
         return false;
@@ -878,6 +880,10 @@ bool deepseek4_dspark_resident_finish(
                      impl->committed, impl->q, accept,
                      provider_age_ms, provider_block_ms, head_ms, verify_ms);
     }
+    timing.provider_age_s = provider_age_ms / 1000.0;
+    timing.provider_block_s = provider_block_ms / 1000.0;
+    timing.head_s = head_ms / 1000.0;
+    timing.verify_s = verify_ms / 1000.0;
     return true;
 }
 

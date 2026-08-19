@@ -335,6 +335,11 @@ static void test_usage_reports_prefill_policy(void) {
     st.prefill_s = 2.0;
     st.decode_s = 1.0;
     st.accept_rate = 0.75;
+    st.spec_cycles = 4;
+    st.spec_provider_age_s = 0.320;
+    st.spec_provider_block_s = 0.040;
+    st.spec_head_s = 0.012;
+    st.spec_verify_s = 0.240;
     st.prefill_mode = "hybrid";
     st.prefill_reason = "dspark_capture";
     st.termination_reason = "prompt_echo_detected";
@@ -345,6 +350,14 @@ static void test_usage_reports_prefill_policy(void) {
           "stream usage reports evaluated prefill tokens");
     CHECK(strstr(out.ptr, "\"prefill_tokens_per_sec\":100.0") != NULL,
           "stream usage reports exact prefill throughput denominator");
+    CHECK(strstr(out.ptr,
+          "\"spec_cycles\":4,\"spec_provider_age_ms\":320.0,") != NULL,
+          "stream usage reports resident proposal age and cycle count");
+    CHECK(strstr(out.ptr,
+          "\"spec_provider_block_ms\":40.0,\"spec_head_ms\":12.0,") != NULL,
+          "stream usage separates exposed NPU wait from tied-head time");
+    CHECK(strstr(out.ptr, "\"spec_verify_ms\":240.0") != NULL,
+          "stream usage reports authoritative target verification time");
     CHECK(strstr(out.ptr, "\"prefill_mode\":\"hybrid\"") != NULL,
           "stream usage reports actual prefill mode");
     CHECK(strstr(out.ptr, "\"prefill_reason\":\"dspark_capture\"") != NULL,

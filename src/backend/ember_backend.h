@@ -156,6 +156,14 @@ typedef struct {
     // req->snap_slot. The server commits its logical prefix entry only when set,
     // so a failed backend save can't poison the cache (#2).
     bool   snapshot_saved;
+    // Resident heterogeneous-pipeline timing. All fields are zero for ordinary
+    // AR and monolithic DSpark. Age includes overlap; block is only the wait
+    // exposed when the session reaches target verification.
+    int    spec_cycles;
+    double spec_provider_age_s;
+    double spec_provider_block_s;
+    double spec_head_s;
+    double spec_verify_s;
 } ember_gen_result;
 
 ember_gen_result ember_backend_generate(ember_backend *b,

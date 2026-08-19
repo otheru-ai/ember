@@ -211,7 +211,19 @@ private:
         ggml_backend_t, int, const DeepSeek4Weights &, DeepSeek4Cache &,
         const DSparkDrafter &, std::vector<float> &,
         DeepSeek4DSparkResidentProposal &, std::vector<int32_t> &,
-        int32_t &, std::vector<float> &, int &, int &, std::string *);
+        int32_t &, std::vector<float> &, int &, int &,
+        struct DeepSeek4DSparkResidentTiming &, std::string *);
+};
+
+// Per-cycle wall phases for the coarse resident pipeline. Provider age includes
+// useful queue/compute overlap; provider_block is only the wait still exposed
+// when this session reaches the GPU verifier. Keeping both prevents aggregate
+// throughput from hiding whether the NPU or target graph is the critical stage.
+struct DeepSeek4DSparkResidentTiming {
+    double provider_age_s = 0.0;
+    double provider_block_s = 0.0;
+    double head_s = 0.0;
+    double verify_s = 0.0;
 };
 
 // Submit the support-model half of one resident speculative cycle.  `committed`
@@ -247,6 +259,7 @@ bool deepseek4_dspark_resident_finish(
     std::vector<float> & last_logits,
     int & offered_candidates,
     int & accepted_candidates,
+    DeepSeek4DSparkResidentTiming & timing,
     std::string * error = nullptr);
 
 // Run DSpark speculative decode: draft block_size candidates with `drafter`,

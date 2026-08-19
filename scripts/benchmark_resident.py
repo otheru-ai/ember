@@ -67,6 +67,13 @@ def response_metrics(payload: dict, elapsed_s: float,
         "decode_ms": float(timings.get("decode_ms", 0.0)),
         "decode_tokens_per_second": float(
             timings.get("decode_tokens_per_sec", 0.0)),
+        "spec_cycles": int(timings.get("spec_cycles", 0)),
+        "spec_provider_age_ms": float(
+            timings.get("spec_provider_age_ms", 0.0)),
+        "spec_provider_block_ms": float(
+            timings.get("spec_provider_block_ms", 0.0)),
+        "spec_head_ms": float(timings.get("spec_head_ms", 0.0)),
+        "spec_verify_ms": float(timings.get("spec_verify_ms", 0.0)),
         "accept_rate": float(usage.get("accept_rate", 0.0)),
         "spec_ran": bool(backend.get("spec_ran", False)),
         "prefill_mode": str(backend.get("prefill_mode", "unknown")),
@@ -142,6 +149,12 @@ def summarize(rounds: list[dict], status_before: dict,
     prefill_ms = [row["prefill_ms"] for row in rows]
     accept = [row["accept_rate"] for row in rows if row["spec_ran"]]
     round_tps = [result["aggregate_tokens_per_second"] for result in rounds]
+    spec_cycles = sum(row["spec_cycles"] for row in rows)
+    spec_provider_age_ms = sum(row["spec_provider_age_ms"] for row in rows)
+    spec_provider_block_ms = sum(
+        row["spec_provider_block_ms"] for row in rows)
+    spec_head_ms = sum(row["spec_head_ms"] for row in rows)
+    spec_verify_ms = sum(row["spec_verify_ms"] for row in rows)
     before_batch = status_before.get("continuous_batching") or {}
     after_batch = status_after.get("continuous_batching") or {}
     decode_batches_delta = int(after_batch.get("decode_batches", 0)) - int(
@@ -165,6 +178,16 @@ def summarize(rounds: list[dict], status_before: dict,
         "backend_prefill_ms_mean": statistics.fmean(prefill_ms),
         "spec_rows": sum(1 for row in rows if row["spec_ran"]),
         "accept_rate_mean": statistics.fmean(accept) if accept else 0.0,
+        "spec_cycles": spec_cycles,
+        "spec_provider_age_ms_per_cycle": (
+            spec_provider_age_ms / spec_cycles if spec_cycles else 0.0),
+        "spec_provider_block_ms_total": spec_provider_block_ms,
+        "spec_provider_block_ms_per_cycle": (
+            spec_provider_block_ms / spec_cycles if spec_cycles else 0.0),
+        "spec_head_ms_per_cycle": (
+            spec_head_ms / spec_cycles if spec_cycles else 0.0),
+        "spec_verify_ms_per_cycle": (
+            spec_verify_ms / spec_cycles if spec_cycles else 0.0),
         "max_decode_batch_before": int(
             before_batch.get("max_decode_batch", 0)),
         "max_decode_batch_after": int(after_batch.get("max_decode_batch", 0)),

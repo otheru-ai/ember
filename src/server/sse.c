@@ -713,7 +713,10 @@ void ember_sse_finish(ember_sse_stream *st, const char *finish_reason,
         "\"prompt_tokens_details\":{\"cached_tokens\":%d},"
         "\"timings\":{\"prefill_ms\":%.1f,\"prefill_tokens\":%d,"
         "\"prefill_tokens_per_sec\":%.1f,\"decode_ms\":%.1f,"
-        "\"decode_tokens_per_sec\":%.2f},\"accept_rate\":%.3f,"
+        "\"decode_tokens_per_sec\":%.2f,\"spec_cycles\":%d,"
+        "\"spec_provider_age_ms\":%.1f,"
+        "\"spec_provider_block_ms\":%.1f,\"spec_head_ms\":%.1f,"
+        "\"spec_verify_ms\":%.1f},\"accept_rate\":%.3f,"
         "\"backend\":{\"prefill_mode\":\"%s\","
         "\"prefill_reason\":\"%s\",\"forced_close\":%s,"
         "\"degenerate\":%s",
@@ -722,6 +725,9 @@ void ember_sse_finish(ember_sse_stream *st, const char *finish_reason,
         st->prefill_s > 0.0 ? st->prefill_tokens / st->prefill_s : 0.0,
         st->decode_s * 1000.0,
         st->decode_s > 0.0 ? completion_tokens / st->decode_s : 0.0,
+        st->spec_cycles, st->spec_provider_age_s * 1000.0,
+        st->spec_provider_block_s * 1000.0,
+        st->spec_head_s * 1000.0, st->spec_verify_s * 1000.0,
         st->accept_rate,
         st->prefill_mode ? st->prefill_mode : "unknown",
         st->prefill_reason ? st->prefill_reason : "unknown",

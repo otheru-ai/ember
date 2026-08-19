@@ -1492,6 +1492,12 @@ speedup-confidence lower bound above the requested floor. The example requires
 at least 2% after variance, not merely a 2% point estimate. A lower per-request
 NPU latency without that aggregate gain is not sufficient. Failed comparison
 reports are still written and return exit status 1 so the evidence is retained.
+Each request also reports resident cycle count and cumulative proposal age,
+blocking provider wait, tied-head, and authoritative verifier time. The harness
+normalizes those fields per cycle. Proposal age may be large when it was hidden
+behind another session; `spec_provider_block_ms_per_cycle` is the actionable
+NPU critical-path cost. If the speed gate fails with near-zero provider block,
+the verifier or acceptance boundary—not XRT submission—is the next target.
 
 The fixed fixture was measured against the running production GPU-DSpark
 design before the maintenance-window A/B. After one warmup, five greedy
