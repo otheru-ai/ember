@@ -125,9 +125,12 @@ public:
                           bool ok);
 
     // One completion per decode session in the current plan. terminal is EOS or
-    // another clean stop; max_new_tokens is enforced independently.
+    // another clean stop. completed_tokens is the exact output width committed
+    // by the backend (one for AR, potentially wider for speculative decode);
+    // max_new_tokens is enforced independently.
     bool complete_decode(ContinuousBatchSubmissionId submission_id,
-                         ContinuousBatchSessionId id, bool ok, bool terminal);
+                         ContinuousBatchSessionId id, bool ok, bool terminal,
+                         int completed_tokens = 1);
 
     bool cancel(ContinuousBatchSessionId id);
     // Coordinator-side terminal transitions for a resident backend that

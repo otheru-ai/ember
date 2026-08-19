@@ -141,6 +141,9 @@ private:
     std::vector<DeepSeek4Cache> resident_cache_pool_;
     void swap_resident_state(ResidentSession &session);
     bool resident_sample_next(ResidentSession &session);
+    int resident_spec_commit_cap(const ResidentSession &session) const;
+    bool resident_submit_spec(ResidentSession &session,
+                              std::string *error = nullptr);
     void recycle_resident_cache(DeepSeek4Cache &cache) noexcept;
     void free_resident_sessions();
 

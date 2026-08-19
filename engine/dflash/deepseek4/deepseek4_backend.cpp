@@ -31,6 +31,9 @@ namespace dflash::common {
 namespace {
 using Clock = std::chrono::steady_clock;
 
+int ds4_spec_emit_budget(const GenerateRequest & req);
+int ds4_spec_context_budget(int committed);
+
 static double elapsed_s(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
 }
@@ -528,6 +531,7 @@ struct DeepSeek4Backend::ResidentSession {
     std::mt19937_64 sampler_rng{std::random_device{}()};
     std::vector<float> last_logits;
     std::vector<float> spec_feat_window;
+    DeepSeek4DSparkResidentProposal spec_proposal;
     std::vector<int32_t> history;
     std::vector<int32_t> generated;
     int prefilled = 0;
@@ -538,6 +542,8 @@ struct DeepSeek4Backend::ResidentSession {
     bool terminal = false;
     bool cancelled = false;
     bool failed = false;
+    bool spec_eligible = false;
+    bool spec_ran = false;
     bool budget_forced_close = false;
     bool degenerate_decode_close = false;
     std::string termination_reason;
@@ -547,6 +553,8 @@ struct DeepSeek4Backend::ResidentSession {
     size_t forced_close_index = 0;
     double prefill_s = 0.0;
     double decode_s = 0.0;
+    long spec_offered = 0;
+    long spec_accepted = 0;
     std::string error;
 };
 
@@ -637,6 +645,40 @@ bool DeepSeek4Backend::resident_sample_next(ResidentSession &session) {
     }
     session.pending_token = next;
     session.pending_ready = true;
+    return true;
+}
+
+int DeepSeek4Backend::resident_spec_commit_cap(
+        const ResidentSession &session) const {
+    if (!session.spec_eligible || !spec_enabled_ || !spec_drafter_ ||
+        !spec_xdna_draft_compute_ || !spec_xdna_draft_compute_->healthy() ||
+        !session.pending_ready || session.pending_forced_close_token ||
+        session.pending_token < 0 || session.terminal || session.failed ||
+        session.cancelled || deepseek4_is_eos_tok(session.pending_token, w_)) {
+        return 0;
+    }
+    const int request_left =
+        session.request.n_gen - (int)session.generated.size();
+    const int speculative_left =
+        ds4_spec_emit_budget(session.request) - (int)session.generated.size();
+    const int context_left = ds4_spec_context_budget(session.cache.cur_pos);
+    const int cap = std::min({4, request_left, speculative_left, context_left});
+    if (cap < 2) return 0;
+    return cap;
+}
+
+bool DeepSeek4Backend::resident_submit_spec(
+        ResidentSession &session, std::string *error) {
+    if (error) error->clear();
+    if (session.spec_proposal.pending()) return true;
+    const int cap = resident_spec_commit_cap(session);
+    if (cap < 2) return false;
+    if (!deepseek4_dspark_resident_prepare(
+            w_, *spec_drafter_, session.spec_feat_window,
+            session.cache.cur_pos, session.pending_token, cap,
+            *spec_xdna_draft_compute_, session.spec_proposal, error)) {
+        return false;
+    }
     return true;
 }
 
@@ -2507,7 +2549,15 @@ bool DeepSeek4Backend::resident_session_create(
     session->progress_cycle = ProgressCycleDetector(
         request.budget_hook.natural_close_token_ids, request.prompt,
         request.tool_region_open_ids, request.tool_region_close_ids);
-
+    const bool sampling_requires_ar = session->sampler.needs_logit_processing();
+    const int capture_spec_budget = std::min(
+        ds4_spec_emit_budget(request),
+        ds4_spec_context_budget((int)request.prompt.size()));
+    session->spec_eligible =
+        spec_xdna_draft_compute_ && spec_xdna_draft_compute_->healthy() &&
+        dspark_request_can_prepare(
+            spec_enabled_, spec_drafter_ != nullptr, request.force_ar_decode,
+            sampling_requires_ar, request.n_gen, capture_spec_budget);
     if (!resident_cache_pool_.empty()) {
         session->cache = std::move(resident_cache_pool_.back());
         resident_cache_pool_.pop_back();
@@ -2546,6 +2596,17 @@ bool DeepSeek4Backend::resident_session_create(
         recycle_resident_cache(session->cache);
         return false;
     }
+    if (session->pending_ready && session->spec_eligible) {
+        std::string spec_error;
+        if (!resident_submit_spec(*session, &spec_error) &&
+            !spec_error.empty()) {
+            std::fprintf(stderr,
+                         "[ds4-resident-spec] initial submit failed: %s; "
+                         "using target AR\n",
+                         spec_error.c_str());
+            session->spec_eligible = false;
+        }
+    }
     resident_sessions_.emplace(id, std::move(session));
     return true;
 }
@@ -2565,6 +2626,7 @@ bool DeepSeek4Backend::resident_session_cancel(
     if (it == resident_sessions_.end() || it->second->terminal ||
         it->second->cancelled || it->second->failed)
         return false;
+    it->second->spec_proposal.cancel();
     it->second->cancelled = true;
     it->second->terminal = true;
     it->second->pending_ready = false;
@@ -2622,13 +2684,17 @@ GenerateResult DeepSeek4Backend::resident_session_result(
     result.decode_s = session.decode_s;
     describe_prefill(result, cfg_.prefill_mode,
                      session.request.force_exact_prefill,
-                     /*prepare_spec=*/false,
+                     session.spec_eligible || session.spec_ran,
                      session.request.force_ar_decode,
                      session.prefill_tokens, w_.n_swa);
     result.budget_forced_close = session.budget_forced_close;
     result.degenerate_decode_close = session.degenerate_decode_close;
     result.termination_reason = session.termination_reason;
     result.snapshot_saved = session.inline_snapshot_saved;
+    result.spec_decode_ran = session.spec_ran;
+    result.accept_rate = session.spec_offered > 0
+        ? (float)session.spec_accepted / (float)session.spec_offered
+        : 0.0f;
     return result;
 }
 
@@ -2669,11 +2735,6 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
         session.request.prompt.begin() + old_pos,
         session.request.prompt.begin() + old_pos + count);
 
-    // Resident batching currently uses target-only decode. Temporarily disable
-    // DSpark capture while the session state is active; the global drafter and
-    // its worker-scoped scheduler are not session-isolated yet.
-    const bool spec_enabled = spec_enabled_;
-    spec_enabled_ = false;
     swap_resident_state(session);
     const auto t0 = Clock::now();
     int committed = -1;
@@ -2681,18 +2742,16 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
         committed = do_prefill(suffix, session.io, old_pos,
                                session.request.snap_pos,
                                session.request.snap_slot,
-                               /*allow_spec_capture=*/false,
+                               session.spec_eligible,
                                session.request.force_exact_prefill);
     } catch (...) {
         swap_resident_state(session);
-        spec_enabled_ = spec_enabled;
         session.failed = true;
         session.error = "resident prefill threw an exception";
         return {};
     }
     session.prefill_s += elapsed_s(t0);
     swap_resident_state(session);
-    spec_enabled_ = spec_enabled;
 
     if (committed < old_pos) {
         session.failed = true;
@@ -2709,6 +2768,18 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
                session.request.n_gen > 0 &&
                !resident_sample_next(session)) {
         return {};
+    }
+    if (session.pending_ready && session.spec_eligible &&
+        !session.spec_proposal.pending()) {
+        std::string spec_error;
+        if (!resident_submit_spec(session, &spec_error) &&
+            !spec_error.empty()) {
+            std::fprintf(stderr,
+                         "[ds4-resident-spec] prefill submit failed: %s; "
+                         "using target AR\n",
+                         spec_error.c_str());
+            session.spec_eligible = false;
+        }
     }
     return {consumed > 0, consumed};
 }
@@ -2745,9 +2816,123 @@ DeepSeek4Backend::decode_batch(
         }
     }
 
+    // Fill the provider queue before collecting any job.  In steady state most
+    // sessions already own a proposal submitted after their previous verify;
+    // this pass covers newly-ready and target-only handoff sessions.  The XDNA
+    // worker serializes NPU execution while the loop below performs GPU target
+    // work for an earlier session.
+    for (ContinuousBatchSessionId id : sessions) {
+        ResidentSession &session = *resident_sessions_.find(id)->second;
+        if (!session.spec_eligible || session.spec_proposal.pending()) continue;
+        std::string spec_error;
+        if (!resident_submit_spec(session, &spec_error) &&
+            !spec_error.empty()) {
+            std::fprintf(stderr,
+                         "[ds4-resident-spec] submit failed session=%" PRIu64
+                         ": %s; using target AR\n",
+                         (uint64_t)id, spec_error.c_str());
+            session.spec_eligible = false;
+        }
+    }
+
     for (ContinuousBatchSessionId id : sessions) {
         auto it = resident_sessions_.find(id);
         ResidentSession &session = *it->second;
+
+        if (session.spec_proposal.pending()) {
+            std::vector<int32_t> committed_tokens;
+            std::vector<float> frontier_logits;
+            int32_t next_token = -1;
+            int offered = 0;
+            int accepted = 0;
+            std::string spec_error;
+            const auto finish_t0 = Clock::now();
+            if (!deepseek4_dspark_resident_finish(
+                    backend_, cfg_.device.gpu, w_, session.cache,
+                    *spec_drafter_, session.spec_feat_window,
+                    session.spec_proposal, committed_tokens, next_token,
+                    frontier_logits, offered, accepted, &spec_error) ||
+                committed_tokens.empty()) {
+                session.failed = true;
+                session.error = spec_error.empty()
+                    ? "resident DSpark cycle failed" : spec_error;
+                fail_all("resident DSpark cycle failed");
+                return result;
+            }
+            session.decode_s += elapsed_s(finish_t0);
+            session.spec_ran = true;
+            session.spec_offered += offered;
+            session.spec_accepted += accepted;
+
+            session.pending_ready = false;
+            session.pending_forced_close_token = false;
+            int completed_tokens = 0;
+            for (int32_t token : committed_tokens) {
+                session.generated.push_back(token);
+                session.history.push_back(token);
+                session.io.emit(token);
+                ++completed_tokens;
+                const bool cycle_detected = session.progress_cycle.observe(token);
+                if (session.io.cancelled) {
+                    session.cancelled = true;
+                    session.terminal = true;
+                    break;
+                }
+                if (cycle_detected) {
+                    session.degenerate_decode_close = true;
+                    session.termination_reason =
+                        session.progress_cycle.reason_name();
+                    session.terminal = true;
+                    std::fprintf(
+                        stderr,
+                        "[deepseek4] resident speculative progress watchdog "
+                        "fired: reason=%s period=%zu span=%zu tokens\n",
+                        session.progress_cycle.reason_name(),
+                        session.progress_cycle.cycle_period(),
+                        session.progress_cycle.repeated_span());
+                    break;
+                }
+                if (deepseek4_is_eos_tok(token, w_) ||
+                    (int)session.generated.size() >= session.request.n_gen) {
+                    session.terminal = true;
+                    break;
+                }
+            }
+            if (session.terminal) {
+                result.push_back({id, true, true, completed_tokens});
+                continue;
+            }
+
+            session.last_logits = std::move(frontier_logits);
+            if (!resident_sample_next(session)) {
+                fail_all("resident speculative sampling failed");
+                return result;
+            }
+            if (!session.pending_forced_close_token &&
+                session.pending_token != next_token) {
+                session.failed = true;
+                session.error =
+                    "resident DSpark bonus disagrees with greedy frontier";
+                fail_all("resident DSpark frontier mismatch");
+                return result;
+            }
+
+            // Refill this session's proposal behind jobs already queued for
+            // other sessions.  Its NPU work can run while their GPU verifiers
+            // execute, and it remains owned by the session until the scheduler
+            // selects that session again.
+            std::string submit_error;
+            if (!resident_submit_spec(session, &submit_error) &&
+                !submit_error.empty()) {
+                std::fprintf(stderr,
+                             "[ds4-resident-spec] refill failed session=%" PRIu64
+                             ": %s; using target AR\n",
+                             (uint64_t)id, submit_error.c_str());
+                session.spec_eligible = false;
+            }
+            result.push_back({id, true, false, completed_tokens});
+            continue;
+        }
 
         const int32_t token = session.pending_token;
         const bool completed_forced_close =
@@ -2814,6 +2999,17 @@ DeepSeek4Backend::decode_batch(
         if (!resident_sample_next(session)) {
             fail_all("resident decode sampling failed");
             return result;
+        }
+        if (session.spec_eligible) {
+            std::string spec_error;
+            if (!resident_submit_spec(session, &spec_error) &&
+                !spec_error.empty()) {
+                std::fprintf(stderr,
+                             "[ds4-resident-spec] AR handoff submit failed "
+                             "session=%" PRIu64 ": %s; disabling resident spec\n",
+                             (uint64_t)id, spec_error.c_str());
+                session.spec_eligible = false;
+            }
         }
         result.push_back({id, true, false});
     }

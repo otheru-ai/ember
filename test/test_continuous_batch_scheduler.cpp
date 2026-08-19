@@ -39,6 +39,29 @@ static void complete_full_prefill(ContinuousBatchScheduler &scheduler,
 
 int main() {
     {
+        ContinuousBatchScheduler scheduler({1, 8, 2, 0});
+        auto id = scheduler.admit(0, 5).value();
+        CHECK(scheduler.mark_decode_ready(id, 0));
+        auto step = scheduler.plan(0);
+        CHECK(scheduler.complete_decode(step.submission_id, id,
+                                        true, false, 3));
+        CHECK(info(scheduler, id).generated_tokens == 3);
+        CHECK(scheduler.stats().decode_tokens_completed == 3);
+
+        CHECK(scheduler.mark_decode_ready(id, 1));
+        step = scheduler.plan(1);
+        // A backend may not overrun the remaining max_new_tokens budget.
+        CHECK(!scheduler.complete_decode(step.submission_id, id,
+                                         true, false, 3));
+        CHECK(scheduler.complete_decode(step.submission_id, id,
+                                        true, false, 2));
+        CHECK(info(scheduler, id).generated_tokens == 5);
+        CHECK(info(scheduler, id).state ==
+              ContinuousBatchSessionState::Finished);
+        CHECK(scheduler.stats().decode_tokens_completed == 5);
+    }
+
+    {
         ContinuousBatchScheduler scheduler({2, 8, 2, 10});
         auto a = scheduler.admit(10, 4);
         auto b = scheduler.admit(3, 2);

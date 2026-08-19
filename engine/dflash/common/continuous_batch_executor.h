@@ -23,6 +23,11 @@ struct ContinuousBatchDecodeCompletion {
     ContinuousBatchSessionId session_id = 0;
     bool ok = false;
     bool terminal = false;
+    // A speculative backend may commit more than one output token in a single
+    // engine submission.  The scheduler must account for the exact committed
+    // width or max_new_tokens/fairness telemetry silently drift.  Ordinary AR
+    // backends retain the historical one-token default.
+    int completed_tokens = 1;
 };
 
 struct ContinuousBatchMixedCompletion {

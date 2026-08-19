@@ -1380,3 +1380,55 @@ generic ROCMFP2 path. Laguna, NVFP4 conversion, M-RoPE, and llama-server
 rollback patches are different model/server seams. Ember's exact-replay path
 already recomputes accepted-token metrics after a shortened replay. None of
 those paths should be transplanted without a trained gfx1151 A/B.
+
+### 2026-08-19 research refresh and resident proposal pipeline
+
+A fresh implementation survey did not find another public engine scheduling a
+single token stream across CPU, gfx1151, and XDNA2 with an authoritative GPU
+verifier. The closest new technical reference is AMD's
+[Triton-XDNA](https://github.com/amd/Triton-XDNA): it targets AIE2P, exposes
+XRT and Linux HSA dispatch paths, and demonstrates that dense matmul and common
+transformer operators can approach hand-written AIE implementations. That is
+useful evidence for replacing individual prototype kernels with a compiler
+path once their mathematical boundary is stable. It does not remove Ember's
+harder scheduling problem: DSpark's proposal is slower than its HIP equivalent
+and only wins if its complete execution is hidden behind another session's
+target verification.
+
+The current [ROCmFPX](https://github.com/charlie12345/ROCmFPX) tree also now
+contains broader ROCmFP2 and routed-MoE work. Its relevant allocator,
+contiguity, and fast-math correctness fixes are recorded above. Its quant
+format and generic execution path are not drop-in replacements for Ember's
+published affine FP2 model or lucebox's gfx1151-specialized kernels. The
+research result is therefore to keep the tuned GPU target intact and improve
+the independent proposal pipeline, not replace the target engine.
+
+The resulting resident-session prototype gives every eligible session an
+opaque asynchronous XDNA proposal job and its own captured target-feature
+window. At a decode scheduling boundary Ember first fills the bounded provider
+queue, then collects and verifies proposals in session order. After session A
+finishes exact q=1 target verification, its next proposal is queued behind the
+already submitted work for session B; the NPU can prepare that proposal while
+the GPU verifies B. CPU workers retain routing and ROCMFP4 expert work. The GPU
+remains authoritative: only the exactly matching draft prefix is committed,
+the final target logit row produces the deferred frontier token, and EOS stops
+the verifier before it can advance KV beyond the sequence.
+
+Continuous batching now accounts for the exact number of tokens committed by
+one speculative completion rather than assuming every backend completion is
+one token. It rejects zero-width and over-budget completions before they can
+leave a session stuck in flight. The resident path is still opt-in through the
+XDNA DSpark provider and only admits greedy requests with enough token/context
+runway. The serial DSpark profitability scheduler is deliberately not reused:
+its wall-clock cost model treats overlapped NPU time as request-critical and
+would make the wrong decision for aggregate resident throughput. A future
+resident gate must use measured GPU wait time and aggregate tokens/second.
+
+GPU-free tests cover wide-completion accounting and failure recovery. The full
+47-test host gauntlet passes, the ROCm/gfx1151 container build links, and the
+`ember:xdna-gen42` release image packages the pinned XRT runtime, provider, AIE
+artifacts, and new server binary. These are build/correctness gates, not a
+performance claim. The remaining decisive test requires exclusive access to
+the 85.3-GiB target model: run the two-session differential validator, then A/B
+resident target-only throughput against resident XDNA proposals while recording
+acceptance, NPU wait exposed on the critical path, and shared-fabric slowdown.

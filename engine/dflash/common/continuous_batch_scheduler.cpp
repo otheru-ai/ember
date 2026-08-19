@@ -239,7 +239,8 @@ bool ContinuousBatchScheduler::complete_prefill(
 
 bool ContinuousBatchScheduler::complete_decode(
         ContinuousBatchSubmissionId submission_id,
-        ContinuousBatchSessionId id, bool ok, bool terminal) {
+        ContinuousBatchSessionId id, bool ok, bool terminal,
+        int completed_tokens) {
     Slot *slot = find(id);
     if (!slot ||
         slot->info.state != ContinuousBatchSessionState::DecodeInFlight ||
@@ -255,9 +256,12 @@ bool ContinuousBatchScheduler::complete_decode(
         if (!slot->info.cancel_requested) ++lifetime_stats_.failures;
         return true;
     }
-    ++slot->info.generated_tokens;
+    const int remaining =
+        slot->info.max_new_tokens - slot->info.generated_tokens;
+    if (completed_tokens <= 0 || completed_tokens > remaining) return false;
+    slot->info.generated_tokens += completed_tokens;
     slot->in_flight_submission = 0;
-    ++lifetime_stats_.decode_tokens_completed;
+    lifetime_stats_.decode_tokens_completed += completed_tokens;
     if (slot->info.cancel_requested) {
         slot->info.state = ContinuousBatchSessionState::Cancelled;
     } else if (terminal ||

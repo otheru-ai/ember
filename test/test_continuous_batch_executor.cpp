@@ -25,6 +25,7 @@ struct FakeBackend : ContinuousBatchWorkBackend {
     bool malformed_prefill = false;
     bool reverse_decode = false;
     int terminal_after = 0;
+    int decode_width = 1;
     int prefill_calls = 0;
     int decode_calls = 0;
     int mixed_calls = 0;
@@ -47,9 +48,10 @@ struct FakeBackend : ContinuousBatchWorkBackend {
         if (throw_decode) throw std::runtime_error("decode");
         std::vector<ContinuousBatchDecodeCompletion> result;
         for (ContinuousBatchSessionId id : ids) {
-            int n = ++decoded[id];
+            int n = (decoded[id] += decode_width);
             result.push_back({id, true, terminal_after > 0 &&
-                                        n >= terminal_after});
+                                        n >= terminal_after,
+                              decode_width});
         }
         if (malformed_decode && !result.empty()) result.pop_back();
         if (reverse_decode) std::reverse(result.begin(), result.end());
@@ -75,9 +77,10 @@ struct FakeBackend : ContinuousBatchWorkBackend {
             result.prefill = {true, requested};
         }
         for (ContinuousBatchSessionId id : ids) {
-            int n = ++decoded[id];
+            int n = (decoded[id] += decode_width);
             result.decode.push_back(
-                {id, true, terminal_after > 0 && n >= terminal_after});
+                {id, true, terminal_after > 0 && n >= terminal_after,
+                 decode_width});
         }
         if (malformed_decode && !result.decode.empty()) {
             result.decode.pop_back();
@@ -103,6 +106,39 @@ static void make_ready(ContinuousBatchScheduler &scheduler,
 }
 
 int main() {
+    {
+        // A speculative backend can retire an accepted block in one engine
+        // submission; scheduler accounting must advance by the whole block.
+        ContinuousBatchScheduler scheduler({1, 8, 2, 0});
+        FakeBackend backend;
+        backend.decode_width = 3;
+        ContinuousBatchExecutor executor(scheduler, backend);
+        auto id = scheduler.admit(0, 5).value();
+        make_ready(scheduler, id, 0);
+        executor.run_once(0);
+        auto session = scheduler.session(id);
+        CHECK(session.has_value());
+        CHECK(session && session->generated_tokens == 3);
+        CHECK(session && session->state ==
+              ContinuousBatchSessionState::DecodeIdle);
+        CHECK(scheduler.stats().decode_tokens_completed == 3);
+    }
+
+    {
+        // A malformed speculative width must fail the plan rather than leave
+        // its session stuck DecodeInFlight after scheduler rejection.
+        ContinuousBatchScheduler scheduler({1, 8, 2, 0});
+        FakeBackend backend;
+        backend.decode_width = 3;
+        ContinuousBatchExecutor executor(scheduler, backend);
+        auto id = scheduler.admit(0, 2).value();
+        make_ready(scheduler, id, 0);
+        executor.run_once(0);
+        CHECK(state(scheduler, id) == ContinuousBatchSessionState::Failed);
+        CHECK(executor.stats().malformed_results == 1);
+        CHECK(!scheduler.submission_in_flight());
+    }
+
     {
         ContinuousBatchScheduler scheduler({3, 8, 2, 0});
         FakeBackend backend;

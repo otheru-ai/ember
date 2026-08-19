@@ -38,6 +38,14 @@ bool ContinuousBatchExecutor::valid_decode(
                       row.session_id) == plan.decode_sessions.end()) {
             return false;
         }
+        if (row.ok) {
+            const auto session = scheduler_.session(row.session_id);
+            if (!session || row.completed_tokens <= 0 ||
+                row.completed_tokens >
+                    session->max_new_tokens - session->generated_tokens) {
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -90,7 +98,8 @@ void ContinuousBatchExecutor::apply_decode(
             });
         if (!it->ok) ++stats_.backend_failures;
         if (!scheduler_.complete_decode(plan.submission_id, expected,
-                                        it->ok, it->terminal)) {
+                                        it->ok, it->terminal,
+                                        it->completed_tokens)) {
             ++stats_.completion_rejections;
         }
     }

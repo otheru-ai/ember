@@ -38,6 +38,7 @@
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -45,6 +46,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace dflash::common {
@@ -218,6 +221,10 @@ private:
                 logits_all.insert(logits_all.end(), logits1.begin(), logits1.end());
             }
             if (t + 1 < n && tokens[(size_t) t + 1] != am1[0]) break;
+            // No token after EOS belongs to the sequence.  Besides avoiding
+            // pointless work, this prevents an accepted speculative block from
+            // advancing resident KV beyond the terminal token.
+            if (deepseek4_is_eos_tok(tokens[(size_t)t], w_)) break;
         }
         verify_features_ = std::move(feat_all);
         if (keep_logits_) verify_logits_ = std::move(logits_all);
@@ -643,6 +650,230 @@ void deepseek4_spec_rollback_apply(const DeepSeek4SpecRollback & rollback,
                                    int commit_pos,
                                    bool restore_prev) {
     spec_rollback_apply_impl(rollback, weights, cache, commit_pos, restore_prev);
+}
+
+struct DeepSeek4DSparkResidentProposal::Impl {
+    int committed = 0;
+    int32_t seed = -1;
+    int q = 0;
+    std::vector<float> noise_embed;
+    std::unique_ptr<XdnaDSparkDraftJob> job;
+    SpecClock::time_point submitted_at{};
+};
+
+DeepSeek4DSparkResidentProposal::DeepSeek4DSparkResidentProposal() = default;
+DeepSeek4DSparkResidentProposal::~DeepSeek4DSparkResidentProposal() = default;
+DeepSeek4DSparkResidentProposal::DeepSeek4DSparkResidentProposal(
+    DeepSeek4DSparkResidentProposal &&) noexcept = default;
+DeepSeek4DSparkResidentProposal &
+DeepSeek4DSparkResidentProposal::operator=(
+    DeepSeek4DSparkResidentProposal &&) noexcept = default;
+
+bool DeepSeek4DSparkResidentProposal::pending() const {
+    return impl_ && impl_->job;
+}
+
+void DeepSeek4DSparkResidentProposal::cancel() noexcept {
+    if (impl_ && impl_->job) impl_->job->cancel();
+    impl_.reset();
+}
+
+bool deepseek4_dspark_resident_prepare(
+        const DeepSeek4Weights & target_w,
+        const DSparkDrafter & drafter,
+        const std::vector<float> & feature_window,
+        int committed,
+        int32_t seed,
+        int max_commit_tokens,
+        XdnaDSparkDraftCompute & xdna_draft_compute,
+        DeepSeek4DSparkResidentProposal & proposal,
+        std::string * error) {
+    if (error) error->clear();
+    if (proposal.pending()) {
+        if (error) *error = "resident DSpark proposal already pending";
+        return false;
+    }
+    const int n_embd = target_w.n_embd;
+    const int feat_row = drafter.n_target_layers * n_embd;
+    if (committed < 0 || seed < 0 || n_embd <= 0 || feat_row <= 0 ||
+        drafter.block_size <= 0 || max_commit_tokens < 2 ||
+        feature_window.size() % (size_t)feat_row != 0 ||
+        feature_window.size() / (size_t)feat_row > (size_t)target_w.n_swa ||
+        !xdna_draft_compute.healthy()) {
+        if (error) *error = "resident DSpark proposal inputs are invalid";
+        return false;
+    }
+
+    auto impl = std::make_unique<DeepSeek4DSparkResidentProposal::Impl>();
+    impl->committed = committed;
+    impl->seed = seed;
+    // Exact-prefix verification is deliberately capped at the validated
+    // ratio-4 width.  Unlike the batched verifier it never feeds a rejected
+    // token, so no rollback state is required.
+    impl->q = std::min({4, drafter.block_size, max_commit_tokens});
+    impl->noise_embed.resize((size_t)n_embd * drafter.block_size);
+    std::vector<int32_t> noise_ids((size_t)drafter.block_size,
+                                   drafter.mask_token_id);
+    noise_ids[0] = seed;
+    if (!target_w.embedder.embed(noise_ids.data(), drafter.block_size,
+                                 impl->noise_embed.data())) {
+        if (error) *error = "resident DSpark seed embedding failed";
+        return false;
+    }
+
+    const int ctx_len = (int)(feature_window.size() / (size_t)feat_row);
+    XdnaDSparkDraftRequest request;
+    request.committed = committed;
+    request.ctx_len = ctx_len;
+    request.noise_embed = impl->noise_embed.data();
+    request.ctx_features = ctx_len > 0 ? feature_window.data() : nullptr;
+    impl->submitted_at = SpecClock::now();
+    impl->job = xdna_draft_compute.submit(request, error);
+    if (!impl->job) return false;
+    proposal.impl_ = std::move(impl);
+    return true;
+}
+
+bool deepseek4_dspark_resident_finish(
+        ggml_backend_t backend,
+        int device,
+        const DeepSeek4Weights & target_w,
+        DeepSeek4Cache & target_cache,
+        const DSparkDrafter & drafter,
+        std::vector<float> & feature_window,
+        DeepSeek4DSparkResidentProposal & proposal,
+        std::vector<int32_t> & committed_tokens,
+        int32_t & next_token,
+        std::vector<float> & last_logits,
+        int & offered_candidates,
+        int & accepted_candidates,
+        std::string * error) {
+    if (error) error->clear();
+    committed_tokens.clear();
+    last_logits.clear();
+    next_token = -1;
+    offered_candidates = 0;
+    accepted_candidates = 0;
+    if (!proposal.impl_ || !proposal.impl_->job) {
+        if (error) *error = "resident DSpark proposal is not pending";
+        return false;
+    }
+
+    std::unique_ptr<DeepSeek4DSparkResidentProposal::Impl> impl =
+        std::move(proposal.impl_);
+    XdnaDSparkDraftOutput provider_output;
+    if (!impl->job->wait(provider_output, error)) return false;
+    const double provider_ms = spec_ms_since(impl->submitted_at);
+    const int n_embd = target_w.n_embd;
+    const size_t hidden_need =
+        (size_t)n_embd * (size_t)drafter.block_size;
+    if (provider_output.hidden.size() != hidden_need) {
+        if (error) *error = "resident DSpark provider returned wrong hidden shape";
+        return false;
+    }
+
+    DeepSeek4DFlashTarget target(
+        target_w, target_cache, backend, device, nullptr,
+        drafter.capture_layer_ids, drafter.mask_token_id,
+        /*strict_verify=*/true);
+    target.set_keep_logits(true);
+    DraftWeights draft_weights = make_dspark_shim(drafter);
+    std::vector<float> padded_hidden(
+        (size_t)n_embd * ((size_t)drafter.block_size + 1), 0.0f);
+    std::memcpy(padded_hidden.data() + n_embd,
+                provider_output.hidden.data(),
+                hidden_need * sizeof(float));
+    std::vector<int32_t> draft_tokens;
+    bool head_ok = dspark_markov_correct_greedy_chain_fused(
+        draft_weights, backend, target.lm_head_tensor(), padded_hidden.data(),
+        impl->q, impl->seed, draft_tokens);
+    if (!head_ok) {
+        head_ok = dspark_markov_correct_greedy_chain(
+            draft_weights, backend, target, padded_hidden.data(), impl->q,
+            impl->seed, 0.0f, draft_tokens);
+    }
+    if (!head_ok || (int)draft_tokens.size() < impl->q) {
+        std::vector<int32_t> projected;
+        if (!target.project_hidden_to_tokens(provider_output.hidden.data(),
+                                             impl->q - 1, projected)) {
+            if (error) *error = "resident DSpark tied head failed";
+            return false;
+        }
+        draft_tokens.clear();
+        draft_tokens.push_back(impl->seed);
+        draft_tokens.insert(draft_tokens.end(), projected.begin(),
+                            projected.end());
+    }
+    if ((int)draft_tokens.size() > impl->q)
+        draft_tokens.resize((size_t)impl->q);
+
+    std::vector<int32_t> target_argmax;
+    int verify_last = -1;
+    const SpecClock::time_point verify_t0 = SpecClock::now();
+    if (!target.verify_batch(draft_tokens, impl->committed, verify_last,
+                             &target_argmax)) {
+        if (error) *error = "resident DSpark exact target verification failed";
+        return false;
+    }
+    const double verify_ms = spec_ms_since(verify_t0);
+
+    int accept = 1;
+    for (int index = 0; index + 1 < (int)draft_tokens.size(); ++index) {
+        if (index >= (int)target_argmax.size() ||
+            draft_tokens[(size_t)index + 1] != target_argmax[(size_t)index])
+            break;
+        ++accept;
+        if (deepseek4_is_eos_tok(draft_tokens[(size_t)index + 1], target_w))
+            break;
+    }
+    if ((int)target_argmax.size() < accept ||
+        target.last_verify_n() != accept) {
+        if (error) *error = "resident DSpark verifier frontier mismatch";
+        return false;
+    }
+
+    std::vector<float> verify_logits;
+    if (!target.read_verify_logits(accept, verify_logits) ||
+        verify_logits.size() != (size_t)accept * target_w.n_vocab) {
+        if (error) *error = "resident DSpark verifier logits missing";
+        return false;
+    }
+    last_logits.assign(
+        verify_logits.end() - target_w.n_vocab, verify_logits.end());
+    next_token = target_argmax[(size_t)accept - 1];
+    committed_tokens.assign(draft_tokens.begin(),
+                            draft_tokens.begin() + accept);
+    offered_candidates = impl->q - 1;
+    accepted_candidates = accept - 1;
+
+    const int feat_row = drafter.n_target_layers * n_embd;
+    const std::vector<float> & features = target.last_features();
+    if (feat_row <= 0 ||
+        features.size() != (size_t)accept * (size_t)feat_row) {
+        if (error) *error = "resident DSpark verifier features missing";
+        return false;
+    }
+    for (int index = 0; index < accept; ++index) {
+        const size_t rows = feature_window.size() / (size_t)feat_row;
+        if (rows >= (size_t)target_w.n_swa) {
+            std::memmove(feature_window.data(),
+                         feature_window.data() + feat_row,
+                         (feature_window.size() - (size_t)feat_row) *
+                             sizeof(float));
+            feature_window.resize(feature_window.size() - (size_t)feat_row);
+        }
+        const float * row = features.data() + (size_t)index * feat_row;
+        feature_window.insert(feature_window.end(), row, row + feat_row);
+    }
+
+    if (spec_env_flag("DFLASH_DS4_TIMING")) {
+        std::fprintf(stderr,
+                     "[ds4-resident-spec] pos=%d q=%d accept=%d "
+                     "provider_wait=%.1fms verify=%.1fms\n",
+                     impl->committed, impl->q, accept,
+                     provider_ms, verify_ms);
+    }
+    return true;
 }
 
 // Batched target verify + capture: wraps the existing multi-token

@@ -32,12 +32,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace dflash::common {
 
 class XdnaDSparkDraftCompute;
+class XdnaDSparkDraftJob;
 
 // The drafter weights. `core` reuses DeepSeek4Weights for the n_layer decoder
 // blocks + per-layer tensors + metadata + out_norm + output_hc_* tail; its
@@ -176,6 +178,76 @@ void deepseek4_spec_rollback_apply(const DeepSeek4SpecRollback & rollback,
                                    DeepSeek4Cache & cache,
                                    int commit_pos,
                                    bool restore_prev);
+
+// One asynchronous, session-owned DSpark proposal.  Its implementation keeps
+// the provider job and all phase-local buffers opaque so ResidentSession does
+// not acquire XRT/ggml details.  A proposal is submitted while another
+// session's target work is eligible to run, then finished later through the
+// exact q=1 verifier.  Moving is allowed; copying would duplicate job ownership.
+class DeepSeek4DSparkResidentProposal {
+public:
+    DeepSeek4DSparkResidentProposal();
+    ~DeepSeek4DSparkResidentProposal();
+    DeepSeek4DSparkResidentProposal(DeepSeek4DSparkResidentProposal &&) noexcept;
+    DeepSeek4DSparkResidentProposal & operator=(
+        DeepSeek4DSparkResidentProposal &&) noexcept;
+    DeepSeek4DSparkResidentProposal(
+        const DeepSeek4DSparkResidentProposal &) = delete;
+    DeepSeek4DSparkResidentProposal & operator=(
+        const DeepSeek4DSparkResidentProposal &) = delete;
+
+    bool pending() const;
+    void cancel() noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    friend bool deepseek4_dspark_resident_prepare(
+        const DeepSeek4Weights &, const DSparkDrafter &,
+        const std::vector<float> &, int, int32_t, int,
+        XdnaDSparkDraftCompute &, DeepSeek4DSparkResidentProposal &,
+        std::string *);
+    friend bool deepseek4_dspark_resident_finish(
+        ggml_backend_t, int, const DeepSeek4Weights &, DeepSeek4Cache &,
+        const DSparkDrafter &, std::vector<float> &,
+        DeepSeek4DSparkResidentProposal &, std::vector<int32_t> &,
+        int32_t &, std::vector<float> &, int &, int &, std::string *);
+};
+
+// Submit the support-model half of one resident speculative cycle.  `committed`
+// is the KV frontier and `seed` is the already-sampled token not yet in KV.
+// max_commit_tokens includes the seed and bounds both target mutation and the
+// number of tokens later reported to the continuous-batch scheduler.
+bool deepseek4_dspark_resident_prepare(
+    const DeepSeek4Weights & target_w,
+    const DSparkDrafter & drafter,
+    const std::vector<float> & feature_window,
+    int committed,
+    int32_t seed,
+    int max_commit_tokens,
+    XdnaDSparkDraftCompute & xdna_draft_compute,
+    DeepSeek4DSparkResidentProposal & proposal,
+    std::string * error = nullptr);
+
+// Collect a submitted proposal, run the tied DSpark head and exact-prefix
+// target verifier, append the accepted committed input tokens to `committed`,
+// and return the deferred target bonus in `next_token`.  `last_logits` is the
+// target distribution that produced next_token, preserving the ordinary AR
+// seam if speculation is disabled on the following scheduler turn.
+bool deepseek4_dspark_resident_finish(
+    ggml_backend_t backend,
+    int device,
+    const DeepSeek4Weights & target_w,
+    DeepSeek4Cache & target_cache,
+    const DSparkDrafter & drafter,
+    std::vector<float> & feature_window,
+    DeepSeek4DSparkResidentProposal & proposal,
+    std::vector<int32_t> & committed_tokens,
+    int32_t & next_token,
+    std::vector<float> & last_logits,
+    int & offered_candidates,
+    int & accepted_candidates,
+    std::string * error = nullptr);
 
 // Run DSpark speculative decode: draft block_size candidates with `drafter`,
 // verify against the DS4 target in one batched forward, accept the matching
