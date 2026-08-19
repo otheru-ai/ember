@@ -129,6 +129,7 @@ private:
     std::string                    spec_draft_path_;
     std::unique_ptr<DSparkDrafter> spec_drafter_;
     std::unique_ptr<XdnaDSparkDraftCompute> spec_xdna_draft_compute_;
+    std::vector<ember_xdna_dspark_tensor_view_v1> spec_xdna_weight_views_;
     std::vector<float>             spec_feat_window_;
 
     bool load_spec_drafter();

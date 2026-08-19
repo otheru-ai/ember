@@ -463,6 +463,91 @@ bool concat_q8_projection_rows(const std::vector<uint8_t> & first,
     return true;
 }
 
+bool pack_q8_grouped_projection_corrected_bf16(
+        const void * raw, size_t raw_bytes, int k, int group_n, int groups,
+        int padded_group_n, std::vector<uint8_t> & packed,
+        std::string * error) {
+    packed.clear();
+    const size_t group_raw_bytes = q8_projection_bytes(k, group_n);
+    const size_t group_packed_bytes =
+        q8_projection_task_packed_bytes(k, padded_group_n);
+    if (!raw || !group_raw_bytes || !group_packed_bytes || groups <= 0 ||
+        padded_group_n < group_n ||
+        static_cast<size_t>(groups) >
+            std::numeric_limits<size_t>::max() / group_raw_bytes ||
+        raw_bytes < static_cast<size_t>(groups) * group_raw_bytes ||
+        static_cast<size_t>(groups) >
+            std::numeric_limits<size_t>::max() / group_packed_bytes) {
+        if (error) *error = "invalid grouped Q8 projection shape or buffer";
+        return false;
+    }
+    const int rows = projection_rows(padded_group_n);
+    const int physical_groups_per_logical =
+        padded_group_n / (rows * kQ8OutputsPerRow);
+    constexpr int task_k_tiles = 4;
+    const int tasks_per_group = (k / kQ8TileK) / task_k_tiles;
+    const size_t task_stride =
+        static_cast<size_t>(task_k_tiles * rows) *
+            kQ8CorrectedTileBytes +
+        2 * sizeof(uint16_t);
+    if (rows <= 0 || physical_groups_per_logical <= 0 ||
+        tasks_per_group <= 0) {
+        if (error) *error = "invalid grouped Q8 descriptor geometry";
+        return false;
+    }
+    const size_t physical_groups_size =
+        static_cast<size_t>(physical_groups_per_logical);
+    const size_t tasks_per_group_size =
+        static_cast<size_t>(tasks_per_group);
+    packed.assign(static_cast<size_t>(groups) * group_packed_bytes, 0);
+    const auto * source = static_cast<const uint8_t *>(raw);
+    for (int group = 0; group < groups; ++group) {
+        std::vector<uint8_t> logical;
+        std::vector<uint8_t> padded;
+        if (!pack_q8_projection_corrected_bf16(
+                source + static_cast<size_t>(group) * group_raw_bytes,
+                group_raw_bytes, k, group_n, logical, error) ||
+            !pad_q8_projection_rows(
+                logical, k, group_n, padded_group_n, padded, error)) {
+            packed.clear();
+            return false;
+        }
+        // A projection descriptor consumes weights in
+        // [column][physical output group][K task] order.  Concatenating the
+        // independently padded logical matrices would instead produce
+        // [logical group][column][K task], so every column after column zero
+        // would read another head group's weights.  Interleave logical groups
+        // beneath each AIE column to match q8_projection_universal_v4.py.
+        for (int column = 0; column < kQ8AieColumns; ++column) {
+            for (int physical = 0;
+                 physical < physical_groups_per_logical; ++physical) {
+                for (int task = 0; task < tasks_per_group; ++task) {
+                    const size_t source_task =
+                        ((static_cast<size_t>(column) *
+                              physical_groups_size +
+                          static_cast<size_t>(physical)) *
+                             tasks_per_group_size +
+                         static_cast<size_t>(task)) * task_stride;
+                    const size_t destination_group =
+                        static_cast<size_t>(group) *
+                            physical_groups_size +
+                        static_cast<size_t>(physical);
+                    const size_t destination_task =
+                        ((static_cast<size_t>(column) *
+                              static_cast<size_t>(groups) *
+                              physical_groups_size +
+                          destination_group) * tasks_per_group_size +
+                         static_cast<size_t>(task)) * task_stride;
+                    std::memcpy(packed.data() + destination_task,
+                                padded.data() + source_task, task_stride);
+                }
+            }
+        }
+    }
+    return packed.size() ==
+        static_cast<size_t>(groups) * group_packed_bytes;
+}
+
 size_t q8_gemm_m32_packed_bytes(int k, int n) {
     if (!q8_supported_shape(k, n) || k % 512 != 0 ||
         n % kQ8OutputsPerRow != 0) return 0;

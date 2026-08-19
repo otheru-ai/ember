@@ -1283,6 +1283,34 @@ the CPU, NPU, and GPU contend for the same memory fabric.  AVX-512 changes
 reduction order, so draft-verifier acceptance and confidence-width metrics are
 release gates even though the trained numerical check passes.
 
+### Whole-draft route and proposal stability
+
+The complete asynchronous provider now runs the three DSpark layers with the
+resident NPU Q8 projections/shared experts and AVX-512 routed experts. On the
+physical Ryzen AI MAX+ 395, the low-overhead eight-case differential measured
+`66.387 ms` provider time, `10.449 ms` HIP-drafter time, and `0.561 ms` for the
+GPU main/context-KV preprojection. Unlike the earlier full debug mode, route
+telemetry does not execute CPU reference projections, so those timings remain
+representative.
+
+Each router reports the score gap between its sixth selected expert and best
+rejected expert. Several real membership flips occurred at gaps below `0.01`;
+for example, one layer-2 boundary selected expert 61 instead of HIP's 134.
+However, route flips are not the sole source of proposal differences: one of
+the two mismatching cases had identical expert sets at every layer and token.
+The eight cases produced six exact six-token Markov chains, a mean common
+prefix of `4.75/6`, and a minimum common prefix of one token. The target
+verifier remains authoritative, so this is an acceptance/throughput issue, not
+an output-correctness escape.
+
+That result rejects a router-only stabilizer as the next optimization. It
+could remove some discontinuities but cannot recover all proposal divergence,
+and reproducing the complete HIP drafter merely to obtain route IDs would erase
+the GPU-overlap objective. The next decisive gate is end-to-end single- and
+two-session acceptance/throughput with the target verifier; optimize a
+particular numerical boundary only if that measurement identifies acceptance
+loss as the limiting term.
+
 ### 2026-08-18 XRT scheduling and buffer-sharing audit
 
 The whole-draft scheduler design was rechecked against XRT's current native
@@ -1307,6 +1335,11 @@ command-BO argument limits (`AIESW-41368`) and fixes DMA-BUF descriptor lifetime
 on import. A whole three-layer command list can now grow with its real BO set;
 it must still be measured against the shorter resident phase lists because
 atomic submission does not make a long NPU critical path free.
+
+The 2026-08-19 refresh found `xdna-driver` main at `79e89d20`, three commits
+past Ember's pin. Two only update validation/firmware archive pins and the third
+adds a 1-GiB shim-DMA loopback test; none changes the runtime or synchronization
+contract, so Ember intentionally retains the validated `cdabc45b` tuple.
 
 ### ROCmFPX 2026-08-17 update audit
 

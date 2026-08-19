@@ -161,6 +161,11 @@ void rope_row(float * row, int head_dim, int rope_dims, int32_t position,
 
 }  // namespace
 
+void dspark_parallel_for(int count,
+                         const std::function<void(int)> & function) {
+    cpu_pool().run(count, function);
+}
+
 bool dspark_weighted_rms_norm(const float * input, const float * weight,
                               int rows, int width, float epsilon,
                               std::vector<float> & output,
@@ -357,14 +362,17 @@ bool dspark_route_topk(const float * normalized, const float * router_weight,
                        const float * selection_bias, int tokens, int n_embd,
                        int n_experts, int top_k, float expert_scale,
                        std::vector<int32_t> & selected,
-                       std::vector<float> & weights, std::string * error) {
+                       std::vector<float> & weights, std::string * error,
+                       std::vector<DsparkRouteBoundary> * boundaries) {
     selected.clear(); weights.clear();
+    if (boundaries) boundaries->clear();
     if (error) error->clear();
     if (!normalized || !router_weight || tokens <= 0 || n_embd <= 0 ||
         n_experts <= 0 || top_k <= 0 || top_k > n_experts)
         return fail(error, "invalid DSpark router input");
     selected.resize(u(tokens) * u(top_k), -1);
     weights.resize(u(tokens) * u(top_k));
+    if (boundaries) boundaries->resize(u(tokens));
     std::vector<float> probabilities(u(tokens) * u(n_experts));
     cpu_pool().run(tokens * n_experts, [&](int task) {
             const int token = task / n_experts;
@@ -403,6 +411,31 @@ bool dspark_route_topk(const float * normalized, const float * router_weight,
         for (int slot = 0; slot < top_k; ++slot)
             weights[u(token) * u(top_k) + u(slot)] =
                 token_probs[ids[slot]] / sum * expert_scale;
+        if (boundaries) {
+            DsparkRouteBoundary boundary;
+            boundary.selected_expert = ids[top_k - 1];
+            const float selected_score = token_probs[boundary.selected_expert] +
+                (selection_bias ? selection_bias[boundary.selected_expert] : 0.0f);
+            float rejected_score = -std::numeric_limits<float>::infinity();
+            for (int expert = 0; expert < n_experts; ++expert) {
+                bool is_selected = false;
+                for (int slot = 0; slot < top_k; ++slot) {
+                    if (ids[slot] == expert) {
+                        is_selected = true;
+                        break;
+                    }
+                }
+                if (is_selected) continue;
+                const float score = token_probs[expert] +
+                    (selection_bias ? selection_bias[expert] : 0.0f);
+                if (score > rejected_score) {
+                    rejected_score = score;
+                    boundary.rejected_expert = expert;
+                }
+            }
+            boundary.margin = selected_score - rejected_score;
+            (*boundaries)[u(token)] = boundary;
+        }
     });
     return true;
 }

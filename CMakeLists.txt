@@ -43,6 +43,8 @@ function(ember_strict target)
   endif()
 endfunction()
 
+find_package(Threads REQUIRED)
+
 # Hardware-only validator for the packaged provider.  It links only the public
 # provider ABI and the CPU ROCMFP2 reference, then dlopen()s the XRT module at
 # runtime, so normal GPU-free builds can still compile it without XRT.
@@ -69,6 +71,10 @@ if(EMBER_XDNA_XRT_PROVIDER)
     HINTS "/opt/rocm/lib" "/opt/rocm/lib64" REQUIRED)
   add_library(ember_xdna_moe_xrt MODULE
     providers/xdna2/provider_xrt.cpp
+    providers/xdna2/provider_dspark_xrt.cpp
+    providers/xdna2/dspark_cpu_ops.cpp
+    providers/xdna2/q8_0_pack.cpp
+    providers/xdna2/rocmfp4_pack.cpp
     providers/xdna2/rocmfp2_pack.cpp)
   target_include_directories(ember_xdna_moe_xrt PRIVATE
     providers/xdna2
@@ -76,7 +82,8 @@ if(EMBER_XDNA_XRT_PROVIDER)
     engine/ggml/include
     engine/ggml/src
     "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember_xdna_moe_xrt PRIVATE "${EMBER_XRT_COREUTIL}")
+  target_link_libraries(ember_xdna_moe_xrt PRIVATE
+    "${EMBER_XRT_COREUTIL}" Threads::Threads m)
   set_target_properties(ember_xdna_moe_xrt PROPERTIES
     PREFIX ""
     OUTPUT_NAME "libember_xdna_moe")
@@ -161,6 +168,15 @@ if(EMBER_XDNA_XRT_PROVIDER)
     providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
   target_link_libraries(ember-xdna-dspark-resident-validate PRIVATE
     "${EMBER_XRT_COREUTIL}")
+  add_executable(ember-xdna-dspark-overlay-validate
+    providers/xdna2/validate_dspark_overlay_xrt.cpp
+    providers/xdna2/q8_model_weights.cpp
+    providers/xdna2/q8_0_pack.cpp
+    src/model/gguf.c)
+  target_include_directories(ember-xdna-dspark-overlay-validate PRIVATE
+    providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
+  target_link_libraries(ember-xdna-dspark-overlay-validate PRIVATE
+    "${EMBER_XRT_COREUTIL}")
 endif()
 
 # ── vendored constrained-decoding core ───────────────────────────────────
@@ -191,7 +207,6 @@ add_library(ember_core STATIC
   src/model/kv_cache.c
 )
 target_include_directories(ember_core PUBLIC src)
-find_package(Threads REQUIRED)
 target_link_libraries(ember_core PUBLIC Threads::Threads)
 
 # ── tests ────────────────────────────────────────────────────────────────
@@ -596,6 +611,15 @@ if(EMBER_ENGINE)
       engine/ggml/src)
     target_link_libraries(ember-dspark-main-bench PRIVATE
       ggml ggml-base ggml-hip ggml-cpu m)
+
+    # Complete-provider hidden-boundary differential. It loads only the draft
+    # model, dlopen()s the packaged XRT provider through the stable ABI, and
+    # compares CPU/NPU output with the ordinary HIP drafter. This can run while
+    # a target model remains resident because it avoids a second 85-GiB load.
+    add_executable(ember-dspark-xdna-diff
+      providers/xdna2/validate_dspark_provider_gpu.cpp)
+    target_link_libraries(ember-dspark-xdna-diff PRIVATE
+      ember_engine Threads::Threads m)
   endif()
 
   # Metadata-only tokenizer probe.  Keep it independent of ember_engine so a

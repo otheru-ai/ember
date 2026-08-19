@@ -328,6 +328,48 @@ int main() {
               task_concatenated, &error),
           "fixed-overlay concatenation rejects multiple output groups");
 
+    std::vector<uint8_t> grouped_raw(task_narrow_raw.size() * 2);
+    std::copy_n(task_raw.begin(), grouped_raw.size(), grouped_raw.begin());
+    std::vector<uint8_t> grouped_packed;
+    CHECK(pack_q8_grouped_projection_corrected_bf16(
+              grouped_raw.data(), grouped_raw.size(), task_k, narrow_n, 2,
+              n, grouped_packed, &error) &&
+          grouped_packed.size() ==
+              2 * q8_projection_task_packed_bytes(task_k, n),
+          "distinct-input output groups pack as padded descriptor runs");
+    std::vector<std::vector<uint8_t>> grouped_independent(2);
+    for (int group = 0; group < 2; ++group) {
+        std::vector<uint8_t> logical, padded;
+        CHECK(pack_q8_projection_corrected_bf16(
+                  grouped_raw.data() +
+                      static_cast<size_t>(group) * task_narrow_raw.size(),
+                  task_narrow_raw.size(), task_k, narrow_n, logical, &error) &&
+              pad_q8_projection_rows(logical, task_k, narrow_n, n,
+                                     padded, &error),
+              "grouped projection independently pads each logical matrix");
+        grouped_independent[static_cast<size_t>(group)] = std::move(padded);
+    }
+    std::vector<uint8_t> grouped_expected(grouped_packed.size());
+    const size_t grouped_column_bytes =
+        grouped_independent[0].size() / kQ8AieColumns;
+    for (int column = 0; column < kQ8AieColumns; ++column) {
+        for (int group = 0; group < 2; ++group) {
+            std::memcpy(
+                grouped_expected.data() +
+                    static_cast<size_t>(column * 2 + group) *
+                        grouped_column_bytes,
+                grouped_independent[static_cast<size_t>(group)].data() +
+                    static_cast<size_t>(column) * grouped_column_bytes,
+                grouped_column_bytes);
+        }
+    }
+    CHECK(grouped_packed == grouped_expected,
+          "grouped descriptor interleaves distinct matrices below each column");
+    CHECK(!pack_q8_grouped_projection_corrected_bf16(
+              grouped_raw.data(), grouped_raw.size() - 1, task_k, narrow_n,
+              2, n, grouped_packed, &error),
+          "grouped projection rejects a truncated final matrix");
+
     std::vector<uint8_t> gemm_packed;
     CHECK(pack_q8_gemm_m32_corrected_bf16(
               task_raw.data(), task_raw.size(), task_k, n,

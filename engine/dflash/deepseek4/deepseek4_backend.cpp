@@ -792,6 +792,29 @@ bool DeepSeek4Backend::load_spec_drafter() {
         return false;
     }
     if (xdna_plugin && *xdna_plugin) {
+        // The provider is created synchronously and the drafter outlives it,
+        // so immutable tensor descriptors can point at engine-owned managed
+        // UMA instead of loading an 11-GiB second copy of the draft model.
+        ggml_backend_synchronize(backend_);
+        spec_xdna_weight_views_.clear();
+        for (ggml_tensor * tensor = ggml_get_first_tensor(d.core.ctx);
+             tensor != nullptr;
+             tensor = ggml_get_next_tensor(d.core.ctx, tensor)) {
+            if (!tensor->data || !tensor->name[0]) continue;
+            ember_xdna_dspark_tensor_view_v1 view{};
+            view.abi_version = EMBER_XDNA_DSPARK_PROVIDER_ABI_VERSION;
+            view.struct_size = sizeof(view);
+            view.name = tensor->name;
+            view.data = tensor->data;
+            view.bytes = ggml_nbytes(tensor);
+            view.type = static_cast<int32_t>(tensor->type);
+            view.n_dims = GGML_MAX_DIMS;
+            for (int dimension = 0; dimension < GGML_MAX_DIMS; ++dimension) {
+                view.dims[dimension] = tensor->ne[dimension];
+                view.strides[dimension] = tensor->nb[dimension];
+            }
+            spec_xdna_weight_views_.push_back(view);
+        }
         XdnaDSparkDraftConfig config;
         config.plugin_path = xdna_plugin;
         config.draft_model_path = spec_draft_path_;
@@ -800,6 +823,12 @@ bool DeepSeek4Backend::load_spec_drafter() {
         config.block_size = d.block_size;
         config.n_swa = w_.n_swa;
         config.head_dim = d.core.head_dim;
+        config.weights_cpu_accessible =
+            ggml_backend_buffer_is_host(d.core.buf) ||
+            ggml_backend_cuda_buffer_is_managed(d.core.buf);
+        config.weight_views = spec_xdna_weight_views_.data();
+        config.weight_view_count = static_cast<uint32_t>(
+            spec_xdna_weight_views_.size());
         config.required = xdna_required;
         std::string error;
         spec_xdna_draft_compute_ =
@@ -833,6 +862,7 @@ bool DeepSeek4Backend::load_spec_drafter() {
 
 void DeepSeek4Backend::release_spec_drafter(bool mark_parked) {
     spec_xdna_draft_compute_.reset();
+    spec_xdna_weight_views_.clear();
     if (spec_drafter_) {
         free_deepseek4_dspark_drafter(*spec_drafter_);
     }

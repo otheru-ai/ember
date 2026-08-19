@@ -79,14 +79,21 @@ int main() {
     const float route_bias[] = {0.0f, 2.0f, 0.0f};
     std::vector<int32_t> selected;
     std::vector<float> route_weights;
+    std::vector<DsparkRouteBoundary> route_boundaries;
     CHECK(dspark_route_topk(route_input, route_matrix, route_bias, 1, 2, 3,
-                            2, 1.5f, selected, route_weights, &error),
+                            2, 1.5f, selected, route_weights, &error,
+                            &route_boundaries),
           "router accepts score-routed fixture");
     CHECK(selected.size() == 2 && selected[0] == 1 && selected[1] == 0,
           "selection bias changes top-k order only");
     CHECK(route_weights.size() == 2 &&
               near(route_weights[0] + route_weights[1], 1.5f),
           "unbiased selected probabilities normalize to expert scale");
+    CHECK(route_boundaries.size() == 1 &&
+              route_boundaries[0].selected_expert == 0 &&
+              route_boundaries[0].rejected_expert == 2 &&
+              route_boundaries[0].margin > 0.0f,
+          "router reports the selected/rejected top-k boundary");
 
     const float query[] = {1.0f, 0.0f};
     const float keys[] = {1.0f, 0.0f, 0.0f, 1.0f};

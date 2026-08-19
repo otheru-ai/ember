@@ -42,7 +42,13 @@ void * create(const ember_xdna_dspark_config_v1 * config,
         std::strcmp(config->draft_model_path, "mock-draft.gguf") != 0 ||
         config->n_embd != 4 || config->n_target_layers != 3 ||
         config->block_size != 5 || config->n_swa != 8 ||
-        config->head_dim != 2) {
+        config->head_dim != 2 || !config->weights_cpu_accessible ||
+        config->weight_view_count != 1 || !config->weight_views ||
+        std::strcmp(config->weight_views[0].name, "mock.weight") != 0 ||
+        config->weight_views[0].data == nullptr ||
+        config->weight_views[0].bytes != 4 * sizeof(float) ||
+        config->weight_views[0].type != 0 ||
+        config->weight_views[0].dims[0] != 4) {
         set_error(error, capacity, "unexpected mock DSpark configuration");
         return nullptr;
     }

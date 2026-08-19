@@ -226,6 +226,10 @@ std::unique_ptr<XdnaDSparkDraftCompute> make_xdna_dspark_draft_compute(
     provider_config.block_size = config.block_size;
     provider_config.n_swa = config.n_swa;
     provider_config.head_dim = config.head_dim;
+    provider_config.weights_cpu_accessible =
+        config.weights_cpu_accessible ? 1u : 0u;
+    provider_config.weight_view_count = config.weight_view_count;
+    provider_config.weight_views = config.weight_views;
     char provider_error[512] = {};
     void * context = provider->create(&provider_config, provider_error,
                                       sizeof(provider_error));

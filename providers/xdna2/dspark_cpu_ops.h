@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,11 @@ struct DsparkHcSplit {
     int tokens = 0;
     int n_hc = 0;
 };
+
+// Shared persistent worker pool used by CPU control and routed-expert work.
+// Calls are serialized at the pool boundary, while tasks within one phase run
+// in parallel. This avoids creating 15-30 host threads per draft layer.
+void dspark_parallel_for(int count, const std::function<void(int)> & function);
 
 bool dspark_weighted_rms_norm(const float * input,
                               const float * weight,
@@ -58,6 +64,15 @@ bool dspark_hc_out(const float * state,
                    std::vector<float> & output,
                    std::string * error = nullptr);
 
+// Distance between the last selected route and the best rejected route.
+// Small positive margins identify the discontinuous top-k boundary where
+// otherwise tiny heterogeneous numerical drift can change expert membership.
+struct DsparkRouteBoundary {
+    float margin = 0.0f;
+    int32_t selected_expert = -1;
+    int32_t rejected_expert = -1;
+};
+
 bool dspark_route_topk(const float * normalized,
                        const float * router_weight,
                        const float * selection_bias,
@@ -68,7 +83,8 @@ bool dspark_route_topk(const float * normalized,
                        float expert_scale,
                        std::vector<int32_t> & selected,
                        std::vector<float> & weights,
-                       std::string * error = nullptr);
+                       std::string * error = nullptr,
+                       std::vector<DsparkRouteBoundary> * boundaries = nullptr);
 
 // q is [tokens, heads, head_dim], kv is [context+tokens, head_dim]. Positions
 // match those rows. The result is [tokens, heads, head_dim] after forward RoPE,

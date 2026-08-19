@@ -62,6 +62,13 @@ bool concat_q8_projection_rows(const std::vector<uint8_t> & first,
                                int second_n,
                                std::vector<uint8_t> & destination,
                                std::string * error = nullptr);
+// Pack independent output groups that consume different activation rows into
+// one descriptor sequence. DSpark output-A uses 8 x (4096 -> 1024), each
+// zero-padded to the resident overlay's 2048-output group width.
+bool pack_q8_grouped_projection_corrected_bf16(
+    const void * raw, size_t raw_bytes, int k, int group_n, int groups,
+    int padded_group_n, std::vector<uint8_t> & packed,
+    std::string * error = nullptr);
 bool pack_q8_gemm_m32_corrected_bf16(const void * raw, size_t raw_bytes,
                                      int k, int n,
                                      std::vector<uint8_t> & packed,

@@ -282,6 +282,53 @@ uint32_t spec_env_u32(const char * name, uint32_t fallback) {
     return (uint32_t) parsed;
 }
 
+bool dspark_log_xdna_compare(
+        const char * label,
+        const std::vector<float> & actual,
+        const std::vector<float> & reference) {
+    if (actual.size() != reference.size() || actual.empty()) {
+        std::fprintf(stderr,
+                     "[ds4-spec] XDNA compare %s shape mismatch: "
+                     "provider=%zu gpu=%zu\n",
+                     label, actual.size(), reference.size());
+        return false;
+    }
+    float max_abs = 0.0f;
+    double sum_abs = 0.0;
+    double dot = 0.0;
+    double actual_sq = 0.0;
+    double reference_sq = 0.0;
+    size_t nonfinite = 0;
+    for (size_t index = 0; index < actual.size(); ++index) {
+        const float a = actual[index];
+        const float r = reference[index];
+        if (!std::isfinite(a) || !std::isfinite(r)) {
+            ++nonfinite;
+            continue;
+        }
+        const float error = std::fabs(a - r);
+        if (error > max_abs) max_abs = error;
+        sum_abs += error;
+        dot += static_cast<double>(a) * r;
+        actual_sq += static_cast<double>(a) * a;
+        reference_sq += static_cast<double>(r) * r;
+    }
+    const double cosine = actual_sq > 0.0 && reference_sq > 0.0
+        ? dot / std::sqrt(actual_sq * reference_sq) : 0.0;
+    const double mean_abs = sum_abs / static_cast<double>(actual.size());
+    std::fprintf(stderr,
+                 "[ds4-spec] XDNA compare %s: n=%zu nonfinite=%zu "
+                 "max_abs=%.9g mean_abs=%.9g cosine=%.10f\n",
+                 label, actual.size(), nonfinite, max_abs, mean_abs, cosine);
+
+    // This is a hidden-boundary gate, not a bitwise gate: the provider changes
+    // FP4 reduction order and uses compensated BF16 AIE weights.  These bounds
+    // are tight enough to reject layout/shape failures while allowing the
+    // expected backend rounding delta.  Token-for-token target verification
+    // remains the final lossless-output gate.
+    return nonfinite == 0 && max_abs <= 0.02f && cosine >= 0.99999;
+}
+
 DSparkSchedulerConfig spec_scheduler_config() {
     DSparkSchedulerConfig config;
     if (const char * value = std::getenv("DFLASH_DS4_SPEC_SCHEDULER")) {
@@ -682,6 +729,12 @@ bool run_deepseek4_dspark_spec_decode(
     const bool timing = spec_env_flag("DFLASH_DS4_TIMING");
     const bool xdna_gpu_main =
         spec_env_flag("DFLASH_DSPARK_XDNA_GPU_MAIN");
+    const bool xdna_compare =
+        spec_env_flag("DFLASH_DSPARK_XDNA_COMPARE");
+    const bool xdna_compare_required =
+        spec_env_flag("DFLASH_DSPARK_XDNA_COMPARE_REQUIRED");
+    const uint32_t xdna_compare_steps = spec_env_u32(
+        "DFLASH_DSPARK_XDNA_COMPARE_STEPS", 1);
     // Exact target-authoritative verification is the production default.
     // The q-wide graph remains opt-in because its different reduction shape
     // can change near-tied target logits. DFLASH_DS4_APPROX_VERIFY is kept as
@@ -843,6 +896,7 @@ bool run_deepseek4_dspark_spec_decode(
     // Cumulative phase timings (ms).
     double tm_draft = 0, tm_head = 0, tm_save = 0, tm_verify = 0, tm_apply = 0, tm_feat = 0;
     const SpecClock::time_point run_t0 = SpecClock::now();
+    uint32_t xdna_compared = 0;
 
     // Resolved once per request, as documented on spec_confidence_prefix_threshold()
     // — it opens /tmp/ds4_spec_conf_prefix, so leaving the call inside the decode
@@ -946,6 +1000,39 @@ bool run_deepseek4_dspark_spec_decode(
                         confidence_hidden = std::move(
                             provider_output.confidence_hidden);
                         draft_ok = true;
+                        if (xdna_compare &&
+                            xdna_compared < xdna_compare_steps) {
+                            std::vector<float> gpu_hidden;
+                            std::vector<float> gpu_confidence_hidden;
+                            const bool gpu_compare_ok =
+                                deepseek4_dspark_draft_forward(
+                                    backend, drafter, noise_embed.data(),
+                                    ctx_len > 0 ? feat_win.data() : nullptr,
+                                    ctx_len, pos, gpu_hidden,
+                                    &gpu_confidence_hidden);
+                            bool compare_ok = gpu_compare_ok;
+                            if (gpu_compare_ok) {
+                                compare_ok = dspark_log_xdna_compare(
+                                    "normalized_hidden", local_hidden,
+                                    gpu_hidden) &&
+                                    dspark_log_xdna_compare(
+                                        "confidence_hidden",
+                                        confidence_hidden,
+                                        gpu_confidence_hidden);
+                            } else {
+                                std::fprintf(stderr,
+                                             "[ds4-spec] XDNA compare GPU "
+                                             "reference failed\n");
+                            }
+                            ++xdna_compared;
+                            if (!compare_ok && xdna_compare_required) {
+                                std::fprintf(stderr,
+                                             "[ds4-spec] XDNA hidden "
+                                             "differential failed (required)\n");
+                                ok = false;
+                                break;
+                            }
+                        }
                     }
                 }
                 if (!draft_ok) {

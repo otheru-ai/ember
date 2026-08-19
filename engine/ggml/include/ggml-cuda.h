@@ -27,6 +27,11 @@ GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
 // device buffer
 GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
 
+// Ember UMA seam: true only when a CUDA/HIP buffer was allocated as managed
+// memory and can therefore be dereferenced by the host after synchronization.
+GGML_BACKEND_API bool ggml_backend_cuda_buffer_is_managed(
+    ggml_backend_buffer_t buffer);
+
 // conduct allreduce operation between devices
 GGML_BACKEND_API bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends);
 

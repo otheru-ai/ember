@@ -26,6 +26,20 @@ int main(int argc, char ** argv) {
     config.block_size = 5;
     config.n_swa = 8;
     config.head_dim = 2;
+    const float mock_weight[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    ember_xdna_dspark_tensor_view_v1 weight_view{};
+    weight_view.abi_version = EMBER_XDNA_DSPARK_PROVIDER_ABI_VERSION;
+    weight_view.struct_size = sizeof(weight_view);
+    weight_view.name = "mock.weight";
+    weight_view.data = mock_weight;
+    weight_view.bytes = sizeof(mock_weight);
+    weight_view.type = 0;
+    weight_view.n_dims = 1;
+    weight_view.dims[0] = 4;
+    weight_view.strides[0] = sizeof(float);
+    config.weights_cpu_accessible = true;
+    config.weight_views = &weight_view;
+    config.weight_view_count = 1;
 
     std::string error;
     auto compute = make_xdna_dspark_draft_compute(config, &error);

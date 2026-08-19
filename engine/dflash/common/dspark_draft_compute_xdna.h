@@ -34,6 +34,21 @@
 extern "C" {
 #endif
 
+// Engine-owned, read-only tensor view. The provider may retain the descriptor
+// and data pointer until destroy(); the drafter outlives its provider. Strides
+// are bytes, matching ggml_tensor::nb, so 3-D expert slices need no copy.
+typedef struct ember_xdna_dspark_tensor_view_v1 {
+    uint32_t abi_version;
+    uint32_t struct_size;
+    const char * name;
+    const void * data;
+    size_t bytes;
+    int32_t type;
+    int32_t n_dims;
+    int64_t dims[4];
+    size_t strides[4];
+} ember_xdna_dspark_tensor_view_v1;
+
 typedef struct ember_xdna_dspark_config_v1 {
     uint32_t abi_version;
     uint32_t struct_size;
@@ -44,6 +59,12 @@ typedef struct ember_xdna_dspark_config_v1 {
     int32_t n_swa;
     // Optional tail: width of each per-layer context KV row.
     int32_t head_dim;
+    // Optional tail: engine-owned weight views. cpu_accessible is true only
+    // for host or managed-UMA storage. A heterogeneous provider must reject
+    // ordinary device allocations instead of dereferencing a HIP pointer.
+    uint32_t weights_cpu_accessible;
+    uint32_t weight_view_count;
+    const ember_xdna_dspark_tensor_view_v1 * weight_views;
 } ember_xdna_dspark_config_v1;
 
 typedef struct ember_xdna_dspark_request_v1 {
@@ -112,6 +133,9 @@ struct XdnaDSparkDraftConfig {
     int block_size = 0;
     int n_swa = 0;
     int head_dim = 0;
+    bool weights_cpu_accessible = false;
+    const ember_xdna_dspark_tensor_view_v1 * weight_views = nullptr;
+    uint32_t weight_view_count = 0;
     bool required = false;
 };
 

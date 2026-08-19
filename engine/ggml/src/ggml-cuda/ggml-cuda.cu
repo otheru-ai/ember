@@ -172,6 +172,19 @@ static bool ggml_cuda_device_use_uma(int device, size_t size) {
     if (device < 0 || device >= GGML_CUDA_MAX_DEVICES || !integrated[device]) {
         return false;
     }
+    // A complete XDNA drafter borrows the already-loaded draft tensor views
+    // for CPU routed experts. Force only large allocations into managed UMA;
+    // graph arenas stay on the faster ordinary HIP path. The plugin variable
+    // is present before target/draft loading, so this remains integrated-only.
+    if (getenv("DFLASH_DSPARK_XDNA_PLUGIN") != nullptr &&
+        size >= (size_t) 1024 * 1024 * 1024) {
+        static bool logged_xdna_uma = false;
+        if (!logged_xdna_uma) {
+            GGML_LOG_INFO("ggml_cuda: XDNA drafter requested; large buffers use managed UMA for shared CPU/GPU weight views\n");
+            logged_xdna_uma = true;
+        }
+        return true;
+    }
     size_t total_ram = ggml_cuda_total_ram_bytes();
     if (total_ram == 0) {
         return false; // unknown RAM: stay conservative on the legacy path

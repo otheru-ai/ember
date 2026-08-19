@@ -211,7 +211,9 @@ static ggml_tensor * build_moe_ffn(ggml_context * ctx,
                                     const DeepSeek4Weights & w,
                                     const DeepSeek4Layer & L,
                                     int layer_idx,
-                                    int n_tokens);
+                                    int n_tokens,
+                                    ggml_tensor ** debug_selected = nullptr,
+                                    ggml_tensor ** debug_selection = nullptr);
 
 struct DeepSeek4CachedDecodeFfnGraph {
     const ggml_context * owner_ctx = nullptr;
@@ -2905,6 +2907,7 @@ static bool build_cached_decode_hc_post_graph(
 struct Ds4MoeRouting {
     ggml_tensor * selected = nullptr;
     ggml_tensor * weights = nullptr;
+    ggml_tensor * selection = nullptr;
 };
 
 static MoeHybridConfig make_ds4_moe_hybrid_config(const DeepSeek4Weights & w) {
@@ -3129,6 +3132,7 @@ static Ds4MoeRouting build_moe_routing(
     if (L.ffn_exp_probs_b) {
         selection = ggml_add(ctx, selection, L.ffn_exp_probs_b);
     }
+    out.selection = selection;
 
     const int k_used = ds4_effective_expert_count(w);
     out.selected = ggml_top_k(ctx, selection, k_used);
@@ -3153,7 +3157,9 @@ static ggml_tensor * build_moe_ffn_parts(
         int layer_idx,
         int n_tokens,
         bool include_shared,
-        bool include_routed) {
+        bool include_routed,
+        ggml_tensor ** debug_selected = nullptr,
+        ggml_tensor ** debug_selection = nullptr) {
 
     const int n_embd = w.n_embd;
     int n_used = w.n_expert_used;
@@ -3168,6 +3174,8 @@ static ggml_tensor * build_moe_ffn_parts(
         routed_out = ggml_scale(ctx, cur, 0.0f);
     } else {
         Ds4MoeRouting routing = build_moe_routing(ctx, cur, w, L, n_tokens);
+        if (debug_selected) *debug_selected = routing.selected;
+        if (debug_selection) *debug_selection = routing.selection;
         n_used = (int) routing.selected->ne[0];
         ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, n_embd, 1, n_tokens);
         ggml_tensor * gate_e = ggml_mul_mat_id(ctx, L.ffn_gate_exps, cur_3d, routing.selected);
@@ -3197,9 +3205,12 @@ static ggml_tensor * build_moe_ffn(
         const DeepSeek4Weights & w,
         const DeepSeek4Layer & L,
         int layer_idx,
-        int n_tokens) {
+        int n_tokens,
+        ggml_tensor ** debug_selected,
+        ggml_tensor ** debug_selection) {
     return build_moe_ffn_parts(
-        ctx, cur, w, L, layer_idx, n_tokens, true, true);
+        ctx, cur, w, L, layer_idx, n_tokens, true, true,
+        debug_selected, debug_selection);
 }
 
 // ─── HC (Hierarchical Controller) Pre ───────────────────────────────────
@@ -7976,6 +7987,14 @@ struct DsparkDraftCache {
     ggml_tensor * out = nullptr;
     ggml_tensor * confidence_out = nullptr;
     std::vector<std::pair<std::string, ggml_tensor *>> dbg_taps;
+    struct RouteTap {
+        std::string name;
+        ggml_tensor * selected = nullptr;
+        ggml_tensor * selection = nullptr;
+    };
+    std::vector<RouteTap> dbg_route_taps;
+    bool debug_taps = false;
+    bool route_taps = false;
     // HC scales are immutable weights: read from the backend once.
     std::vector<std::array<float, 3>> s_attn, s_ffn;
     float s_out = 0.0f;
@@ -8005,8 +8024,11 @@ struct DsparkDraftCache {
         pos_ctx = nullptr;
         out = nullptr;
         confidence_out = nullptr;
+        debug_taps = false;
+        route_taps = false;
         std::vector<uint8_t>().swap(arena);
         std::vector<std::pair<std::string, ggml_tensor *>>().swap(dbg_taps);
+        std::vector<RouteTap>().swap(dbg_route_taps);
         std::vector<std::array<float, 3>>().swap(s_attn);
         std::vector<std::array<float, 3>>().swap(s_ffn);
         s_out = 0.0f;
@@ -8146,6 +8168,8 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
 
     DsparkDraftCache & C = g_dspark_draft_cache;
     const bool DS4_DBG = std::getenv("DFLASH_DS4_DSPARK_DEBUG") != nullptr;
+    const bool DS4_ROUTE_DBG = DS4_DBG ||
+        std::getenv("DFLASH_DS4_DSPARK_ROUTE_DEBUG") != nullptr;
 
     if (C.drafter != (const void *) &d || C.backend != backend) {
         // HC scales (host) per layer + output — immutable, read once per drafter.
@@ -8161,7 +8185,8 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
     }
 
     if (!C.ctx || C.ctx_len != ctx_len || C.block != block ||
-        C.drafter != (const void *) &d || C.backend != backend) {
+        C.drafter != (const void *) &d || C.backend != backend ||
+        C.debug_taps != DS4_DBG || C.route_taps != DS4_ROUTE_DBG) {
         // ── (Re)build the graph ─────────────────────────────────────────
         if (C.backend != backend && C.alloc) {
             ggml_gallocr_free(C.alloc);
@@ -8170,6 +8195,7 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
         if (C.ctx) { ggml_free(C.ctx); C.ctx = nullptr; }
         C.gf = nullptr;
         C.dbg_taps.clear();
+        C.dbg_route_taps.clear();
         if (C.arena.empty()) C.arena.resize(256u * 1024 * 1024);
         ggml_init_params ip{};
         ip.mem_size = C.arena.size();
@@ -8276,8 +8302,22 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
             ggml_tensor * ffn_in = fwork[0];
             for (int p = 1; p < block; p++) ffn_in = ggml_concat(ctx, ffn_in, fwork[p], 1);
             ggml_tensor * ffn_normed = build_rms_norm(ctx, ffn_in, L.ffn_norm, w.rms_eps);
-            ggml_tensor * ffn_out = build_moe_ffn(ctx, ffn_normed, w, L, il, block);
+            ggml_tensor * selected = nullptr;
+            ggml_tensor * selection = nullptr;
+            ggml_tensor * ffn_out = build_moe_ffn(
+                ctx, ffn_normed, w, L, il, block,
+                DS4_ROUTE_DBG ? &selected : nullptr,
+                DS4_ROUTE_DBG ? &selection : nullptr);
             if (!ffn_out) { ggml_free(C.ctx); C.ctx = nullptr; C.gf = nullptr; return false; }
+            if (DS4_ROUTE_DBG && selected && selection) {
+                ggml_set_output(selected);
+                ggml_set_output(selection);
+                ggml_build_forward_expand(gf, selected);
+                ggml_build_forward_expand(gf, selection);
+                C.dbg_route_taps.push_back(
+                    {std::string("route_L") + std::to_string(il),
+                     selected, selection});
+            }
             dbg_tap(std::string("ffn_L") + std::to_string(il), ffn_out);
             // ── HC post (FFN) ───────────────────────────────────────────
             hc_next = nullptr;
@@ -8327,6 +8367,8 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
         C.block   = block;
         C.drafter = (const void *) &d;
         C.backend = backend;
+        C.debug_taps = DS4_DBG;
+        C.route_taps = DS4_ROUTE_DBG;
     }
 
     // ── Set inputs + compute (cached graph) ─────────────────────────────
@@ -8356,6 +8398,60 @@ bool deepseek4_dspark_draft_forward(ggml_backend_t backend,
                                 sizeof(float) * confidence_hidden->size());
     }
 
+    if (DS4_ROUTE_DBG) {
+        for (auto & tp : C.dbg_route_taps) {
+            const size_t count = ggml_nelements(tp.selected);
+            std::vector<int32_t> ids(count);
+            ggml_backend_tensor_get(
+                tp.selected, ids.data(), 0, sizeof(int32_t) * count);
+            const size_t score_count = ggml_nelements(tp.selection);
+            std::vector<float> scores(score_count);
+            ggml_backend_tensor_get(
+                tp.selection, scores.data(), 0,
+                sizeof(float) * score_count);
+            const int top_k = (int) tp.selected->ne[0];
+            const int experts = (int) tp.selection->ne[0];
+            const int tokens = top_k > 0
+                ? static_cast<int>(count / static_cast<size_t>(top_k)) : 0;
+            for (int token = 0; token < tokens; ++token) {
+                std::fprintf(stderr,
+                             "[ds4-dspark-route] %s token=%d ids=",
+                             tp.name.c_str(), token);
+                for (int slot = 0; slot < top_k; ++slot) {
+                    std::fprintf(stderr, "%s%d", slot ? "," : "",
+                        ids[static_cast<size_t>(token * top_k + slot)]);
+                }
+                int boundary_selected = -1;
+                int boundary_rejected = -1;
+                float selected_score = std::numeric_limits<float>::infinity();
+                float rejected_score =
+                    -std::numeric_limits<float>::infinity();
+                for (int expert = 0; expert < experts; ++expert) {
+                    bool is_selected = false;
+                    for (int slot = 0; slot < top_k; ++slot) {
+                        if (ids[static_cast<size_t>(token * top_k + slot)] ==
+                            expert) {
+                            is_selected = true;
+                            break;
+                        }
+                    }
+                    const float score = scores[
+                        static_cast<size_t>(token * experts + expert)];
+                    if (is_selected && score < selected_score) {
+                        selected_score = score;
+                        boundary_selected = expert;
+                    } else if (!is_selected && score > rejected_score) {
+                        rejected_score = score;
+                        boundary_rejected = expert;
+                    }
+                }
+                std::fprintf(stderr, " boundary=%d/%d margin=%.9g",
+                             boundary_selected, boundary_rejected,
+                             selected_score - rejected_score);
+                std::fputc('\n', stderr);
+            }
+        }
+    }
     if (DS4_DBG) {
         for (auto & tp : C.dbg_taps) {
             const size_t ne = ggml_nelements(tp.second);
