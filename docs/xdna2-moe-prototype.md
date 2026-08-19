@@ -1449,12 +1449,16 @@ resident gate must use measured GPU wait time and aggregate tokens/second.
 
 GPU-free tests cover wide-completion accounting and failure recovery. The full
 48-test host gauntlet passes, the ROCm/gfx1151 container build links, and the
-`ember:xdna-gen42` release image packages the pinned XRT runtime, provider, AIE
-artifacts, and new server binary. These are build/correctness gates, not a
-performance claim. The remaining decisive test requires exclusive access to
-the 85.3-GiB target model: run the two-session differential validator, then A/B
-resident target-only throughput against resident XDNA proposals while recording
-acceptance, NPU wait exposed on the critical path, and shared-fabric slowdown.
+telemetry-enabled `ember:xdna-gen43` release image packages the pinned XRT
+runtime, provider, AIE artifacts, and server at commit `5a3171c`. The image ID
+is `edcb75e950a6`; its extracted server SHA-256 is
+`3959e93c555faa1eb2d5c239a13b9e33371f76a495224cc55330eac19d9647d4` and it
+is staged on the gfx1151 host under `/tmp/ember-xdna-gen43/`. These are
+build/correctness gates, not a performance claim. The remaining decisive test
+requires exclusive access to the 85.3-GiB target model: run the two-session
+differential validator, then A/B resident target-only throughput against
+resident XDNA proposals while recording acceptance, NPU wait exposed on the
+critical path, and shared-fabric slowdown.
 
 The validator now actually permits its resident rows to speculate. With the
 provider marked required it also requires `batch.spec_rows == batch.rows`, so a
