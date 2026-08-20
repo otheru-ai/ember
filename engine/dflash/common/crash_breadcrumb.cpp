@@ -6,7 +6,7 @@
 
 extern "C" {
 __attribute__((visibility("default")))
-struct ds4_crash_bc ds4_crash_breadcrumb = {0};
+struct ds4_crash_bc ds4_crash_breadcrumb = {};
 __attribute__((visibility("default")))
-struct ds4_kv_view_bc ds4_kv_view_breadcrumb = {0};
+struct ds4_kv_view_bc ds4_kv_view_breadcrumb = {};
 }

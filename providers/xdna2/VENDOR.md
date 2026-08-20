@@ -1,13 +1,15 @@
 # XDNA2 kernel provenance
 
-`libember_xdna_moe.so` retains its historical filename but exports two
-versioned interfaces: the original selected target-expert ABI and the current
-asynchronous whole-DSpark ABI. The serving overlay enables only the latter.
-Its AIE projection/shared-expert runlists are paired with Ember-owned AVX-512
-ROCMFP4 CPU work; neither interface is a general ggml XDNA backend.
+`libember_xdna_dspark.so` exports only the asynchronous whole-DSpark ABI used by
+the serving overlay. Its resident AIE projection/shared-expert runlists are
+paired with Ember-owned AVX-512 ROCMFP4 CPU work; it is not a general ggml XDNA
+backend. The rejected target-expert provider, older overlay generations, and
+their validators were removed from the source and release image after the
+Gen52 role split was selected. Their measurements and provenance remain in
+`docs/xdna2-moe-prototype.md` as a historical engineering record.
 
-The full-array object-FIFO topology in `kernel/rocmfp2_gemv.py` is adapted
-from TileFuse's W4A16 vector-matrix example:
+The removed experimental `rocmfp2_gemv.py` full-array object-FIFO topology was
+adapted from TileFuse's W4A16 vector-matrix example:
 
 - repository: <https://github.com/glassescrab/mlir-aie>
 - branch at import: `feature/update-mix-mm-int4-verification`

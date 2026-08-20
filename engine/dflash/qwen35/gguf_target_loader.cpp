@@ -45,7 +45,6 @@
 
 #include "internal.h"
 #include "common/derived_scalars.h"
-#include "common/layer_split_utils.h"
 #include "common/gguf_mmap.h"
 #include "common/gguf_bounds.h"
 
@@ -99,30 +98,6 @@ bool CpuEmbedder::embed(const int32_t * ids, int n, float * out_f32) const {
 }
 
 namespace {
-
-// Required uint32 metadata key → bound check. Aborts load on mismatch.
-bool expect_u32(const gguf_context * g, const char * key, uint32_t expected, std::string & err) {
-    int64_t id = gguf_find_key(g, key);
-    if (id < 0) { err = std::string("missing gguf key: ") + key; return false; }
-    if (gguf_get_kv_type(g, id) != GGUF_TYPE_UINT32) {
-        err = std::string("gguf key has wrong type: ") + key;
-        return false;
-    }
-    uint32_t v = gguf_get_val_u32(g, id);
-    if (v != expected) {
-        char b[256];
-        std::snprintf(b, sizeof(b), "gguf key %s=%u expected %u", key, v, expected);
-        err = b;
-        return false;
-    }
-    return true;
-}
-
-int32_t get_i32_or(const gguf_context * g, const char * key, int32_t fallback) {
-    int64_t id = gguf_find_key(g, key);
-    if (id < 0 || gguf_get_kv_type(g, id) != GGUF_TYPE_INT32) return fallback;
-    return gguf_get_val_i32(g, id);
-}
 
 uint32_t get_u32_or(const gguf_context * g, const char * key, uint32_t fallback) {
     int64_t id = gguf_find_key(g, key);

@@ -25,6 +25,13 @@ measured reason target decode should stay on the fused GPU path. The historical
 sections below retain those rejected designs because they constrain the current
 architecture.
 
+> Repository scope note (2026-08-19): only the selected Gen52 resident DSpark
+> implementation remains in source. Historical sections preserve measurements,
+> filenames, and reproduction commands from the images that were tested; words
+> such as "packaged" in those sections describe those past images, not the
+> current `release-xdna` contents. The removed experimental sources remain
+> recoverable from Git history.
+
 The design follows AMD's GPT-OSS-20B QMoE split—host routing followed by
 selected-expert accelerator work—and adapts TileFuse's full 4x8 XDNA2 GEMV
 dataflow to decode Ember's byte-exact affine ROCMFP2 blocks. Provenance and
@@ -67,36 +74,54 @@ also important, but it does not directly consume the model's ROCMFP2 expert
 weights. A future whole-expert BF16/VitisAI experiment is worth comparing; it
 does not replace the byte-exact custom-kernel correctness baseline.
 
+## Lessons from current NPU inference engines
+
+[FastFlowLM](https://github.com/ROCm/FastFlowLM) is the closest public proof
+that Strix Halo's XDNA2 can run transformer and MoE inference on Linux. It is a
+fully NPU runtime, not a fine-grained GPU/NPU shared graph: model-specific
+kernels are downloaded separately, and its low-level work uses IRON and
+AIE-MLIR. That supports Ember's resident, ahead-of-time xclbin and instruction
+bundle design. It does not make FastFlowLM's kernels drop-in compatible with
+Ember's GGUF tensor layout, affine ROCMFP quantization, or byte-exact DSpark
+contract; adopting a binary also requires a separate format, correctness,
+provenance, and licensing review.
+
+FastFlowLM's
+[Linux guide](https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md)
+also distinguishes two independent health checks. Its validator can see the
+kernel DRM node directly while model execution still fails if XRT cannot open
+device zero. Ember therefore checks both `/dev/accel/accel0` and
+`xrt-smi examine`, and treats unlimited memlock as an operating requirement.
+A visible NPU node alone is not sufficient validation.
+
+[Lemonade's NPU FAQ](https://github.com/lemonade-sdk/lemonade/blob/main/docs/guide/faq.md)
+documents two useful deployment boundaries: Linux NPU-only inference is
+provided through FastFlowLM, while Ryzen AI Software's hybrid mode remains
+Windows-only; in that hybrid mode the NPU handles prompt processing and the
+GPU handles token generation. This independently supports assigning a coarse,
+bounded phase to the NPU and leaving latency-critical decode authoritative on
+gfx1151. It is not evidence that arbitrary HIP and XRT buffers are coherent or
+that per-operator GPU↔NPU transfers are free.
+
+FastFlowLM's current releases include optimized Qwen3.6-MoE paths, which makes
+its kernel tiling, resident-weight policy, and model/artifact versioning useful
+research targets. Its release notes also require re-downloading weights when
+the optimized kernel/quant contract changes. Ember should follow the same
+principle: xclbin, instruction streams, packing format, and model metadata are
+one versioned compatibility unit, gated by the full differential validator.
+
 ## Implemented pieces
 
-- `MoeExpertCompute` can decline shapes and safely replay on the existing cold
-  path. `DFLASH_MOE_XDNA_REQUIRED=1` turns failures fatal for validation.
-- The versioned provider ABI passes global expert IDs, routing weights, and
-  ROCMFP2 weight views whose local/global indexing is explicit. The plugin does
-  not parse or remap the 85.3 GiB GGUF; hybrid placement exposes its validated
-  mmap regions directly.
-- `rocmfp2_pack.cpp` losslessly permutes GGML output-major blocks into 128x64
-  AIE tiles. Gen4 additionally creates its vector-friendly uint4/BF16 layout.
-  Raw and both packed F32 references are tested for exact equality.
-- `kernel/rocmfp2_gemv.py` implements the full XDNA2 4x8 object-FIFO topology
-  for the exact 4096->2048 and 2048->4096 expert projections.
-- `kernel/rocmfp2_gemv.cc` decodes ROCMFP2 directly. Generation 2 keeps the
-  K-tile carry in a tile-local F32 buffer and converts to BF16 at the output
-  DMA boundary; generation 1 rounded through its BF16 FIFO after every 128
-  inputs. Generation 3 makes the output FIFO and host BO F32, so gate/up and
-  down projections cross the CPU phase boundary without another BF16 round.
-- `kernel/rocmfp2_gemv_v4.cc` vector-decodes 64 output lanes at once into a
-  tile-local BF16 scratchpad, then performs native eight-row vector MACs into
-  the Gen3 FP32 boundary.
-- `provider_xrt.cpp` owns persistent XRT contexts/instruction BOs and a bounded
-  LRU of pre-tiled host-only weight BOs. Generations 2 through 4 submit every
-  selected gate/up projection in one XRT runlist and every down projection in
-  a second runlist, with the CPU SwiGLU calculation as the unavoidable phase
-  boundary. It accepts q=1 and separate gate/up/down ROCMFP2 tensors only.
-- The optional `release-xdna` image builds XRT plus the XDNA userspace shim from
-  the pinned `amd/xdna-driver` tree, builds every generation for both projection
-  shapes with Peano, and packages the plugin and artifacts. It never packages
-  a kernel module.
+- `provider_dspark_xrt.cpp` owns the asynchronous whole-draft provider and one
+  persistent XRT context for all resident projection/shared-expert modes.
+- `kernel/dspark_resident_v1.{py,cc}` is the only retained AIE source. Docker
+  builds one byte-identical xclbin plus the five instruction streams used by
+  the trained DSpark shapes.
+- `dspark_cpu_ops.cpp`, `q8_0_pack.cpp`, and `rocmfp4_pack.cpp` implement the
+  current AVX-512 CPU routing/routed-expert path and exact resident Q8 packing.
+- `release-xdna` packages the serving plugin, pinned XRT userspace, and only
+  those six runtime artifacts. It never packages a kernel module or research
+  validators. `dev-xdna` retains the current validators and benchmarks.
 
 ## Build and run the image
 
@@ -114,26 +139,31 @@ With `amd_iommu=off`, the accelerator cannot establish the DMA mappings used by
 XRT. Remove that kernel argument, reboot, and confirm both `/dev/accel/accel0`
 and translated AMD-Vi domains before testing the provider.
 
-Build the opt-in image (the XRT/Peano stages are intentionally much heavier
-than the normal release image):
+Build the opt-in serving and debug images (the XRT/Peano stages are
+intentionally much heavier than the normal release image):
 
 ```bash
-docker build --target release-xdna -f docker/Dockerfile \
+docker build --network host --target release-xdna -f docker/Dockerfile \
   -t ember:xdna-local .
+docker build --network host --target dev-xdna -f docker/Dockerfile \
+  -t ember:xdna-dev .
 ```
 
-Run the packaged hardware correctness probe before loading model weights:
+Run the current whole-overlay correctness probe from the debug image:
 
 ```bash
-docker run --rm --entrypoint ember-xdna-validate \
+docker run --rm --entrypoint ember-xdna-dspark-overlay-validate \
   --device /dev/accel/accel0 \
   --security-opt seccomp=unconfined --ulimit memlock=-1:-1 \
-  ember:xdna-local
+  -v /path/to/models:/models:ro \
+  ember:xdna-dev \
+  /usr/local/share/ember/xdna2 /models/dspark-draft.gguf
 ```
 
-The probe enters through the public provider ABI and checks cold and warm-cache
-execution against a BF16-aware CPU reference. It is deliberately a structured
-bring-up gate, not a substitute for trained-weight differential validation.
+The probe alternates every retained projection instruction stream and the
+shared-expert stream through the same resident xclbin, then compares trained
+outputs with the CPU reference. It does not replace the GPU/provider
+differential validator or Ember's release differential.
 
 Start it with the normal Compose definition plus the XDNA override:
 
@@ -160,26 +190,10 @@ Current resident DSpark controls:
 | `DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` | `0` | Experimental admission threshold; keep disabled pending corpus calibration |
 | `EMBER_XDNA_BATCH_SESSIONS` | `2` in overlay | Compose-only resident session count used for overlap |
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
-| `EMBER_XDNA_DEVICE` | `0` | XRT device index |
 
-Historical target-expert/standalone-validator controls remain available for
-research, but are not enabled by `compose.xdna.yaml`:
-
-| variable | default | purpose |
-|---|---:|---|
-| `DFLASH_MOE_XDNA_PLUGIN` | unset | Selected target-expert provider `.so` |
-| `DFLASH_MOE_XDNA_REQUIRED` | `0` | Fail rather than replay target experts on the GPU |
-| `DFLASH_MOE_XDNA_MIN_TOKENS` | `1` | Smallest batch accepted by the target-expert wrapper |
-| `DFLASH_MOE_XDNA_TRACE` | `0` | Target-expert provider call/cache counters |
-| `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed target-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged ROCMFP2 generation `1`-`6`; Gen6 is validator-only |
-| `EMBER_XDNA_VALIDATION_WARM_RUNS` | `1` | Repeat cached standalone validation dispatches |
-| `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
-| `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected target experts in one call |
-
-Target-expert offload additionally needs `DFLASH_EXPERT_BUDGET_MB` low enough
-to leave experts cold. It measured slower than the fused GPU target path and
-must not be enabled as a serving optimization.
+Historical target-expert and standalone-kernel controls were removed with their
+implementations. Target-expert offload measured slower than the fused GPU path;
+keeping dormant environment switches would imply unsupported behavior.
 
 ## Hardware validation status (2026-08-15 through 2026-08-19)
 

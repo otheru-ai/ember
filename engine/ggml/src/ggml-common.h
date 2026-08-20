@@ -22,48 +22,12 @@ typedef uint32_t ggml_half2;
 #define GGML_COMMON_AGGR_S data
 
 #define GGML_COMMON_DECL
-#elif defined(GGML_COMMON_DECL_METAL)
-#include <metal_stdlib>
-
-typedef half  ggml_half;
-typedef half2 ggml_half2;
-
-#define GGML_COMMON_AGGR_U
-#define GGML_COMMON_AGGR_S
-
-#define GGML_COMMON_DECL
-#elif defined(GGML_COMMON_DECL_CUDA)
-#if defined(GGML_COMMON_DECL_MUSA)
-#include <musa_fp16.h>
-#else
-#include <cuda_fp16.h>
-#endif
-#include <cstdint>
-
-typedef half  ggml_half;
-typedef half2 ggml_half2;
-
-#define GGML_COMMON_AGGR_U
-#define GGML_COMMON_AGGR_S data
-
-#define GGML_COMMON_DECL
 #elif defined(GGML_COMMON_DECL_HIP)
 #include <hip/hip_fp16.h>
 #include <cstdint>
 
 typedef half  ggml_half;
 typedef half2 ggml_half2;
-
-#define GGML_COMMON_AGGR_U
-#define GGML_COMMON_AGGR_S data
-
-#define GGML_COMMON_DECL
-#elif defined(GGML_COMMON_DECL_SYCL)
-#include <sycl/half_type.hpp>
-#include <cstdint>
-
-typedef sycl::half  ggml_half;
-typedef sycl::half2 ggml_half2;
 
 #define GGML_COMMON_AGGR_U
 #define GGML_COMMON_AGGR_S data
@@ -89,7 +53,7 @@ typedef sycl::half2 ggml_half2;
 #define QK_K 256
 #define K_SCALE_SIZE 12
 
-#if defined(GGML_COMMON_DECL_CUDA) || defined(GGML_COMMON_DECL_HIP) || defined(GGML_COMMON_DECL_SYCL)
+#if defined(GGML_COMMON_DECL_HIP)
 // QR = QK / number of values before dequantization
 // QI = number of 32 bit integers before dequantization
 
@@ -169,7 +133,7 @@ typedef sycl::half2 ggml_half2;
 #define QI3_S (QK_K / (4*QR3_S))
 #define QR3_S 4
 
-#endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
+#endif // GGML_COMMON_DECL_HIP
 
 #ifdef _MSC_VER
 #define GGML_EXTENSION
@@ -485,25 +449,10 @@ static_assert(sizeof(block_iq4_xs) == sizeof(ggml_half) + sizeof(uint16_t) + QK_
 #define GGML_TABLE_END() };
 
 #define GGML_COMMON_IMPL
-#elif defined(GGML_COMMON_IMPL_METAL)
-#include <metal_stdlib>
-
-#define GGML_TABLE_BEGIN(type, name, size) static const constant type name[size] = {
-#define GGML_TABLE_END() };
-
-#define GGML_COMMON_IMPL
-#elif defined(GGML_COMMON_IMPL_CUDA) || defined(GGML_COMMON_IMPL_HIP) || defined(GGML_COMMON_IMPL_MUSA)
+#elif defined(GGML_COMMON_IMPL_HIP)
 #include <cstdint>
 
 #define GGML_TABLE_BEGIN(type, name, size) static const __device__ type name[size] = {
-#define GGML_TABLE_END() };
-
-#define GGML_COMMON_IMPL
-#elif defined(GGML_COMMON_IMPL_SYCL)
-
-#include <cstdint>
-
-#define GGML_TABLE_BEGIN(type, name, size) static const type name[size] = {
 #define GGML_TABLE_END() };
 
 #define GGML_COMMON_IMPL

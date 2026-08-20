@@ -1,7 +1,5 @@
 #include "rocmfp4_pack.h"
 
-#include "rocmfp2_pack.h"
-
 #include <cstring>
 #include <limits>
 
@@ -22,6 +20,20 @@ bool checked_projection_size(int k, int n, size_t * size) {
     }
     *size = static_cast<size_t>(n) * blocks * kRocmfp4BlockBytes;
     return true;
+}
+
+float ue4m3_to_float(uint8_t value) {
+    if (value > 0x7e) return 0.0f;
+    const unsigned exponent = value >> 3;
+    const unsigned mantissa = value & 7u;
+    if (exponent == 0) return static_cast<float>(mantissa) * 0x1p-10f;
+    static constexpr float powers[16] = {
+        0.0f, 0x1p-10f, 0x1p-9f, 0x1p-8f,
+        0x1p-7f, 0x1p-6f, 0x1p-5f, 0x1p-4f,
+        0x1p-3f, 0x1p-2f, 0x1p-1f, 0x1p0f,
+        0x1p1f, 0x1p2f, 0x1p3f, 0x1p4f,
+    };
+    return static_cast<float>(8u + mantissa) * powers[exponent];
 }
 
 uint16_t float_to_bf16(float value) {

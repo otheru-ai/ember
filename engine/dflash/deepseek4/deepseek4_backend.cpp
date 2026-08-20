@@ -457,63 +457,6 @@ static MoeHybridConfig make_ds4_parent_worker_cfg(const DeepSeek4Weights & w) {
     return cfg;
 }
 
-static MoeHybridConfig make_ds4_parent_cpu_tail_cfg(const DeepSeek4Weights & w) {
-    MoeHybridConfig cfg = make_ds4_parent_worker_cfg(w);
-    cfg.materialize_hot_experts = false;
-    cfg.materialize_cold_experts = true;
-    cfg.cold_expert_backend = MoeHybridColdBackend::Cpu;
-    return cfg;
-}
-
-static std::vector<MoeExpertLayer> make_ds4_xdna_expert_layers(
-        const DeepSeek4Weights & w,
-        const MoeHybridStorage & hybrid) {
-    std::vector<MoeExpertLayer> layers(hybrid.layers.size());
-    for (size_t il = 0; il < hybrid.layers.size(); ++il) {
-        const MoeHybridLayerStorage & storage = hybrid.layers[il];
-        const DeepSeek4Layer & src = w.layers[il];
-        MoeExpertLayer & dst = layers[il];
-        dst.layer_idx = (int)il;
-        dst.cold_global_by_local = storage.cold_expert_ids;
-        dst.fused_gate_up = storage.fused_gate_up;
-        dst.gate_data = storage.gate_cold ? storage.gate_cold->data : nullptr;
-        dst.up_data = storage.up_cold ? storage.up_cold->data : nullptr;
-        dst.down_data = storage.down_cold ? storage.down_cold->data : nullptr;
-        dst.gate_up_data = storage.gate_up_cold ? storage.gate_up_cold->data : nullptr;
-        dst.gate_stride = storage.gate_expert_bytes;
-        dst.up_stride = storage.up_expert_bytes;
-        dst.down_stride = storage.down_expert_bytes;
-        dst.gate_up_stride = storage.gate_up_expert_bytes;
-        dst.gate_type = src.ffn_gate_exps ? src.ffn_gate_exps->type : GGML_TYPE_COUNT;
-        dst.up_type = src.ffn_up_exps ? src.ffn_up_exps->type : GGML_TYPE_COUNT;
-        dst.down_type = src.ffn_down_exps ? src.ffn_down_exps->type : GGML_TYPE_COUNT;
-        dst.gate_up_type = GGML_TYPE_COUNT;
-        dst.gate_scale = 1.0f;
-        dst.up_scale = 1.0f;
-        dst.down_scale = 1.0f;
-
-        // The streaming hybrid path intentionally leaves cold experts in the
-        // GGUF mmap. Give XDNA direct views of those already-validated regions
-        // instead of making a second host copy of every cold expert. GGUF
-        // tensors retain global expert order, unlike materialized cold tensors.
-        if (!dst.down_data && hybrid.has_mmap() &&
-            il < hybrid.layer_regions.size()) {
-            const auto * base = static_cast<const uint8_t *>(hybrid.mmap_data);
-            const LayerExpertRegions & regions = hybrid.layer_regions[il];
-            dst.gate_data = regions.gate_exps.size
-                ? base + regions.gate_exps.offset : nullptr;
-            dst.up_data = regions.up_exps.size
-                ? base + regions.up_exps.offset : nullptr;
-            dst.down_data = regions.down_exps.size
-                ? base + regions.down_exps.offset : nullptr;
-            dst.gate_up_data = regions.gate_up_exps.size
-                ? base + regions.gate_up_exps.offset : nullptr;
-            dst.weights_indexed_by_global = true;
-        }
-    }
-    return layers;
-}
-
 }  // namespace
 
 DeepSeek4Backend::DeepSeek4Backend(const DeepSeek4BackendConfig & cfg)
@@ -708,17 +651,6 @@ bool DeepSeek4Backend::validate_prefill_mode() const {
     if (cfg_.prefill_mode == PrefillAttentionMode::Exact) {
         return true;
     }
-    const PlacementBackend target_backend =
-        cfg_.device.backend == PlacementBackend::Auto
-            ? compiled_placement_backend()
-            : cfg_.device.backend;
-    if (target_backend != PlacementBackend::Hip ||
-        cfg_.device.is_layer_split()) {
-        std::fprintf(stderr,
-            "[deepseek4] %s prefill requires a single HIP target\n",
-            prefill_attention_mode_name(cfg_.prefill_mode));
-        return false;
-    }
     if (w_.moe_hybrid || moe_hybrid_) {
         std::fprintf(stderr,
             "[deepseek4] %s prefill requires every expert to be resident; "
@@ -730,15 +662,10 @@ bool DeepSeek4Backend::validate_prefill_mode() const {
 }
 
 bool DeepSeek4Backend::load_model() {
-    const PlacementBackend target_backend =
-        cfg_.device.backend == PlacementBackend::Auto
-            ? compiled_placement_backend()
-            : cfg_.device.backend;
-
     // Fused decode and layer-major prefill reference every expert directly.
     // Make their residency requirement explicit instead of silently falling
     // back to tokenwise hybrid execution.
-    if (target_backend == PlacementBackend::Hip && requires_monolithic_model()) {
+    if (requires_monolithic_model()) {
         std::fprintf(stderr,
                      "[deepseek4] monolithic execution requested "
                      "(fused_decode=%s, prefill=%s)\n",
@@ -760,17 +687,11 @@ bool DeepSeek4Backend::load_model() {
                 return false;
             }
         }
-    } else if (target_backend == PlacementBackend::Hip) {
+    } else {
         std::fprintf(stderr,
                      "[deepseek4] HIP target detected; using hybrid expert load path\n");
         if (!init_hybrid_model()) {
             std::fprintf(stderr, "[deepseek4] hybrid mode failed: %s\n", cfg_.model_path);
-            return false;
-        }
-    } else if (!load_deepseek4_gguf(cfg_.model_path, backend_, w_)) {
-        std::fprintf(stderr, "[deepseek4] full model load failed, trying hybrid mode...\n");
-        if (!init_hybrid_model()) {
-            std::fprintf(stderr, "[deepseek4] hybrid mode also failed: %s\n", cfg_.model_path);
             return false;
         }
     }
@@ -793,7 +714,7 @@ bool DeepSeek4Backend::load_model() {
 
 bool DeepSeek4Backend::load_spec_drafter() {
     if (spec_draft_path_.empty()) return true;
-    if (parked_ || moe_hybrid_) {
+    if (moe_hybrid_) {
         std::fprintf(stderr,
                      "[deepseek4] cannot load DSpark drafter without a resident "
                      "monolithic target\n");
@@ -901,13 +822,12 @@ bool DeepSeek4Backend::load_spec_drafter() {
         }
     }
     spec_enabled_ = true;
-    spec_drafter_parked_ = false;
     std::fprintf(stderr, "[deepseek4] DSpark spec-decode ENABLED (drafter=%s)\n",
                  spec_draft_path_.c_str());
     return true;
 }
 
-void DeepSeek4Backend::release_spec_drafter(bool mark_parked) {
+void DeepSeek4Backend::release_spec_drafter() {
     spec_xdna_draft_compute_.reset();
     spec_xdna_weight_views_.clear();
     if (spec_drafter_) {
@@ -916,7 +836,6 @@ void DeepSeek4Backend::release_spec_drafter(bool mark_parked) {
     spec_drafter_.reset();
     spec_enabled_ = false;
     spec_feat_window_.clear();
-    spec_drafter_parked_ = mark_parked && !spec_draft_path_.empty();
 }
 
 bool DeepSeek4Backend::init() {
@@ -940,9 +859,6 @@ bool DeepSeek4Backend::init() {
     if (!validate_prefill_mode()) {
         return false;
     }
-    if (!init_xdna_moe_provider()) {
-        return false;
-    }
     if (prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
         std::fprintf(stderr,
             "[deepseek4] warning: %s prefill is approximate and may change "
@@ -956,11 +872,6 @@ bool DeepSeek4Backend::init() {
         return false;
     }
     cache_.prefill_mode = cfg_.prefill_mode;
-
-    if (moe_hybrid_) {
-        // Expert IPC removed — layer split replaces expert split.
-        // The DeepSeek4Backend single-GPU path now runs all experts locally.
-    }
 
     const int active_experts =
         w_.routed_expert_top_k > 0 ? w_.routed_expert_top_k : w_.n_expert_used;
@@ -1089,152 +1000,6 @@ bool DeepSeek4Backend::init_hybrid_model() {
         moe_hybrid_->cold_backend_kind == MoeHybridColdBackend::Gpu ? "gpu" : "cpu";
     std::fprintf(stderr, "[deepseek4] hybrid experts ready: hot=%d cold=%d cold_backend=%s%s\n",
                  moe_placement_.total_hot, total_cold, cold_backend, "");
-    return true;
-}
-
-bool DeepSeek4Backend::init_xdna_moe_provider() {
-    xdna_expert_compute_.reset();
-    xdna_expert_layers_.clear();
-    const char * plugin = std::getenv("DFLASH_MOE_XDNA_PLUGIN");
-    if (!plugin || !plugin[0]) return true;
-
-    const bool required = env_flag_enabled("DFLASH_MOE_XDNA_REQUIRED");
-    if (!moe_hybrid_) {
-        std::fprintf(stderr,
-                     "[xdna-moe] provider requested but model placement has no cold experts; "
-                     "set DFLASH_EXPERT_BUDGET_MB to force a hybrid placement\n");
-        return !required;
-    }
-
-    XdnaMoeExpertComputeConfig config;
-    config.plugin_path = plugin;
-    config.model_path = cfg_.model_path ? cfg_.model_path : "";
-    config.n_layer = w_.n_layer;
-    config.n_expert = w_.n_expert;
-    config.n_expert_used = w_.n_expert_used;
-    config.n_embd = w_.n_embd;
-    config.n_ff_exp = w_.n_ff_exp;
-    config.swiglu_clamp = w_.swiglu_clamp_exp;
-    config.min_tokens = (int)std::max(
-        1L, std::min(env_nonnegative_long("DFLASH_MOE_XDNA_MIN_TOKENS", 1), 4096L));
-    config.required = required;
-
-    std::string error;
-    xdna_expert_compute_ = make_xdna_moe_expert_compute(config, &error);
-    if (!xdna_expert_compute_) {
-        std::fprintf(stderr, "[xdna-moe] %s%s\n", error.c_str(),
-                     required ? " (required)" : "; using existing GPU/CPU path");
-        return !required;
-    }
-    xdna_expert_layers_ = make_ds4_xdna_expert_layers(w_, *moe_hybrid_);
-    std::fprintf(stderr, "[xdna-moe] provider ready: min_tokens=%d%s\n",
-                 config.min_tokens, required ? " required" : "");
-    return true;
-}
-
-void DeepSeek4Backend::print_ready_banner() const {
-    std::printf("[deepseek4-daemon] ready layers=%d ctx=%d experts=%d/%d\n",
-                w_.n_layer, cache_.max_ctx, w_.n_expert_used, w_.n_expert);
-    std::fflush(stdout);
-}
-
-bool DeepSeek4Backend::park(ParkTarget target) {
-    const bool want_draft = park_target_includes_draft_model(target);
-    const bool want_target_model = park_target_includes_target_model(target);
-
-    if (want_draft && spec_drafter_) {
-        release_spec_drafter(/*mark_parked=*/true);
-        std::printf("[deepseek4] DSpark drafter parked (VRAM released)\n");
-        std::fflush(stdout);
-    }
-    if (!want_target_model || parked_) return true;
-
-    maybe_save_routing_stats();
-    free_resident_sessions();
-    for (int i = 0; i < PREFIX_SLOTS; ++i) {
-        free_deepseek4_snapshot(snapshots_[i]);
-    }
-    last_logits_.clear();
-    free_deepseek4_cache(cache_);
-    xdna_expert_compute_.reset();
-    xdna_expert_layers_.clear();
-    stream_engine_.destroy();
-    moe_hybrid_.reset();
-    moe_placement_ = {};
-    free_deepseek4_weights(w_);
-    parked_ = true;
-    if (spec_drafter_) {
-        std::printf("[deepseek4] target parked (target VRAM released; "
-                    "DSpark drafter retained)\n");
-    } else {
-        std::printf("[deepseek4] target parked (target VRAM released)\n");
-    }
-    std::fflush(stdout);
-    return true;
-}
-
-bool DeepSeek4Backend::unpark(ParkTarget target) {
-    const bool want_draft = park_target_includes_draft_model(target);
-    const bool want_target_model = park_target_includes_target_model(target);
-
-    if (want_target_model && parked_) {
-        if (!load_model()) {
-            std::fprintf(stderr, "[deepseek4] unpark: failed to restore target model\n");
-            free_deepseek4_weights(w_);
-            stream_engine_.destroy();
-            moe_hybrid_.reset();
-            moe_placement_ = {};
-            return false;
-        }
-        if (!init_xdna_moe_provider()) {
-            std::fprintf(stderr,
-                         "[deepseek4] unpark: failed to restore XDNA MoE provider\n");
-            xdna_expert_compute_.reset();
-            xdna_expert_layers_.clear();
-            free_deepseek4_weights(w_);
-            stream_engine_.destroy();
-            moe_hybrid_.reset();
-            moe_placement_ = {};
-            return false;
-        }
-
-        const int max_ctx = cfg_.max_ctx > 0 ? cfg_.max_ctx : 8192;
-        if (!create_deepseek4_cache(backend_, w_, max_ctx, cache_)) {
-            std::fprintf(stderr,
-                         "[deepseek4] unpark: failed to recreate KV cache (ctx=%d)\n",
-                         max_ctx);
-            free_deepseek4_cache(cache_);
-            free_deepseek4_weights(w_);
-            stream_engine_.destroy();
-            moe_hybrid_.reset();
-            moe_placement_ = {};
-            return false;
-        }
-
-        parked_ = false;
-        std::printf("[deepseek4] target unparked (VRAM restored)\n");
-        std::fflush(stdout);
-    }
-    if (!validate_prefill_mode()) {
-        free_deepseek4_weights(w_);
-        stream_engine_.destroy();
-        moe_hybrid_.reset();
-        moe_placement_ = {};
-        return false;
-    }
-
-    if (want_draft && spec_drafter_parked_) {
-        if (parked_) {
-            std::fprintf(stderr,
-                         "[deepseek4] unpark: restore target before DSpark drafter\n");
-            return false;
-        }
-        if (!load_spec_drafter()) {
-            std::fprintf(stderr, "[deepseek4] unpark: failed to restore DSpark drafter\n");
-            return false;
-        }
-    }
-    cache_.prefill_mode = cfg_.prefill_mode;
     return true;
 }
 
@@ -1470,8 +1235,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             ok = deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), n_tok, pos,
                                 logits, moe_hybrid_.get(), tokens.data() + i,
                                 &stream_engine_, timing ? &step_tel : nullptr,
-                                routing_stats_.get(), hp,
-                                xdna_expert_compute_.get(), &xdna_expert_layers_);
+                                routing_stats_.get(), hp);
         } else {
             std::vector<float> hc_state;
             // In exact q=1 prefill, intermediate logits have no consumer and
@@ -1575,8 +1339,7 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         return deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), 1,
                               committed + idx, lg, moe_hybrid_.get(), &tok,
                               moe_hybrid_ ? &stream_engine_ : nullptr, nullptr,
-                              routing_stats_.get(), nullptr,
-                              xdna_expert_compute_.get(), &xdna_expert_layers_);
+                              routing_stats_.get(), nullptr);
     };
     auto sample_from = [&](std::vector<float> & lg) -> int32_t {
         if (token_mask && token_mask->active())
@@ -1706,8 +1469,7 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
                                 moe_hybrid_.get(), &tok_to_eval,
                                 moe_hybrid_ ? &stream_engine_ : nullptr,
                                 timing ? &step_tel : nullptr,
-                                routing_stats_.get(), nullptr,
-                                xdna_expert_compute_.get(), &xdna_expert_layers_)) {
+                                routing_stats_.get(), nullptr)) {
                 std::fprintf(stderr, "[deepseek4] decode step failed\n");
                 return false;
             }
@@ -2537,7 +2299,7 @@ bool DeepSeek4Backend::resident_session_create(
         int restore_slot,
         std::string *error) {
     if (error) error->clear();
-    if (id == 0 || resident_sessions_.count(id) != 0 || parked_) {
+    if (id == 0 || resident_sessions_.count(id) != 0) {
         if (error) *error = "invalid or duplicate resident session";
         return false;
     }
@@ -3026,8 +2788,7 @@ DeepSeek4Backend::decode_batch(
             embed.data(), 1, pos, logits,
             moe_hybrid_.get(), &token,
             moe_hybrid_ ? &stream_engine_ : nullptr,
-            nullptr, routing_stats_.get(), nullptr,
-            xdna_expert_compute_.get(), &xdna_expert_layers_);
+            nullptr, routing_stats_.get(), nullptr);
         session.decode_s += elapsed_s(t0);
         if (!ok) {
             session.failed = true;
@@ -3086,19 +2847,6 @@ ContinuousBatchMixedCompletion DeepSeek4Backend::execute_mixed(
     return mixed;
 }
 
-bool DeepSeek4Backend::handle_compress(const std::string & line,
-                                        const DaemonIO & io) {
-    (void)line; (void)io;
-    std::fprintf(stderr, "[deepseek4] compress not yet supported\n");
-    return false;
-}
-
-void DeepSeek4Backend::free_drafter() {
-    // Keep the configured path so request-scoped residency and an explicit
-    // later `unpark draft` can restore the DSpark model.
-    release_spec_drafter(/*mark_parked=*/true);
-}
-
 void DeepSeek4Backend::maybe_save_routing_stats() {
     if (!routing_stats_ || routing_stats_out_path_.empty()) return;
     std::string err;
@@ -3110,14 +2858,12 @@ void DeepSeek4Backend::maybe_save_routing_stats() {
 
 void DeepSeek4Backend::shutdown() {
     maybe_save_routing_stats();
-    free_drafter();
+    release_spec_drafter();
     free_resident_sessions();
     for (int i = 0; i < PREFIX_SLOTS; i++) {
         free_deepseek4_snapshot(snapshots_[i]);
     }
     free_deepseek4_cache(cache_);
-    xdna_expert_compute_.reset();
-    xdna_expert_layers_.clear();
     stream_engine_.destroy();
     moe_hybrid_.reset();
     routing_stats_.reset();

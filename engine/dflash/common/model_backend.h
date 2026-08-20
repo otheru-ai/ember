@@ -1,9 +1,8 @@
 // Model daemon backend interface.
 //
-// Abstract base class that encapsulates all model-specific operations so a
-// single generic daemon loop (daemon_loop.cpp) can service any architecture
-// (qwen35, laguna, qwen3, gemma, …) without duplicating the stdin/stdout
-// protocol parsing.
+// Stable C++ seam between Ember's C ABI bridge and the vendored DeepSeek4
+// implementation. Only operations exercised by the in-process server belong
+// here; the old multi-architecture stdin daemon is not part of Ember.
 //
 // Concrete backends own their GPU resources, weight/cache lifecycle, and
 // generation strategy (autoregressive, speculative decode, etc.).
@@ -27,59 +26,8 @@
 #include "continuous_batch_executor.h"
 #include "sampler.h"
 #include "thinking_budget.h"
-#include "placement/draft_residency.h"
 
 namespace dflash::common {
-
-enum class ParkTarget {
-    // NOTE: Empty preserves Qwen3's existing no-target park/unpark behavior.
-    Empty,
-    All,
-    TargetModel,
-    DraftModel,
-};
-
-struct ParkTargetMapping {
-    ParkTarget target;
-    std::string_view str_value;
-};
-
-inline constexpr ParkTargetMapping park_target_to_str_mappings[] = {
-    {ParkTarget::Empty,       ""},
-    {ParkTarget::All,         "all"},
-    {ParkTarget::TargetModel, "target"},
-    {ParkTarget::DraftModel,  "draft"},
-};
-
-constexpr const char * park_target_name(ParkTarget target) {
-    for (const auto & mapping : park_target_to_str_mappings) {
-        if (mapping.target == target) {
-            return mapping.str_value.empty()
-                ? "empty"
-                : mapping.str_value.data();
-        }
-    }
-    return "unknown";
-}
-
-constexpr std::optional<ParkTarget> parse_park_target(std::string_view value) {
-    for (const auto & mapping : park_target_to_str_mappings) {
-        if (mapping.str_value == value) return mapping.target;
-    }
-    return std::nullopt;
-}
-
-constexpr bool park_target_includes_target_model(ParkTarget target) {
-    return target == ParkTarget::Empty ||
-           target == ParkTarget::All ||
-           target == ParkTarget::TargetModel;
-}
-
-constexpr bool park_target_includes_draft_model(ParkTarget target) {
-    return target == ParkTarget::Empty ||
-           target == ParkTarget::All ||
-           target == ParkTarget::DraftModel;
-}
 
 // Token callback for streaming generation. Called once per committed token.
 // Return true to continue generation, false to abort.
@@ -95,8 +43,6 @@ using InferenceObserver = std::function<void(const char * phase,
 
 // ─── I/O handle passed to backend methods that need protocol output ─────
 struct DaemonIO {
-    int stream_fd = -1;
-
     // Optional token callback. When set, emit() calls this for each token
     // (excluding the -1 sentinel). If it returns false, the `cancelled`
     // flag is set and the caller should abort generation.
@@ -116,13 +62,22 @@ struct DaemonIO {
     // Mirrors antirez/ds4's server_prefill_progress `: prefill` heartbeat.
     std::function<bool()> on_prefill_keepalive;
 
-    // Write a single int32 to the stream fd (token or -1 sentinel).
-    // Also invokes on_token if set. Sets cancelled=true if on_token
-    // returns false (client disconnected).
-    void emit(int32_t v) const;
+    // Publish a committed token. Negative sentinels from the removed stdin
+    // daemon are ignored because Ember streams through callbacks only.
+    void emit(int32_t value) const {
+        if (on_token && value >= 0 && !on_token(value)) cancelled = true;
+    }
 
     // Return an IO handle that also invokes `cb` for emitted tokens.
-    DaemonIO with_token_callback(const TokenCallback & cb) const;
+    DaemonIO with_token_callback(const TokenCallback &callback) const {
+        DaemonIO output = *this;
+        if (!callback) return output;
+        TokenCallback existing = output.on_token;
+        output.on_token = [existing, callback](int32_t token) -> bool {
+            return (!existing || existing(token)) && callback(token);
+        };
+        return output;
+    }
 };
 
 // ─── Generate request/result ────────────────────────────────────────────
@@ -170,7 +125,6 @@ struct GenerateRequest {
     int                        n_gen       = 0;
     SamplerCfg                 sampler;
     bool                       do_sample   = false;
-    bool                       stream      = false;  // emit tokens to stream_fd
     // Optional inline-snap: snapshot at this position after prefill.
     int                        snap_pos    = -1;
     int                        snap_slot   = -1;
@@ -370,16 +324,6 @@ struct ResidentBatchBackend : ContinuousBatchWorkBackend {
 struct ModelBackend {
     virtual ~ModelBackend() = default;
 
-    // Print the "[<arch>-daemon] ready ..." banner on stdout.
-    virtual void print_ready_banner() const = 0;
-
-    // ── Park / unpark ────────────────────────────────────────────────
-    // Backend decides which resources to release/restore. Returns true on
-    // success; on failure prints to stderr and returns false.
-    virtual bool park(ParkTarget target) = 0;
-    virtual bool unpark(ParkTarget target) = 0;
-    virtual bool is_target_parked() const = 0;
-
     // ── Generation ───────────────────────────────────────────────────
     // Run a full prefill + decode cycle. Backend owns the strategy
     // (autoregressive, speculative, DDTree, …).
@@ -492,42 +436,6 @@ struct ModelBackend {
         return false;
     }
 
-    // ── Compress (pflash) ────────────────────────────────────────────
-    // Backend owns the DrafterContext lifecycle and park/unpark policy.
-
-    struct CompressRequest {
-        std::vector<int32_t> input_ids;      // drafter-tokenized prompt
-        float                keep_ratio;      // fraction to keep (0.0–1.0)
-        std::string          drafter_path;    // GGUF path (for lazy-load)
-        int                  drafter_gpu = 0;  // backend-local GPU for PFlash drafter
-        bool                 skip_park = false; // true on >=32GB GPUs
-        DraftResidencyAction residency_action = DraftResidencyAction::KeepLoaded;
-    };
-
-    struct CompressResult {
-        bool                 ok = false;
-        std::vector<int32_t> compressed_ids;  // surviving token IDs
-    };
-
-    // Typed compress API (preferred for in-process callers).
-    virtual CompressResult compress(const CompressRequest & req);
-
-    // Legacy string-based compress (for daemon_loop stdin protocol).
-    // `line` is the full "compress ..." command line.
-    virtual bool handle_compress(const std::string & line,
-                                  const DaemonIO & io) = 0;
-    virtual void free_drafter() = 0;
-
-    // ── Arch-specific command hook ───────────────────────────────────
-    // Called for any command the generic loop does not recognize. Return
-    // true if the backend handled it; false to fall through to the
-    // "unknown command" error path.
-    virtual bool try_handle_command(const std::string & line,
-                                     const DaemonIO & io) {
-        (void)line; (void)io;
-        return false;
-    }
-
     // ── DFlash speculative decode support ────────────────────────────
     // Returns true if this backend can participate in DFlash spec decode
     // (i.e. it implements the DFlashTarget interface).
@@ -540,17 +448,6 @@ struct ModelBackend {
     // Release oversized scratch buffers between requests to prevent VRAM
     // growth over time. Default is a no-op.
     virtual void release_scratch() {}
-
-    // Return true when the backend can route draft execution through the
-    // common remote-draft IPC transport. Model families that do not implement
-    // the DFlash feature boundary keep the default false and are rejected by
-    // the server before startup.
-    virtual bool supports_remote_draft() const { return false; }
-
-    // Layer-split capability introspection. Non layer-split backends keep the
-    // default false; LayerSplitBackend proxies model-adapter support.
-    virtual bool supports_kvflash() const { return false; }
-    virtual bool supports_mixed_backend_layer_split() const { return false; }
 
     // ── Routing data collection ──────────────────────────────────────
     // Set an external routing collector that the backend will call for each
@@ -573,7 +470,6 @@ struct ModelBackend {
 
     // ── Cleanup ──────────────────────────────────────────────────────
     // Release all resources (weights, cache, snapshots, drafter).
-    // Called by run_daemon() before returning.
     // Spark day-one bootstrap: when true, the server feeds local agent history
     // (Claude Code + Codex) through generate() before serving, then calls
     // spark_bootstrap_finalize to save the profile and rebuild placement so the

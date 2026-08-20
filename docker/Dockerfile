@@ -1,14 +1,9 @@
 # syntax=docker/dockerfile:1
 #
-# Ember has two intentionally separate image targets:
-#
-#   docker build --target dev     -t ember:dev     -f docker/Dockerfile .
-#   docker build --target release -t ember:release -f docker/Dockerfile .
-#
-# `dev` contains AMD's complete ROCm compiler/SDK, the source tree, build tools,
-# symbols, and build tree. `release` starts again from Ubuntu and receives only
-# the stripped server, crash shim, recursive ELF dependency closure, rocBLAS
-# runtime kernel data, and first-run utilities. Model weights are never copied.
+# `dev` is the full ROCm source/debug image. `release` contains only the server
+# and its gfx1151 runtime closure. The optional `dev-xdna`/`release-xdna`
+# stages add the current resident DSpark XDNA2 path; historical kernel
+# generations and validators are deliberately not shipped.
 
 ARG ROCM_DEV_IMAGE=rocm/dev-ubuntu-24.04:7.14.0-full@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467
@@ -22,13 +17,9 @@ FROM ${ROCM_DEV_IMAGE} AS toolchain
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      build-essential \
-      ca-certificates \
-      cmake \
-      curl \
+      build-essential ca-certificates cmake curl \
  && rm -rf /var/lib/apt/lists/*
 
-# ROCm 7.14's base omits the loader entry shipped by earlier complete images.
 RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig
 
@@ -37,13 +28,11 @@ FROM toolchain AS dev
 WORKDIR /ember
 COPY . /ember
 
-# Static ggml/engine linkage prevents project-built .so files and their build
-# tree RPATHs from leaking into the runtime image. ROCm remains dynamically
-# linked so the release stage can carry its exact, auditable runtime closure.
+# Keep the complete current debug toolset in ember-dev. Only ember-dflash is
+# copied into the release runtime closure below.
 RUN cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
       -DEMBER_ENGINE=ON \
-      -DEMBER_ENGINE_BACKEND=hip \
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /ember/build-rocm \
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
@@ -64,10 +53,6 @@ RUN gcc -shared -fPIC -O2 -g \
  && strip --strip-unneeded /usr/local/lib/libsegvtrace.so \
  && bash docker/collect-runtime.sh /ember-runtime \
       /usr/local/bin/ember-dflash \
-      /usr/local/bin/ember-dspark-main-bench \
-      /usr/local/bin/ember-dspark-xdna-diff \
-      /usr/local/bin/ember-dspark-cpu-bench \
-      /usr/local/bin/ember-dspark-rocmfp4-cpu-bench \
       /usr/local/lib/libsegvtrace.so \
       /opt/rocm/bin/rocminfo \
  && rocblas_kpack="$(find /opt/rocm -type f \
@@ -88,9 +73,6 @@ RUN gcc -shared -fPIC -O2 -g \
     fi \
  && du -sh /ember-runtime
 
-# License texts are runtime content, not development documentation. Preserve
-# the project license and every vendored notice alongside the binaries that
-# incorporate those components.
 RUN install -Dm0644 LICENSE /ember-licenses/ember/LICENSE \
  && install -Dm0644 engine/ggml/LICENSE /ember-licenses/ggml/LICENSE \
  && install -Dm0644 engine/dflash/LICENSE /ember-licenses/dflash/LICENSE \
@@ -117,8 +99,7 @@ LABEL org.opencontainers.image.title="Ember" \
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
+      ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
  && (getent group video >/dev/null || echo 'video:x:44:' >> /etc/group) \
  && (getent group render >/dev/null || echo 'render:x:109:' >> /etc/group) \
@@ -130,22 +111,15 @@ COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig \
- && ! ldd /usr/local/bin/ember-dspark-main-bench | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-dspark-xdna-diff | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-dspark-cpu-bench | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-dspark-rocmfp4-cpu-bench | grep -q 'not found'
+ && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found'
 
 ENV EMBER_MODEL_DIR=/models \
     EMBER_KV_CACHE_DIR=/cache
 
 ENTRYPOINT ["/usr/local/bin/ember-entrypoint"]
 
-# ── Optional XDNA2 userspace ──────────────────────────────────────────────
-#
-# The container carries userspace only. amdxdna.ko and NPU firmware must be
-# installed on the host, whose /dev/accel/accel0 is passed at runtime. Building
-# the shim with SKIP_KMOD avoids the common container mistake of packaging a
-# DKMS module that cannot control the host kernel.
+# XRT userspace is pinned to the same amdxdna tree used for host validation.
+# The host owns amdxdna.ko, firmware, IOMMU policy, and /dev/accel/accel0.
 FROM ${RUNTIME_IMAGE} AS xdna-userspace-build
 
 ARG XDNA_DRIVER_REF
@@ -159,8 +133,6 @@ RUN git clone --filter=blob:none https://github.com/amd/xdna-driver.git /xdna-dr
  && git -C /xdna-driver checkout "${XDNA_DRIVER_REF}" \
  && git -C /xdna-driver submodule update --init --recursive
 
-# XRT's dependency helper knows the distro-specific package set. -docker
-# deliberately omits host-driver-only dependencies.
 RUN /xdna-driver/xrt/src/runtime_src/tools/scripts/xrtdeps.sh -docker
 
 RUN cd /xdna-driver/xrt/build \
@@ -186,9 +158,6 @@ RUN cmake -S /xdna-driver -B /xdna-driver/build/EmberRelease \
  && install -Dm0644 /xdna-driver/xrt/LICENSE \
       /xdna-licenses/xrt/LICENSE
 
-# Compile both DeepSeek expert projection shapes with the open Peano flow.
-# xclbinutil comes from the exact XRT build above; the source remains in the
-# repository so every binary in the image is reproducible and auditable.
 FROM ${RUNTIME_IMAGE} AS xdna-kernel-build
 
 ARG MLIR_AIE_VERSION
@@ -216,39 +185,16 @@ ENV PATH=/iron/bin:/iron/lib/python3.12/site-packages/mlir_aie/bin:/opt/xilinx/x
     MLIR_AIE_INSTALL_DIR=/iron/lib/python3.12/site-packages/mlir_aie \
     PEANO_INSTALL_DIR=/iron/lib/python3.12/site-packages/llvm-aie
 
-RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
- && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v5 \
- && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v6 \
- && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v7 \
- && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 expert-v8 \
- && make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 shared-q8-v2 \
- && make -C /kernel K=4096 N=1024 BUILD_DIR=/kernel/build/q8-4096x1024 q8-projection-v3 \
- && make -C /kernel K=1024 N=32768 BUILD_DIR=/kernel/build/q8-1024x32768 q8-projection-v3 \
- && make -C /kernel K=4096 N=512 BUILD_DIR=/kernel/build/q8-4096x512 q8-projection-v3 \
- && make -C /kernel K=4096 N=512 BUILD_DIR=/kernel/build/q8-m32-4096x512 q8-gemm-m32-v4 \
- && make -C /kernel K=12288 N=4096 BUILD_DIR=/kernel/build/q8-m32-12288x4096 q8-gemm-m32-v4 \
- && make -C /kernel K=4096 N=8192 BUILD_DIR=/kernel/build/q8-4096x8192 q8-projection-v3 \
- && make -C /kernel K=8192 N=4096 BUILD_DIR=/kernel/build/q8-8192x4096 q8-projection-v3 \
- && make -C /kernel K=4096 N=1024 BUILD_DIR=/kernel/build/q8u-4096x1024 q8-projection-universal-v4 \
- && make -C /kernel K=1024 N=32768 BUILD_DIR=/kernel/build/q8u-1024x32768 q8-projection-universal-v4 \
- && make -C /kernel K=4096 N=8192 BUILD_DIR=/kernel/build/q8u-4096x8192 q8-projection-universal-v4 \
- && make -C /kernel K=8192 N=4096 BUILD_DIR=/kernel/build/q8u-8192x4096 q8-projection-universal-v4 \
- && make -C /kernel K=4096 N=2048 RESIDENT_MODE=projection \
-      BUILD_DIR=/kernel/build/resident-projection dspark-resident-v1 \
+RUN make -C /kernel K=4096 N=2048 RESIDENT_MODE=projection \
+      BUILD_DIR=/kernel/build/resident-projection \
  && make -C /kernel K=1024 N=32768 RESIDENT_MODE=projection \
-      BUILD_DIR=/kernel/build/resident-qb dspark-resident-v1 \
+      BUILD_DIR=/kernel/build/resident-qb \
  && make -C /kernel K=4096 N=16384 RESIDENT_MODE=projection \
-      BUILD_DIR=/kernel/build/resident-oa-grouped dspark-resident-v1 \
+      BUILD_DIR=/kernel/build/resident-oa-grouped \
  && make -C /kernel K=8192 N=4096 RESIDENT_MODE=projection \
-      BUILD_DIR=/kernel/build/resident-ob dspark-resident-v1 \
+      BUILD_DIR=/kernel/build/resident-ob \
  && make -C /kernel K=4096 N=2048 RESIDENT_MODE=shared \
-      BUILD_DIR=/kernel/build/resident-shared dspark-resident-v1 \
- && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
-      /kernel/build/q8u-1024x32768/q8_projection_universal_v4.mlir.prj/main.pdi \
- && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
-      /kernel/build/q8u-4096x8192/q8_projection_universal_v4.mlir.prj/main.pdi \
- && cmp /kernel/build/q8u-4096x1024/q8_projection_universal_v4.mlir.prj/main.pdi \
-      /kernel/build/q8u-8192x4096/q8_projection_universal_v4.mlir.prj/main.pdi \
+      BUILD_DIR=/kernel/build/resident-shared \
  && cmp /kernel/build/resident-projection/dspark_resident_v1.mlir.prj/main.pdi \
       /kernel/build/resident-qb/dspark_resident_v1.mlir.prj/main.pdi \
  && cmp /kernel/build/resident-projection/dspark_resident_v1.mlir.prj/main.pdi \
@@ -257,81 +203,6 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
       /kernel/build/resident-ob/dspark_resident_v1.mlir.prj/main.pdi \
  && cmp /kernel/build/resident-projection/dspark_resident_v1.mlir.prj/main.pdi \
       /kernel/build/resident-shared/dspark_resident_v1.mlir.prj/main.pdi \
- && make -C /kernel K=2048 N=4096 BUILD_DIR=/kernel/build/2048x4096 \
- && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.xclbin \
-      /xdna-artifacts/gemv_4096x2048.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/gemv_4096x2048.insts \
-      /xdna-artifacts/gemv_4096x2048.insts \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v2_4096x2048.xclbin \
-      /xdna-artifacts/gemv_v2_4096x2048.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v2_4096x2048.insts \
-      /xdna-artifacts/gemv_v2_4096x2048.insts \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v3_4096x2048.xclbin \
-      /xdna-artifacts/gemv_v3_4096x2048.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v3_4096x2048.insts \
-      /xdna-artifacts/gemv_v3_4096x2048.insts \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v4_4096x2048.xclbin \
-      /xdna-artifacts/gemv_v4_4096x2048.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/gemv_v4_4096x2048.insts \
-      /xdna-artifacts/gemv_v4_4096x2048.insts \
- && install -Dm0644 /kernel/build/4096x2048/expert_v5_4096x2048x4096.xclbin \
-      /xdna-artifacts/expert_v5_4096x2048x4096.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/expert_v5_4096x2048x4096.insts \
-      /xdna-artifacts/expert_v5_4096x2048x4096.insts \
- && install -Dm0644 /kernel/build/4096x2048/expert_v6_4096x2048x4096_b4.xclbin \
-      /xdna-artifacts/expert_v6_4096x2048x4096_b4.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/expert_v6_4096x2048x4096_b4.insts \
-      /xdna-artifacts/expert_v6_4096x2048x4096_b4.insts \
- && install -Dm0644 /kernel/build/4096x2048/expert_v7_4096x2048x4096_b5.xclbin \
-      /xdna-artifacts/expert_v7_4096x2048x4096_b5.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/expert_v7_4096x2048x4096_b5.insts \
-      /xdna-artifacts/expert_v7_4096x2048x4096_b5.insts \
- && install -Dm0644 /kernel/build/4096x2048/expert_v8_4096x2048x4096_b5.xclbin \
-      /xdna-artifacts/expert_v8_4096x2048x4096_b5.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/expert_v8_4096x2048x4096_b5.insts \
-      /xdna-artifacts/expert_v8_4096x2048x4096_b5.insts \
- && install -Dm0644 /kernel/build/4096x2048/shared_q8_v2_4096x2048x4096_b5.xclbin \
-      /xdna-artifacts/shared_q8_v2_4096x2048x4096_b5.xclbin \
- && install -Dm0644 /kernel/build/4096x2048/shared_q8_v2_4096x2048x4096_b5.insts \
-      /xdna-artifacts/shared_q8_v2_4096x2048x4096_b5.insts \
- && install -Dm0644 /kernel/build/q8-4096x1024/q8_projection_v3_4096x1024_b5.xclbin \
-      /xdna-artifacts/q8_projection_v3_4096x1024_b5.xclbin \
- && install -Dm0644 /kernel/build/q8-4096x1024/q8_projection_v3_4096x1024_b5.insts \
-      /xdna-artifacts/q8_projection_v3_4096x1024_b5.insts \
- && install -Dm0644 /kernel/build/q8-1024x32768/q8_projection_v3_1024x32768_b5.xclbin \
-      /xdna-artifacts/q8_projection_v3_1024x32768_b5.xclbin \
- && install -Dm0644 /kernel/build/q8-1024x32768/q8_projection_v3_1024x32768_b5.insts \
-      /xdna-artifacts/q8_projection_v3_1024x32768_b5.insts \
- && install -Dm0644 /kernel/build/q8-4096x512/q8_projection_v3_4096x512_b5.xclbin \
-      /xdna-artifacts/q8_projection_v3_4096x512_b5.xclbin \
- && install -Dm0644 /kernel/build/q8-4096x512/q8_projection_v3_4096x512_b5.insts \
-      /xdna-artifacts/q8_projection_v3_4096x512_b5.insts \
- && install -Dm0644 /kernel/build/q8-m32-4096x512/q8_gemm_m32_v4_4096x512_b128.xclbin \
-      /xdna-artifacts/q8_gemm_m32_v4_4096x512_b128.xclbin \
- && install -Dm0644 /kernel/build/q8-m32-4096x512/q8_gemm_m32_v4_4096x512_b128.insts \
-      /xdna-artifacts/q8_gemm_m32_v4_4096x512_b128.insts \
- && install -Dm0644 /kernel/build/q8-m32-12288x4096/q8_gemm_m32_v4_12288x4096_b128.xclbin \
-      /xdna-artifacts/q8_gemm_m32_v4_12288x4096_b128.xclbin \
- && install -Dm0644 /kernel/build/q8-m32-12288x4096/q8_gemm_m32_v4_12288x4096_b128.insts \
-      /xdna-artifacts/q8_gemm_m32_v4_12288x4096_b128.insts \
- && install -Dm0644 /kernel/build/q8-4096x8192/q8_projection_v3_4096x8192_b5.xclbin \
-      /xdna-artifacts/q8_projection_v3_4096x8192_b5.xclbin \
- && install -Dm0644 /kernel/build/q8-4096x8192/q8_projection_v3_4096x8192_b5.insts \
-      /xdna-artifacts/q8_projection_v3_4096x8192_b5.insts \
- && install -Dm0644 /kernel/build/q8-8192x4096/q8_projection_v3_8192x4096_b5.xclbin \
-      /xdna-artifacts/q8_projection_v3_8192x4096_b5.xclbin \
- && install -Dm0644 /kernel/build/q8-8192x4096/q8_projection_v3_8192x4096_b5.insts \
-      /xdna-artifacts/q8_projection_v3_8192x4096_b5.insts \
- && install -Dm0644 /kernel/build/q8u-4096x1024/q8_projection_universal_v4_4096x1024_b5.xclbin \
-      /xdna-artifacts/q8_projection_universal_v4_b5.xclbin \
- && install -Dm0644 /kernel/build/q8u-4096x1024/q8_projection_universal_v4_4096x1024_b5.insts \
-      /xdna-artifacts/q8_projection_universal_v4_4096x1024_b5.insts \
- && install -Dm0644 /kernel/build/q8u-1024x32768/q8_projection_universal_v4_1024x32768_b5.insts \
-      /xdna-artifacts/q8_projection_universal_v4_1024x32768_b5.insts \
- && install -Dm0644 /kernel/build/q8u-4096x8192/q8_projection_universal_v4_4096x8192_b5.insts \
-      /xdna-artifacts/q8_projection_universal_v4_4096x8192_b5.insts \
- && install -Dm0644 /kernel/build/q8u-8192x4096/q8_projection_universal_v4_8192x4096_b5.insts \
-      /xdna-artifacts/q8_projection_universal_v4_8192x4096_b5.insts \
  && install -Dm0644 /kernel/build/resident-projection/dspark_resident_v1_projection_4096x2048_b5.xclbin \
       /xdna-artifacts/dspark_resident_q8_v1_b5.xclbin \
  && install -Dm0644 /kernel/build/resident-projection/dspark_resident_v1_projection_4096x2048_b5.insts \
@@ -343,27 +214,14 @@ RUN make -C /kernel K=4096 N=2048 BUILD_DIR=/kernel/build/4096x2048 \
  && install -Dm0644 /kernel/build/resident-ob/dspark_resident_v1_projection_8192x4096_b5.insts \
       /xdna-artifacts/dspark_resident_q8_v1_projection_8192x4096_b5.insts \
  && install -Dm0644 /kernel/build/resident-shared/dspark_resident_v1_shared_4096x2048_b5.insts \
-      /xdna-artifacts/dspark_resident_q8_v1_shared_4096x2048x4096_b5.insts \
- && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.xclbin \
-      /xdna-artifacts/gemv_2048x4096.xclbin \
- && install -Dm0644 /kernel/build/2048x4096/gemv_2048x4096.insts \
-      /xdna-artifacts/gemv_2048x4096.insts \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v2_2048x4096.xclbin \
-      /xdna-artifacts/gemv_v2_2048x4096.xclbin \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v2_2048x4096.insts \
-      /xdna-artifacts/gemv_v2_2048x4096.insts \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v3_2048x4096.xclbin \
-      /xdna-artifacts/gemv_v3_2048x4096.xclbin \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v3_2048x4096.insts \
-      /xdna-artifacts/gemv_v3_2048x4096.insts \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v4_2048x4096.xclbin \
-      /xdna-artifacts/gemv_v4_2048x4096.xclbin \
- && install -Dm0644 /kernel/build/2048x4096/gemv_v4_2048x4096.insts \
-      /xdna-artifacts/gemv_v4_2048x4096.insts
+      /xdna-artifacts/dspark_resident_q8_v1_shared_4096x2048x4096_b5.insts
 
 FROM dev AS dev-xdna
 
 COPY --from=xdna-userspace-build /xdna-runtime/ /
+COPY --from=xdna-kernel-build /xdna-artifacts/ \
+  /usr/local/share/ember/xdna2/
+ENV EMBER_XDNA_ARTIFACT_DIR=/usr/local/share/ember/xdna2
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       uuid-dev \
@@ -375,38 +233,14 @@ RUN apt-get update \
       -DEMBER_XDNA_XRT_PROVIDER=ON \
       -DEMBER_XRT_ROOT=/opt/xilinx/xrt \
  && cmake --build /ember/build-xdna-provider \
-      --target ember_xdna_moe_xrt ember-xdna-validate \
-      ember-xdna-gpu-interop ember-xdna-rocmfp4-validate -j"$(nproc)" \
- && cmake --build /ember/build-xdna-provider \
-      --target ember-xdna-q8-validate \
-      ember-xdna-q8-projection-validate \
-      ember-xdna-q8-gemm-m32-validate \
-      ember-xdna-overlay-switch-bench \
-      ember-xdna-q8-universal-validate \
-      ember-xdna-dspark-resident-validate \
+      --target ember_xdna_dspark_xrt ember-xdna-dspark-resident-validate \
       ember-xdna-dspark-overlay-validate -j"$(nproc)" \
- && install -Dm0755 /ember/build-xdna-provider/libember_xdna_moe.so \
-      /xdna-provider/libember_xdna_moe.so \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-validate \
-      /xdna-provider/ember-xdna-validate \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-gpu-interop \
-      /xdna-provider/ember-xdna-gpu-interop \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-rocmfp4-validate \
-      /xdna-provider/ember-xdna-rocmfp4-validate \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-validate \
-      /xdna-provider/ember-xdna-q8-validate \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-projection-validate \
-      /xdna-provider/ember-xdna-q8-projection-validate \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-gemm-m32-validate \
-      /xdna-provider/ember-xdna-q8-gemm-m32-validate \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-overlay-switch-bench \
-      /xdna-provider/ember-xdna-overlay-switch-bench \
- && install -Dm0755 /ember/build-xdna-provider/ember-xdna-q8-universal-validate \
-      /xdna-provider/ember-xdna-q8-universal-validate \
+ && install -Dm0755 /ember/build-xdna-provider/libember_xdna_dspark.so \
+      /xdna-provider/libember_xdna_dspark.so \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-dspark-resident-validate \
-      /xdna-provider/ember-xdna-dspark-resident-validate \
+      /usr/local/bin/ember-xdna-dspark-resident-validate \
  && install -Dm0755 /ember/build-xdna-provider/ember-xdna-dspark-overlay-validate \
-      /xdna-provider/ember-xdna-dspark-overlay-validate
+      /usr/local/bin/ember-xdna-dspark-overlay-validate
 
 FROM release AS release-xdna
 
@@ -419,32 +253,11 @@ RUN apt-get update \
 
 COPY --from=xdna-userspace-build /xdna-runtime/ /
 COPY --from=xdna-userspace-build /xdna-licenses/ /usr/share/licenses/ember/
-COPY --from=dev-xdna /xdna-provider/libember_xdna_moe.so \
-  /usr/local/lib/ember/libember_xdna_moe.so
-COPY --from=dev-xdna /xdna-provider/ember-xdna-validate \
-  /usr/local/bin/ember-xdna-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-gpu-interop \
-  /usr/local/bin/ember-xdna-gpu-interop
-COPY --from=dev-xdna /xdna-provider/ember-xdna-rocmfp4-validate \
-  /usr/local/bin/ember-xdna-rocmfp4-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-validate \
-  /usr/local/bin/ember-xdna-q8-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-projection-validate \
-  /usr/local/bin/ember-xdna-q8-projection-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-gemm-m32-validate \
-  /usr/local/bin/ember-xdna-q8-gemm-m32-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-overlay-switch-bench \
-  /usr/local/bin/ember-xdna-overlay-switch-bench
-COPY --from=dev-xdna /xdna-provider/ember-xdna-q8-universal-validate \
-  /usr/local/bin/ember-xdna-q8-universal-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-dspark-resident-validate \
-  /usr/local/bin/ember-xdna-dspark-resident-validate
-COPY --from=dev-xdna /xdna-provider/ember-xdna-dspark-overlay-validate \
-  /usr/local/bin/ember-xdna-dspark-overlay-validate
+COPY --from=dev-xdna /xdna-provider/libember_xdna_dspark.so \
+  /usr/local/lib/ember/libember_xdna_dspark.so
 COPY --from=xdna-kernel-build /xdna-artifacts/ \
   /usr/local/share/ember/xdna2/
-COPY providers/xdna2/VENDOR.md \
-  /usr/share/doc/ember/xdna2/VENDOR.md
+COPY providers/xdna2/VENDOR.md /usr/share/doc/ember/xdna2/VENDOR.md
 COPY providers/xdna2/LLVM-EXCEPTION.txt \
   /usr/share/licenses/ember/tilefuse/LLVM-EXCEPTION.txt
 COPY vendor/xgrammar/LICENSE \
@@ -452,17 +265,7 @@ COPY vendor/xgrammar/LICENSE \
 
 RUN echo /opt/xilinx/xrt/lib > /etc/ld.so.conf.d/20-xrt.conf \
  && ldconfig \
- && ! ldd /usr/local/lib/ember/libember_xdna_moe.so | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-gpu-interop | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-rocmfp4-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-q8-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-q8-projection-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-q8-gemm-m32-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-overlay-switch-bench | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-q8-universal-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-dspark-resident-validate | grep -q 'not found' \
- && ! ldd /usr/local/bin/ember-xdna-dspark-overlay-validate | grep -q 'not found' \
+ && ! ldd /usr/local/lib/ember/libember_xdna_dspark.so | grep -q 'not found' \
  && ! ldd /opt/xilinx/xrt/lib/libxrt_driver_xdna.so.2 | grep -q 'not found' \
  && /opt/xilinx/xrt/bin/xrt-smi --version
 

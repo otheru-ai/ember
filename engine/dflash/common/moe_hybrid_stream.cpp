@@ -76,7 +76,7 @@ bool MoeHybridStreamEngine::init(ggml_backend_t gpu_backend, size_t max_expert_b
     cuda_err = cudaMalloc(&gpu_scratch_, max_expert_bytes);
     if (cuda_err != cudaSuccess) {
         if (err) *err = std::string("cudaMalloc scratch failed: ") + cudaGetErrorString(cuda_err);
-        cudaFreeHost(pinned_buf_);
+        (void)cudaFreeHost(pinned_buf_);
         pinned_buf_ = nullptr;
         pinned_size_ = 0;
         return false;
@@ -92,11 +92,11 @@ bool MoeHybridStreamEngine::is_ready() const {
 
 void MoeHybridStreamEngine::destroy() {
     if (gpu_scratch_) {
-        cudaFree(gpu_scratch_);
+        (void)cudaFree(gpu_scratch_);
         gpu_scratch_ = nullptr;
     }
     if (pinned_buf_) {
-        cudaFreeHost(pinned_buf_);
+        (void)cudaFreeHost(pinned_buf_);
         pinned_buf_ = nullptr;
     }
     pinned_size_ = 0;

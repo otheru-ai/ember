@@ -90,7 +90,6 @@ extern "C" {
     GGML_BACKEND_API int ggml_cpu_has_avx512_vbmi(void);
     GGML_BACKEND_API int ggml_cpu_has_avx512_vnni(void);
     GGML_BACKEND_API int ggml_cpu_has_avx512_bf16(void);
-    GGML_BACKEND_API int ggml_cpu_has_amx_int8   (void);
     // ARM
     GGML_BACKEND_API int ggml_cpu_has_neon       (void);
     GGML_BACKEND_API int ggml_cpu_has_arm_fma    (void);

@@ -88,14 +88,20 @@ xrt-smi examine
 test -r /dev/accel/accel0
 ```
 
-Build the image and run its synthetic provider gate without loading the model:
+Build the release image. It contains only the serving plugin and the five
+resident overlay artifacts; validators stay in the `dev-xdna` image:
 
 ```bash
-docker build --target release-xdna -f docker/Dockerfile -t ember:xdna-local .
-docker run --rm --entrypoint ember-xdna-validate \
+docker build --network host --target release-xdna -f docker/Dockerfile \
+  -t ember:xdna-local .
+docker build --network host --target dev-xdna -f docker/Dockerfile \
+  -t ember:xdna-dev .
+docker run --rm --entrypoint ember-xdna-dspark-overlay-validate \
   --device /dev/accel/accel0 \
   --security-opt seccomp=unconfined --ulimit memlock=-1:-1 \
-  ember:xdna-local
+  -v "$PWD/models:/models:ro" \
+  ember:xdna-dev \
+  /usr/local/share/ember/xdna2 /models/DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf
 ```
 
 Then start the opt-in overlay:
@@ -106,9 +112,9 @@ docker compose -f compose.yaml -f compose.xdna.yaml up --build -d
 
 The overlay enables the DSpark provider and `--batch-sessions 2`; provider
 failure falls back to GPU DSpark. Set `DFLASH_DSPARK_XDNA_REQUIRED=1` only for
-correctness/performance gates that must reject fallback. Do not enable the old
-`DFLASH_MOE_XDNA_PLUGIN` target-expert placement for serving: it was useful for
-kernel research but measured slower than the fused GPU target path.
+correctness/performance gates that must reject fallback. The slower XDNA
+target-expert provider and its historical kernel generations have been removed;
+their measurements remain in the research guide.
 
 The fixed Gen52 fixture cleared the throughput gate, but a low-acceptance
 fixture exposed a capture-graph output difference. Treat results as

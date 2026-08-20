@@ -62,6 +62,16 @@ class ReleaseScriptTests(unittest.TestCase):
         for script in (ENTRYPOINT, COLLECT_RUNTIME, PREFLIGHT, SMOKE):
             subprocess.run(["bash", "-n", str(script)], check=True)
 
+    def test_local_compose_builds_use_host_network(self) -> None:
+        # The supported WSL host intentionally disables Docker's unusable
+        # bridge/iptables path. Local builds must not implicitly select it.
+        for compose in (COMPOSE_BUILD, COMPOSE_XDNA):
+            self.assertIn("network: host", compose.read_text())
+
+        compose = COMPOSE.read_text()
+        ember_dev = compose[compose.index("  ember-dev:"):]
+        self.assertIn("network: host", ember_dev)
+
     def test_container_targets_separate_toolchain_from_runtime(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("AS dev", dockerfile)
@@ -82,12 +92,13 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("rocblas/library/gfx1151", dockerfile)
         self.assertIn("TensileLibrary_lazy_gfx1151.dat", dockerfile)
 
+
     def test_xdna_image_keeps_host_driver_outside_container(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         compose = COMPOSE_XDNA.read_text()
         runtime = self.docker_stage(dockerfile, "release-xdna")
         self.assertIn("COPY --from=xdna-userspace-build", runtime)
-        self.assertIn("libember_xdna_moe.so", runtime)
+        self.assertIn("libember_xdna_dspark.so", runtime)
         self.assertNotIn("amdxdna.ko", runtime)
         self.assertIn("SKIP_KMOD=ON", dockerfile)
         self.assertIn("/dev/accel/accel0:/dev/accel/accel0", compose)

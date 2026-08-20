@@ -13,7 +13,6 @@
 #include "../common/moe_hybrid_routing_stats.h"
 #include "../common/moe_hybrid_storage.h"
 #include "../common/moe_hybrid_stream.h"
-#include "../common/moe_expert_compute_xdna.h"
 #include "../common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
@@ -40,12 +39,6 @@ public:
     bool init();
 
     // ModelBackend interface
-    void print_ready_banner() const override;
-
-    bool park(ParkTarget target) override;
-    bool unpark(ParkTarget target) override;
-    bool is_target_parked() const override { return parked_; }
-
     GenerateResult generate_impl(const GenerateRequest & req,
                                  const DaemonIO & io) override;
 
@@ -94,10 +87,6 @@ public:
         int requested_tokens,
         const std::vector<ContinuousBatchSessionId> &decode_sessions) override;
 
-    bool handle_compress(const std::string & line,
-                         const DaemonIO & io) override;
-    void free_drafter() override;
-
     void shutdown() override;
 
 private:
@@ -106,7 +95,6 @@ private:
     ggml_backend_t         snap_backend_ = nullptr;
     DeepSeek4Weights       w_;
     DeepSeek4Cache         cache_;
-    bool                   parked_       = false;
 
     // Sampler
     SamplerCfg             sampler_;
@@ -125,7 +113,6 @@ private:
 
     // DSpark speculative decode (opt-in: DFLASH_DS4_SPEC=1 + DFLASH_DS4_DRAFT=<gguf>).
     bool                           spec_enabled_ = false;
-    bool                           spec_drafter_parked_ = false;
     std::string                    spec_draft_path_;
     std::unique_ptr<DSparkDrafter> spec_drafter_;
     std::unique_ptr<XdnaDSparkDraftCompute> spec_xdna_draft_compute_;
@@ -133,7 +120,7 @@ private:
     std::vector<float>             spec_feat_window_;
 
     bool load_spec_drafter();
-    void release_spec_drafter(bool mark_parked);
+    void release_spec_drafter();
 
     struct ResidentSession;
     std::unordered_map<ContinuousBatchSessionId,
@@ -190,7 +177,6 @@ private:
 
     bool load_model();
     bool init_hybrid_model();
-    bool init_xdna_moe_provider();
     bool requires_monolithic_model() const;
     bool validate_prefill_mode() const;
     bool compute_uniform_hybrid_placement(const DeepSeek4Weights & w,
@@ -202,11 +188,6 @@ private:
     std::shared_ptr<MoeHybridStorage> moe_hybrid_;
     MoeHybridPlacement                moe_placement_;
     MoeHybridStreamEngine             stream_engine_;
-    std::unique_ptr<MoeExpertCompute> xdna_expert_compute_;
-    std::vector<MoeExpertLayer>       xdna_expert_layers_;
-    // Expert IPC removed — layer split replaces expert split.
-    // Kept for compilation compatibility; init_hybrid_model() is no longer called
-    // from the layer-split path.
     std::shared_ptr<MoeHybridRoutingStats> routing_stats_;
     std::string                       routing_stats_out_path_;
 };

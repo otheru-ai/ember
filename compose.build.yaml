@@ -6,6 +6,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: release
+      network: host
       args:
         EMBER_VERSION: ${EMBER_VERSION:-dev}
         EMBER_VCS_REF: ${EMBER_VCS_REF:-unknown}

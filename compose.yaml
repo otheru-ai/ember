@@ -41,6 +41,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: dev
+      network: host
     image: ember:dev
     network_mode: host
     devices:

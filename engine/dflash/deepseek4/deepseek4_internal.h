@@ -24,7 +24,7 @@
 #include "ggml-backend.h"
 
 #include "internal.h"
-#include "common/layer_split_utils.h"
+#include "placement/placement_config.h"
 #include "common/prefill_attention_mode.h"
 
 namespace dflash::common {
@@ -47,8 +47,6 @@ struct MoeHybridPlacement;
 struct MoeHybridConfig;
 struct MoeHybridRoutingStats;
 class MoeHybridStreamEngine;
-struct MoeExpertCompute;
-struct MoeExpertLayer;
 
 struct DeepSeek4StepTelemetry {
     uint64_t total_us = 0;
@@ -242,7 +240,7 @@ struct DeepSeek4Weights {
     int32_t eos_id      = -1;
     int32_t eos_chat_id = -1;
 
-    // MoE hybrid placement (deprecated — layer split replaces expert split)
+    // Unified-memory expert residency and optional local XDNA2 placement.
     bool moe_hybrid       = false;
 
     // Runtime serving policy. These values are set by the backend after the
@@ -317,7 +315,6 @@ struct DeepSeek4RawRingSpan {
 struct DeepSeek4BackendConfig {
     const char * model_path   = nullptr;
     DevicePlacement device;
-    int          stream_fd    = -1;
     int          chunk        = 512;   // prefill chunk size
     PrefillAttentionMode prefill_mode = PrefillAttentionMode::Exact;
     int          max_ctx      = 0;     // 0 = auto from SWA + compression capacity
@@ -407,9 +404,7 @@ bool deepseek4_step(
     MoeHybridStreamEngine *     stream_engine = nullptr,
     DeepSeek4StepTelemetry *    telemetry = nullptr,
     MoeHybridRoutingStats *     routing_stats = nullptr,
-    Ds4VerifyHooks *            verify_hooks = nullptr,
-    MoeExpertCompute *          expert_compute = nullptr,
-    const std::vector<MoeExpertLayer> * expert_layers = nullptr);
+    Ds4VerifyHooks *            verify_hooks = nullptr);
 
 // Optional hooks for the DSpark spec-decode batched verify (deepseek4_dspark).
 // When set on a multi-token deepseek4_step_layer_range call they add: per-layer

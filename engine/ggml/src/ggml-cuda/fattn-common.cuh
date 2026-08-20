@@ -664,8 +664,6 @@ static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restric
 
 #ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
-        const half2 h_norm = __half2half2(__float2half(norm));
-
 #pragma unroll
         for (int l = 0; l < ne; l++) {
             const int jl = j + l;
@@ -941,7 +939,7 @@ static __global__ void flash_attn_stream_k_fixup_general(
         max_val = max_val_new;
 
         // If this block started in a previous tile we are done and don't need to combine additional partial results.
-        if (fastmodulo(kbc, fd_iter_k) == 0 || fastdiv(kbc, fd_iter_k) < tile_kbc0) {
+        if (fastmodulo(kbc, fd_iter_k) == 0 || static_cast<int>(fastdiv(kbc, fd_iter_k)) < tile_kbc0) {
             break;
         }
         bidx--;

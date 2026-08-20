@@ -4,7 +4,6 @@
 
 #include "moe_hybrid_types.h"
 #include "moe_hybrid_storage.h"
-#include "moe_expert_compute.h"
 
 #include "ggml-backend.h"
 
@@ -110,8 +109,6 @@ struct MoeHybridFfnTelemetry {
     int cold_selected = 0;
 };
 
-int moe_hybrid_expert_compute_batch_limit();
-int moe_hybrid_expert_compute_ipc_batch_limit(int n_tokens);
 int moe_hybrid_prefill_hot_sub_batch_limit();
 
 // Single-token hybrid FFN: hot on GPU, cold on CPU, combine on host.
@@ -156,8 +153,6 @@ bool eval_moe_hybrid_ffn_batched(
     std::string *                   err = nullptr,
     ggml_gallocr_t *                p_hot_alloc = nullptr,
     ggml_gallocr_t *                p_cold_alloc = nullptr,
-    MoeExpertCompute *                expert_compute = nullptr,
-    const MoeExpertLayer *            expert_layer = nullptr,
     MoeHybridFfnTelemetry *         telemetry = nullptr);
 
 // Hot-only batched prefill: all selected experts are in VRAM.
@@ -188,9 +183,7 @@ bool eval_moe_hybrid_ffn_gpu_resident(
     GpuResidentState &              gpu_state,
     const int32_t *                 selected_ids,
     const float *                   selected_weights,
-    int                             n_selected,
-    MoeExpertCompute *                expert_compute = nullptr,
-    const MoeExpertLayer *            expert_layer = nullptr);
+    int                             n_selected);
 
 struct CachedHotGraphOptions {
     float swiglu_clamp = 0.0f;

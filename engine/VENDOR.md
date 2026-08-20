@@ -24,3 +24,22 @@ OUT_PROD). HIP fast-math remains deliberately disabled per ROCmFPX `8e6277f8`'s
 gfx1151 speculative-decode measurements. Before updating it, diff the candidate
 upstream revision against `8fd9584`, preserve the license notices above, and
 record the new upstream commit and any local divergence in this file.
+
+## Pruned deployment scope
+
+Ember preserves the upstream provenance above, but intentionally does not carry
+the whole portable lucebox/ggml source matrix. This vendored snapshot is scoped
+to the only supported deployment: Linux x86-64 on AMD Strix Halo, with one
+gfx1151 HIP device and the on-package XDNA2 NPU. Non-AMD compute backends,
+non-x86 CPU implementations, NVIDIA-only sampling, remote execution, layer
+splitting, and multi-GPU peer/shard placement have been removed. The remaining
+`ggml-cuda` directory name is an upstream compatibility detail: ROCm's HIP build
+compiles those shared `.cu`/`.cuh` kernels directly, and they are load-bearing
+for the gfx1151 path. The public split/peer-copy surface and RCCL integration
+are removed; a compile-time guard also excludes the shared substrate's internal
+peer-copy branch.
+
+When importing a future engine fix, diff against upstream commit `8fd9584` and
+port only files reachable by this retained HIP/x86-64 build. A broad vendor
+refresh would reintroduce unsupported architectures and must be pruned and
+revalidated before landing.

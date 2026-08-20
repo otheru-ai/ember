@@ -157,7 +157,8 @@ ctest --test-dir build --output-on-failure
 Build the real ROCm backend from the repository root with:
 
 ```bash
-docker build --target dev -f docker/Dockerfile -t ember-rocm:7.14-dev .
+docker build --network host --target dev -f docker/Dockerfile \
+  -t ember-rocm:7.14-dev .
 scripts/build.sh
 ```
 

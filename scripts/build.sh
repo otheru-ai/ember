@@ -29,8 +29,7 @@ docker run --rm \
     set -euo pipefail
     cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
-      -DEMBER_ENGINE=ON \
-      -DEMBER_ENGINE_BACKEND=hip
+      -DEMBER_ENGINE=ON
     cmake --build /ember/build-rocm -j ${JOBS}
   "
 

@@ -7,17 +7,8 @@
 #include <cstdint>
 #include <memory>
 
-#if defined(GGML_USE_HIP)
 #define GGML_COMMON_DECL_HIP
 #define GGML_COMMON_IMPL_HIP
-#else
-#define GGML_COMMON_DECL_CUDA
-#define GGML_COMMON_IMPL_CUDA
-#if defined(GGML_USE_MUSA)
-#define GGML_COMMON_DECL_MUSA
-#define GGML_COMMON_IMPL_MUSA
-#endif
-#endif
 #include "ggml-common.h"
 #include "../../rocmfp4/rocmfp4.h"
 #include "../../rocmfpx/rocmfpx.h"
@@ -31,13 +22,7 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
-#elif defined(GGML_USE_MUSA)
-#include "vendors/musa.h"
-#else
-#include "vendors/cuda.h"
-#endif // defined(GGML_USE_HIP)
 
 #define STRINGIZE_IMPL(...) #__VA_ARGS__
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
@@ -92,18 +77,6 @@
 #define GGML_CUDA_CC_IS_CDNA2(cc)   (cc >= GGML_CUDA_CC_CDNA2 && cc < GGML_CUDA_CC_CDNA3)
 #define GGML_CUDA_CC_IS_CDNA3(cc)   (cc >= GGML_CUDA_CC_CDNA3 && cc < GGML_CUDA_CC_CDNA4)
 #define GGML_CUDA_CC_IS_CDNA4(cc)   (cc >= GGML_CUDA_CC_CDNA4 && cc < GGML_CUDA_CC_RDNA1)
-
-// Moore Threads
-#define MUSART_HMASK 40300 // MUSA rc4.3, min. ver. for half2 -> uint mask comparisons
-
-#define GGML_CUDA_CC_QY1 (GGML_CUDA_CC_OFFSET_MTHREADS + 0x210) // MTT S80, MTT S3000
-#define GGML_CUDA_CC_QY2 (GGML_CUDA_CC_OFFSET_MTHREADS + 0x220) // MTT S4000
-#define GGML_CUDA_CC_PH1 (GGML_CUDA_CC_OFFSET_MTHREADS + 0x310) // MTT S5000
-
-#define GGML_CUDA_CC_IS_MTHREADS(cc) (cc >= GGML_CUDA_CC_OFFSET_MTHREADS && cc < GGML_CUDA_CC_OFFSET_AMD)
-#define GGML_CUDA_CC_IS_QY1(cc)      (cc >= GGML_CUDA_CC_QY1 && cc < GGML_CUDA_CC_QY2)
-#define GGML_CUDA_CC_IS_QY2(cc)      (cc >= GGML_CUDA_CC_QY2 && cc < GGML_CUDA_CC_PH1)
-#define GGML_CUDA_CC_IS_PH1(cc)      (cc >= GGML_CUDA_CC_PH1)
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11070
 #    define GGML_CUDA_USE_CUB
@@ -197,10 +170,6 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 
 #define CUBLAS_CHECK(err) CUDA_CHECK_GEN(err, CUBLAS_STATUS_SUCCESS, cublas_get_error_str)
 
-#ifdef GGML_USE_NCCL
-#define NCCL_CHECK(err) CUDA_CHECK_GEN(err, ncclSuccess, ncclGetErrorString)
-#endif // GGML_USE_NCCL
-
 #if !defined(GGML_USE_HIP) && !defined(GGML_CUDA_NO_VMM)
 static const char * cu_get_error_str(CUresult err) {
     const char * err_str;
@@ -283,33 +252,30 @@ static const char * cu_get_error_str(CUresult err) {
 #endif // defined(TURING_MMA_AVAILABLE)
 
 static bool fp16_available(const int cc) {
-    return ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_PASCAL ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_PH1);
+    return GGML_CUDA_CC_IS_AMD(cc) ||
+        ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_PASCAL;
 }
 
 static bool fast_fp16_available(const int cc) {
     return GGML_CUDA_CC_IS_AMD(cc) ||
-        (GGML_CUDA_CC_IS_NVIDIA(cc) && fp16_available(cc) && ggml_cuda_highest_compiled_arch(cc) != 610) ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && fp16_available(cc));
+        (GGML_CUDA_CC_IS_NVIDIA(cc) && fp16_available(cc) && ggml_cuda_highest_compiled_arch(cc) != 610);
 }
 
 // To be used for feature selection of external libraries, e.g. cuBLAS.
 static bool fast_fp16_hardware_available(const int cc) {
-    return (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_PASCAL && cc != 610) || GGML_CUDA_CC_IS_AMD(cc) ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_QY2);
+    return (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_PASCAL && cc != 610) ||
+        GGML_CUDA_CC_IS_AMD(cc);
 }
 
 // To be used for feature selection of external libraries, e.g. cuBLAS.
 static bool fp16_mma_hardware_available(const int cc) {
     return (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_VOLTA) ||
-        GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA3(cc) || GGML_CUDA_CC_IS_RDNA4(cc) ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_QY2);
+        GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA3(cc) || GGML_CUDA_CC_IS_RDNA4(cc);
 }
 
 static bool bf16_mma_hardware_available(const int cc) {
     return (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE) ||
-        GGML_CUDA_CC_IS_CDNA(cc) || cc >= GGML_CUDA_CC_RDNA3 ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_PH1);
+        GGML_CUDA_CC_IS_CDNA(cc) || cc >= GGML_CUDA_CC_RDNA3;
 }
 
 static bool fp32_mma_hardware_available(const int cc) {
@@ -669,14 +635,13 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
 }
 
-#if (defined(CUDART_VERSION) && CUDART_VERSION < CUDART_HMASK) || defined(GGML_USE_HIP) || \
-    (defined(MUSART_VERSION) && MUSART_VERSION < MUSART_HMASK)
+#if (defined(CUDART_VERSION) && CUDART_VERSION < CUDART_HMASK) || defined(GGML_USE_HIP)
 static __device__ __forceinline__ uint32_t __hgt2_mask(const half2 a, const half2 b) {
     const uint32_t mask_low  = 0x0000FFFF * (float( __low2half(a)) > float( __low2half(b)));
     const uint32_t mask_high = 0xFFFF0000 * (float(__high2half(a)) > float(__high2half(b)));
     return mask_low | mask_high;
 }
-#endif // (defined(CUDART_VERSION) && CUDART_VERSION < CUDART_HMASK) || defined(GGML_USE_HIP) || (defined(MUSART_VERSION) && MUSART_VERSION < MUSART_HMASK)
+#endif // old CUDA runtimes or HIP
 
 static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, int c) {
 #if defined(GGML_USE_HIP)
@@ -1144,9 +1109,6 @@ struct ggml_cuda_device_info {
 
     std::array<float, GGML_CUDA_MAX_DEVICES> default_tensor_split = {};
 
-#ifdef GGML_USE_NCCL
-    ncclComm_t comms[GGML_CUDA_MAX_DEVICES];
-#endif // GGML_USE_NCCL
 };
 
 const ggml_cuda_device_info & ggml_cuda_info();

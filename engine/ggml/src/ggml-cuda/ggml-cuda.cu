@@ -264,7 +264,8 @@ static int ggml_cuda_parse_id(char devName[]) {
     int archMinor = 0x0;
     int archNum = GGML_CUDA_CC_OFFSET_AMD;
     int archLen = strlen(devName);
-    char archName[archLen + 1];
+    std::vector<char> arch_buffer((size_t) archLen + 1);
+    char * archName = arch_buffer.data();
 
     // strip leading 'gfx' while copying into our buffer
     if (archLen > 3) {
@@ -432,28 +433,6 @@ static ggml_cuda_device_info ggml_cuda_init() {
 
     // configure logging to stdout
     // CUBLAS_CHECK(cublasLoggerConfigure(1, 1, 0, nullptr));
-
-    for (int id = 0; id < info.device_count; ++id) {
-        ggml_cuda_set_device(id);
-        for (int id_other = 0; id_other < info.device_count; ++id_other) {
-            if (id == id_other) {
-                continue;
-            }
-            int can_access_peer;
-            CUDA_CHECK(cudaDeviceCanAccessPeer(&can_access_peer, id, id_other));
-            if (can_access_peer) {
-                CUDA_CHECK(cudaDeviceEnablePeerAccess(id_other, 0));
-            }
-        }
-    }
-
-#ifdef GGML_USE_NCCL
-    int dev_ids[GGML_CUDA_MAX_DEVICES];
-    for (int id = 0; id < info.device_count; ++id) {
-        dev_ids[id] = id;
-    }
-    NCCL_CHECK(ncclCommInitAll(info.comms, info.device_count, dev_ids));
-#endif // GGML_USE_NCCL
 
     return info;
 }
@@ -1325,83 +1304,6 @@ static const ggml_backend_buffer_type_i ggml_backend_cuda_split_buffer_type_inte
     /* .is_host          = */ ggml_backend_cuda_split_buffer_type_is_host,
 };
 
-bool ggml_backend_cuda_allreduce_tensor(ggml_backend_t * backends, struct ggml_tensor ** tensors, size_t n_backends) {
-#ifdef GGML_USE_NCCL
-    const int64_t ne = ggml_nelements(tensors[0]);
-    // FIXME the input of llm_graph_context::build_in_out_ids can produce a tensor with 0 elements if n_outputs == 0
-    // This then causes a crash in this function
-    if (ne == 0) {
-        return true;
-    }
-    for (size_t i = 0; i < n_backends; ++i) {
-        GGML_ASSERT(tensors[i] != nullptr);
-        GGML_ASSERT(ggml_nelements(tensors[i]) == ne);
-        GGML_ASSERT(ggml_is_contiguously_allocated(tensors[i]));
-    }
-
-    const ggml_cuda_device_info info = ggml_cuda_info();
-
-    // For small tensors, simply reduce them as FP32.
-    // The following heuristic for how "small" a tensor should be is based on RTX 4090s connected via 16x PCIe 4.0.
-    if ((n_backends <= 2 && ne < 32768) || (n_backends == 3 && ne < 131072) || (n_backends >= 4 && ne < 262144)) {
-        NCCL_CHECK(ncclGroupStart());
-        for (size_t i = 0; i < n_backends; ++i) {
-            ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backends[i]->context;
-            NCCL_CHECK(ncclAllReduce(tensors[i]->data, tensors[i]->data, ne, ncclFloat, ncclSum, info.comms[cuda_ctx->device], cuda_ctx->stream()));
-        }
-        NCCL_CHECK(ncclGroupEnd());
-
-        return true;
-    }
-
-    // For large tensors it's faster to compress them to BF16 for the reduction:
-    to_bf16_cuda_t to_bf16 = ggml_get_to_bf16_cuda(GGML_TYPE_F32);
-    to_fp32_cuda_t to_fp32 = ggml_get_to_fp32_cuda(GGML_TYPE_BF16);
-
-    ggml_cuda_pool_alloc<nv_bfloat16> tmp[GGML_CUDA_MAX_DEVICES];
-    for (size_t i = 0; i < n_backends; ++i) {
-        ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backends[i]->context;
-        tmp[i].pool = &cuda_ctx->pool();
-        tmp[i].alloc(ne);
-
-        ggml_cuda_set_device(i);
-        to_bf16(tensors[i]->data, tmp[i].get(), ne, cuda_ctx->stream());
-        CUDA_CHECK(cudaGetLastError());
-    }
-
-    NCCL_CHECK(ncclGroupStart());
-    for (size_t i = 0; i < n_backends; ++i) {
-        ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backends[i]->context;
-        NCCL_CHECK(ncclAllReduce(tmp[i].get(), tmp[i].get(), ne, ncclBfloat16, ncclSum, info.comms[cuda_ctx->device], cuda_ctx->stream()));
-    }
-    NCCL_CHECK(ncclGroupEnd());
-
-    for (size_t i = 0; i < n_backends; ++i) {
-        ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backends[i]->context;
-
-        ggml_cuda_set_device(i);
-        to_fp32(tmp[i].get(), (float *) tensors[i]->data, ne, cuda_ctx->stream());
-        CUDA_CHECK(cudaGetLastError());
-    }
-
-    return true;
-#else
-    // If NCCL is installed it is used by default for optimal performance.
-    // However, NVIDIA does not distribute NCCL with CUDA so users may be unwittingly missing this package.
-    // RCCL is disabled by default, users are explicitly opting in.
-    // Therefore print no warning for RCCL.
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    static bool warning_printed = false;
-    if (!warning_printed) {
-        GGML_LOG_WARN("%s: NVIDIA Collective Communications Library (NCCL) is unavailable, multi GPU performance will be suboptimal\n", __func__);
-        warning_printed = true;
-    }
-#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    GGML_UNUSED_VARS(backends, tensors, n_backends);
-    return false;
-#endif // GGML_USE_NCCL
-}
-
 ggml_backend_buffer_type_t ggml_backend_cuda_split_buffer_type(int main_device, const float * tensor_split) {
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
@@ -1616,8 +1518,7 @@ static void ggml_cuda_op_mul_mat_cublas(
 
     const int cc = ggml_cuda_info().devices[id].cc;
 
-    const bool supports_bf16 = GGML_CUDA_CC_IS_NVIDIA(cc) || GGML_CUDA_CC_IS_AMD(cc) ||
-        (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_QY2);
+    const bool supports_bf16 = GGML_CUDA_CC_IS_NVIDIA(cc) || GGML_CUDA_CC_IS_AMD(cc);
 
     const bool use_fp16 =
         src0->type != GGML_TYPE_NVFP4 &&
@@ -4537,13 +4438,13 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
 }
 #endif // USE_CUDA_GRAPH
 
+#ifdef USE_CUDA_GRAPH
 static thread_local bool ggml_cuda_skip_props_check = false;
-
-extern "C" void ggml_cuda_set_skip_props_check(bool skip);
 
 extern "C" void ggml_cuda_set_skip_props_check(bool skip) {
     ggml_cuda_skip_props_check = skip;
 }
+#endif
 
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
@@ -5795,12 +5696,6 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
 
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
-    if (strcmp(name, "ggml_backend_allreduce_tensor") == 0) {
-        return (void *)ggml_backend_cuda_allreduce_tensor;
-    }
-    if (strcmp(name, "ggml_backend_split_buffer_type") == 0) {
-        return (void *)ggml_backend_cuda_split_buffer_type;
-    }
     if (strcmp(name, "ggml_backend_register_host_buffer") == 0) {
         return (void *)ggml_backend_cuda_register_host_buffer;
     }
@@ -5888,5 +5783,3 @@ ggml_backend_t ggml_backend_cuda_init(int device) {
 
     return cuda_backend;
 }
-
-GGML_BACKEND_DL_IMPL(ggml_backend_cuda_reg)

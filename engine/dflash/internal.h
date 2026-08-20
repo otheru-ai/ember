@@ -693,15 +693,3 @@ QwenLayerPrefnOutputs build_qwen35_layer_prefn(
     bool                  skip_gdn_intermediate = true);
 
 } // namespace dflash::common
-
-#if defined(GGML_USE_CUDA) && !defined(GGML_USE_HIP)
-#include <cuda_runtime.h>
-// Host-staged copy between CUDA devices (no peer access required).
-// Streams are device-specific: src_stream orders the D2H leg on src_dev and
-// dst_stream orders the H2D leg on dst_dev. Null streams use each device's
-// default stream. The helper synchronizes before returning.
-bool dflash_cuda_copy_between_devices(int src_dev, const void * src,
-                                      int dst_dev, void * dst, size_t nbytes,
-                                      cudaStream_t src_stream = nullptr,
-                                      cudaStream_t dst_stream = nullptr);
-#endif

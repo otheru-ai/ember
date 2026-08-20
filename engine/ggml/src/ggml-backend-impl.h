@@ -85,20 +85,6 @@ extern "C" {
     GGML_API void                  ggml_backend_multi_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml_backend_buffer_usage usage);
 
     //
-    // Backend (meta)
-    //
-
-    GGML_API bool ggml_backend_is_meta       (ggml_backend_t backend);
-    GGML_API bool ggml_backend_buffer_is_meta(ggml_backend_buffer_t buf);
-    GGML_API bool ggml_backend_buft_is_meta  (ggml_backend_buffer_type_t buft);
-
-    GGML_API size_t         ggml_backend_meta_n_backends    (ggml_backend_t meta_backend);
-    GGML_API ggml_backend_t ggml_backend_meta_simple_backend(ggml_backend_t meta_backend, size_t index);
-
-    // temporary workaround to statically allocate tensors from a context in a deduplicated way:
-    GGML_API struct ggml_backend_buffer * ggml_backend_meta_alloc_ctx_tensors_from_buft(struct ggml_context * ctx, ggml_backend_buffer_type_t buft);
-
-    //
     // Backend (stream)
     //
 
@@ -228,47 +214,6 @@ extern "C" {
         struct ggml_backend_reg_i iface;
         void * context;
     };
-
-    // Add backend dynamic loading support to the backend
-
-    // Initialize the backend
-    typedef ggml_backend_reg_t (*ggml_backend_init_t)(void);
-    // Optional: obtain a score for the backend based on the system configuration
-    // Higher scores are preferred, 0 means the backend is not supported in the current system
-    typedef int                (*ggml_backend_score_t)(void);
-
-#ifdef GGML_BACKEND_DL
-#    ifdef __cplusplus
-#        define GGML_BACKEND_DL_IMPL(reg_fn)                             \
-            extern "C" {                                                 \
-            GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void); \
-            }                                                            \
-            ggml_backend_reg_t ggml_backend_init(void) {                 \
-                return reg_fn();                                         \
-            }
-#        define GGML_BACKEND_DL_SCORE_IMPL(score_fn)       \
-            extern "C" {                                   \
-            GGML_BACKEND_API int ggml_backend_score(void); \
-            }                                              \
-            int ggml_backend_score(void) {                 \
-                return score_fn();                         \
-            }
-#    else
-#        define GGML_BACKEND_DL_IMPL(reg_fn)                              \
-            GGML_BACKEND_API ggml_backend_reg_t ggml_backend_init(void);  \
-            ggml_backend_reg_t                  ggml_backend_init(void) { \
-                return reg_fn();                                          \
-            }
-#        define GGML_BACKEND_DL_SCORE_IMPL(score_fn)        \
-            GGML_BACKEND_API int ggml_backend_score(void);  \
-            int                  ggml_backend_score(void) { \
-                return score_fn();                          \
-            }
-#    endif
-#else
-#    define GGML_BACKEND_DL_IMPL(reg_fn)
-#    define GGML_BACKEND_DL_SCORE_IMPL(score_fn)
-#endif
 
 #ifdef  __cplusplus
 }

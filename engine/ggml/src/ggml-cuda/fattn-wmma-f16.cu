@@ -560,7 +560,9 @@ void ggml_cuda_flash_attn_ext_wmma_f16(ggml_backend_cuda_context & ctx, ggml_ten
     const ggml_tensor * Q   = dst->src[0];
 
     const enum ggml_prec prec = ggml_flash_attn_ext_get_prec(KQV);
+#if !defined(GGML_USE_HIP)
     const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
+#endif
 
     if (prec != GGML_PREC_DEFAULT) {
         if (Q->ne[1] <= 32 || Q->ne[0] > 128) {

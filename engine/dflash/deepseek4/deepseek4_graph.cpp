@@ -2626,55 +2626,8 @@ static bool ds4_backend_is_hip(ggml_backend_t backend) {
          std::strstr(name, "ROCm") != nullptr);
 }
 
-static bool ds4_backend_is_cuda(ggml_backend_t backend) {
-    const char * name = ggml_backend_name(backend);
-    return name && std::strstr(name, "CUDA") != nullptr;
-}
-
 static bool ds4_backend_is_gpu(ggml_backend_t backend) {
-    return ds4_backend_is_hip(backend) || ds4_backend_is_cuda(backend);
-}
-
-static bool ds4_try_gpu_hc_pre(float * working,
-                               float * post,
-                               float * comb,
-                               const float * hc_state,
-                               const float * scale_data,
-                               const float * base_data,
-                               ggml_tensor * fn_tensor,
-                               int n_embd,
-                               int n_hc,
-                               int sinkhorn_iters,
-                               float hc_eps) {
-#if defined(DFLASH27B_BACKEND_CUDA) || defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
-    if (!fn_tensor || !fn_tensor->data) {
-        return false;
-    }
-    return deepseek4_cuda_hc_pre(hc_state,
-                                 fn_tensor->data,
-                                 scale_data,
-                                 base_data,
-                                 n_embd,
-                                 n_hc,
-                                 sinkhorn_iters,
-                                 hc_eps,
-                                 working,
-                                 post,
-                                 comb);
-#else
-    (void) working;
-    (void) post;
-    (void) comb;
-    (void) hc_state;
-    (void) scale_data;
-    (void) base_data;
-    (void) fn_tensor;
-    (void) n_embd;
-    (void) n_hc;
-    (void) sinkhorn_iters;
-    (void) hc_eps;
-    return false;
-#endif
+    return ds4_backend_is_hip(backend);
 }
 
 static bool ds4_try_gpu_hc_pre_device(ggml_tensor * working,
@@ -2966,8 +2919,6 @@ static bool eval_ds4_hybrid(
         std::vector<float> & ffn_out_host,
         ggml_gallocr_t * hot_alloc,
         ggml_gallocr_t * cold_alloc,
-        MoeExpertCompute * expert_compute,
-        const MoeExpertLayer * expert_layer,
         DeepSeek4StepTelemetry * step_tel) {
     const auto ffn_t0 = Ds4TimingClock::now();
     if (hybrid_cfg.n_expert_used != n_expert_used) {
@@ -2976,9 +2927,7 @@ static bool eval_ds4_hybrid(
                      layer, hybrid_cfg.n_expert_used, n_expert_used);
         return false;
     }
-    if (!storage.down_cold && !storage.gate_up_cold &&
-        (!expert_compute || !expert_layer ||
-         !expert_compute->accepts(n_tokens, n_expert_used))) {
+    if (!storage.down_cold && !storage.gate_up_cold) {
         if (!hybrid_owner || !stream_engine || !stream_engine->is_ready() ||
             !hybrid_owner->has_mmap() ||
             layer < 0 || layer >= (int) hybrid_owner->layer_regions.size()) {
@@ -3059,16 +3008,12 @@ static bool eval_ds4_hybrid(
         return true;
     }
 
-    const bool attempted_expert_compute =
-        expert_compute && expert_layer &&
-        expert_compute->accepts(n_tokens, n_expert_used);
     MoeHybridFfnTelemetry ffn_tel;
     std::string ffn_err;
     bool ffn_ok = eval_moe_hybrid_ffn_batched(
         backend, cpu_backend, hybrid_cfg, desc, storage,
         ffn_normed_host, selected_host, weights_host,
         n_tokens, ffn_out_host, &ffn_err, hot_alloc, cold_alloc,
-        expert_compute, expert_layer,
         step_tel ? &ffn_tel : nullptr);
     if (ffn_ok) {
         if (step_tel) {
@@ -3076,23 +3021,6 @@ static bool eval_ds4_hybrid(
             add_ffn_telemetry(step_tel, ffn_tel);
         }
         return true;
-    }
-
-    if (attempted_expert_compute && expert_compute->failure_is_fatal()) {
-        std::fprintf(stderr,
-                     "[xdna-moe] required mixed expert eval failed at layer %d: %s\n",
-                     layer, ffn_err.empty() ? "no engine error" : ffn_err.c_str());
-        return false;
-    }
-    if (!storage.down_cold && !storage.gate_up_cold) {
-        // An optional provider may fail after initialization. Re-enter the
-        // existing mmap-to-GPU path so a prototype fault does not take down
-        // inference or silently produce a partial expert sum.
-        return eval_ds4_hybrid(
-            backend, cpu_backend, hybrid_cfg, desc, hybrid_owner, storage,
-            stream_engine, layer, n_embd, n_expert_used, ffn_normed_host,
-            selected_host, weights_host, n_tokens, ffn_out_host,
-            hot_alloc, cold_alloc, nullptr, nullptr, step_tel);
     }
 
     ffn_out_host.assign((size_t)n_embd * (size_t)n_tokens, 0.0f);
@@ -3216,33 +3144,6 @@ static ggml_tensor * build_moe_ffn(
 
 // ─── HC (Hierarchical Controller) Pre ───────────────────────────────────
 // Mixes n_hc residual streams into a single working vector via Sinkhorn.
-
-static ggml_tensor * build_hc_pre(
-        ggml_context * ctx,
-        ggml_tensor * hc_state,      // [n_hc * n_embd] persistent residual
-        const DeepSeek4Weights & w,
-        ggml_tensor * hc_fn,         // [n_hc * n_embd, hc_mix_dim]
-        ggml_tensor * hc_scale,      // [3]
-        ggml_tensor * hc_base,       // [n_hc]
-        int n_tokens) {
-
-    const int n_embd = w.n_embd;
-    const int n_hc   = w.n_hc;
-    (void)n_tokens;
-
-    // RMSNorm over each HC stream independently
-    ggml_tensor * flat = ggml_rms_norm(ctx, hc_state, w.hc_eps);
-
-    // Mix projection: flat → [hc_mix_dim]
-    // hc_mix_dim = 2*n_hc + n_hc*n_hc (pre weights + post gates + combine matrix)
-    ggml_tensor * mix = ggml_mul_mat(ctx, hc_fn, flat);
-
-    // Placeholder: return first HC stream as the working vector
-    ggml_tensor * out = ggml_view_1d(ctx, hc_state, n_embd, 0);
-
-    (void)mix; (void)hc_scale; (void)hc_base; (void)n_hc;
-    return out;
-}
 
 // ─── CPU-side HC for hybrid path ────────────────────────────────────────
 // HC involves Sinkhorn normalization (iterative, 4×4 matrix) which doesn't
@@ -3652,21 +3553,6 @@ static void finish_hc_pre_from_mix_into(float * working,
     memcpy(comb, split + 2 * n_hc, (size_t)n_hc * n_hc * sizeof(float));
 }
 
-static HcPreResult finish_hc_pre_from_mix(const float * hc_state,
-                                          const float * mix,
-                                          const float * scale_data,
-                                          const float * base_data,
-                                          int n_embd,
-                                          int n_hc,
-                                          int sinkhorn_iters) {
-    HcPreResult result;
-    result.working.resize(n_embd);
-    finish_hc_pre_from_mix_into(result.working.data(), result.post, result.comb,
-                                hc_state, mix, scale_data, base_data,
-                                n_embd, n_hc, sinkhorn_iters);
-    return result;
-}
-
 static void cpu_hc_pre_into(float * working,
                             float * post,
                             float * comb,
@@ -3712,14 +3598,6 @@ static HcPreResult cpu_hc_pre(const float * hc_state, const uint16_t * fn_data,
     return result;
 }
 
-static bool ds4_hc_cuda_enabled() {
-#if defined(DFLASH27B_BACKEND_CUDA)
-    return true;
-#else
-    return false;
-#endif
-}
-
 static HcPreResult hc_pre_auto(const float * hc_state,
                                const HcWeightsCpu & weights,
                                ggml_tensor * fn_tensor,
@@ -3727,20 +3605,7 @@ static HcPreResult hc_pre_auto(const float * hc_state,
                                int n_hc,
                                int sinkhorn_iters,
                                float hc_eps) {
-#if defined(DFLASH27B_BACKEND_CUDA)
-    if (ds4_hc_cuda_enabled() && fn_tensor && fn_tensor->data) {
-        float mix[24];
-        if (deepseek4_cuda_hc_pre_mix(hc_state, fn_tensor->data,
-                                      n_embd, n_hc, hc_eps, mix)) {
-            return finish_hc_pre_from_mix(hc_state, mix,
-                                          weights.scale_data.data(),
-                                          weights.base_data.data(),
-                                          n_embd, n_hc, sinkhorn_iters);
-        }
-    }
-#else
     (void)fn_tensor;
-#endif
     return cpu_hc_pre(hc_state, weights.fn_data.data(),
                       weights.scale_data.data(), weights.base_data.data(),
                       n_embd, n_hc, sinkhorn_iters, hc_eps);
@@ -3759,21 +3624,7 @@ static void hc_pre_auto_into(float * working,
                              float * flat,
                              float * mix_scratch,
                              bool serial_fn) {
-#if defined(DFLASH27B_BACKEND_CUDA)
-    if (ds4_hc_cuda_enabled() && fn_tensor && fn_tensor->data) {
-        float mix[24];
-        if (deepseek4_cuda_hc_pre_mix(hc_state, fn_tensor->data,
-                                      n_embd, n_hc, hc_eps, mix)) {
-            finish_hc_pre_from_mix_into(working, post, comb, hc_state, mix,
-                                        weights.scale_data.data(),
-                                        weights.base_data.data(),
-                                        n_embd, n_hc, sinkhorn_iters);
-            return;
-        }
-    }
-#else
     (void)fn_tensor;
-#endif
     cpu_hc_pre_into(working, post, comb,
                     hc_state, weights.fn_data.data(),
                     weights.scale_data.data(), weights.base_data.data(),
@@ -4027,9 +3878,7 @@ static bool deepseek4_step_hybrid(
         const int32_t * token_ids,
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
-        MoeHybridRoutingStats * routing_stats,
-        MoeExpertCompute * expert_compute,
-        const std::vector<MoeExpertLayer> * expert_layers) {
+        MoeHybridRoutingStats * routing_stats) {
     const auto step_t0 = Ds4TimingClock::now();
     const int n_embd = w.n_embd;
     const int n_hc = w.n_hc;
@@ -4074,9 +3923,6 @@ static bool deepseek4_step_hybrid(
     }
 
     for (int il = 0; il < w.n_layer; ++il) {
-        if (ds4_env_flag("DFLASH_MOE_XDNA_TRACE")) {
-            std::fprintf(stderr, "[xdna-moe] layer %d begin\n", il);
-        }
         const DeepSeek4Layer & L = w.layers[(size_t) il];
         DeepSeek4LayerCache & lc = cache.layers[(size_t) il];
         const HcLayerWeightsCpu & hc_lw = hc_layer_weights[(size_t)il];
@@ -4300,16 +4146,12 @@ static bool deepseek4_step_hybrid(
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
-            const MoeExpertLayer * expert_layer =
-                expert_layers && (size_t)il < expert_layers->size()
-                    ? &(*expert_layers)[(size_t)il]
-                    : nullptr;
             if (!eval_ds4_hybrid(
                     backend, cpu_backend, hybrid_cfg, desc, &moe_hybrid, storage, stream_engine,
                     il, n_embd, n_used,
                     ffn_normed_host.data(), selected_host.data(), weights_host.data(),
                     n_tokens, ffn_out_host, &hot_alloc, &cold_alloc,
-                    expert_compute, expert_layer, telemetry)) {
+                    telemetry)) {
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);
                 return false;
@@ -4422,16 +4264,12 @@ static bool deepseek4_step_hybrid(
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
-            const MoeExpertLayer * expert_layer =
-                expert_layers && (size_t)il < expert_layers->size()
-                    ? &(*expert_layers)[(size_t)il]
-                    : nullptr;
             if (!eval_ds4_hybrid(
                     backend, cpu_backend, hybrid_cfg, desc, &moe_hybrid, storage, stream_engine,
                     il, n_embd, n_used,
                     ffn_normed_host.data(), selected_host.data(), weights_host.data(),
                     n_tokens, ffn_out_host, &hot_alloc, &cold_alloc,
-                    expert_compute, expert_layer, telemetry)) {
+                    telemetry)) {
                 if (hot_alloc) ggml_gallocr_free(hot_alloc);
                 if (cold_alloc) ggml_gallocr_free(cold_alloc);
                 return false;
@@ -4536,9 +4374,7 @@ bool deepseek4_step(
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
         MoeHybridRoutingStats * routing_stats,
-        Ds4VerifyHooks * verify_hooks,
-        MoeExpertCompute * expert_compute,
-        const std::vector<MoeExpertLayer> * expert_layers) {
+        Ds4VerifyHooks * verify_hooks) {
     if (w.moe_hybrid && moe_hybrid != nullptr) {
         if (!deepseek4_cuda_hc_set_device(device)) {
             std::fprintf(stderr,
@@ -4548,8 +4384,7 @@ bool deepseek4_step(
         }
         return deepseek4_step_hybrid(backend, w, cache, *moe_hybrid,
                                      embed, n_tokens, kv_start, out_logits,
-                                     token_ids, stream_engine, telemetry, routing_stats,
-                                     expert_compute, expert_layers);
+                                     token_ids, stream_engine, telemetry, routing_stats);
     }
 
     std::vector<float> hc_state;
@@ -7949,7 +7784,6 @@ static ggml_tensor * build_dspark_attention(
         ggml_tensor * pos_block,   // I32[block]    absolute positions committed..committed+block-1
         ggml_tensor * neg_block,   // I32[block]    -(block positions)
         ggml_tensor * pos_ctx) {   // I32[ctx_len]  absolute positions committed-ctx_len..committed-1
-    const int n_embd    = w.n_embd;
     const int head_dim  = w.head_dim;
     const int n_head    = w.n_head;
     const int n_rot     = w.n_rot;

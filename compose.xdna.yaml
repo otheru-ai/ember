@@ -6,6 +6,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: release-xdna
+      network: host
       args:
         EMBER_VERSION: ${EMBER_VERSION:-dev}
         EMBER_VCS_REF: ${EMBER_VCS_REF:-unknown}
@@ -20,7 +21,7 @@ services:
       # XDNA2 resident draft projections/shared experts, CPU routed experts.
       # The provider stays optional unless an equivalence run explicitly makes
       # it required; ordinary HIP DSpark remains the safe fallback.
-      DFLASH_DSPARK_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_moe.so
+      DFLASH_DSPARK_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_dspark.so
       DFLASH_DSPARK_XDNA_REQUIRED: ${DFLASH_DSPARK_XDNA_REQUIRED:-0}
       DFLASH_DSPARK_XDNA_GPU_MAIN: ${DFLASH_DSPARK_XDNA_GPU_MAIN:-1}
       DFLASH_DS4_TIMING: ${DFLASH_DS4_TIMING:-0}

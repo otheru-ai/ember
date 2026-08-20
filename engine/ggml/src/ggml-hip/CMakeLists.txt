@@ -47,10 +47,6 @@ find_package(hip     REQUIRED)
 find_package(hipblas REQUIRED)
 find_package(rocblas REQUIRED)
 
-if (GGML_HIP_RCCL)
-    find_package(rccl REQUIRED)
-endif()
-
 if (${hip_VERSION} VERSION_LESS 6.1)
     message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
 endif()
@@ -87,10 +83,16 @@ ggml_add_backend_library(ggml-hip
                          ${GGML_SOURCES_ROCM}
                         )
 
-# TODO: do not use CUDA definitions for HIP
-if (NOT GGML_BACKEND_DL)
-    target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
-endif()
+# The HIP substrate intentionally carries generic quant/template helpers that
+# gfx1151 does not instantiate. Suppress only those translation-unit-local
+# warnings; keep warnings for live variables and operations actionable.
+target_compile_options(ggml-hip PRIVATE
+    -Wno-sign-compare
+    -Wno-unused-function
+    -Wno-unneeded-internal-declaration)
+
+# TODO: upstream's HIP substrate still uses the CUDA-compatible public ABI.
+target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
 
 add_compile_definitions(GGML_USE_HIP)
 
@@ -102,9 +104,9 @@ if (GGML_CUDA_FORCE_CUBLAS)
     add_compile_definitions(GGML_CUDA_FORCE_CUBLAS)
 endif()
 
-if (GGML_CUDA_NO_PEER_COPY)
-    add_compile_definitions(GGML_CUDA_NO_PEER_COPY)
-endif()
+# Ember is a single-APU engine. Keep the shared HIP kernel source's peer-copy
+# paths compiled out rather than exposing upstream's multi-GPU switch.
+add_compile_definitions(GGML_CUDA_NO_PEER_COPY)
 
 if (GGML_HIP_GRAPHS)
     add_compile_definitions(GGML_HIP_GRAPHS)
@@ -120,10 +122,6 @@ endif()
 
 if (NOT GGML_HIP_MMQ_MFMA)
     add_compile_definitions(GGML_HIP_NO_MMQ_MFMA)
-endif()
-
-if (GGML_HIP_RCCL)
-    add_compile_definitions(GGML_USE_NCCL) # RCCL has the same interface as NCCL.
 endif()
 
 if (GGML_HIP_EXPORT_METRICS)
@@ -148,10 +146,6 @@ endif()
 
 if (GGML_STATIC)
     message(FATAL_ERROR "Static linking not supported for HIP/ROCm")
-endif()
-
-if (GGML_HIP_RCCL)
-    target_link_libraries(ggml-hip PRIVATE ggml-base roc::rccl)
 endif()
 
 target_link_libraries(ggml-hip PRIVATE ggml-base hip::host roc::rocblas roc::hipblas)

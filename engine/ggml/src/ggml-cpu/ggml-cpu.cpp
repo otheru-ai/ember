@@ -4,7 +4,6 @@
 #include "repack.h"
 #include "traits.h"
 #include "ggml-impl.h"
-#include "amx/amx.h"
 
 #include <cctype>
 #include <string>
@@ -42,12 +41,6 @@
 std::vector<ggml_backend_buffer_type_t> & ggml_backend_cpu_get_extra_buffer_types() {
     static std::vector<ggml_backend_buffer_type_t> bufts = []() {
         std::vector<ggml_backend_buffer_type_t> bufts;
-
-#if defined(__AMX_INT8__) && defined(__AVX512VNNI__)
-        if (ggml_backend_amx_buffer_type()) {
-            bufts.push_back(ggml_backend_amx_buffer_type());
-        }
-#endif
 
 #ifdef GGML_USE_CPU_RISCV64_SPACEMIT
         if (ggml_backend_cpu_riscv64_spacemit_buffer_type()) {
@@ -571,9 +564,6 @@ static ggml_backend_feature * ggml_backend_cpu_get_features(ggml_backend_reg_t r
         if (ggml_cpu_has_avx512_bf16()) {
             features.push_back({ "AVX512_BF16", "1" });
         }
-        if (ggml_cpu_has_amx_int8()) {
-            features.push_back({ "AMX_INT8", "1" });
-        }
         if (ggml_cpu_has_neon()) {
             features.push_back({ "NEON", "1" });
         }
@@ -704,5 +694,3 @@ ggml_backend_reg_t ggml_backend_cpu_reg(void) {
 
     return &ggml_backend_cpu_reg;
 }
-
-GGML_BACKEND_DL_IMPL(ggml_backend_cpu_reg)

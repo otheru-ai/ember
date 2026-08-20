@@ -14,10 +14,6 @@
 #include <unordered_set>
 #include <utility>
 
-#ifdef DFLASH27B_HAVE_GPU_SAMPLER
-#include "geometric_sampler_cuda.h"
-#endif
-
 namespace dflash::common {
 
 namespace {
@@ -66,8 +62,7 @@ size_t nucleus_cutoff(std::vector<std::pair<float, int>> & cand, double target, 
 // Draws a token from `cand`, whose .first fields are proportional
 // probabilities (need not already sum to 1 or be sorted). `r_uniform` is a
 // pre-drawn uniform in [0,1) supplied by the caller (drawn once per
-// sample_logits call) so every path — GPU, GPU-assisted top_p, or CPU —
-// consumes the same single RNG value.
+// sample_logits call) so the CPU chain consumes exactly one RNG value.
 int draw_from_weights(const std::vector<std::pair<float, int>> & cand, double r_uniform) {
     if (cand.empty()) return -1;
     double Z = 0.0;
@@ -129,33 +124,6 @@ static void trace_sampler_choice(
     std::fprintf(stderr, "\n");
 }
 
-#ifdef DFLASH27B_HAVE_GPU_SAMPLER
-// Given probabilities the GPU already computed (penalties + softmax(temp)
-// applied, summing to ~1) for a pure top_p (no top_k) config, find the
-// nucleus and draw. Skips all exp()/Z bookkeeping the raw-logit path needs,
-// since the input is already normalized.
-//
-// Only worth calling for top_p without top_k: top_k's CPU cost is already
-// cheap (partial_sort scales with k, not vocab — measured ~270-300us at
-// vocab=151936), so a GPU round trip (kernel + D2H copy, ~500-800us) makes it
-// slower, not faster. top_p's CPU cost without top_k is dominated by
-// nucleus_cutoff's O(vocab) std::nth_element passes regardless of who
-// computed the input probabilities, so skipping the CPU-side exp() pass here
-// is a net win (measured ~1.4x faster end-to-end at vocab=151936).
-int sample_from_gpu_probs(std::vector<float> & probs, double top_p, double r_uniform) {
-    std::vector<std::pair<float, int>> cand(probs.size());
-    for (size_t i = 0; i < probs.size(); i++) cand[i] = {probs[i], (int)i};
-
-    double Z = 0.0;
-    for (auto & c : cand) Z += c.first;
-    const double target = top_p * Z;
-    const size_t cut = nucleus_cutoff(cand, target, [](auto & c){ return (double)c.first; });
-    cand.resize(cut);
-
-    return draw_from_weights(cand, r_uniform);
-}
-#endif
-
 }  // namespace
 
 int sample_logits(const float * logits_in,
@@ -167,49 +135,16 @@ int sample_logits(const float * logits_in,
 
     // Draw the single uniform up front, exactly once, and only when we will
     // actually sample (temp>0; greedy returns before any draw). It is then
-    // threaded through every path below — the full-GPU draw, the GPU-assisted
-    // top_p draw, and the CPU draw all consume this same value — so the RNG
-    // stream advances identically no matter which path resolves the token
-    // (including a GPU→CPU fallback), keeping decode reproducible whether the
-    // GPU sampler is on or off.
+    // threaded through every filter below so the RNG stream advances once and
+    // decode remains reproducible.
     double r_uniform = 0.0;
     if (cfg.temp > 0.0f) {
         std::uniform_real_distribution<double> u(0.0, 1.0);
         r_uniform = u(rng);
     }
 
-#ifdef DFLASH27B_HAVE_GPU_SAMPLER
-    // GPU path (on by default; set DFLASH_GPU_SAMPLE=0 to disable). top_k>0,
-    // top_p in (0,1) (both unsupported on the GPU, see geometric_sampler_cuda.h),
-    // and any CUDA error return -1 and fall through to the CPU chain below.
-    if (gpu_sampler_enabled() && gpu_sampler_supports(cfg)) {
-        const int g = geometric_sample_logits_cuda(logits_in, vocab, cfg, history, r_uniform,
-                                         /*logits_on_device=*/false);
-        if (g >= 0) return g;
-    }
-#endif
     const bool need_top_k = cfg.top_k > 0 && cfg.top_k < vocab;
     const bool need_top_p = cfg.top_p > 0.0f && cfg.top_p < 1.0f;
-
-#ifdef DFLASH27B_HAVE_GPU_SAMPLER
-    // Reaching here means the GPU either can't fully handle this config
-    // (top_k/top_p above) or is disabled. For pure top_p (no top_k), the GPU
-    // can still compute the shared, vocab-wide penalty+softmax prefix and
-    // hand back normalized probabilities, letting the CPU skip straight to
-    // nucleus_cutoff — worth it because that search's O(vocab) cost dominates
-    // regardless of who computed its input. top_k (with or without top_p) is
-    // deliberately excluded: its CPU cost is already cheap (partial_sort
-    // scales with k, not vocab), so the GPU round trip would make it slower,
-    // not faster (measured regression, not just "no win").
-    if (cfg.temp > 0.0f && need_top_p && !need_top_k && cfg.min_p <= 0.0f && gpu_sampler_enabled()) {
-        std::vector<float> gpu_probs(vocab);
-        if (geometric_compute_probs_cuda(logits_in, vocab, cfg, history,
-                                         gpu_probs.data(), /*logits_on_device=*/false)) {
-            return sample_from_gpu_probs(gpu_probs, cfg.top_p, r_uniform);
-        }
-        // else: fall through to the full CPU chain below.
-    }
-#endif
 
     std::vector<std::pair<float, int>> cand(vocab);
     bool any_usable_logit = false;

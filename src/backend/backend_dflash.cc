@@ -694,7 +694,6 @@ static void build_generate_request(const ember_gen_request *req,
         greq.force_greedy_next = [fg, fud]() -> bool { return fg(fud); };
     }
 
-    io.stream_fd = -1;  // callback-driven, no pipe
     ember_keepalive_cb ka_cb = req->on_prefill;
     if (ka_cb) {
         io.on_prefill_keepalive = [ka_cb, ud, cancelled]() -> bool {
@@ -1261,7 +1260,6 @@ static bool backend_validate_impl(
     ar.snap_pos = n_prompt;
 
     DaemonIO io;
-    io.stream_fd = -1;
     GenerateResult baseline = b->be->generate(ar, io);
     trace_validation_tokens("baseline", baseline.tokens);
     report->baseline_tokens = (int)baseline.tokens.size();

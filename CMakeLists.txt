@@ -26,7 +26,7 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 # warning-fixing exercise. EMBER_STRICT_TARGETS below is the ember-owned set.
 option(EMBER_STRICT "Treat warnings as errors and enable the strict warning set" OFF)
 option(EMBER_XDNA_XRT_PROVIDER
-  "Build the optional XRT/IRON ROCMFP2 MoE provider" OFF)
+  "Build the optional resident DSpark XRT/IRON provider" OFF)
 set(EMBER_XRT_ROOT "/opt/xilinx/xrt" CACHE PATH
   "XRT userspace prefix used by EMBER_XDNA_XRT_PROVIDER")
 set(EMBER_STRICT_FLAGS
@@ -45,120 +45,27 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
-# Hardware-only validator for the packaged provider.  It links only the public
-# provider ABI and the CPU ROCMFP2 reference, then dlopen()s the XRT module at
-# runtime, so normal GPU-free builds can still compile it without XRT.
-add_executable(ember-xdna-validate
-  providers/xdna2/validate_xrt.cpp
-  providers/xdna2/rocmfp2_pack.cpp)
-target_include_directories(ember-xdna-validate PRIVATE
-  providers/xdna2
-  engine/dflash/common
-  engine/ggml/include
-  engine/ggml/src)
-target_link_libraries(ember-xdna-validate PRIVATE ${CMAKE_DL_LIBS})
-
 if(EMBER_XDNA_XRT_PROVIDER)
   find_path(EMBER_XRT_INCLUDE_DIR xrt/xrt_bo.h
     HINTS "${EMBER_XRT_ROOT}/include" REQUIRED)
   find_library(EMBER_XRT_COREUTIL xrt_coreutil
     HINTS "${EMBER_XRT_ROOT}/lib" "${EMBER_XRT_ROOT}/lib64" REQUIRED)
-  find_path(EMBER_ROCM_INCLUDE_DIR hip/hip_runtime_api.h
-    HINTS "/opt/rocm/include" REQUIRED)
-  find_library(EMBER_HIP_RUNTIME amdhip64
-    HINTS "/opt/rocm/lib" "/opt/rocm/lib64" REQUIRED)
-  find_library(EMBER_HSA_RUNTIME hsa-runtime64
-    HINTS "/opt/rocm/lib" "/opt/rocm/lib64" REQUIRED)
-  add_library(ember_xdna_moe_xrt MODULE
-    providers/xdna2/provider_xrt.cpp
+  add_library(ember_xdna_dspark_xrt MODULE
     providers/xdna2/provider_dspark_xrt.cpp
     providers/xdna2/dspark_cpu_ops.cpp
     providers/xdna2/q8_0_pack.cpp
-    providers/xdna2/rocmfp4_pack.cpp
-    providers/xdna2/rocmfp2_pack.cpp)
-  target_include_directories(ember_xdna_moe_xrt PRIVATE
+    providers/xdna2/rocmfp4_pack.cpp)
+  target_include_directories(ember_xdna_dspark_xrt PRIVATE
     providers/xdna2
     engine/dflash/common
     engine/ggml/include
     engine/ggml/src
     "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember_xdna_moe_xrt PRIVATE
+  target_link_libraries(ember_xdna_dspark_xrt PRIVATE
     "${EMBER_XRT_COREUTIL}" Threads::Threads m)
-  set_target_properties(ember_xdna_moe_xrt PROPERTIES
+  set_target_properties(ember_xdna_dspark_xrt PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "libember_xdna_moe")
-  add_executable(ember-xdna-gpu-interop
-    providers/xdna2/validate_gpu_interop.cpp
-    providers/xdna2/rocmfp2_pack.cpp)
-  target_include_directories(ember-xdna-gpu-interop PRIVATE
-    providers/xdna2
-    engine/ggml/include
-    engine/ggml/src
-    "${EMBER_XRT_INCLUDE_DIR}"
-    "${EMBER_ROCM_INCLUDE_DIR}")
-  target_compile_definitions(ember-xdna-gpu-interop PRIVATE
-    __HIP_PLATFORM_AMD__=1)
-  target_link_libraries(ember-xdna-gpu-interop PRIVATE
-    "${EMBER_XRT_COREUTIL}"
-    "${EMBER_HIP_RUNTIME}"
-    "${EMBER_HSA_RUNTIME}")
-  add_executable(ember-xdna-rocmfp4-validate
-    providers/xdna2/validate_rocmfp4_xrt.cpp
-    providers/xdna2/rocmfp4_model_weights.cpp
-    providers/xdna2/rocmfp4_pack.cpp
-    providers/xdna2/rocmfp4_route_plan.cpp
-    providers/xdna2/rocmfp2_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-rocmfp4-validate PRIVATE
-    providers/xdna2
-    "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-rocmfp4-validate PRIVATE
-    "${EMBER_XRT_COREUTIL}")
-  add_executable(ember-xdna-q8-validate
-    providers/xdna2/validate_q8_xrt.cpp
-    providers/xdna2/q8_model_weights.cpp
-    providers/xdna2/q8_0_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-q8-validate PRIVATE
-    providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-q8-validate PRIVATE
-    "${EMBER_XRT_COREUTIL}")
-  add_executable(ember-xdna-q8-projection-validate
-    providers/xdna2/validate_q8_projection_xrt.cpp
-    providers/xdna2/q8_model_weights.cpp
-    providers/xdna2/q8_0_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-q8-projection-validate PRIVATE
-    providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-q8-projection-validate PRIVATE
-    "${EMBER_XRT_COREUTIL}")
-  add_executable(ember-xdna-q8-gemm-m32-validate
-    providers/xdna2/validate_q8_gemm_m32_xrt.cpp
-    providers/xdna2/q8_model_weights.cpp
-    providers/xdna2/q8_0_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-q8-gemm-m32-validate PRIVATE
-    providers/xdna2 "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-q8-gemm-m32-validate PRIVATE
-    "${EMBER_XRT_COREUTIL}")
-  add_executable(ember-xdna-overlay-switch-bench
-    providers/xdna2/benchmark_xrt_reconfiguration.cpp
-    providers/xdna2/q8_model_weights.cpp
-    providers/xdna2/q8_0_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-overlay-switch-bench PRIVATE
-    providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-overlay-switch-bench PRIVATE
-    "${EMBER_XRT_COREUTIL}")
-  add_executable(ember-xdna-q8-universal-validate
-    providers/xdna2/validate_q8_universal_xrt.cpp
-    providers/xdna2/q8_model_weights.cpp
-    providers/xdna2/q8_0_pack.cpp
-    src/model/gguf.c)
-  target_include_directories(ember-xdna-q8-universal-validate PRIVATE
-    providers/xdna2 src/model "${EMBER_XRT_INCLUDE_DIR}")
-  target_link_libraries(ember-xdna-q8-universal-validate PRIVATE
-    "${EMBER_XRT_COREUTIL}")
+    OUTPUT_NAME "libember_xdna_dspark")
   add_executable(ember-xdna-dspark-resident-validate
     providers/xdna2/validate_dspark_resident_xrt.cpp
     providers/xdna2/q8_model_weights.cpp
@@ -349,21 +256,11 @@ target_include_directories(test_resident_batch_coordinator PRIVATE
   engine/ggml/include)
 add_test(NAME resident_batch_coordinator COMMAND test_resident_batch_coordinator)
 
-add_library(mock_xdna_moe_provider MODULE
-  test/mock_xdna_moe_provider.cpp
+add_library(mock_xdna_dspark_provider MODULE
   test/mock_xdna_dspark_provider.cpp)
-target_include_directories(mock_xdna_moe_provider PRIVATE
+target_include_directories(mock_xdna_dspark_provider PRIVATE
   engine/dflash/common engine/ggml/include engine/ggml/src)
-set_target_properties(mock_xdna_moe_provider PROPERTIES PREFIX "")
-
-add_executable(test_xdna_moe_provider
-  test/test_xdna_moe_provider.cpp
-  engine/dflash/common/moe_expert_compute_xdna.cpp)
-target_include_directories(test_xdna_moe_provider PRIVATE
-  engine/dflash/common engine/ggml/include engine/ggml/src)
-target_link_libraries(test_xdna_moe_provider PRIVATE ${CMAKE_DL_LIBS})
-add_test(NAME xdna_moe_provider COMMAND test_xdna_moe_provider
-  $<TARGET_FILE:mock_xdna_moe_provider>)
+set_target_properties(mock_xdna_dspark_provider PROPERTIES PREFIX "")
 
 add_executable(test_xdna_dspark_provider
   test/test_xdna_dspark_provider.cpp
@@ -372,7 +269,7 @@ target_include_directories(test_xdna_dspark_provider PRIVATE
   engine/dflash/common)
 target_link_libraries(test_xdna_dspark_provider PRIVATE ${CMAKE_DL_LIBS})
 add_test(NAME xdna_dspark_provider COMMAND test_xdna_dspark_provider
-  $<TARGET_FILE:mock_xdna_moe_provider>)
+  $<TARGET_FILE:mock_xdna_dspark_provider>)
 
 add_executable(test_xdna_dspark_cpu_ops
   test/test_xdna_dspark_cpu_ops.cpp
@@ -393,7 +290,6 @@ add_executable(ember-dspark-rocmfp4-cpu-bench
   providers/xdna2/benchmark_rocmfp4_cpu.cpp
   providers/xdna2/rocmfp4_model_weights.cpp
   providers/xdna2/rocmfp4_pack.cpp
-  providers/xdna2/rocmfp2_pack.cpp
   src/model/gguf.c)
 target_include_directories(ember-dspark-rocmfp4-cpu-bench PRIVATE
   providers/xdna2 src/model)
@@ -401,33 +297,17 @@ target_link_libraries(ember-dspark-rocmfp4-cpu-bench PRIVATE
   Threads::Threads m)
 ember_strict(ember-dspark-rocmfp4-cpu-bench)
 
-add_executable(test_xdna_rocmfp2_pack
-  test/test_xdna_rocmfp2_pack.cpp
-  providers/xdna2/rocmfp2_pack.cpp)
-target_include_directories(test_xdna_rocmfp2_pack PRIVATE providers/xdna2)
-add_test(NAME xdna_rocmfp2_pack COMMAND test_xdna_rocmfp2_pack)
-ember_strict(test_xdna_rocmfp2_pack)
-
 add_executable(test_xdna_rocmfp4_pack
   test/test_xdna_rocmfp4_pack.cpp
-  providers/xdna2/rocmfp4_pack.cpp
-  providers/xdna2/rocmfp2_pack.cpp)
+  providers/xdna2/rocmfp4_pack.cpp)
 target_include_directories(test_xdna_rocmfp4_pack PRIVATE providers/xdna2)
 add_test(NAME xdna_rocmfp4_pack COMMAND test_xdna_rocmfp4_pack)
 ember_strict(test_xdna_rocmfp4_pack)
-
-add_executable(test_xdna_rocmfp4_route_plan
-  test/test_xdna_rocmfp4_route_plan.cpp
-  providers/xdna2/rocmfp4_route_plan.cpp)
-target_include_directories(test_xdna_rocmfp4_route_plan PRIVATE providers/xdna2)
-add_test(NAME xdna_rocmfp4_route_plan COMMAND test_xdna_rocmfp4_route_plan)
-ember_strict(test_xdna_rocmfp4_route_plan)
 
 add_executable(test_xdna_rocmfp4_model_weights
   test/test_xdna_rocmfp4_model_weights.cpp
   providers/xdna2/rocmfp4_model_weights.cpp
   providers/xdna2/rocmfp4_pack.cpp
-  providers/xdna2/rocmfp2_pack.cpp
   src/model/gguf.c)
 target_include_directories(test_xdna_rocmfp4_model_weights PRIVATE
   providers/xdna2 src/model)
@@ -471,10 +351,10 @@ set(EMBER_C_TESTS
   chat_api prefill_policy api_adapters http background_gate chat_template
   compaction gguf model_card kv_cache qa dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
-  continuous_batch_executor resident_batch_coordinator xdna_moe_provider
+  continuous_batch_executor resident_batch_coordinator
   xdna_dspark_provider xdna_dspark_cpu_ops
-  xdna_rocmfp2_pack xdna_rocmfp4_pack xdna_rocmfp4_route_plan
-  xdna_rocmfp4_model_weights xdna_q8_pack xdna_q8_model_weights)
+  xdna_rocmfp4_pack xdna_rocmfp4_model_weights xdna_q8_pack
+  xdna_q8_model_weights)
 set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 
 # ── ember-server binary ──
@@ -555,11 +435,6 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_scripts.py)
   set_tests_properties(release_scripts PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME promote_from_dev
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_promote_from_dev.py)
-  set_tests_properties(promote_from_dev PROPERTIES TIMEOUT 20)
 endif()
 
 # ── standalone model-compute engine (vendored ggml fork + DeepSeek4) ──────
@@ -567,64 +442,47 @@ endif()
 # (no ROCm/HIP toolchain needed). Turn ON in the ROCm container to build the
 # vendored engine under engine/ (see engine/VENDOR.md):
 #
-#   cmake -S . -B build-rocm -DEMBER_ENGINE=ON -DEMBER_ENGINE_BACKEND=hip
+#   cmake -S . -B build-rocm -DEMBER_ENGINE=ON
 #   cmake --build build-rocm --target ggml-hip -j     # Phase 1: prove ggml builds
 #
 # Phases: P1 = ggml fork builds; P2 = ember_engine.a (DeepSeek4 + common subset)
 # + link backend_dflash.cc; P3 = KV snapshot save/restore.
 option(EMBER_ENGINE "Build the vendored GPU model-compute engine (ggml fork + DeepSeek4)" OFF)
-set(EMBER_ENGINE_BACKEND "hip" CACHE STRING "EMBER_ENGINE GPU backend: hip or cuda")
 if(EMBER_ENGINE)
-  string(TOLOWER "${EMBER_ENGINE_BACKEND}" EMBER_ENGINE_BACKEND)
-  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
-    # Default to Strix Halo (gfx1151); override with -DAMDGPU_TARGETS=gfxXXXX.
-    # Must be set before enable_language(HIP) so HIP targets inherit it.
-    if(NOT CMAKE_HIP_ARCHITECTURES)
-      if(AMDGPU_TARGETS)
-        set(CMAKE_HIP_ARCHITECTURES "${AMDGPU_TARGETS}" CACHE STRING "" FORCE)
-      else()
-        set(CMAKE_HIP_ARCHITECTURES "gfx1151" CACHE STRING "" FORCE)
-      endif()
-    endif()
-    # ggml-hip + hip-config also consult (AMD)GPU_TARGETS. Pin them so device
-    # code targets the right ISA even when the build container has no visible
-    # GPU (amdgpu-arch detection fails → would silently default to gfx906/gfx942).
-    set(GPU_TARGETS    "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "" FORCE)
-    set(AMDGPU_TARGETS "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "" FORCE)
-    enable_language(HIP)
-  elseif(EMBER_ENGINE_BACKEND STREQUAL "cuda")
-    enable_language(CUDA)
-  else()
-    message(FATAL_ERROR "EMBER_ENGINE_BACKEND must be 'hip' or 'cuda', got '${EMBER_ENGINE_BACKEND}'")
+  # Ember is an AMD Strix Halo appliance, not a portable ggml frontend. Pin
+  # gfx1151 before enabling HIP so an image built without a visible GPU cannot
+  # silently acquire a generic or host-dependent device-code target.
+  if(AMDGPU_TARGETS AND NOT AMDGPU_TARGETS STREQUAL "gfx1151")
+    message(FATAL_ERROR "Ember supports only AMD gfx1151, got AMDGPU_TARGETS=${AMDGPU_TARGETS}")
   endif()
+  set(CMAKE_HIP_ARCHITECTURES "gfx1151" CACHE STRING "" FORCE)
+  set(GPU_TARGETS             "gfx1151" CACHE STRING "" FORCE)
+  set(AMDGPU_TARGETS          "gfx1151" CACHE STRING "" FORCE)
+  enable_language(HIP)
   add_subdirectory(engine)
 
-  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
-    # Narrow placement diagnostic: loads only the trained DSpark main and three
-    # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
-    # context widths. It avoids a second resident target-model allocation on
-    # gfx1151.
-    add_executable(ember-dspark-main-bench
-      providers/xdna2/benchmark_dspark_main_gpu.cpp
-      providers/xdna2/q8_model_weights.cpp
-      providers/xdna2/q8_0_pack.cpp
-      src/model/gguf.c)
-    target_include_directories(ember-dspark-main-bench PRIVATE
-      providers/xdna2
-      engine/ggml/include
-      engine/ggml/src)
-    target_link_libraries(ember-dspark-main-bench PRIVATE
-      ggml ggml-base ggml-hip ggml-cpu m)
+  # Narrow placement diagnostic: loads only the trained DSpark main and three
+  # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
+  # context widths. It avoids a second resident target-model allocation.
+  add_executable(ember-dspark-main-bench
+    providers/xdna2/benchmark_dspark_main_gpu.cpp
+    providers/xdna2/q8_model_weights.cpp
+    providers/xdna2/q8_0_pack.cpp
+    src/model/gguf.c)
+  target_include_directories(ember-dspark-main-bench PRIVATE
+    providers/xdna2
+    engine/ggml/include
+    engine/ggml/src)
+  target_link_libraries(ember-dspark-main-bench PRIVATE
+    ggml ggml-base ggml-hip ggml-cpu m)
 
-    # Complete-provider hidden-boundary differential. It loads only the draft
-    # model, dlopen()s the packaged XRT provider through the stable ABI, and
-    # compares CPU/NPU output with the ordinary HIP drafter. This can run while
-    # a target model remains resident because it avoids a second 85-GiB load.
-    add_executable(ember-dspark-xdna-diff
-      providers/xdna2/validate_dspark_provider_gpu.cpp)
-    target_link_libraries(ember-dspark-xdna-diff PRIVATE
-      ember_engine Threads::Threads m)
-  endif()
+  # Complete-provider hidden-boundary differential. It loads only the draft
+  # model, dlopen()s the packaged XRT provider through the stable ABI, and
+  # compares CPU/NPU output with the ordinary HIP drafter.
+  add_executable(ember-dspark-xdna-diff
+    providers/xdna2/validate_dspark_provider_gpu.cpp)
+  target_link_libraries(ember-dspark-xdna-diff PRIVATE
+    ember_engine Threads::Threads m)
 
   # Metadata-only tokenizer probe.  Keep it independent of ember_engine so a
   # production GGUF can be inspected without loading weights or touching the
@@ -673,23 +531,16 @@ if(EMBER_ENGINE)
   target_include_directories(ember-dflash PRIVATE src src/backend)
   target_compile_definitions(ember-dflash PRIVATE _GNU_SOURCE)
   # The bridge TU pulls in lucebox headers that switch on the GPU backend.
-  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
-    set_source_files_properties(src/backend/backend_dflash.cc PROPERTIES
-      COMPILE_DEFINITIONS "DFLASH27B_BACKEND_HIP=1;GGML_USE_HIP;GGML_USE_CPU")
-  elseif(EMBER_ENGINE_BACKEND STREQUAL "cuda")
-    set_source_files_properties(src/backend/backend_dflash.cc PROPERTIES
-      COMPILE_DEFINITIONS "DFLASH27B_BACKEND_CUDA=1;GGML_USE_CUDA;GGML_USE_CPU")
-  endif()
+  set_source_files_properties(src/backend/backend_dflash.cc PROPERTIES
+    COMPILE_DEFINITIONS "DFLASH27B_BACKEND_HIP=1;GGML_USE_HIP;GGML_USE_CPU")
   # xgrammar: backend_dflash.cc compiles the tool grammar and masks logits.
   target_link_libraries(ember-dflash PRIVATE ember_engine xgrammar Threads::Threads m)
-  if(EMBER_ENGINE_BACKEND STREQUAL "hip")
-    # --validate-gemm-batch calls hipBLAS directly from backend_dflash.cc.
-    # ggml-hip links roc::hipblas PRIVATE, so it does not propagate; ask for it
-    # here rather than widening ggml's link interface.
-    find_package(hip QUIET)
-    find_package(hipblas QUIET)
-    if(TARGET roc::hipblas AND TARGET hip::host)
-      target_link_libraries(ember-dflash PRIVATE hip::host roc::hipblas)
-    endif()
+  # --validate-gemm-batch calls hipBLAS directly from backend_dflash.cc.
+  # ggml-hip links roc::hipblas PRIVATE, so it does not propagate; ask for it
+  # here rather than widening ggml's link interface.
+  find_package(hip QUIET)
+  find_package(hipblas QUIET)
+  if(TARGET roc::hipblas AND TARGET hip::host)
+    target_link_libraries(ember-dflash PRIVATE hip::host roc::hipblas)
   endif()
 endif()

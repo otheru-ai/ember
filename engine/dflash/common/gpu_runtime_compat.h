@@ -1,19 +1,13 @@
 #pragma once
 
-// Minimal CUDA/HIP runtime compatibility for dflash harness code that already
-// uses cuda* names. This is not a HIP-only shim: CUDA builds include the CUDA
-// runtime through this header, while HIP builds map the existing cuda* runtime
-// spellings to hip*.
-
-#if defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
+// Minimal HIP compatibility for vendored code that retains cuda* spellings.
+#if !defined(DFLASH27B_BACKEND_HIP) && !defined(GGML_USE_HIP)
+#error "Ember's dflash runtime supports only HIP"
+#endif
 
 #include <hip/hip_runtime.h>
 
-#define cudaDeviceCanAccessPeer hipDeviceCanAccessPeer
-#define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
 #define cudaDeviceSynchronize hipDeviceSynchronize
-#define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
-#define cudaErrorPeerAccessNotEnabled hipErrorPeerAccessNotEnabled
 #define cudaError_t hipError_t
 #define cudaFree hipFree
 #define cudaGetDeviceCount hipGetDeviceCount
@@ -27,7 +21,6 @@
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice hipMemcpyHostToDevice
 #define cudaMemcpyKind hipMemcpyKind
-#define cudaMemcpyPeerAsync hipMemcpyPeerAsync
 #define cudaMemset hipMemset
 #define cudaMemGetInfo hipMemGetInfo
 #define cudaSetDevice hipSetDevice
@@ -56,9 +49,3 @@
 #define cudaStreamDestroy hipStreamDestroy
 #define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaErrorInvalidValue hipErrorInvalidValue
-
-#else
-
-#include <cuda_runtime.h>
-
-#endif
