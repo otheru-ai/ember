@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -38,6 +39,28 @@
 #include <vector>
 
 namespace {
+
+using ProfileClock = std::chrono::steady_clock;
+
+double profile_milliseconds(ProfileClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(
+        ProfileClock::now() - start).count();
+}
+
+struct ProviderProfile {
+    double setup = 0.0;
+    double hc = 0.0;
+    double norm = 0.0;
+    double qakv = 0.0;
+    double qb = 0.0;
+    double attention = 0.0;
+    double output_projection = 0.0;
+    double routed = 0.0;
+    double shared_tail = 0.0;
+    double expert_span = 0.0;
+    double combine = 0.0;
+    double final = 0.0;
+};
 
 constexpr int kBatch = 5;
 constexpr int kLayers = 3;
@@ -884,6 +907,11 @@ private:
     }
 
     bool compute(Job & job) {
+        const auto total_start = ProfileClock::now();
+        const bool profile =
+            std::getenv("EMBER_DSPARK_PROFILE") != nullptr;
+        ProviderProfile timings;
+        auto phase_start = ProfileClock::now();
         std::string error;
         const bool debug = std::getenv("DFLASH_DS4_DSPARK_DEBUG") != nullptr;
         unsigned cpu_q8_mask = 0;
@@ -914,11 +942,13 @@ private:
         for (int token = 0; token < kBatch; ++token)
             kv_positions[static_cast<size_t>(job.ctx_len + token)] =
                 job.committed + token;
+        if (profile) timings.setup += profile_milliseconds(phase_start);
 
         for (int layer_index = 0; layer_index < kLayers; ++layer_index) {
             LayerState & layer = layers_[static_cast<size_t>(layer_index)];
             std::vector<float> working, normalized;
             ember::xdna2::DsparkHcSplit split;
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_hc_pre(
                     state.data(), layer.attn_hc.fn.data(),
                     layer.attn_hc.base.data(), layer.attn_hc.scale,
@@ -930,11 +960,16 @@ private:
                 job.error = error;
                 return false;
             }
+            if (profile) timings.hc += profile_milliseconds(phase_start);
+            phase_start = ProfileClock::now();
+            // The weighted norm above is intentionally included with HC: it
+            // consumes HC's working output and cannot overlap the projection.
             std::vector<float> qakv;
             if (!layer.qakv->run(*kernel_, normalized.data(), qakv, &error)) {
                 job.error = error;
                 return false;
             }
+            if (profile) timings.qakv += profile_milliseconds(phase_start);
             std::vector<float> qa(static_cast<size_t>(kBatch) * kQa);
             std::vector<float> block_kv(static_cast<size_t>(kBatch) * kHeadDim);
             for (int token = 0; token < kBatch; ++token) {
@@ -968,6 +1003,7 @@ private:
                 }
             }
             std::vector<float> qa_normalized, block_kv_normalized;
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_weighted_rms_norm(
                     qa.data(), layer.qa_norm.data(), kBatch, kQa, 1.0e-6f,
                     qa_normalized, &error) ||
@@ -977,11 +1013,14 @@ private:
                 job.error = error;
                 return false;
             }
+            if (profile) timings.norm += profile_milliseconds(phase_start);
             std::vector<float> q;
+            phase_start = ProfileClock::now();
             if (!layer.qb->run(*kernel_, qa_normalized.data(), q, &error)) {
                 job.error = error;
                 return false;
             }
+            if (profile) timings.qb += profile_milliseconds(phase_start);
             if (debug || (cpu_q8_mask & 2u)) {
                 std::vector<float> reference;
                 if (!reference_projection(layer.qb_raw,
@@ -996,12 +1035,14 @@ private:
                 if (cpu_q8_mask & 2u) q = std::move(reference);
             }
             std::vector<float> ones(kHeadDim, 1.0f), q_normalized;
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_weighted_rms_norm(
                     q.data(), ones.data(), kBatch * kHeads, kHeadDim,
                     1.0e-6f, q_normalized, &error)) {
                 job.error = error;
                 return false;
             }
+            if (profile) timings.norm += profile_milliseconds(phase_start);
             std::vector<float> kv(static_cast<size_t>(job.ctx_len + kBatch) *
                                   kHeadDim);
             if (job.ctx_len > 0) {
@@ -1014,6 +1055,7 @@ private:
             std::copy(block_kv_normalized.begin(), block_kv_normalized.end(),
                       kv.begin() + static_cast<size_t>(job.ctx_len) * kHeadDim);
             std::vector<float> attention;
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_attention_reduce(
                     q_normalized.data(), kv.data(),
                     layer.sinks.empty() ? nullptr : layer.sinks.data(),
@@ -1023,6 +1065,7 @@ private:
                 job.error = error;
                 return false;
             }
+            if (profile) timings.attention += profile_milliseconds(phase_start);
             std::vector<float> oa_input(
                 static_cast<size_t>(kOutGroups) * kBatch * kOutGroupDim);
             for (int group = 0; group < kOutGroups; ++group) {
@@ -1038,11 +1081,14 @@ private:
                 }
             }
             std::vector<float> oa, attn_output;
+            phase_start = ProfileClock::now();
             if (!layer.oa->run(*kernel_, oa_input.data(), oa, &error) ||
                 !layer.ob->run(*kernel_, oa.data(), attn_output, &error)) {
                 job.error = error;
                 return false;
             }
+            if (profile)
+                timings.output_projection += profile_milliseconds(phase_start);
             if (debug || (cpu_q8_mask & 4u)) {
                 std::vector<float> oa_reference(
                     static_cast<size_t>(kBatch) *
@@ -1095,6 +1141,7 @@ private:
             }
             trace_stats("attn_L", layer_index, attn_output);
             std::vector<float> next;
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_hc_post(
                     state.data(), attn_output.data(), split, kEmbd,
                     next, &error)) {
@@ -1102,7 +1149,9 @@ private:
                 return false;
             }
             state = std::move(next);
+            if (profile) timings.hc += profile_milliseconds(phase_start);
 
+            phase_start = ProfileClock::now();
             if (!ember::xdna2::dspark_hc_pre(
                     state.data(), layer.ffn_hc.fn.data(),
                     layer.ffn_hc.base.data(), layer.ffn_hc.scale,
@@ -1114,16 +1163,26 @@ private:
                 job.error = error;
                 return false;
             }
+            if (profile) timings.hc += profile_milliseconds(phase_start);
+            const auto expert_start = ProfileClock::now();
             auto shared_command = layer.shared->start(*kernel_, normalized.data());
             std::vector<float> routed, shared;
+            phase_start = ProfileClock::now();
             const bool routed_ok = routed_experts(
                 layer_index, layer, normalized, routed, &error);
+            if (profile) timings.routed += profile_milliseconds(phase_start);
+            phase_start = ProfileClock::now();
             const bool shared_ok = layer.shared->finish(
                 std::move(shared_command), shared, &error);
+            if (profile) {
+                timings.shared_tail += profile_milliseconds(phase_start);
+                timings.expert_span += profile_milliseconds(expert_start);
+            }
             if (!routed_ok || !shared_ok) {
                 job.error = error;
                 return false;
             }
+            phase_start = ProfileClock::now();
             ember::xdna2::dspark_parallel_for(kBatch * kEmbd, [&](int index) {
                 shared[static_cast<size_t>(index)] +=
                     routed[static_cast<size_t>(index)];
@@ -1136,8 +1195,10 @@ private:
                 return false;
             }
             state = std::move(next);
+            if (profile) timings.combine += profile_milliseconds(phase_start);
             trace_stats("hcL", layer_index, state);
         }
+        phase_start = ProfileClock::now();
         if (!ember::xdna2::dspark_hc_out(
                 state.data(), output_hc_fn_.data(), output_hc_base_.data(),
                 output_hc_scale_, kBatch, kEmbd, kHc, 1.0e-6f,
@@ -1146,6 +1207,21 @@ private:
                 job.confidence.data(), output_norm_.data(), kBatch, kEmbd,
                 1.0e-6f, job.hidden, &job.error))
             return false;
+        if (profile) {
+            timings.final += profile_milliseconds(phase_start);
+            std::fprintf(stderr,
+                "[xdna-dspark-profile] committed=%d ctx=%d total=%.3f "
+                "setup=%.3f hc=%.3f norm=%.3f qakv=%.3f qb=%.3f "
+                "attention=%.3f oaob=%.3f routed=%.3f "
+                "shared_tail=%.3f expert_span=%.3f combine=%.3f "
+                "final=%.3f ms\n",
+                job.committed, job.ctx_len,
+                profile_milliseconds(total_start), timings.setup, timings.hc,
+                timings.norm, timings.qakv, timings.qb, timings.attention,
+                timings.output_projection, timings.routed,
+                timings.shared_tail, timings.expert_span, timings.combine,
+                timings.final);
+        }
         trace_stats("confidence", -1, job.confidence);
         trace_stats("hidden", -1, job.hidden);
         return true;

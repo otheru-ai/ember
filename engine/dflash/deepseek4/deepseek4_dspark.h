@@ -182,8 +182,9 @@ void deepseek4_spec_rollback_apply(const DeepSeek4SpecRollback & rollback,
 // One asynchronous, session-owned DSpark proposal.  Its implementation keeps
 // the provider job and all phase-local buffers opaque so ResidentSession does
 // not acquire XRT/ggml details.  A proposal is submitted while another
-// session's target work is eligible to run, then finished later through the
-// exact q=1 verifier.  Moving is allowed; copying would duplicate job ownership.
+// session's target work is eligible to run, then finished through the q-wide
+// target verifier. Partial acceptance rolls back and replays the exact q=1
+// prefix. Moving is allowed; copying would duplicate job ownership.
 class DeepSeek4DSparkResidentProposal {
 public:
     DeepSeek4DSparkResidentProposal();
@@ -242,11 +243,12 @@ bool deepseek4_dspark_resident_prepare(
     DeepSeek4DSparkResidentProposal & proposal,
     std::string * error = nullptr);
 
-// Collect a submitted proposal, run the tied DSpark head and exact-prefix
-// target verifier, append the accepted committed input tokens to `committed`,
-// and return the deferred target bonus in `next_token`.  `last_logits` is the
-// target distribution that produced next_token, preserving the ordinary AR
-// seam if speculation is disabled on the following scheduler turn.
+// Collect a submitted proposal, run the tied DSpark head and q-wide target
+// verifier, append the accepted committed input tokens to `committed`, and
+// return the deferred target bonus in `next_token`. A partial block is restored
+// and replayed q=1 before returning. `last_logits` is the target distribution
+// that produced next_token, preserving the ordinary AR seam if speculation is
+// disabled on the following scheduler turn.
 bool deepseek4_dspark_resident_finish(
     ggml_backend_t backend,
     int device,

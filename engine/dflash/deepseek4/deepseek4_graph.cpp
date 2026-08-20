@@ -5500,6 +5500,8 @@ struct Ds4LayerMajorCachedLayer {
     std::vector<ggml_tensor *> allocated_tensors;
     ggml_tensor * hash_ids = nullptr;
     ggml_tensor * logits = nullptr;
+    ggml_tensor * capture = nullptr;
+    int capture_index = -1;
 
     void destroy() {
         if (ctx) {
@@ -5514,6 +5516,8 @@ struct Ds4LayerMajorCachedLayer {
         gf = nullptr;
         hash_ids = nullptr;
         logits = nullptr;
+        capture = nullptr;
+        capture_index = -1;
         i32_inputs.clear();
         i32_array_inputs.clear();
         i64_array_inputs.clear();
@@ -5529,6 +5533,7 @@ struct Ds4LayerMajorGraphCache {
     PrefillAttentionMode mode = PrefillAttentionMode::Exact;
     int n_tokens = 0;
     int kv_start = -1;
+    std::vector<int> capture_ids;
     bool ready = false;
     ggml_context * state_ctx = nullptr;
     ggml_backend_buffer_t state_buf = nullptr;
@@ -5538,10 +5543,12 @@ struct Ds4LayerMajorGraphCache {
 
     bool matches(const DeepSeek4Weights & w, const DeepSeek4Cache & cache,
                  ggml_backend_t b,
-                 PrefillAttentionMode m, int tokens, int start) const {
+                 PrefillAttentionMode m, int tokens, int start,
+                 const std::vector<int> * captures) const {
         return ready && owner_ctx == w.ctx && owner_cache_ctx == cache.ctx &&
                backend == b && mode == m &&
                n_tokens == tokens && kv_start == start &&
+               capture_ids == (captures ? *captures : std::vector<int>{}) &&
                layers.size() == (size_t) w.n_layer;
     }
 
@@ -5564,6 +5571,7 @@ struct Ds4LayerMajorGraphCache {
         mode = PrefillAttentionMode::Exact;
         n_tokens = 0;
         kv_start = -1;
+        capture_ids.clear();
         ready = false;
     }
 
@@ -5682,11 +5690,18 @@ static int ds4_try_layer_major_prefill(
         int kv_start,
         std::vector<float> & out_logits,
         const int32_t * token_ids,
-        DeepSeek4StepTelemetry * telemetry) {
+        DeepSeek4StepTelemetry * telemetry,
+        const std::vector<int> * capture_ids,
+        std::vector<float> * capture_out) {
     if (!backend || !embed || n_tokens <= 4 ||
         n_tokens > DS4_MAX_LAYER_MAJOR_PREFILL_TOKENS ||
-        kv_start < 0 || w.moe_hybrid) {
+        kv_start < 0 || w.moe_hybrid ||
+        ((capture_ids == nullptr) != (capture_out == nullptr))) {
         return 0;
+    }
+    if (capture_ids && capture_ids->empty()) {
+        capture_ids = nullptr;
+        capture_out = nullptr;
     }
     if (cache.prefill_mode == PrefillAttentionMode::Exact) return 0;
     if (!ds4_backend_is_gpu(backend) || !hc_out_weights.loaded ||
@@ -5728,7 +5743,7 @@ static int ds4_try_layer_major_prefill(
     if (token_ids) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
             if (candidate.matches(w, cache, backend, cache.prefill_mode,
-                                  n_tokens, kv_start)) {
+                                  n_tokens, kv_start, capture_ids)) {
                 graph_cache = &candidate;
                 cache_hit = true;
                 break;
@@ -5749,7 +5764,10 @@ static int ds4_try_layer_major_prefill(
             const bool same_owner = candidate->owner_ctx == w.ctx &&
                                     candidate->owner_cache_ctx == cache.ctx &&
                                     candidate->backend == backend &&
-                                    candidate->mode == cache.prefill_mode;
+                                    candidate->mode == cache.prefill_mode &&
+                                    candidate->capture_ids ==
+                                        (capture_ids ? *capture_ids
+                                                     : std::vector<int>{});
             if (std::getenv("EMBER_GTT_TRACE")) {
                 std::fprintf(stderr, "[gtt] MISS req(n=%d kv=%d mode=%d) cand(ready=%d owner_ok=%d cache_ok=%d back_ok=%d mode=%d n=%d kv=%d layers=%zu) n_layer=%d\n",
                     n_tokens, kv_start, (int) cache.prefill_mode,
@@ -5769,6 +5787,8 @@ static int ds4_try_layer_major_prefill(
                 graph_cache->mode = cache.prefill_mode;
                 graph_cache->n_tokens = n_tokens;
                 graph_cache->kv_start = kv_start;
+                graph_cache->capture_ids =
+                    capture_ids ? *capture_ids : std::vector<int>{};
                 graph_cache->layers.resize((size_t) w.n_layer);
                 cache_build = true;
             }
@@ -5822,6 +5842,10 @@ static int ds4_try_layer_major_prefill(
 
     GTT("after_state_alloc");
     std::vector<float> initial((size_t) hc_dim * n_tokens);
+    if (capture_out) {
+        capture_out->assign(
+            capture_ids->size() * (size_t)n_embd * (size_t)n_tokens, 0.0f);
+    }
     for (int t = 0; t < n_tokens; ++t) {
         for (int h = 0; h < n_hc; ++h) {
             std::memcpy(initial.data() + (size_t) t * hc_dim +
@@ -5928,6 +5952,20 @@ static int ds4_try_layer_major_prefill(
                 ggml_backend_tensor_get(
                     layer.logits, out_logits.data(), 0,
                     sizeof(float) * (size_t) w.n_vocab);
+            }
+            if (layer.capture && capture_out && layer.capture_index >= 0) {
+                std::vector<float> captured((size_t)n_embd * n_tokens);
+                ggml_backend_tensor_get(
+                    layer.capture, captured.data(), 0,
+                    sizeof(float) * captured.size());
+                for (int t = 0; t < n_tokens; ++t) {
+                    std::memcpy(
+                        capture_out->data() +
+                            ((size_t)t * capture_ids->size() +
+                             (size_t)layer.capture_index) * n_embd,
+                        captured.data() + (size_t)t * n_embd,
+                        sizeof(float) * (size_t)n_embd);
+                }
             }
 
             DeepSeek4LayerCache & lc = cache.layers[(size_t) il];
@@ -6054,6 +6092,29 @@ static int ds4_try_layer_major_prefill(
         ggml_tensor * hc_next = ggml_ds4_hc_post(
             ctx, hc_after_attn, ffn_out, split_ffn, n_hc);
 
+        int capture_index = -1;
+        if (capture_ids) {
+            for (size_t ci = 0; ci < capture_ids->size(); ++ci) {
+                if ((*capture_ids)[ci] == il) {
+                    capture_index = (int)ci;
+                    break;
+                }
+            }
+        }
+        ggml_tensor * capture = nullptr;
+        if (capture_index >= 0) {
+            ggml_tensor * streams = ggml_reshape_3d(
+                ctx, hc_next, n_embd, n_hc, n_tokens);
+            ggml_tensor * streams_t = ggml_cont(
+                ctx, ggml_permute(ctx, streams, 1, 0, 2, 3));
+            ggml_tensor * mean = ggml_scale(
+                ctx, ggml_sum_rows(ctx, streams_t), 1.0f / (float)n_hc);
+            capture = ggml_reshape_2d(
+                ctx, ggml_cont(ctx, mean), n_embd, n_tokens);
+            ggml_set_output(capture);
+            ggml_build_forward_expand(gf, capture);
+        }
+
         // Persist HC state for the next layer before this layer's gallocr
         // scratch buffer is reused.
         ggml_tensor * state_copy = ggml_cpy(ctx, hc_next, state_out);
@@ -6155,6 +6216,20 @@ static int ds4_try_layer_major_prefill(
             ggml_backend_tensor_get(logits, out_logits.data(), 0,
                                     sizeof(float) * (size_t) w.n_vocab);
         }
+        if (capture && capture_out && capture_index >= 0) {
+            std::vector<float> captured((size_t)n_embd * n_tokens);
+            ggml_backend_tensor_get(
+                capture, captured.data(), 0,
+                sizeof(float) * captured.size());
+            for (int t = 0; t < n_tokens; ++t) {
+                std::memcpy(
+                    capture_out->data() +
+                        ((size_t)t * capture_ids->size() +
+                         (size_t)capture_index) * n_embd,
+                    captured.data() + (size_t)t * n_embd,
+                    sizeof(float) * (size_t)n_embd);
+            }
+        }
 
         const int ratio = (int) w.compress_ratios[(size_t) il];
         if (ratio > 0) {
@@ -6171,6 +6246,8 @@ static int ds4_try_layer_major_prefill(
             cached_layer->f32_array_inputs = std::move(f32_array_inputs);
             cached_layer->hash_ids = hash_ids;
             cached_layer->logits = logits;
+            cached_layer->capture = capture;
+            cached_layer->capture_index = capture_index;
         } else {
             ggml_free(ctx);
         }
@@ -6362,10 +6439,17 @@ bool deepseek4_step_layer_range(
     // update. Splitting it at each ratio-4 boundary first makes the optimized
     // n_tokens > 4 dispatch below unreachable and silently drops prefill onto
     // the reference scheduler.
+    const bool layer_major_capture_hooks =
+        verify_hooks && verify_hooks->capture_layer_ids &&
+        verify_hooks->capture_out && !verify_hooks->all_logits_out &&
+        !verify_hooks->require_fused_q1;
+    const bool incompatible_layer_major_hooks =
+        verify_hooks && !layer_major_capture_hooks;
     const bool layer_major_candidate =
         deepseek4_layer_major_prefill_candidate(
             n_tokens, layer_begin, is_last_shard, out_logits != nullptr,
-            ds4_backend_is_gpu(backend), w.moe_hybrid, verify_hooks != nullptr,
+            ds4_backend_is_gpu(backend), w.moe_hybrid,
+            incompatible_layer_major_hooks,
             cache.prefill_mode);
     // The fused q2..q4 verifier models a learned-compressor boundary inside
     // its graph. Decide whether that graph is eligible before applying the
@@ -6535,7 +6619,10 @@ bool deepseek4_step_layer_range(
             fused_decode_graph_cache, backend, w, cache,
             hc_layer_weights_range, hc_output_weights_range,
             hash_routing_tables_range, scratch.hash_expert_ids, embed,
-            n_tokens, kv_start, *out_logits, token_ids, telemetry);
+            n_tokens, kv_start, *out_logits, token_ids, telemetry,
+            layer_major_capture_hooks ? verify_hooks->capture_layer_ids
+                                      : nullptr,
+            layer_major_capture_hooks ? verify_hooks->capture_out : nullptr);
         if (prc < 0) return false;
         if (prc > 0) {
             if (telemetry) {

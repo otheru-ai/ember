@@ -1341,6 +1341,13 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     int spec_capture_from = n_total;
     const bool capture_spec_features =
         allow_spec_capture && spec_enabled_ && spec_drafter_;
+    // The layer-major HIP graph can publish mean-over-HC capture rows while it
+    // performs the configured dense/sparse prefill. Draft features need not be
+    // q=1-identical: the target verifier remains authoritative, and forcing the
+    // final 128 prompt rows through q=1 erased the entire speculative speedup.
+    const bool layer_major_spec_capture =
+        capture_spec_features && !force_exact_prefill && !moe_hybrid_ &&
+        prefill_attention_mode_is_approximate(base_prefill_mode);
     if (!allow_spec_capture) {
         // A request that cannot enter speculative decode must be
         // observationally identical to the configured target-only path.
@@ -1397,15 +1404,17 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             }
         }
 
-        // Only the final SWA feature window needs DSpark's exact q=1 capture
-        // contract. The preceding prefix stays on the configured layer-major
-        // batched path. This avoids forcing a 10k+ prompt through one graph
-        // launch per token merely because speculative decode is eligible.
-        const PrefillAttentionMode step_mode = select_prefill_step_mode(
-            base_prefill_mode, force_exact_prefill,
-            capture_spec_features, i, spec_capture_from);
+        // When the layer-major graph owns feature capture, the final SWA window
+        // stays on the configured approximate prefill topology. Exact mode and
+        // hybrid placement retain the q=1 capture contract.
+        const PrefillAttentionMode step_mode = layer_major_spec_capture
+            ? base_prefill_mode
+            : select_prefill_step_mode(
+                base_prefill_mode, force_exact_prefill,
+                capture_spec_features, i, spec_capture_from);
         const bool capture_exact =
-            capture_spec_features && i >= spec_capture_from;
+            capture_spec_features && i >= spec_capture_from &&
+            !layer_major_spec_capture;
         const bool step_exact =
             !prefill_attention_mode_is_approximate(step_mode);
         cache_.prefill_mode = step_mode;
@@ -1434,7 +1443,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         if (capture_spec_features && i + n_tok > spec_capture_from) {
             spec_hooks.capture_layer_ids = &spec_drafter_->capture_layer_ids;
             spec_hooks.capture_out = &spec_cap;
-            spec_hooks.require_fused_q1 = true;
+            spec_hooks.require_fused_q1 = !layer_major_spec_capture;
             hp = &spec_hooks;
         }
         const bool need_step_logits =
@@ -1927,8 +1936,7 @@ static void describe_prefill(GenerateResult &result,
                              bool force_exact_prefill,
                              bool prepare_spec,
                              bool force_ar_decode,
-                             int token_count,
-                             int capture_window) {
+                             int token_count) {
     result.prefill_tokens = std::max(0, token_count);
     if (token_count <= 0) {
         result.prefill_mode = "none";
@@ -1943,8 +1951,8 @@ static void describe_prefill(GenerateResult &result,
     if (prepare_spec) {
         const bool configured_approx =
             prefill_attention_mode_is_approximate(configured_mode);
-        result.prefill_mode = configured_approx && token_count > capture_window
-            ? "hybrid"
+        result.prefill_mode = configured_approx
+            ? prefill_attention_mode_name(configured_mode)
             : "exact";
         result.prefill_reason = "dspark_capture";
         return;
@@ -1981,7 +1989,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     const bool prepare_spec = eligible_without_gate && profitability_allowed;
     describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
                      prepare_spec, req.force_ar_decode,
-                     (int)req.prompt.size(), w_.n_swa);
+                     (int)req.prompt.size());
 
     // Prefill
     int committed = do_prefill(req.prompt, out_io, /*kv_offset=*/0,
@@ -2377,7 +2385,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     const int delta_tokens = std::max(0, prompt_len - snap_pos);
     describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
                      prepare_spec, req.force_ar_decode,
-                     delta_tokens, w_.n_swa);
+                     delta_tokens);
     if (prompt_len > snap_pos) {
         std::vector<int32_t> delta(
             req.prompt.begin() + snap_pos, req.prompt.end());
@@ -2691,7 +2699,7 @@ GenerateResult DeepSeek4Backend::resident_session_result(
                      session.request.force_exact_prefill,
                      session.spec_eligible || session.spec_ran,
                      session.request.force_ar_decode,
-                     session.prefill_tokens, w_.n_swa);
+                     session.prefill_tokens);
     result.budget_forced_close = session.budget_forced_close;
     result.degenerate_decode_close = session.degenerate_decode_close;
     result.termination_reason = session.termination_reason;
@@ -2863,8 +2871,7 @@ DeepSeek4Backend::decode_batch(
                     *spec_drafter_, session.spec_feat_window,
                     session.spec_proposal, committed_tokens, next_token,
                     frontier_logits, offered, accepted, spec_timing,
-                    &spec_error) ||
-                committed_tokens.empty()) {
+                    &spec_error)) {
                 session.failed = true;
                 session.error = spec_error.empty()
                     ? "resident DSpark cycle failed" : spec_error;
@@ -2880,75 +2887,91 @@ DeepSeek4Backend::decode_batch(
             session.spec_provider_block_s += spec_timing.provider_block_s;
             session.spec_head_s += spec_timing.head_s;
             session.spec_verify_s += spec_timing.verify_s;
-
-            session.pending_ready = false;
-            session.pending_forced_close_token = false;
-            int completed_tokens = 0;
-            for (int32_t token : committed_tokens) {
-                session.generated.push_back(token);
-                session.history.push_back(token);
-                session.io.emit(token);
-                ++completed_tokens;
-                const bool cycle_detected = session.progress_cycle.observe(token);
-                if (session.io.cancelled) {
-                    session.cancelled = true;
-                    session.terminal = true;
-                    break;
-                }
-                if (cycle_detected) {
-                    session.degenerate_decode_close = true;
-                    session.termination_reason =
-                        session.progress_cycle.reason_name();
-                    session.terminal = true;
-                    std::fprintf(
-                        stderr,
-                        "[deepseek4] resident speculative progress watchdog "
-                        "fired: reason=%s period=%zu span=%zu tokens\n",
-                        session.progress_cycle.reason_name(),
-                        session.progress_cycle.cycle_period(),
-                        session.progress_cycle.repeated_span());
-                    break;
-                }
-                if (deepseek4_is_eos_tok(token, w_) ||
-                    (int)session.generated.size() >= session.request.n_gen) {
-                    session.terminal = true;
-                    break;
-                }
-            }
-            if (session.terminal) {
-                result.push_back({id, true, true, completed_tokens});
-                continue;
-            }
-
-            session.last_logits = std::move(frontier_logits);
-            if (!resident_sample_next(session)) {
-                fail_all("resident speculative sampling failed");
-                return result;
-            }
-            if (!session.pending_forced_close_token &&
-                session.pending_token != next_token) {
-                session.failed = true;
-                session.error =
-                    "resident DSpark bonus disagrees with greedy frontier";
-                fail_all("resident DSpark frontier mismatch");
-                return result;
-            }
-
-            // Refill this session's proposal behind jobs already queued for
-            // other sessions.  Its NPU work can run while their GPU verifiers
-            // execute, and it remains owned by the session until the scheduler
-            // selects that session again.
-            std::string submit_error;
-            if (!resident_submit_spec(session, &submit_error) &&
-                !submit_error.empty()) {
-                std::fprintf(stderr,
-                             "[ds4-resident-spec] refill failed session=%" PRIu64
-                             ": %s; using target AR\n",
-                             (uint64_t)id, submit_error.c_str());
+            // A partial resident block is both a numerical-risk signal and a
+            // measured loss on this topology. resident_finish rolls it back
+            // completely; remain on the ordinary target graph for the request.
+            if (offered > 0 && accepted < offered) {
                 session.spec_eligible = false;
             }
-            result.push_back({id, true, false, completed_tokens});
-            continue;
+
+            // Confidence admission can decline before touching target state.
+            // Disable speculation for this request and execute the already-
+            // pending token through the ordinary resident AR path below.
+            if (committed_tokens.empty()) {
+                session.spec_eligible = false;
+            } else {
+                session.pending_ready = false;
+                session.pending_forced_close_token = false;
+                int completed_tokens = 0;
+                for (int32_t token : committed_tokens) {
+                    session.generated.push_back(token);
+                    session.history.push_back(token);
+                    session.io.emit(token);
+                    ++completed_tokens;
+                    const bool cycle_detected =
+                        session.progress_cycle.observe(token);
+                    if (session.io.cancelled) {
+                        session.cancelled = true;
+                        session.terminal = true;
+                        break;
+                    }
+                    if (cycle_detected) {
+                        session.degenerate_decode_close = true;
+                        session.termination_reason =
+                            session.progress_cycle.reason_name();
+                        session.terminal = true;
+                        std::fprintf(
+                            stderr,
+                            "[deepseek4] resident speculative progress "
+                            "watchdog fired: reason=%s period=%zu span=%zu "
+                            "tokens\n",
+                            session.progress_cycle.reason_name(),
+                            session.progress_cycle.cycle_period(),
+                            session.progress_cycle.repeated_span());
+                        break;
+                    }
+                    if (deepseek4_is_eos_tok(token, w_) ||
+                        (int)session.generated.size() >=
+                            session.request.n_gen) {
+                        session.terminal = true;
+                        break;
+                    }
+                }
+                if (session.terminal) {
+                    result.push_back({id, true, true, completed_tokens});
+                    continue;
+                }
+
+                session.last_logits = std::move(frontier_logits);
+                if (!resident_sample_next(session)) {
+                    fail_all("resident speculative sampling failed");
+                    return result;
+                }
+                if (!session.pending_forced_close_token &&
+                    session.pending_token != next_token) {
+                    session.failed = true;
+                    session.error =
+                        "resident DSpark bonus disagrees with greedy frontier";
+                    fail_all("resident DSpark frontier mismatch");
+                    return result;
+                }
+
+                // Refill this session's proposal behind jobs already queued
+                // for other sessions. Its NPU work can run while their GPU
+                // verifiers execute, and remains owned by this session.
+                std::string submit_error;
+                if (!resident_submit_spec(session, &submit_error) &&
+                    !submit_error.empty()) {
+                    std::fprintf(
+                        stderr,
+                        "[ds4-resident-spec] refill failed session=%" PRIu64
+                        ": %s; using target AR\n",
+                        (uint64_t)id, submit_error.c_str());
+                    session.spec_eligible = false;
+                }
+                result.push_back({id, true, false, completed_tokens});
+                continue;
+            }
         }
 
         const int32_t token = session.pending_token;

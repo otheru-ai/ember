@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cinttypes>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -796,19 +797,38 @@ bool deepseek4_dspark_resident_finish(
     DeepSeek4DFlashTarget target(
         target_w, target_cache, backend, device, nullptr,
         drafter.capture_layer_ids, drafter.mask_token_id,
-        /*strict_verify=*/true);
+        /*strict_verify=*/false);
     target.set_keep_logits(true);
+    DeepSeek4StepTelemetry verify_telemetry;
+    const bool detailed_timing = spec_env_flag("DFLASH_DS4_TIMING");
+    if (detailed_timing) target.set_telemetry(&verify_telemetry);
     DraftWeights draft_weights = make_dspark_shim(drafter);
     std::vector<float> padded_hidden(
         (size_t)n_embd * ((size_t)drafter.block_size + 1), 0.0f);
+    std::vector<float> padded_confidence_hidden;
+    std::vector<float> draft_confidence;
     std::memcpy(padded_hidden.data() + n_embd,
                 provider_output.hidden.data(),
                 hidden_need * sizeof(float));
+    const bool confidence_available =
+        provider_output.confidence_hidden.size() == hidden_need &&
+        drafter.confidence_w && drafter.confidence_b &&
+        (drafter.confidence_dim == n_embd ||
+         drafter.confidence_dim == n_embd + drafter.markov_rank);
+    if (confidence_available) {
+        padded_confidence_hidden.assign(
+            (size_t)n_embd * ((size_t)drafter.block_size + 1), 0.0f);
+        std::memcpy(padded_confidence_hidden.data() + n_embd,
+                    provider_output.confidence_hidden.data(),
+                    hidden_need * sizeof(float));
+    }
     std::vector<int32_t> draft_tokens;
     const SpecClock::time_point head_t0 = SpecClock::now();
     bool head_ok = dspark_markov_correct_greedy_chain_fused(
         draft_weights, backend, target.lm_head_tensor(), padded_hidden.data(),
-        impl->q, impl->seed, draft_tokens);
+        impl->q, impl->seed, draft_tokens,
+        confidence_available ? &draft_confidence : nullptr,
+        confidence_available ? padded_confidence_hidden.data() : nullptr);
     if (!head_ok) {
         head_ok = dspark_markov_correct_greedy_chain(
             draft_weights, backend, target, padded_hidden.data(), impl->q,
@@ -830,15 +850,54 @@ bool deepseek4_dspark_resident_finish(
         draft_tokens.resize((size_t)impl->q);
     const double head_ms = spec_ms_since(head_t0);
 
+    // The resident verifier has a different reduction topology from ordinary
+    // AR and is therefore reserved for drafts that the support model itself
+    // considers reliable. A declined first block leaves target KV untouched;
+    // the resident coordinator falls through to its ordinary AR path and
+    // disables speculation for the rest of this request. Zero preserves the
+    // diagnostic always-admit behavior used by earlier prototypes.
+    const uint32_t min_confidence_milli = spec_env_u32(
+        "DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI", 0);
+    const bool confidence_declined = min_confidence_milli > 0 &&
+        (draft_confidence.empty() ||
+         draft_confidence[0] < (float)min_confidence_milli / 1000.0f);
+    if (detailed_timing) {
+        std::fprintf(stderr,
+                     "[ds4-resident-confidence] pos=%d confidence0=%s%.3f "
+                     "threshold=%.3f admit=%d\n",
+                     impl->committed,
+                     draft_confidence.empty() ? "n/a " : "",
+                     draft_confidence.empty() ? 0.0f : draft_confidence[0],
+                     (float)min_confidence_milli / 1000.0f,
+                     confidence_declined ? 0 : 1);
+    }
+    if (confidence_declined) {
+        timing.provider_age_s = provider_age_ms / 1000.0;
+        timing.provider_block_s = provider_block_ms / 1000.0;
+        timing.head_s = head_ms / 1000.0;
+        return true;
+    }
+
+    // Resident speculation must use the q-wide verifier to save target work.
+    // The previous strict verifier evaluated q separate target forwards, so
+    // even a perfect NPU proposal could never accelerate decode.  A partial
+    // q-wide result is only an admission signal: its different reduction
+    // topology can disagree with ordinary AR at near-tied logits, including
+    // during a q=1 prefix replay. Roll the entire attempt back and let the
+    // coordinator commit the pending token through the ordinary AR graph.
+    DeepSeek4SpecRollback rollback;
+    deepseek4_spec_rollback_save(
+        target_cache, rollback, impl->committed, (int)draft_tokens.size());
     std::vector<int32_t> target_argmax;
     int verify_last = -1;
     const SpecClock::time_point verify_t0 = SpecClock::now();
     if (!target.verify_batch(draft_tokens, impl->committed, verify_last,
                              &target_argmax)) {
-        if (error) *error = "resident DSpark exact target verification failed";
+        deepseek4_spec_rollback_apply(
+            rollback, target_w, target_cache, impl->committed, true);
+        if (error) *error = "resident DSpark batched target verification failed";
         return false;
     }
-    const double verify_ms = spec_ms_since(verify_t0);
 
     int accept = 1;
     for (int index = 0; index + 1 < (int)draft_tokens.size(); ++index) {
@@ -849,9 +908,39 @@ bool deepseek4_dspark_resident_finish(
         if (deepseek4_is_eos_tok(draft_tokens[(size_t)index + 1], target_w))
             break;
     }
-    if ((int)target_argmax.size() < accept ||
-        target.last_verify_n() != accept) {
+    if ((int)target_argmax.size() < accept) {
+        deepseek4_spec_rollback_apply(
+            rollback, target_w, target_cache, impl->committed, true);
         if (error) *error = "resident DSpark verifier frontier mismatch";
+        return false;
+    }
+
+    if (accept < (int)draft_tokens.size()) {
+        deepseek4_spec_rollback_apply(
+            rollback, target_w, target_cache, impl->committed, true);
+        const double verify_ms = spec_ms_since(verify_t0);
+        offered_candidates = (int)draft_tokens.size() - 1;
+        accepted_candidates = 0;
+        if (detailed_timing) {
+            std::fprintf(stderr,
+                         "[ds4-resident-spec] pos=%d q=%d accept=0 "
+                         "partial=%d provider_age=%.1fms "
+                         "provider_block=%.1fms head=%.1fms verify=%.1fms "
+                         "fallback=target-ar\n",
+                         impl->committed, impl->q, accept,
+                         provider_age_ms, provider_block_ms, head_ms,
+                         verify_ms);
+        }
+        timing.provider_age_s = provider_age_ms / 1000.0;
+        timing.provider_block_s = provider_block_ms / 1000.0;
+        timing.head_s = head_ms / 1000.0;
+        timing.verify_s = verify_ms / 1000.0;
+        return true;
+    }
+    const double verify_ms = spec_ms_since(verify_t0);
+
+    if (target.last_verify_n() != accept) {
+        if (error) *error = "resident DSpark verifier commit mismatch";
         return false;
     }
 
@@ -866,7 +955,7 @@ bool deepseek4_dspark_resident_finish(
     next_token = target_argmax[(size_t)accept - 1];
     committed_tokens.assign(draft_tokens.begin(),
                             draft_tokens.begin() + accept);
-    offered_candidates = impl->q - 1;
+    offered_candidates = (int)draft_tokens.size() - 1;
     accepted_candidates = accept - 1;
 
     const int feat_row = drafter.n_target_layers * n_embd;
@@ -893,9 +982,17 @@ bool deepseek4_dspark_resident_finish(
         std::fprintf(stderr,
                      "[ds4-resident-spec] pos=%d q=%d accept=%d "
                      "provider_age=%.1fms provider_block=%.1fms "
-                     "head=%.1fms verify=%.1fms\n",
+                     "head=%.1fms verify=%.1fms "
+                     "graph(build/set/compute/read)=%.1f/%.1f/%.1f/%.1fms "
+                     "fused(calls/rows)=%" PRIu64 "/%" PRIu64 "\n",
                      impl->committed, impl->q, accept,
-                     provider_age_ms, provider_block_ms, head_ms, verify_ms);
+                     provider_age_ms, provider_block_ms, head_ms, verify_ms,
+                     verify_telemetry.full_graph_build_us / 1000.0,
+                     verify_telemetry.full_graph_set_us / 1000.0,
+                     verify_telemetry.full_graph_compute_us / 1000.0,
+                     verify_telemetry.full_graph_read_us / 1000.0,
+                     verify_telemetry.fused_verify_calls,
+                     verify_telemetry.fused_verify_rows);
     }
     timing.provider_age_s = provider_age_ms / 1000.0;
     timing.provider_block_s = provider_block_ms / 1000.0;

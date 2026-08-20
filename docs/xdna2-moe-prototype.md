@@ -1430,12 +1430,13 @@ The resulting resident-session prototype gives every eligible session an
 opaque asynchronous XDNA proposal job and its own captured target-feature
 window. At a decode scheduling boundary Ember first fills the bounded provider
 queue, then collects and verifies proposals in session order. After session A
-finishes exact q=1 target verification, its next proposal is queued behind the
+finishes q-wide target verification, its next proposal is queued behind the
 already submitted work for session B; the NPU can prepare that proposal while
 the GPU verifies B. CPU workers retain routing and ROCMFP4 expert work. The GPU
-remains authoritative: only the exactly matching draft prefix is committed,
-the final target logit row produces the deferred frontier token, and EOS stops
-the verifier before it can advance KV beyond the sequence.
+remains authoritative: only a fully accepted q-wide block is committed, the
+final target logit row produces the deferred frontier token, and EOS stops the
+verifier before it can advance KV beyond the sequence. A partial block is
+rolled back in full and that request returns to the ordinary target AR graph.
 
 Continuous batching now accounts for the exact number of tokens committed by
 one speculative completion rather than assuming every backend completion is
@@ -1521,3 +1522,46 @@ The candidate must beat both this current-design wall rate and the
 maintenance-window two-session target-only control. Beating only the
 single-session control would demonstrate batching capacity, not that the NPU
 proposal role is useful.
+
+### Gen49--52 q-wide verifier and promotion result
+
+The initial resident implementation did not accelerate inference because its
+"strict" verifier performed one complete q=1 target forward for every proposed
+token. Gen49 instead captures the three DSpark target-layer features directly
+from sparse layer-major prefill and verifies four proposal rows with one target
+graph. Graph-cache keys include both the model/cache owner and capture-layer
+identity; omitting the owner had allowed two resident sessions to reuse graph
+state backed by the wrong KV cache.
+
+The NPU provider retains the resident Q8 projection/shared-expert overlay while
+the CPU evaluates routed ROCMFP4 experts. That CPU GEMM is not scalar: its hot
+path is an explicitly dispatched AVX-512F implementation using 512-bit unpack,
+codebook permutation, multiply, and reduction operations, with a byte-exact
+scalar fallback on unsupported hosts. On the target Zen 5 CPU, the routed
+experts took roughly 34--36 ms per provider block. Smaller DSpark glue remains
+scalar or compiler-vectorized and benchmarks near 5.99 ms; it is not the
+leading critical-path cost while provider work overlaps target verification.
+
+The clean Gen52 two-session gate used ten concurrent 64-token rounds after one
+warmup. Against the 21.236 tok/s target-only control it achieved 31.518 tok/s
+aggregate and 38.331 backend decode tok/s. The observed speedup was `1.4842x`;
+the one-sided 95% bootstrap lower bound was `1.4727x`. All 20 candidate outputs
+matched the fixed reference hash, every proposal block was accepted, and NPU
+blocking wait averaged 6.89 ms per cycle. The raw reports are
+`gpu-baseline-gen44.json` and `xdna-candidate-gen52.json` in the host's
+`/tmp/ember-xdna-gen43/results/` staging directory.
+
+This is an opt-in performance result, not a general bit-exactness claim. A
+low-acceptance poem fixture exposed different text from ordinary AR even when
+the entire first speculative attempt was rolled back and no NPU token was
+committed. The remaining difference begins in the sparse feature-capture
+prefill graph: adding capture outputs can change gfx1151 reduction scheduling
+at near-tied logits. Gen52 therefore treats the first partial q-wide block as a
+request-local circuit breaker, rolls back all target mutations, and stays on
+ordinary AR. This improved that fixture from 12.55 to 18.80 aggregate tok/s,
+but its output still differs from the non-capture control. Promotion beyond
+the prototype requires a representative output-quality corpus and a capture
+method proven observationally equivalent to ordinary prefill. The optional
+`DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` admission threshold defaults to zero;
+first-block confidence was anti-correlated on the two measured fixtures and
+must not be enabled as a quality heuristic without a broader calibration set.
