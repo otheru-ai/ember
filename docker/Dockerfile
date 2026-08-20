@@ -410,7 +410,7 @@ RUN apt-get update \
 
 FROM release AS release-xdna
 
-LABEL org.opencontainers.image.description="DeepSeek-V4-Flash inference server with experimental AMD XDNA2 MoE provider"
+LABEL org.opencontainers.image.description="DeepSeek-V4-Flash inference server with experimental CPU/GPU/XDNA2 DSpark provider"
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

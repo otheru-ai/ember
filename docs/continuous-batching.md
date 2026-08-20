@@ -62,8 +62,10 @@ Model weights and the engine submission thread remain shared. Snapshot restore
 copies a stable parked prefix into the resident cache before its read lease is
 released. Released sessions return their cache allocation to a warm pool, so
 slot reuse resets resident state without repeatedly allocating the full context
-buffer. DSpark is disabled for resident sessions because its drafter and rolling
-verifier feature state are not yet session-isolated.
+buffer. Ordinary monolithic GPU DSpark remains outside resident mode. The
+opt-in XDNA2 DSpark provider has a separate session-isolated path: each eligible
+session owns its captured target features, asynchronous proposal job, verifier
+rollback frontier, and exact committed-token count.
 
 The real C backend bridge owns a coordinator thread. Concurrent HTTP dispatchers
 enqueue generation calls, then block on their individual completions while that
@@ -159,10 +161,17 @@ into one command batch; Ember's remaining throughput work is the HIP equivalent
 absolute positions) while sharing as many embedding, attention, HC, MoE, and
 output launches as the backend permits.
 
-After that graph is validated, DSpark needs the same per-session treatment for
-its draft cache, feature window, verifier rollback state, and profitability
-scheduler before speculative resident batching can be enabled. The XDNA2
-prototype now has an asynchronous whole-draft-forward provider contract with
-two-job session-isolation coverage. The monolithic path collects it
-immediately; the resident implementation must retain one proposal job per
-session and schedule GPU verify for a different ready session before waiting.
+The XDNA2 prototype now pipelines one asynchronous whole-draft proposal per
+eligible session and schedules q-wide GPU verification for another ready
+session before collecting it. The fixed Gen52 gate measured 1.4842x aggregate
+throughput over the two-session target-only control, with every proposal block
+accepted and about 6.89 ms of provider wait exposed per cycle.
+
+The remaining XDNA work is a correctness/promotion problem, not basic session
+plumbing. A low-acceptance fixture changed output when the sparse target graph
+added feature-capture outputs, even after a partial first proposal triggered
+the circuit breaker and rolled back all speculative state. The path must prove
+capture is observationally equivalent across a representative quality corpus
+before it can become a default. Its future profitability gate must use exposed
+provider wait and aggregate tokens/second; proposal age includes useful overlap
+and is not itself a reason to reject the NPU path.

@@ -33,11 +33,19 @@ const char *ember_http_header(const ember_http_request *req, const char *name);
 typedef void (*ember_http_handler)(const ember_http_request *req, int client_fd,
                                    void *ud);
 
-// Listen on 127.0.0.1:port and dispatch each connection to `handler` on its own
-// thread. Blocks until ember_http_request_stop() is called, then stops accepting
-// and waits for every already-accepted connection to finish. Returns non-zero
-// on listen/bind failure.
-int ember_http_serve(int port, ember_http_handler handler, void *ud);
+// True when `host` is an IPv4 address suitable for ember_http_serve. Keeping
+// resolution out of the listener makes bad configuration fail before the
+// expensive model load and keeps the bind target unambiguous.
+bool ember_http_host_valid(const char *host);
+
+// Listen on host:port and dispatch each connection to `handler` on its own
+// thread. Callers choose the address explicitly; the CLI's default remains
+// 127.0.0.1 because Ember has no built-in authentication. Blocks until
+// ember_http_request_stop() is called, then stops accepting and waits for every
+// already-accepted connection to finish. Returns non-zero on address,
+// listen, or bind failure.
+int ember_http_serve(const char *host, int port,
+                     ember_http_handler handler, void *ud);
 
 // Async-signal-safe shutdown request. It closes the listening socket to wake
 // accept(); existing connection threads are allowed to drain.

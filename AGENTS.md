@@ -18,6 +18,12 @@ and represent person-years of gfx1151-specific tuning. Everything above the
 forward pass is **rewritten fresh in C** in this repo. This is a *server rewrite
 with a kernel bridge*, not a kernel rewrite.
 
+The opt-in `release-xdna` prototype adds a second provider seam below the
+backend ABI. Its measured Gen52 placement keeps the target/verifier on the GPU,
+runs resident DSpark projection/shared-expert work on XDNA2, and runs routing
+plus ROCMFP4 experts through AVX-512 CPU code. It is not release-default: a
+capture-graph quality difference remains an explicit promotion blocker.
+
 The published full-ROCMFP affine fp2 model (85.3 GiB, 2.58 bpw) meets
 the Strix-Halo reference benchmarks (~248–253 tok/s sparse prefill, ~32 tok/s
 decode with DSpark). See `README.md` for installation and first use, and
@@ -56,6 +62,9 @@ engine/        Vendored fork of lucebox: ggml fork with ROCMFP kernels
                (engine/ggml), the DeepSeek4 backend (engine/dflash/deepseek4),
                batching machinery (engine/dflash/common), HIP compat shims.
                Provenance pinned in engine/VENDOR.md.
+providers/xdna2/ Optional XRT provider, CPU SIMD quant kernels, AIE/IRON
+               sources, validators, and pinned provenance. This remains below
+               the backend ABI and must keep ordinary HIP fallback intact.
 test/          Plain C/C++ test binaries (one main() each) plus Python
                server-level and quant-pipeline tests.
 scripts/       build.sh (ROCm container build), diagnostics, and the quant
@@ -295,6 +304,9 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   `test_gguf_tensor_error.py`, `test_quant_manifest_corpus.py`). All Python is
   stdlib-only.
 - GPU-dependent runtime validation requires exclusive access to a target GPU.
+  XDNA claims additionally require the pinned host driver/firmware/XRT tuple,
+  translated IOMMU domains, `/dev/accel/accel0`, provider validators, and the
+  trained two-session differential/throughput gates.
 
 ## Container deployment
 
@@ -309,10 +321,11 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   symbolized backtrace on fatal signals because a real core dump is impractical
   at ~100 GB RSS.
 - The experimental `release-xdna` target layers an XRT userspace stack, XDNA
-  shim, AOT IRON artifacts, and the opt-in MoE provider over `release`. The
-  `amdxdna` kernel driver and firmware remain host responsibilities; pass
-  `/dev/accel/accel0` with `compose.xdna.yaml`. This target is a correctness and
-  measurement prototype, not a release-default backend.
+  shim, AOT IRON artifacts, and the opt-in target-MoE/DSpark provider over
+  `release`. `compose.xdna.yaml` enables only the measured resident DSpark
+  placement with two sessions; the older target-expert placement is research,
+  not a serving optimization. The `amdxdna` kernel driver, firmware, and IOMMU
+  setup remain host responsibilities. This target is not release-default.
 - `scripts/build.sh` uses the `dev` image and does not require a GPU merely to
   compile because `gfx1151` is pinned explicitly. Override the image with
   `EMBER_IMAGE` and parallelism with `JOBS`.
@@ -322,14 +335,17 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   `EMBER_BG_MAX_WAIT_SECS` tune background gating; `EMBER_IDLE_RECLAIM_SECS`
   controls idle graph reclamation; `EMBER_TRACE_TOKENS` and
   `DFLASH_TRACE_SAMPLER` enable off-by-default token/sampler forensics;
+  `DFLASH_DSPARK_XDNA_PLUGIN`, `DFLASH_DSPARK_XDNA_GPU_MAIN`, and
+  `DFLASH_DSPARK_XDNA_REQUIRED` control the optional resident NPU proposal path;
   `DS4_SERVER_PREFILL_QUANTUM`,
   `DS4_SERVER_MIXED_PREFILL_QUANTUM`, `DS4_SERVER_DECODE_COALESCE_US` tune
   batched-mode scheduling.
 
 ## Security considerations
 
-- The server binds to loopback (`--port`, default 8080); browser CORS is off
-  unless `--cors` is passed.
+- The server binds to loopback by default (`--host 127.0.0.1`, `--port 8080`);
+  an explicit `--host 0.0.0.0` exposes its unauthenticated API. Browser CORS is
+  off unless `--cors` is passed.
 - Hardening already in place, preserve it: socket send/recv timeouts so a stuck
   client cannot wedge a slot; 64 MB request-body cap; query-string stripping;
   JSON-escaped output everywhere; validated surrogate pairs.

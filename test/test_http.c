@@ -28,6 +28,7 @@ typedef struct {
     int             requests;      // handler invocations
     size_t          last_body_len;
     int             rc;            // ember_http_serve return code
+    const char     *host;
     int             port;
 } server_state;
 
@@ -44,7 +45,7 @@ static void record_handler(const ember_http_request *req, int fd, void *ud) {
 
 static void *serve_thread(void *ud) {
     server_state *st = (server_state *)ud;
-    st->rc = ember_http_serve(st->port, record_handler, st);
+    st->rc = ember_http_serve(st->host, st->port, record_handler, st);
     return NULL;
 }
 
@@ -129,7 +130,12 @@ static void test_server_loop(void) {
     // test process rather than surface as a write error.
     signal(SIGPIPE, SIG_IGN);
 
-    server_state st = {.mu = PTHREAD_MUTEX_INITIALIZER};
+    // Connect through loopback while listening on the wildcard address. This
+    // is the deployment path required by container and Kubernetes gateways.
+    server_state st = {
+        .mu = PTHREAD_MUTEX_INITIALIZER,
+        .host = "0.0.0.0",
+    };
     pthread_t server;
     CHECK(start_server(&st, &server), "test server listening");
     if (st.port <= 0 || st.rc == 0) return;
@@ -226,6 +232,10 @@ static void test_server_loop(void) {
 
 int main(void){
     printf("ember http tests\n");
+    CHECK(ember_http_host_valid("127.0.0.1"), "loopback listen host accepted");
+    CHECK(ember_http_host_valid("0.0.0.0"), "wildcard listen host accepted");
+    CHECK(!ember_http_host_valid("localhost"), "non-address listen host rejected");
+    CHECK(!ember_http_host_valid(""), "empty listen host rejected");
     char raw[] = "POST /v1/chat/completions HTTP/1.1\r\n"
                  "Host: localhost\r\nContent-Type: application/json\r\n"
                  "Content-Length: 7\r\n\r\n{\"a\":1}";

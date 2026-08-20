@@ -1,9 +1,9 @@
 # Operations guide
 
-This guide covers the supported deployment: one DeepSeek-V4-Flash
-ROCMFPx model on a native Linux AMD Strix Halo (`gfx1151`) host. Ember is not a
-general-purpose GGUF runner, and the release image is not expected to work on
-other GPU architectures.
+This guide covers the supported deployment: one DeepSeek-V4-Flash ROCMFPx model
+on a native Linux AMD Strix Halo (`gfx1151`) host. Ember is not a general-purpose
+GGUF runner, and the release image is not expected to work on other GPU or NPU
+architectures.
 
 ## Host prerequisites
 
@@ -16,6 +16,12 @@ other GPU architectures.
   quant, 10,897,111,840-byte drafter, download staging, and filesystem
   headroom.
 - Docker Engine with the Compose v2 plugin.
+
+The normal release needs no NPU software. The opt-in heterogeneous image also
+requires the host `amdxdna` driver and compatible firmware, translated IOMMU
+domains (do not boot with `amd_iommu=off`), render-group access, and a visible
+`/dev/accel/accel0`. The image supplies XRT userspace; it cannot replace the
+host kernel module or firmware.
 
 Run the host checks before the first build:
 
@@ -65,6 +71,50 @@ The smoke test checks health, model discovery, and status without generating
 tokens. Use `scripts/smoke_test.sh --generate` after an upgrade to exercise a
 short end-to-end inference request.
 
+## Opt-in CPU/GPU/NPU deployment
+
+The `release-xdna` image is a measured prototype, not the default release
+backend. Its current Gen52 placement keeps the target model and authoritative
+verification on the GPU, runs the resident DSpark projection/shared-expert
+pipeline on XDNA2, and uses AVX-512 CPU code for DSpark routing and routed
+ROCMFP4 experts. Two resident sessions are required to overlap one session's
+NPU proposal with another session's GPU verification.
+
+Confirm the host path before building:
+
+```bash
+source /opt/xilinx/xrt/setup.sh
+xrt-smi examine
+test -r /dev/accel/accel0
+```
+
+Build the image and run its synthetic provider gate without loading the model:
+
+```bash
+docker build --target release-xdna -f docker/Dockerfile -t ember:xdna-local .
+docker run --rm --entrypoint ember-xdna-validate \
+  --device /dev/accel/accel0 \
+  --security-opt seccomp=unconfined --ulimit memlock=-1:-1 \
+  ember:xdna-local
+```
+
+Then start the opt-in overlay:
+
+```bash
+docker compose -f compose.yaml -f compose.xdna.yaml up --build -d
+```
+
+The overlay enables the DSpark provider and `--batch-sessions 2`; provider
+failure falls back to GPU DSpark. Set `DFLASH_DSPARK_XDNA_REQUIRED=1` only for
+correctness/performance gates that must reject fallback. Do not enable the old
+`DFLASH_MOE_XDNA_PLUGIN` target-expert placement for serving: it was useful for
+kernel research but measured slower than the fused GPU target path.
+
+The fixed Gen52 fixture cleared the throughput gate, but a low-acceptance
+fixture exposed a capture-graph output difference. Treat results as
+experimental until the quality corpus and observational-equivalence gate in
+[`xdna2-moe-prototype.md`](xdna2-moe-prototype.md) pass.
+
 ## Reproducible model acquisition
 
 The container supports exactly this published pair at Hugging Face revision
@@ -83,9 +133,12 @@ and only then renames it to the final `.gguf` path. A digest mismatch never
 starts the server.
 
 Other model artifacts are unsupported. The artifact filenames, revision, and
-digests are not configurable, and verification cannot be disabled. The model
-pair has its own license on its Hugging Face card and is not included in the
-Ember image.
+digests are not configurable. By default Ember also re-hashes pre-existing
+artifacts on every start. On a trusted, immutable model store, set
+`EMBER_VERIFY_EXISTING_SHA256=0` to skip only those startup scans. Downloads
+remain verified before promotion regardless of this setting. The model pair
+has its own license on its Hugging Face card and is not included in the Ember
+image.
 
 ## Runtime state and observability
 
@@ -106,10 +159,11 @@ Prometheus contract.
 
 ## Network and security boundary
 
-The server binds to loopback, and Compose uses host networking so that default
-survives containerization. Ember has no built-in authentication. Do not change
-the bind address or publish it to an untrusted network without an authenticating
-reverse proxy, TLS, request-size/rate limits, and network policy.
+The server binds to loopback by default, and Compose uses host networking so
+that default survives containerization. Ember has no built-in authentication.
+Set `EMBER_HOST=0.0.0.0` only when a trusted gateway in another network
+namespace must reach it, and require authentication, TLS, request-size/rate
+limits, and network policy at that boundary.
 
 The ROCm runtime requires direct device access, host IPC, and an unconfined
 seccomp profile in the supported Compose configuration. These privileges make
@@ -125,7 +179,8 @@ code on a sensitive host.
 3. Build with explicit `EMBER_VERSION` and `EMBER_VCS_REF` values when producing
    a named local artifact.
 4. Run the GPU-free suite, then the differential validator described in the
-   README on the target machine.
+   README on the target machine. XDNA candidates additionally require the
+   packaged provider gate and trained two-session differential/throughput gate.
 5. Rebuild, start, and run `scripts/smoke_test.sh --generate`.
 
 The model and KV cache are host directories, so rolling back the image does not
@@ -138,12 +193,16 @@ Ember before copying or removing the cache directory.
 |---|---|
 | `/dev/kfd is unavailable` | Install/fix the host AMD device stack and pass the device to Docker. |
 | `no gfx1151 agent was found` | This image is running on unsupported hardware or ROCm cannot enumerate it. |
+| `/dev/accel/accel0` is missing | The optional NPU path lacks a loaded/compatible `amdxdna` host driver, firmware, permissions, or device mount. |
+| XRT reports mapping/`ENOSPC` failures | Confirm IOMMU translation is enabled and memlock is unlimited; `amd_iommu=off` is unsupported. |
 | `insufficient free space` | Free space in `EMBER_MODELS_DIR` or move it to a larger local filesystem. |
 | `model SHA-256 mismatch` | Remove the named final or `.part` file and retry; do not disable verification to hide corruption. |
 | container remains `starting` | Model load is still in progress; inspect logs. If the server exited, Compose will show the startup error. |
-| clients cannot connect | Confirm `/health`, port overrides, and that the client uses `127.0.0.1`, not a container-only hostname. |
+| clients cannot connect | Confirm `/health`, host/port overrides, and routing. The default `127.0.0.1` bind is intentionally unreachable from another network namespace; use `EMBER_HOST=0.0.0.0` only behind a trusted gateway. |
 | agent behaves differently | Check the exact client settings in `client-compatibility.md`, especially base URL, model id, context, and tool mode. |
 
 Include the output of `scripts/preflight.sh`, `docker compose logs ember`, the
 source revision, model digest, kernel/ROCm versions, and reproduction request in
-support reports. Redact prompts and tool results that contain private data.
+support reports. For XDNA runs also include the `amdxdna`/firmware/XRT versions,
+IOMMU state, provider mode, and whether fallback was allowed. Redact prompts and
+tool results that contain private data.

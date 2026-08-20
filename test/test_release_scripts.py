@@ -92,7 +92,10 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("SKIP_KMOD=ON", dockerfile)
         self.assertIn("/dev/accel/accel0:/dev/accel/accel0", compose)
         self.assertIn("memlock:", compose)
-        self.assertIn("DFLASH_MOE_XDNA_PLUGIN", compose)
+        self.assertIn("DFLASH_DSPARK_XDNA_PLUGIN", compose)
+        self.assertIn("DFLASH_DSPARK_XDNA_GPU_MAIN", compose)
+        self.assertIn('command: ["--batch-sessions"', compose)
+        self.assertNotIn("DFLASH_MOE_XDNA_PLUGIN:", compose)
 
     def test_compose_pulls_release_and_keeps_source_build_explicit(self) -> None:
         compose = COMPOSE.read_text()
@@ -102,6 +105,12 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn(f"ghcr.io/otheru-ai/ember:{version}", release_service)
         self.assertIn("pull_policy: always", release_service)
         self.assertNotIn("build:", release_service)
+        self.assertIn("EMBER_HOST: ${EMBER_HOST:-127.0.0.1}", release_service)
+        self.assertIn(
+            "EMBER_VERIFY_EXISTING_SHA256: ${EMBER_VERIFY_EXISTING_SHA256:-1}",
+            release_service,
+        )
+        self.assertIn("$${EMBER_HOST:-127.0.0.1}", release_service)
         self.assertIn("target: release", build)
         self.assertIn("pull_policy: build", build)
 
@@ -178,6 +187,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 "EMBER_MODEL_DIR": directory,
                 "EMBER_SERVER_BIN": "/bin/echo",
                 "EMBER_KV_CACHE_DIR": directory,
+                "EMBER_HOST": "0.0.0.0",
                 "EMBER_PORT": "18080",
                 "EMBER_TOOL_LOOP_REPORT": "9",
                 "EMBER_NO_PROGRESS_REPORT": "10",
@@ -192,6 +202,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 check=True,
             )
             self.assertIn("-m " + str(model), result.stdout)
+            self.assertIn("--host 0.0.0.0", result.stdout)
             self.assertIn("--port 18080", result.stdout)
             self.assertIn("--tool-loop-report 9", result.stdout)
             self.assertIn("--no-progress-report 10", result.stdout)
@@ -202,6 +213,7 @@ class ReleaseScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             curl_log = root / "curl.log"
+            sha256_log = root / "sha256.log"
             fake_curl = root / "curl"
             fake_curl.write_text(
                 "#!/usr/bin/env bash\n"
@@ -220,7 +232,11 @@ class ReleaseScriptTests(unittest.TestCase):
             )
             fake_curl.chmod(0o755)
             fake_sha256sum = root / "sha256sum"
-            fake_sha256sum.write_text("#!/usr/bin/env bash\nexit 0\n")
+            fake_sha256sum.write_text(
+                "#!/usr/bin/env bash\n"
+                f"cat >> {sha256_log}\n"
+                "exit 0\n"
+            )
             fake_sha256sum.chmod(0o755)
             fake_df = root / "df"
             fake_df.write_text(
@@ -234,6 +250,9 @@ class ReleaseScriptTests(unittest.TestCase):
                 "EMBER_MODEL_DIR": directory,
                 "EMBER_SERVER_BIN": "/bin/echo",
                 "EMBER_SEGVTRACE": "",
+                # This switch skips only pre-existing files. Both downloads
+                # must still cross the digest gate before atomic promotion.
+                "EMBER_VERIFY_EXISTING_SHA256": "0",
                 "PATH": directory + os.pathsep + os.environ["PATH"],
             }
             subprocess.run(
@@ -248,6 +267,46 @@ class ReleaseScriptTests(unittest.TestCase):
             ))
             self.assertTrue(any("ROCMFPx-Strix-Lean-2.58bpw.gguf" in url for url in urls))
             self.assertTrue(any("DSpark-draft-4.25bpw.gguf" in url for url in urls))
+            checks = sha256_log.read_text().splitlines()
+            self.assertEqual(len(checks), 2)
+            self.assertTrue(all(".part" in check for check in checks))
+
+    def test_entrypoint_can_skip_preexisting_artifact_checksums(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            model = root / (
+                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+            )
+            draft = root / (
+                "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
+            )
+            model.write_bytes(b"pre-provisioned-model")
+            draft.write_bytes(b"pre-provisioned-draft")
+            marker = root / "sha256-was-called"
+            fake_sha256sum = root / "sha256sum"
+            fake_sha256sum.write_text(
+                "#!/usr/bin/env bash\n"
+                f"touch {marker}\n"
+                "exit 1\n"
+            )
+            fake_sha256sum.chmod(0o755)
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_SERVER_BIN": "/bin/true",
+                "EMBER_KV_CACHE_DIR": directory,
+                "EMBER_VERIFY_EXISTING_SHA256": "0",
+                "PATH": directory + os.pathsep + os.environ["PATH"],
+            }
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT)],
+                env=env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertFalse(marker.exists())
+            self.assertEqual(result.stderr.count("WARNING: skipping SHA-256"), 2)
 
     def test_entrypoint_rejects_wrong_digest_even_with_ignored_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -266,6 +325,20 @@ class ReleaseScriptTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 78)
             self.assertIn("SHA-256 mismatch", result.stderr)
+
+    def test_entrypoint_rejects_invalid_existing_checksum_setting(self) -> None:
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT)],
+            env=os.environ
+            | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_VERIFY_EXISTING_SHA256": "sometimes",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("must be 0 or 1", result.stderr)
 
     def test_draft_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

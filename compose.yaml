@@ -19,13 +19,15 @@ services:
       - ${EMBER_CACHE_DIR:-./cache}:/cache
     environment:
       EMBER_AUTO_DOWNLOAD: ${EMBER_AUTO_DOWNLOAD:-1}
+      EMBER_VERIFY_EXISTING_SHA256: ${EMBER_VERIFY_EXISTING_SHA256:-1}
+      EMBER_HOST: ${EMBER_HOST:-127.0.0.1}
       EMBER_PORT: ${EMBER_PORT:-8080}
       EMBER_DRY_MULTIPLIER: ${EMBER_DRY_MULTIPLIER:-0}
       EMBER_TOOL_LOOP_REPORT: ${EMBER_TOOL_LOOP_REPORT:-}
       EMBER_NO_PROGRESS_REPORT: ${EMBER_NO_PROGRESS_REPORT:-}
       EMBER_AUTO_ANSWER_AFTER_LOOP: ${EMBER_AUTO_ANSWER_AFTER_LOOP:-}
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent --show-error http://127.0.0.1:$${EMBER_PORT:-8080}/health >/dev/null"]
+      test: ["CMD-SHELL", "listen=$${EMBER_HOST:-127.0.0.1}; [ \"$$listen\" = 0.0.0.0 ] && listen=127.0.0.1; curl --fail --silent --show-error http://$$listen:$${EMBER_PORT:-8080}/health >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

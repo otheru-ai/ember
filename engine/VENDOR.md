@@ -16,11 +16,11 @@ network fetch.
 
 `engine/` is intentionally a fork, not an unmodified third-party mirror.
 Local changes cover the C ABI bridge, gfx1151 ROCMFP integration, DSpark
-scheduling, resident-session batching, the opt-in XDNA2 selected-expert
-provider seam, release-specific tests, and three audited ROCmFPX correctness
-ports (`00d54526` allocation views, `5ed0d9ef` HIP norm support, and
-`a8b5fa90` ROCMFP2 CPU OUT_PROD). HIP fast-math remains deliberately disabled
-per ROCmFPX `8e6277f8`'s gfx1151 speculative-decode measurements. Before
-updating it, diff the candidate upstream revision against `8fd9584`, preserve
-the license notices above, and record the new upstream commit and any local
-divergence in this file.
+scheduling, resident-session batching, the opt-in XDNA2 selected-expert and
+asynchronous whole-draft provider seams, q-wide resident verification,
+release-specific tests, and three audited ROCmFPX correctness ports (`00d54526`
+allocation views, `5ed0d9ef` HIP norm support, and `a8b5fa90` ROCMFP2 CPU
+OUT_PROD). HIP fast-math remains deliberately disabled per ROCmFPX `8e6277f8`'s
+gfx1151 speculative-decode measurements. Before updating it, diff the candidate
+upstream revision against `8fd9584`, preserve the license notices above, and
+record the new upstream commit and any local divergence in this file.

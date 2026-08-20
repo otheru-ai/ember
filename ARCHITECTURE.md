@@ -14,6 +14,8 @@ GGUF runner, and it is not a clean-room kernel implementation. The server was
 rewritten so request handling, streaming, tool use, caching policy, and errors
 are explicit and testable. The tuned tokenizer, model implementation, and GPU
 kernels were retained because they are model-coupled and performance-critical.
+An opt-in provider below that boundary can also pipeline DSpark work across the
+Strix Halo CPU and XDNA2 NPU without exposing either runtime to the C server.
 
 For supported APIs, commands, flags, and measured performance, start with
 [`README.md`](README.md). This document explains how the pieces fit together
@@ -56,6 +58,14 @@ OpenAI / Anthropic / agent clients
                               | Vendored engine         |
                               | DeepSeek, ROCMFP, MoE,  |
                               | attention, DSpark       |
+                              +------------+------------+
+                                           |
+                               optional DSpark provider ABI
+                                           |
+                              +------------v------------+
+                              | providers/xdna2/        |
+                              | XRT/IRON NPU + AVX-512  |
+                              | CPU draft pipeline      |
                               +-------------------------+
 ```
 
@@ -68,6 +78,7 @@ The major ownership boundaries are:
 | Model-facing contract | `src/backend/ember_backend.h` | Stable Ember C ABI |
 | GPU bridge | `src/backend/backend_dflash.cc` | Ember-owned C++ adapter |
 | DeepSeek implementation and ROCm kernels | `engine/` | Maintained vendored fork; see `engine/VENDOR.md` |
+| Optional CPU/NPU provider and AIE kernels | `providers/xdna2/` | Ember prototype with pinned upstream provenance |
 | Constrained-decoding runtime | `vendor/xgrammar/` | Vendored dependency; see its `VENDOR.md` |
 
 ## Why this boundary exists
@@ -216,8 +227,9 @@ In resident mode, each admitted session owns its KV, HC/compressor state,
 logits, sampler/RNG history, pending tokens, callbacks, and timing. Model
 weights and the coordinator remain shared. The scheduler interleaves bounded
 prefill quanta and decode-ready sessions, but the current DeepSeek decode batch
-uses a correctness-first serial row fallback. DSpark is disabled for resident
-sessions until its draft and verifier state are session-local. See
+uses a correctness-first serial row fallback. Ordinary GPU DSpark remains on
+the monolithic path; the opt-in XDNA2 provider has a session-isolated resident
+proposal/verifier path. See
 [`docs/continuous-batching.md`](docs/continuous-batching.md).
 
 Shared server bookkeeping—prefix reservations, replay memory, continuation
@@ -348,6 +360,41 @@ made it slower than the normal path. The benchmark and gate are documented next
 to the option in `engine/CMakeLists.txt`; it should not be enabled until a stable
 graph key is demonstrated by measurement.
 
+## Heterogeneous CPU/GPU/NPU execution
+
+The normal release remains the authoritative GPU/CPU implementation. The
+opt-in `release-xdna` image adds a versioned DSpark provider seam below the
+backend ABI; HTTP, model semantics, snapshots, and the target model do not know
+about XRT.
+
+The current Gen52 resident placement assigns work by measured strength:
+
+| Processor | Owned work |
+|---|---|
+| gfx1151 GPU | Target prefill/decode, attention and target MoE, DSpark main projection, q-wide verification |
+| XDNA2 NPU | Resident Q8 DSpark projection and shared-expert AIE runlists |
+| Zen 5 CPU | Draft routing, AVX-512 ROCMFP4 routed experts, accumulation, XRT/HIP ordering |
+
+Each eligible resident session owns an asynchronous proposal job and captured
+target-feature window. The coordinator submits NPU work for one session while
+the GPU verifies another, then commits only tokens accepted by the GPU's
+authoritative q-wide verifier. A provider initialization or execution failure
+falls back to ordinary GPU DSpark unless `DFLASH_DSPARK_XDNA_REQUIRED=1` makes
+the validation boundary fail closed.
+
+Strix Halo's unified physical memory does not make HIP and XRT ownership
+implicit. The CPU orders completion and synchronization; provider weights and
+buffers still cross explicit runtime ownership boundaries. Direct HIP/XRT
+dma-buf interoperability has been validated, but it does not create autonomous
+GPU-to-NPU dispatch—the CPU remains the command and fence authority.
+
+This path has a measured two-session throughput win on a fixed fixture, but it
+remains experimental because capture-output graph changes affected a separate
+low-acceptance fixture. Promotion requires a representative output-quality
+corpus and an observationally equivalent feature-capture path. The complete
+measurements, rejected placements, and promotion gates are in
+[`docs/xdna2-moe-prototype.md`](docs/xdna2-moe-prototype.md).
+
 ## Deployment architecture
 
 The Dockerfile has two intentionally different outputs:
@@ -362,14 +409,25 @@ ROCm toolchain image
               Ubuntu base + stripped server + crash shim
               + exact recursive ROCm runtime dependency closure
               + gfx1151 rocBLAS data + download utilities
+
+        +-- dev-xdna / release-xdna targets (opt-in)
+              release contents + pinned XRT/XDNA userspace
+              + IRON AIE artifacts + heterogeneous provider
 ```
 
 The model is not included in either image. Compose mounts `./models` and
-`./cache`, downloads the pinned GGUF on first use, verifies its size and
-SHA-256, and then starts the release image. Host networking preserves Ember's
-loopback-only bind. Direct access to `/dev/kfd` and `/dev/dri`, host IPC, and an
-unconfined seccomp profile are required by the supported ROCm deployment; the
-container is therefore a packaging boundary, not a security sandbox.
+`./cache`, downloads the pinned GGUF on first use, verifies its SHA-256, and
+then starts the release image. Host networking preserves Ember's loopback
+default; `--host`/`EMBER_HOST` can explicitly select another IPv4 bind address.
+Direct access to `/dev/kfd` and `/dev/dri`, host IPC, and an unconfined seccomp
+profile are required by the supported ROCm deployment; the container is
+therefore a packaging boundary, not a security sandbox.
+
+The XDNA overlay additionally passes `/dev/accel/accel0`, locks accelerator
+buffers in memory, selects two resident sessions, and enables the DSpark
+provider. It packages XRT userspace and AIE artifacts only. The host kernel's
+`amdxdna` module, NPU firmware, IOMMU configuration, and device permissions are
+outside the image and must already be correct.
 
 `libsegvtrace.so` is preloaded in the release image to print a symbolized
 backtrace on fatal signals. This is more practical than a core dump for a
@@ -390,7 +448,8 @@ and degrades gracefully where model output is merely unusable:
 - failed snapshot writes never create logical cache hits;
 - continuation IDs must match a model-scoped authoritative frontier;
 - client disconnects cancel prefill/decode through callbacks;
-- the server binds to loopback and provides no built-in authentication.
+- the server binds to loopback by default and provides no built-in
+  authentication; selecting a wildcard address is an explicit operator action.
 
 Tool-loop detection is observability by default, not a ceiling. Ember derives
 request-local diagnostics from repeated call signatures, identical call/result
@@ -415,10 +474,17 @@ compile together. On target hardware, the differential validator compares
 fresh autoregressive output with in-memory restore, disk round-trip, DSpark,
 and optional resident-session paths.
 
+The XDNA provider has GPU-free ABI, packing, routing, queue-lifetime, and SIMD
+tests plus packaged hardware validators for AIE kernels and HIP/XRT
+interoperability. A release claim still requires the trained-model two-session
+differential and throughput gates on a host with translated IOMMU domains.
+
 This division is deliberate:
 
 - behavior above the ABI should be reproducible in ordinary CI;
 - model and GPU correctness must be proven on gfx1151;
+- NPU correctness and overlap must be proven on the pinned XRT/firmware/driver
+  tuple with IOMMU enabled;
 - performance claims require measurement on the supported model and hardware.
 
 ## Where a change belongs
@@ -434,6 +500,7 @@ This division is deliberate:
 | Change prefix selection or eviction | `kv_cache.*` and orchestration in `main.c` |
 | Add a model/backend capability | `ember_backend.h`, both backend implementations, tests |
 | Change kernels or DeepSeek execution | `engine/`, with `VENDOR.md` review |
+| Change XDNA placement, provider ABI, or AIE kernels | `providers/xdna2/`, engine provider seam, provenance and hardware gates |
 | Change runtime packaging | `docker/`, `compose.yaml`, release-script tests |
 
 Before changing a subtle behavior, read the design block in the corresponding
@@ -445,11 +512,12 @@ than accidental complexity.
 
 ## Current scope and non-goals
 
-Ember intentionally targets one model family and one integrated-GPU platform.
+Ember intentionally targets one model family and one integrated APU platform.
 Current non-goals include:
 
 - a general-purpose model registry or arbitrary GGUF compatibility;
 - Metal, CUDA, multi-GPU, or tensor-parallel deployment;
+- other NPU architectures or treating XDNA2 as a generic ggml backend;
 - GLM model support;
 - replacing the tuned HIP kernels solely to remove the vendor boundary;
 - built-in authentication, TLS termination, or internet-facing tenancy;

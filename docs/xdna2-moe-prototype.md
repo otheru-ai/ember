@@ -1,10 +1,29 @@
-# XDNA2 MoE expert prototype
+# XDNA2 heterogeneous inference prototype
 
-This branch contains an opt-in bring-up path for running selected
-DeepSeek-V4-Flash routed experts on Strix Halo's 32-tile XDNA2 NPU. HIP keeps
-attention, routing, shared experts, and residual combination; CPU code handles
-control and the current SwiGLU boundary. It is a measurement vehicle, not a
-production acceleration claim, and the normal HIP image is unchanged.
+Ember contains an opt-in path for coordinating Strix Halo's CPU, gfx1151 GPU,
+and 32-tile XDNA2 NPU during DeepSeek-V4-Flash inference. The normal HIP image
+is unchanged. The `release-xdna` image is a measurement and validation vehicle,
+not yet the release-default backend.
+
+The current Gen52 placement is not the original target-expert experiment. It
+keeps the target model and q-wide authoritative verifier on the GPU, assigns
+resident DSpark projection/shared-expert work to the NPU, and executes DSpark
+routing plus routed ROCMFP4 experts with explicit AVX-512 on the CPU. With two
+resident sessions, the NPU prepares one proposal while the GPU verifies another
+session. On the fixed promotion fixture this produced a measured 1.4842x
+aggregate throughput speedup with a 1.4727x one-sided 95% lower bound.
+
+That result is deliberately still called a prototype. A low-acceptance fixture
+exposed output differences caused by the target feature-capture graph even
+when no NPU proposal token was committed. The default release therefore remains
+GPU DSpark, and the XDNA overlay falls back to it unless validation explicitly
+sets `DFLASH_DSPARK_XDNA_REQUIRED=1`.
+
+The work began as selected target-expert offload. That research established the
+provider ABI, XRT packaging, quantized AIE kernels, ownership rules, and the
+measured reason target decode should stay on the fused GPU path. The historical
+sections below retain those rejected designs because they constrain the current
+architecture.
 
 The design follows AMD's GPT-OSS-20B QMoE split—host routing followed by
 selected-expert accelerator work—and adapts TileFuse's full 4x8 XDNA2 GEMV
@@ -106,9 +125,10 @@ docker build --target release-xdna -f docker/Dockerfile \
 Run the packaged hardware correctness probe before loading model weights:
 
 ```bash
-docker run --rm --device /dev/accel/accel0 \
+docker run --rm --entrypoint ember-xdna-validate \
+  --device /dev/accel/accel0 \
   --security-opt seccomp=unconfined --ulimit memlock=-1:-1 \
-  ember:xdna-local ember-xdna-validate
+  ember:xdna-local
 ```
 
 The probe enters through the public provider ABI and checks cold and warm-cache
@@ -122,30 +142,46 @@ docker compose -f compose.yaml -f compose.xdna.yaml up --build -d
 ```
 
 The override passes `/dev/accel/accel0`, sets unlimited memlock, enables the
-packaged provider, and leaves enough experts cold to exercise it. The provider
-is optional by default so a failure falls back to the baseline path. Use
-`DFLASH_MOE_XDNA_REQUIRED=1` only for equivalence testing and benchmarks.
+packaged DSpark provider with the GPU-main placement, and selects two resident
+sessions so GPU/NPU work can overlap. The provider is optional by default, so a
+failure falls back to GPU DSpark. Use `DFLASH_DSPARK_XDNA_REQUIRED=1` only for
+equivalence testing and benchmarks.
 
 ## Controls
 
+Current resident DSpark controls:
+
 | variable | default | purpose |
 |---|---:|---|
-| `DFLASH_MOE_XDNA_PLUGIN` | unset | Provider `.so`; packaged override supplies it |
-| `DFLASH_MOE_XDNA_REQUIRED` | `0` | Fail rather than replay on the baseline path |
-| `DFLASH_MOE_XDNA_MIN_TOKENS` | `1` | Smallest batch accepted by the ABI wrapper |
-| `DFLASH_MOE_XDNA_TRACE` | `0` | Engine and provider call/cache counters |
+| `DFLASH_DSPARK_XDNA_PLUGIN` | unset | Whole-draft provider `.so`; the XDNA Compose overlay supplies the packaged module |
+| `DFLASH_DSPARK_XDNA_REQUIRED` | `0` | Fail rather than fall back to GPU DSpark |
+| `DFLASH_DSPARK_XDNA_GPU_MAIN` | `1` in overlay | Keep DSpark `main_proj`/`main_norm` on the GPU and submit the draft-layer body |
+| `DFLASH_DS4_TIMING` | `0` | Report proposal age, blocking provider wait, tied-head, and verifier timing |
+| `DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` | `0` | Experimental admission threshold; keep disabled pending corpus calibration |
+| `EMBER_XDNA_BATCH_SESSIONS` | `2` in overlay | Compose-only resident session count used for overlap |
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 | `EMBER_XDNA_DEVICE` | `0` | XRT device index |
-| `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed-weight BO cache |
-| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged generation `1`-`6`; Gen5 is opt-in and Gen6 is validator-only |
-| `EMBER_XDNA_VALIDATION_WARM_RUNS` | `1` | Repeat cached validation dispatches for sustained-load and overlap measurements |
+
+Historical target-expert/standalone-validator controls remain available for
+research, but are not enabled by `compose.xdna.yaml`:
+
+| variable | default | purpose |
+|---|---:|---|
+| `DFLASH_MOE_XDNA_PLUGIN` | unset | Selected target-expert provider `.so` |
+| `DFLASH_MOE_XDNA_REQUIRED` | `0` | Fail rather than replay target experts on the GPU |
+| `DFLASH_MOE_XDNA_MIN_TOKENS` | `1` | Smallest batch accepted by the target-expert wrapper |
+| `DFLASH_MOE_XDNA_TRACE` | `0` | Target-expert provider call/cache counters |
+| `EMBER_XDNA_WEIGHT_CACHE_MB` | `1024` | Bounded packed target-weight BO cache |
+| `EMBER_XDNA_KERNEL_GEN` | `4` | Select packaged ROCMFP2 generation `1`-`6`; Gen6 is validator-only |
+| `EMBER_XDNA_VALIDATION_WARM_RUNS` | `1` | Repeat cached standalone validation dispatches |
 | `EMBER_XDNA_VALIDATION_DENSE` | unset | Use deterministic dense weights in the standalone probe |
-| `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected experts in one call |
+| `EMBER_XDNA_VALIDATION_EXPERTS` | `1` | Probe 1-6 selected target experts in one call |
 
-`DFLASH_EXPERT_BUDGET_MB` must leave cold experts in the hybrid placement. If
-all routed experts are resident on the GPU, the provider has no work.
+Target-expert offload additionally needs `DFLASH_EXPERT_BUDGET_MB` low enough
+to leave experts cold. It measured slower than the fused GPU target path and
+must not be enabled as a serving optimization.
 
-## Hardware validation status (2026-08-15 through 2026-08-16)
+## Hardware validation status (2026-08-15 through 2026-08-19)
 
 The prototype was exercised on the target gfx1151 Strix Halo host after
 enabling IOMMU. XRT identified `RyzenAI-npu5`, AIE2P 6x8, firmware 1.1.2.65.

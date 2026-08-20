@@ -14,6 +14,11 @@ The load-bearing decision: the GPU kernels and the tokenizer are *reused*
 (person-years of gfx1151 tuning, and a `joyai-llm` pre-tokenizer that must be
 byte-exact); everything above the forward pass is *rewritten fresh in C*.
 
+The opt-in heterogeneous prototype remains below the same ABI: the GPU owns the
+target/verifier, XDNA2 owns resident DSpark projection/shared-expert runlists,
+and AVX-512 CPU code owns draft routing and ROCMFP4 routed experts. It is not
+release-default because feature capture still has a quality-equivalence gate.
+
 ## Build & test
 
 Two build configurations. Almost all work happens in the first one.
@@ -29,9 +34,10 @@ scripts/build.sh                                          # -> build-rocm/ember-
 ```
 
 The opt-in `release-xdna` Docker target packages the experimental XRT/IRON
-XDNA2 MoE provider. It requires the host `amdxdna` driver, firmware, and
-`/dev/accel/accel0`; use `compose.xdna.yaml`. It is not part of the normal
-release path or performance baseline.
+target-MoE and DSpark provider. It requires the host `amdxdna` driver, firmware,
+enabled IOMMU, and `/dev/accel/accel0`; use `compose.xdna.yaml`. The overlay
+selects the measured two-session DSpark placement, while ordinary HIP remains
+the normal release path and fallback.
 
 `build/` is already configured, so `cmake --build build` is the fast inner loop.
 

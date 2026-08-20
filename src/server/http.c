@@ -274,20 +274,28 @@ done:
     return NULL;
 }
 
-int ember_http_serve(int port, ember_http_handler handler, void *ud) {
+bool ember_http_host_valid(const char *host) {
+    struct in_addr addr;
+    return host && host[0] && inet_pton(AF_INET, host, &addr) == 1;
+}
+
+int ember_http_serve(const char *host, int port,
+                     ember_http_handler handler, void *ud) {
     if (g_stop_requested) return 0;
+    struct sockaddr_in addr = {0};
+    if (!ember_http_host_valid(host)) return 1;
+    addr.sin_family = AF_INET;
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) return 1;
+    addr.sin_port = htons((uint16_t)port);
+
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0) return 1;
+    if (lfd < 0) return 2;
     int yes = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in addr = {0};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)port);
-    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(lfd); return 2; }
-    if (listen(lfd, 64) != 0) { close(lfd); return 3; }
+    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(lfd); return 3; }
+    if (listen(lfd, 64) != 0) { close(lfd); return 4; }
     g_listen_fd = lfd;
-    fprintf(stderr, "[ember] listening on http://127.0.0.1:%d\n", port);
+    fprintf(stderr, "[ember] listening on http://%s:%d\n", host, port);
 
     while (!g_stop_requested) {
         int cfd = accept(lfd, NULL, NULL);

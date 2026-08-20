@@ -15,11 +15,17 @@ model="$model_dir/$file"
 draft="$model_dir/$draft_file"
 model_verified=0
 draft_verified=0
+verify_existing_sha256="${EMBER_VERIFY_EXISTING_SHA256:-1}"
 
 die() {
   echo "ember: $*" >&2
   exit 78
 }
+
+case "$verify_existing_sha256" in
+  0|1) ;;
+  *) die "EMBER_VERIFY_EXISTING_SHA256 must be 0 or 1" ;;
+esac
 
 if [[ "${EMBER_SKIP_DEVICE_CHECK:-0}" != 1 ]]; then
   [[ -r /dev/kfd ]] || die "/dev/kfd is unavailable; pass the AMD KFD device to the container"
@@ -47,6 +53,17 @@ verify_sha256() {
   echo "ember: verifying SHA-256 for $(basename "$path")"
   printf '%s  %s\n' "$digest" "$path" | sha256sum --check --status ||
     die "$label SHA-256 mismatch: $path (remove the file and download it again)"
+}
+
+verify_existing_artifact() {
+  local path="$1"
+  local digest="$2"
+  local label="$3"
+  if [[ "$verify_existing_sha256" == 1 ]]; then
+    verify_sha256 "$path" "$digest" "$label"
+  else
+    echo "ember: WARNING: skipping SHA-256 verification for pre-existing $label: $path" >&2
+  fi
 }
 
 check_download_space() {
@@ -98,7 +115,7 @@ if [[ ! -r "$model" ]]; then
 fi
 
 if [[ "$model_verified" != 1 ]]; then
-  verify_sha256 "$model" "$expected_sha256" model
+  verify_existing_artifact "$model" "$expected_sha256" model
 fi
 
 if [[ ! -r "$draft" && "$draft" == "$model_dir/$draft_file" && \
@@ -114,7 +131,7 @@ if [[ ! -r "$draft" ]]; then
   exit 66
 fi
 if [[ "$draft_verified" != 1 ]]; then
-  verify_sha256 "$draft" "$draft_expected_sha256" "draft model"
+  verify_existing_artifact "$draft" "$draft_expected_sha256" "draft model"
 fi
 export DFLASH_DS4_SPEC=1
 export DFLASH_DS4_DRAFT="$draft"
@@ -138,6 +155,7 @@ fi
 exec "$server_bin" \
   -m "$model" \
   --kv-cache-dir "${EMBER_KV_CACHE_DIR:-/cache}" \
+  --host "${EMBER_HOST:-127.0.0.1}" \
   --port "${EMBER_PORT:-8080}" \
   "${server_args[@]}" \
   "$@"

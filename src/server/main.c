@@ -3910,7 +3910,8 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
 static void print_usage(FILE *out, const char *argv0) {
     fprintf(out,
         "Usage: %s -m MODEL [options]\n"
-        "  --port N                    loopback port (default 8080)\n"
+        "  --host IPV4                 listen address (default 127.0.0.1)\n"
+        "  --port N                    listen port (default 8080)\n"
         "  --model-name ID             advertised model id\n"
         "  --model-card PATH           sampling/reasoning model card\n"
         "  --cors                      allow browser cross-origin requests\n"
@@ -4118,6 +4119,7 @@ static bool install_shutdown_handlers(void) {
 
 int main(int argc, char **argv) {
     int port = 8080;
+    const char *host = "127.0.0.1";
     const char *model_path = NULL, *model_name = "deepseek-v4-flash";
     const char *card_path = NULL, *kv_dir = NULL;
     long kv_cache_mb = 0;   // 0 = library default (131072 MB)
@@ -4167,6 +4169,13 @@ int main(int argc, char **argv) {
         } else if (strcmp(opt, "--port") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1, 65535, &port);
+        } else if (strcmp(opt, "--host") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v && ember_http_host_valid(v);
+            if (v && !options_ok)
+                fprintf(stderr, "[ember] invalid IPv4 address for %s: %s\n",
+                        opt, v);
+            if (options_ok) host = v;
         } else if (strcmp(opt, "-m") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
@@ -4288,6 +4297,10 @@ int main(int argc, char **argv) {
         print_usage(stderr, argv[0]);
         return 2;
     }
+    if (strcmp(host, "127.0.0.1") != 0)
+        fprintf(stderr,
+                "[ember] WARNING: listening beyond loopback; Ember has no "
+                "built-in authentication\n");
     if (!env_seconds("EMBER_BG_IDLE_SECS", 5.0, &bg_idle_secs) ||
         !env_seconds("EMBER_BG_MAX_WAIT_SECS", 60.0, &bg_max_wait_secs))
         return 2;
@@ -4451,7 +4464,7 @@ int main(int argc, char **argv) {
         pthread_mutex_destroy(&srv.gen_lock);
         return 1;
     }
-    int rc = ember_http_serve(port, handler, &srv);
+    int rc = ember_http_serve(host, port, handler, &srv);
     // HTTP shutdown has stopped acceptance and drained connection threads.
     // gen_worker_stop now drains the queue and frees the backend as its LAST
     // action on its owning thread, where its thread_local graph caches live.

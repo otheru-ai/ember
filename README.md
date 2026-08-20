@@ -10,10 +10,10 @@
 
 > [!IMPORTANT]
 > **Ember is designed exclusively for AMD Strix Halo (`gfx1151`).** It is an
-> intentionally focused engine for one GPU architecture and one model family,
-> allowing the entire stack to be tuned for the best possible performance on
-> that platform. It is not a general-purpose inference engine and does not
-> support other GPUs.
+> intentionally focused engine for one APU platform and one model family,
+> allowing its CPU, GPU, unified memory, and optional XDNA2 NPU path to be
+> tuned together. It is not a general-purpose inference engine and does not
+> support other GPU or NPU architectures.
 
 Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
 Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
@@ -28,7 +28,9 @@ on one local endpoint.
 - `/dev/kfd` and `/dev/dri` available to Docker
 
 Docker Desktop, virtualized GPU passthrough, and other GPU architectures are not
-supported.
+supported. The normal release uses the GPU and CPU only. The opt-in XDNA2 image
+additionally requires a working host `amdxdna` driver, firmware, IOMMU
+translation, and `/dev/accel/accel0`.
 
 ## Start Ember
 
@@ -99,7 +101,9 @@ Useful endpoints:
 - `POST /v1/completions`
 
 Ember has no built-in authentication and listens on loopback by default. Use an
-authenticating reverse proxy before exposing it to another host.
+authenticating reverse proxy before exposing it to another host. Set
+`EMBER_HOST=0.0.0.0` (or pass `--host 0.0.0.0` to the binary) when a trusted
+container or Kubernetes gateway must reach the API.
 
 ## Configure
 
@@ -112,14 +116,18 @@ cp .env.example .env
 Edit `.env`, then restart with `docker compose up -d`. Common settings are:
 
 ```dotenv
+EMBER_HOST=127.0.0.1
 EMBER_PORT=8080
 EMBER_MODELS_DIR=./models
 EMBER_CACHE_DIR=./cache
 ```
 
 Only the pinned quant and drafter are supported. They are not configurable,
-and Ember always verifies both SHA-256 digests before start. See
-[.env.example](.env.example) for every container setting.
+and Ember always verifies downloads before making them runnable. Existing
+artifacts are also re-hashed before every start by default; operators using a
+trusted, immutable model store may set `EMBER_VERIFY_EXISTING_SHA256=0` to skip
+that expensive startup scan. See [.env.example](.env.example) for every
+container setting.
 
 ## Coding agents
 
@@ -153,16 +161,39 @@ docker build --target dev -f docker/Dockerfile -t ember-rocm:7.14-dev .
 scripts/build.sh
 ```
 
-An experimental image that additionally packages the XRT/IRON XDNA2 MoE
-provider is available as the opt-in `release-xdna` target. It requires a
-working host `amdxdna` driver and `/dev/accel/accel0`; see the
-[XDNA2 prototype guide](docs/xdna2-moe-prototype.md) before building or
-benchmarking it.
+### CPU/GPU/NPU prototype
+
+The opt-in `release-xdna` image packages the XRT/IRON provider used by Ember's
+measured heterogeneous decode prototype. Its current division of work is:
+
+| Processor | Role |
+|---|---|
+| GPU | Target model, DSpark main projection, q-wide authoritative verification |
+| NPU | Asynchronous resident DSpark projection and shared-expert pipeline |
+| CPU | DSpark routing, AVX-512 ROCMFP4 routed experts, orchestration |
+
+Two resident sessions overlap NPU proposal work for one request with GPU target
+verification for another. The best fixed-fixture Gen52 run measured a 1.484x
+aggregate throughput speedup, but a separate low-acceptance fixture exposed a
+capture-graph output difference. The path therefore remains experimental and
+opt-in; it is not the default release backend or a general quality claim.
+
+It requires a compatible host `amdxdna` driver and firmware, enabled IOMMU,
+`/dev/accel/accel0`, and render-group access. Build and start it with:
+
+```bash
+docker compose -f compose.yaml -f compose.xdna.yaml up --build -d
+```
+
+The overlay selects two resident sessions and falls back to ordinary GPU
+DSpark if the NPU provider cannot initialize. Read the
+[XDNA2 heterogeneous inference guide](docs/xdna2-moe-prototype.md) before
+validation or benchmarking.
 
 ## Documentation
 
 - [Operations and troubleshooting](docs/operations.md)
-- [Experimental XDNA2 MoE provider](docs/xdna2-moe-prototype.md)
+- [Experimental CPU/GPU/XDNA2 inference](docs/xdna2-moe-prototype.md)
 - [Client configuration](docs/client-compatibility.md)
 - [Architecture](ARCHITECTURE.md)
 - [Security policy](SECURITY.md)

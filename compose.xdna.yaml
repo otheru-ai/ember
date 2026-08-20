@@ -16,8 +16,13 @@ services:
         soft: -1
         hard: -1
     environment:
-      DFLASH_MOE_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_moe.so
-      DFLASH_MOE_XDNA_REQUIRED: ${DFLASH_MOE_XDNA_REQUIRED:-0}
-      DFLASH_MOE_XDNA_TRACE: ${DFLASH_MOE_XDNA_TRACE:-1}
-      DFLASH_EXPERT_BUDGET_MB: ${DFLASH_EXPERT_BUDGET_MB:-32768}
-      EMBER_XDNA_WEIGHT_CACHE_MB: ${EMBER_XDNA_WEIGHT_CACHE_MB:-1024}
+      # Gen52 placement: GPU main projection + authoritative target verifier,
+      # XDNA2 resident draft projections/shared experts, CPU routed experts.
+      # The provider stays optional unless an equivalence run explicitly makes
+      # it required; ordinary HIP DSpark remains the safe fallback.
+      DFLASH_DSPARK_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_moe.so
+      DFLASH_DSPARK_XDNA_REQUIRED: ${DFLASH_DSPARK_XDNA_REQUIRED:-0}
+      DFLASH_DSPARK_XDNA_GPU_MAIN: ${DFLASH_DSPARK_XDNA_GPU_MAIN:-1}
+      DFLASH_DS4_TIMING: ${DFLASH_DS4_TIMING:-0}
+      DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI: ${DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI:-0}
+    command: ["--batch-sessions", "${EMBER_XDNA_BATCH_SESSIONS:-2}"]

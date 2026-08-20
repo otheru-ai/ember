@@ -9,6 +9,18 @@ version `2026.8.10` is tagged `v2026.8.10`.
 day; additional fixes remain on `main` until the next dated release rather than
 using an ambiguous same-day suffix.
 
+## Unreleased
+
+- Added `--host` and `EMBER_HOST` so trusted container/Kubernetes gateways can
+  reach Ember while preserving the unauthenticated loopback default.
+- Added `EMBER_VERIFY_EXISTING_SHA256=0` for trusted immutable model stores;
+  downloaded artifacts remain pinned and checksum-verified before promotion.
+- Integrated and documented the opt-in Gen52 CPU/GPU/XDNA2 resident DSpark
+  prototype. The XDNA Compose overlay now selects the measured two-session
+  proposal pipeline instead of the slower historical target-expert placement.
+- Kept heterogeneous inference experimental: the fixed throughput fixture
+  passed, while capture-graph output equivalence remains a promotion blocker.
+
 ## 2026.8.10
 
 - Prepared the first source release.

@@ -1,5 +1,11 @@
 # XDNA2 kernel provenance
 
+`libember_xdna_moe.so` retains its historical filename but exports two
+versioned interfaces: the original selected target-expert ABI and the current
+asynchronous whole-DSpark ABI. The serving overlay enables only the latter.
+Its AIE projection/shared-expert runlists are paired with Ember-owned AVX-512
+ROCMFP4 CPU work; neither interface is a general ggml XDNA backend.
+
 The full-array object-FIFO topology in `kernel/rocmfp2_gemv.py` is adapted
 from TileFuse's W4A16 vector-matrix example:
 
