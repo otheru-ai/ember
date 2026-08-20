@@ -17,9 +17,11 @@
 //     restores them all before q=1 replay while a full block stays committed,
 //   - comp rows are index-addressed (pos / ratio)        -> idempotent,
 //   - n_comp / n_index_comp are pure functions of commit position,
-//   - the other non-idempotent state is the ratio-4 compressor prev-half
-//     (4 rows/state, flushed cur->prev at chunk boundaries), a few KB/layer,
-//     saved host-side before the verify and restored before partial replay.
+//   - the other non-idempotent state is the ratio-4 compressor's complete
+//     eight-row prev/current window, a few KB/layer, saved host-side before
+//     the verify and restored before partial replay.  Saving only prev was
+//     insufficient: a q-wide verify can wrap rejected future tokens into the
+//     current half before the q=1 fallback reaches the same boundary.
 // As in Dwarfstar, a fully accepted block keeps the batched target state. A
 // partial accept rolls all the way back and replays the accepted prefix through
 // the ordinary q=1 target graph. This makes the rejection path target-exact
@@ -497,16 +499,20 @@ static inline float spec_ctx_confidence_scale(int kv_pos, bool enabled) {
 }
 
 // ── Light rollback state ────────────────────────────────────────────────
-// prev-half = first 4 rows of a [comp_width, 8] ratio-4 rolling state.
-// ratio-128 states ([comp_width, 128]) are pure position rings -> skip.
-void save_prev_half(ggml_tensor * t, std::vector<uint8_t> & buf) {
+// The ratio-4 compressor owns an eight-row [prev,current] window.  A q-wide
+// verify can overwrite both halves, including wrapping rejected future rows
+// into current before the ordinary q=1 fallback recompresses a boundary.
+// Preserve all eight rows.  Ratio-128 states are pure position rings and the
+// at-risk rows are overwritten position-for-position by replay, so skip them.
+void save_ratio4_state(ggml_tensor * t, std::vector<uint8_t> & buf) {
     if (!t || t->ne[1] != 8) { buf.clear(); return; }
-    const size_t bytes = (size_t) t->nb[1] * 4;
+    const size_t bytes = ggml_nbytes(t);
     if (buf.size() != bytes) buf.resize(bytes);
     ggml_backend_tensor_get(t, buf.data(), 0, bytes);
 }
 
-void restore_prev_half(ggml_tensor * t, const std::vector<uint8_t> & buf) {
+void restore_ratio4_state(ggml_tensor * t,
+                          const std::vector<uint8_t> & buf) {
     if (!t || buf.empty()) return;
     ggml_backend_tensor_set(t, buf.data(), 0, buf.size());
 }
@@ -520,10 +526,10 @@ void spec_rollback_save_impl(const DeepSeek4Cache & cache,
     for (size_t il = 0; il < cache.layers.size(); ++il) {
         const DeepSeek4LayerCache & lc = cache.layers[il];
         DeepSeek4SpecRollback::Layer & s = rb.layers[il];
-        save_prev_half(lc.attn_compressor.state_kv,       s.attn_kv);
-        save_prev_half(lc.attn_compressor.state_score,    s.attn_sc);
-        save_prev_half(lc.indexer_compressor.state_kv,    s.idx_kv);
-        save_prev_half(lc.indexer_compressor.state_score, s.idx_sc);
+        save_ratio4_state(lc.attn_compressor.state_kv,       s.attn_kv);
+        save_ratio4_state(lc.attn_compressor.state_score,    s.attn_sc);
+        save_ratio4_state(lc.indexer_compressor.state_kv,    s.idx_kv);
+        save_ratio4_state(lc.indexer_compressor.state_score, s.idx_sc);
         s.raw_row_bytes = 0;
         s.raw_rows.clear();
         if (lc.raw_kv && lc.raw_kv->ne[1] > 0 && rb.raw_count > 0) {
@@ -547,10 +553,10 @@ void spec_rollback_save_impl(const DeepSeek4Cache & cache,
 }
 
 // Truncate the cache to commit_pos. restore_prev is set when the verify
-// crossed a ratio-4 boundary at-or-past commit_pos: that flush filled the
-// prev-half rows with a chunk containing rejected tokens, so put the
-// pre-verify rows back. (A boundary strictly inside the committed range is a
-// legitimate flush and must be kept.)
+// crossed a ratio-4 boundary at-or-past commit_pos: q-wide evaluation may have
+// modified either half of the rolling window with rejected tokens, so put the
+// complete pre-verify state back. (A boundary strictly inside the committed
+// range is a legitimate flush and must be kept.)
 void spec_rollback_apply_impl(const DeepSeek4SpecRollback & rb,
                               const DeepSeek4Weights & w,
                               DeepSeek4Cache & cache,
@@ -564,10 +570,10 @@ void spec_rollback_apply_impl(const DeepSeek4SpecRollback & rb,
         if (ratio == 4) lc.n_index_comp = commit_pos / 4;
         if (restore_prev && il < rb.layers.size()) {
             const DeepSeek4SpecRollback::Layer & s = rb.layers[il];
-            restore_prev_half(lc.attn_compressor.state_kv,       s.attn_kv);
-            restore_prev_half(lc.attn_compressor.state_score,    s.attn_sc);
-            restore_prev_half(lc.indexer_compressor.state_kv,    s.idx_kv);
-            restore_prev_half(lc.indexer_compressor.state_score, s.idx_sc);
+            restore_ratio4_state(lc.attn_compressor.state_kv,       s.attn_kv);
+            restore_ratio4_state(lc.attn_compressor.state_score,    s.attn_sc);
+            restore_ratio4_state(lc.indexer_compressor.state_kv,    s.idx_kv);
+            restore_ratio4_state(lc.indexer_compressor.state_score, s.idx_sc);
         }
         if (il < rb.layers.size() && lc.raw_kv && lc.raw_kv->ne[1] > 0) {
             const DeepSeek4SpecRollback::Layer & s = rb.layers[il];
@@ -793,6 +799,33 @@ bool deepseek4_dspark_resident_finish(
         if (error) *error = "resident DSpark provider returned wrong hidden shape";
         return false;
     }
+    std::vector<float> gpu_reference_hidden;
+    if (spec_env_flag("DFLASH_DSPARK_XDNA_COMPARE")) {
+        const int feat_row = drafter.n_target_layers * n_embd;
+        const int ctx_len = feat_row > 0
+            ? (int)(feature_window.size() / (size_t)feat_row) : 0;
+        std::vector<float> gpu_confidence_hidden;
+        const bool gpu_ok = deepseek4_dspark_draft_forward(
+            backend, drafter, impl->noise_embed.data(),
+            ctx_len > 0 ? feature_window.data() : nullptr,
+            ctx_len, impl->committed, gpu_reference_hidden,
+            &gpu_confidence_hidden);
+        const bool compare_ok = gpu_ok &&
+            dspark_log_xdna_compare(
+                "resident_normalized_hidden", provider_output.hidden,
+                gpu_reference_hidden) &&
+            dspark_log_xdna_compare(
+                "resident_confidence_hidden",
+                provider_output.confidence_hidden,
+                gpu_confidence_hidden);
+        if (!compare_ok &&
+            spec_env_flag("DFLASH_DSPARK_XDNA_COMPARE_REQUIRED")) {
+            if (error) *error = gpu_ok
+                ? "resident XDNA hidden differential failed"
+                : "resident GPU draft reference failed";
+            return false;
+        }
+    }
 
     DeepSeek4DFlashTarget target(
         target_w, target_cache, backend, device, nullptr,
@@ -848,6 +881,29 @@ bool deepseek4_dspark_resident_finish(
     }
     if ((int)draft_tokens.size() > impl->q)
         draft_tokens.resize((size_t)impl->q);
+    if (!gpu_reference_hidden.empty()) {
+        std::vector<float> gpu_padded_hidden(
+            (size_t)n_embd * ((size_t)drafter.block_size + 1), 0.0f);
+        std::memcpy(gpu_padded_hidden.data() + n_embd,
+                    gpu_reference_hidden.data(), hidden_need * sizeof(float));
+        std::vector<int32_t> gpu_draft_tokens;
+        bool gpu_head_ok = dspark_markov_correct_greedy_chain_fused(
+            draft_weights, backend, target.lm_head_tensor(),
+            gpu_padded_hidden.data(), impl->q, impl->seed,
+            gpu_draft_tokens, nullptr, nullptr);
+        if (!gpu_head_ok) {
+            gpu_head_ok = dspark_markov_correct_greedy_chain(
+                draft_weights, backend, target, gpu_padded_hidden.data(),
+                impl->q, impl->seed, 0.0f, gpu_draft_tokens);
+        }
+        std::fprintf(stderr,
+                     "[xdna-dspark-head-compare] pos=%d seed=%d "
+                     "provider0=%d gpu0=%d gpu_ok=%d\n",
+                     impl->committed, impl->seed,
+                     draft_tokens.size() > 1 ? draft_tokens[1] : -1,
+                     gpu_draft_tokens.size() > 1 ? gpu_draft_tokens[1] : -1,
+                     gpu_head_ok ? 1 : 0);
+    }
     const double head_ms = spec_ms_since(head_t0);
 
     // The resident verifier has a different reduction topology from ordinary
@@ -924,10 +980,12 @@ bool deepseek4_dspark_resident_finish(
         if (detailed_timing) {
             std::fprintf(stderr,
                          "[ds4-resident-spec] pos=%d q=%d accept=0 "
-                         "partial=%d provider_age=%.1fms "
+                         "partial=%d draft0=%d target0=%d provider_age=%.1fms "
                          "provider_block=%.1fms head=%.1fms verify=%.1fms "
                          "fallback=target-ar\n",
                          impl->committed, impl->q, accept,
+                         draft_tokens.size() > 1 ? draft_tokens[1] : -1,
+                         target_argmax.empty() ? -1 : target_argmax[0],
                          provider_age_ms, provider_block_ms, head_ms,
                          verify_ms);
         }

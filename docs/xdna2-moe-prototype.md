@@ -186,6 +186,8 @@ Current resident DSpark controls:
 | `DFLASH_DSPARK_XDNA_PLUGIN` | unset | Whole-draft provider `.so`; the XDNA Compose overlay supplies the packaged module |
 | `DFLASH_DSPARK_XDNA_REQUIRED` | `0` | Fail rather than fall back to GPU DSpark |
 | `DFLASH_DSPARK_XDNA_GPU_MAIN` | `1` in overlay | Keep DSpark `main_proj`/`main_norm` on the GPU and submit the draft-layer body |
+| `DFLASH_DS4_FUSED_VERIFY` | `1` in overlay | Use the q-wide fused target verifier required for the measured resident speedup |
+| `DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS` | `4` in overlay | Rebuild four exact support-feature rows in an isolated cache without changing authoritative sparse prefill; `0` restores approximate layer-major capture |
 | `DFLASH_DS4_TIMING` | `0` | Report proposal age, blocking provider wait, tied-head, and verifier timing |
 | `DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` | `0` | Experimental admission threshold; keep disabled pending corpus calibration |
 | `EMBER_XDNA_BATCH_SESSIONS` | `2` in overlay | Compose-only resident session count used for overlap |
@@ -195,7 +197,7 @@ Historical target-expert and standalone-kernel controls were removed with their
 implementations. Target-expert offload measured slower than the fused GPU path;
 keeping dormant environment switches would imply unsupported behavior.
 
-## Hardware validation status (2026-08-15 through 2026-08-19)
+## Hardware validation status (2026-08-15 through 2026-08-20)
 
 The prototype was exercised on the target gfx1151 Strix Halo host after
 enabling IOMMU. XRT identified `RyzenAI-npu5`, AIE2P 6x8, firmware 1.1.2.65.
@@ -1495,21 +1497,33 @@ leave a session stuck in flight. The resident path is still opt-in through the
 XDNA DSpark provider and only admits greedy requests with enough token/context
 runway. The serial DSpark profitability scheduler is deliberately not reused:
 its wall-clock cost model treats overlapped NPU time as request-critical and
-would make the wrong decision for aggregate resident throughput. A future
-resident gate must use measured GPU wait time and aggregate tokens/second.
+would make the wrong decision for aggregate resident throughput. Resident
+gates therefore use measured GPU wait time and aggregate tokens/second.
 
 GPU-free tests cover wide-completion accounting and failure recovery. The full
-48-test host gauntlet passes, the ROCm/gfx1151 container build links, and the
+host gauntlet passes, the ROCm/gfx1151 container build links, and the
 telemetry-enabled `ember:xdna-gen43` release image packages the pinned XRT
 runtime, provider, AIE artifacts, and server at commit `5a3171c`. The image ID
 is `edcb75e950a6`; its extracted server SHA-256 is
 `3959e93c555faa1eb2d5c239a13b9e33371f76a495224cc55330eac19d9647d4` and it
-is staged on the gfx1151 host under `/tmp/ember-xdna-gen43/`. These are
-build/correctness gates, not a performance claim. The remaining decisive test
-requires exclusive access to the 85.3-GiB target model: run the two-session
-differential validator, then A/B resident target-only throughput against
-resident XDNA proposals while recording acceptance, NPU wait exposed on the
-critical path, and shared-fabric slowdown.
+is staged on the gfx1151 host under `/tmp/ember-xdna-gen43/`. Those were
+build/correctness gates, not a performance claim.
+
+The promotion-safe follow-up ran on 2026-08-20. Sparse target prefill now
+remains completely authoritative while a spare cache reconstructs only the
+last four q=1 support-feature rows. A rejected block restores the complete
+ratio-4 compressor window, not only its previous half, and resident proposal
+width stops at the next ratio-4 boundary. The low-acceptance fixture therefore
+fell back to the exact target output hash, while the high-acceptance fixture
+accepted every candidate and retained its target output hash.
+
+The full 10-round, two-session gate measured 24.9849 aggregate tok/s against
+the 21.2357 tok/s target-only control: 1.1765x observed speedup with a 1.1762x
+95% bootstrap lower bound, above the required 1.10x gate. The in-process
+validator also reported token-exact AR, snapshot restore, fresh DSpark, and two
+resident XDNA rows. These results promote the fixed fixtures; a broader quality
+corpus remains required before the optional XDNA overlay becomes the normal
+release image.
 
 The validator now actually permits its resident rows to speculate. With the
 provider marked required it also requires `batch.spec_rows == batch.rows`, so a

@@ -116,10 +116,12 @@ correctness/performance gates that must reject fallback. The slower XDNA
 target-expert provider and its historical kernel generations have been removed;
 their measurements remain in the research guide.
 
-The fixed Gen52 fixture cleared the throughput gate, but a low-acceptance
-fixture exposed a capture-graph output difference. Treat results as
-experimental until the quality corpus and observational-equivalence gate in
-[`xdna2-moe-prototype.md`](xdna2-moe-prototype.md) pass.
+The XDNA overlay defaults to the fused q-wide verifier and a four-row exact
+shadow capture. The latter never changes authoritative sparse prefill. The
+fixed accepted/rejected fixtures are token-exact and the full two-session gate
+cleared its 1.10x lower-bound requirement; keep the overlay experimental until
+the broader quality corpus in
+[`xdna2-moe-prototype.md`](xdna2-moe-prototype.md) passes.
 
 ## Reproducible model acquisition
 

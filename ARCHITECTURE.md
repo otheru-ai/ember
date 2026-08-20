@@ -376,8 +376,10 @@ The current Gen52 resident placement assigns work by measured strength:
 | Zen 5 CPU | Draft routing, AVX-512 ROCMFP4 routed experts, accumulation, XRT/HIP ordering |
 
 Each eligible resident session owns an asynchronous proposal job and captured
-target-feature window. The coordinator submits NPU work for one session while
-the GPU verifies another, then commits only tokens accepted by the GPU's
+target-feature window. Sparse prefill remains on the target-only graph; an
+isolated spare cache rebuilds four exact q=1 support rows, so capture cannot
+perturb target logits or KV. The coordinator submits NPU work for one session
+while the GPU verifies another, then commits only tokens accepted by the GPU's
 authoritative q-wide verifier. A provider initialization or execution failure
 falls back to ordinary GPU DSpark unless `DFLASH_DSPARK_XDNA_REQUIRED=1` makes
 the validation boundary fail closed.
@@ -388,11 +390,11 @@ buffers still cross explicit runtime ownership boundaries. Direct HIP/XRT
 dma-buf interoperability has been validated, but it does not create autonomous
 GPU-to-NPU dispatch—the CPU remains the command and fence authority.
 
-This path has a measured two-session throughput win on a fixed fixture, but it
-remains experimental because capture-output graph changes affected a separate
-low-acceptance fixture. Promotion requires a representative output-quality
-corpus and an observationally equivalent feature-capture path. The complete
-measurements, rejected placements, and promotion gates are in
+This path has a measured two-session throughput win and the shadow-capture path
+is observationally equivalent on both the accepted and rejected fixed
+fixtures. It remains an optional overlay until a representative output-quality
+corpus clears the same gate. The complete measurements, rejected placements,
+and promotion gates are in
 [`docs/xdna2-moe-prototype.md`](docs/xdna2-moe-prototype.md).
 
 ## Deployment architecture

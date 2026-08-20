@@ -18,12 +18,15 @@ services:
         hard: -1
     environment:
       # Gen52 placement: GPU main projection + authoritative target verifier,
-      # XDNA2 resident draft projections/shared experts, CPU routed experts.
+      # XDNA2 resident draft projections/shared experts, CPU routed experts,
+      # fused GPU verification, and target-isolated exact support capture.
       # The provider stays optional unless an equivalence run explicitly makes
       # it required; ordinary HIP DSpark remains the safe fallback.
       DFLASH_DSPARK_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_dspark.so
       DFLASH_DSPARK_XDNA_REQUIRED: ${DFLASH_DSPARK_XDNA_REQUIRED:-0}
       DFLASH_DSPARK_XDNA_GPU_MAIN: ${DFLASH_DSPARK_XDNA_GPU_MAIN:-1}
+      DFLASH_DS4_FUSED_VERIFY: ${DFLASH_DS4_FUSED_VERIFY:-1}
+      DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS: ${DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS:-4}
       DFLASH_DS4_TIMING: ${DFLASH_DS4_TIMING:-0}
       DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI: ${DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI:-0}
     command: ["--batch-sessions", "${EMBER_XDNA_BATCH_SESSIONS:-2}"]

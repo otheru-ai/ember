@@ -478,6 +478,8 @@ struct DeepSeek4Backend::ResidentSession {
     std::vector<int32_t> history;
     std::vector<int32_t> generated;
     int prefilled = 0;
+    int restore_slot = -1;
+    int restore_pos = 0;
     int prefill_tokens = 0;
     int32_t pending_token = -1;
     bool pending_ready = false;
@@ -514,6 +516,138 @@ void DeepSeek4Backend::swap_resident_state(ResidentSession &session) {
     swap(last_logits_, session.last_logits);
     swap(spec_feat_window_, session.spec_feat_window);
     swap(inline_snapshot_saved_, session.inline_snapshot_saved);
+}
+
+bool DeepSeek4Backend::rebuild_resident_spec_features(
+        ResidentSession &session, std::string *error) {
+    if (error) error->clear();
+    if (!session.spec_eligible || !spec_drafter_ ||
+        session.request.force_exact_prefill ||
+        !prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
+        return true;
+    }
+
+    const int exact_rows = (int)std::min<long>(
+        w_.n_swa,
+        env_nonnegative_long("DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS", 4));
+    if (exact_rows <= 0) return true;
+
+    const int prompt_size = (int)session.request.prompt.size();
+    const int feat_row = spec_drafter_->n_target_layers * w_.n_embd;
+    if (prompt_size <= 0 || feat_row <= 0) {
+        if (error) *error = "invalid resident DSpark shadow-capture shape";
+        return false;
+    }
+
+    auto reset_shadow = [&]() {
+        reset_deepseek4_cache(cache_);
+        cache_.prefill_mode = cfg_.prefill_mode;
+    };
+    reset_shadow();
+
+    int pos = 0;
+    std::vector<float> rebuilt;
+    if (session.restore_slot >= 0 && session.restore_pos > 0) {
+        if (!snapshot_used(session.restore_slot) ||
+            !deepseek4_snapshot_restore(
+                snapshots_[session.restore_slot], cache_)) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark shadow snapshot restore failed";
+            return false;
+        }
+        pos = session.restore_pos;
+        rebuilt = snapshot_spec_features_[session.restore_slot];
+        if (cache_.cur_pos != pos ||
+            rebuilt.size() % (size_t)feat_row != 0 ||
+            rebuilt.size() / (size_t)feat_row > (size_t)w_.n_swa) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark shadow snapshot metadata mismatch";
+            return false;
+        }
+    }
+    if (pos < 0 || pos > prompt_size) {
+        reset_shadow();
+        if (error) *error = "resident DSpark shadow restore position mismatch";
+        return false;
+    }
+
+    const int exact_from = std::max(pos, prompt_size - exact_rows);
+    const int shadow_chunk = std::max(
+        1, std::min({w_.n_swa, DS4_MAX_LAYER_MAJOR_PREFILL_TOKENS,
+                     cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa}));
+    std::vector<float> embed;
+    std::vector<float> hc_state;
+    std::vector<float> logits;
+
+    // Reconstruct the state preceding the exact suffix in a spare cache. This
+    // intentionally mirrors the old hybrid capture experiment, but never
+    // touches the authoritative resident cache or its sparse-prefill logits.
+    while (pos < exact_from) {
+        const int count = std::min(shadow_chunk, exact_from - pos);
+        embed.resize((size_t)w_.n_embd * (size_t)count);
+        if (!w_.embedder.embed(session.request.prompt.data() + pos, count,
+                               embed.data())) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark shadow prefix embedding failed";
+            return false;
+        }
+        cache_.prefill_mode = cfg_.prefill_mode;
+        logits.clear();
+        if (!deepseek4_step_layer_range(
+                backend_, cfg_.device.gpu, w_, cache_, hc_state,
+                embed.data(), count, pos, 0, w_.n_layer, &logits,
+                session.request.prompt.data() + pos, nullptr,
+                /*allow_decode_graph_reuse=*/false, nullptr)) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark shadow prefix replay failed";
+            return false;
+        }
+        pos += count;
+    }
+
+    cache_.prefill_mode = PrefillAttentionMode::Exact;
+    for (; pos < prompt_size; ++pos) {
+        embed.resize((size_t)w_.n_embd);
+        if (!w_.embedder.embed(session.request.prompt.data() + pos, 1,
+                               embed.data())) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark shadow suffix embedding failed";
+            return false;
+        }
+        std::vector<float> captured;
+        Ds4VerifyHooks hooks;
+        hooks.capture_layer_ids = &spec_drafter_->capture_layer_ids;
+        hooks.capture_out = &captured;
+        hooks.require_fused_q1 = true;
+        logits.clear();
+        if (!deepseek4_step_layer_range(
+                backend_, cfg_.device.gpu, w_, cache_, hc_state,
+                embed.data(), 1, pos, 0, w_.n_layer, &logits,
+                session.request.prompt.data() + pos, nullptr,
+                /*allow_decode_graph_reuse=*/true, &hooks) ||
+            captured.size() != (size_t)feat_row) {
+            reset_shadow();
+            if (error) *error =
+                "resident DSpark exact shadow suffix failed";
+            return false;
+        }
+        const size_t rows = rebuilt.size() / (size_t)feat_row;
+        if (rows >= (size_t)w_.n_swa) {
+            std::memmove(rebuilt.data(), rebuilt.data() + feat_row,
+                         (rebuilt.size() - (size_t)feat_row) * sizeof(float));
+            rebuilt.resize(rebuilt.size() - (size_t)feat_row);
+        }
+        rebuilt.insert(rebuilt.end(), captured.begin(), captured.end());
+    }
+
+    session.spec_feat_window = std::move(rebuilt);
+    reset_shadow();
+    return true;
 }
 
 void DeepSeek4Backend::free_resident_sessions() {
@@ -610,7 +744,13 @@ int DeepSeek4Backend::resident_spec_commit_cap(
     const int speculative_left =
         ds4_spec_emit_budget(session.request) - (int)session.generated.size();
     const int context_left = ds4_spec_context_budget(session.cache.cur_pos);
-    const int cap = std::min({4, request_left, speculative_left, context_left});
+    // Match the ordinary DSpark scheduler: never let one q-wide verification
+    // cross a ratio-4 compressor boundary. Crossing changes the target
+    // reduction topology and can flip a near-tied first argmax even when the
+    // draft candidate matches ordinary q=1 autoregressive decode.
+    const int boundary_left = 4 - (session.cache.cur_pos & 3);
+    const int cap = std::min(
+        {4, boundary_left, request_left, speculative_left, context_left});
     if (cap < 2) return 0;
     return cap;
 }
@@ -1107,9 +1247,9 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     const bool capture_spec_features =
         allow_spec_capture && spec_enabled_ && spec_drafter_;
     // The layer-major HIP graph can publish mean-over-HC capture rows while it
-    // performs the configured dense/sparse prefill. Draft features need not be
-    // q=1-identical: the target verifier remains authoritative, and forcing the
-    // final 128 prompt rows through q=1 erased the entire speculative speedup.
+    // performs the configured dense/sparse prefill. Resident XDNA decode may
+    // replace these with an isolated exact shadow suffix after authoritative
+    // prefill completes; never change the target graph merely for capture.
     const bool layer_major_spec_capture =
         capture_spec_features && !force_exact_prefill && !moe_hybrid_ &&
         prefill_attention_mode_is_approximate(base_prefill_mode);
@@ -2311,6 +2451,7 @@ bool DeepSeek4Backend::resident_session_create(
 
     auto session = std::make_unique<ResidentSession>();
     session->request = request;
+    session->restore_slot = restore_slot;
     // ModelBackend::generate_impl normally composes GenerateRequest::on_token
     // into DaemonIO before decode. Resident sessions bypass that wrapper, so
     // compose it here or streaming/cancellation silently disappears.
@@ -2355,6 +2496,7 @@ bool DeepSeek4Backend::resident_session_create(
         session->last_logits = snapshot_logits_[restore_slot];
         session->spec_feat_window = snapshot_spec_features_[restore_slot];
         session->prefilled = session->cache.cur_pos;
+        session->restore_pos = session->prefilled;
         if (session->prefilled < 0 ||
             session->prefilled > (int)request.prompt.size() ||
             session->last_logits.empty()) {
@@ -2518,11 +2660,16 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
     swap_resident_state(session);
     const auto t0 = Clock::now();
     int committed = -1;
+    const bool shadow_spec_capture =
+        session.spec_eligible && !session.request.force_exact_prefill &&
+        prefill_attention_mode_is_approximate(cfg_.prefill_mode) &&
+        env_nonnegative_long(
+            "DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS", 4) > 0;
     try {
         committed = do_prefill(suffix, session.io, old_pos,
                                session.request.snap_pos,
                                session.request.snap_slot,
-                               session.spec_eligible,
+                               session.spec_eligible && !shadow_spec_capture,
                                session.request.force_exact_prefill);
     } catch (...) {
         swap_resident_state(session);
@@ -2541,6 +2688,20 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
     const int consumed = committed - old_pos;
     session.prefill_tokens += consumed;
     session.prefilled = committed;
+    if (session.spec_eligible && shadow_spec_capture &&
+        session.prefilled == (int)session.request.prompt.size()) {
+        const auto shadow_t0 = Clock::now();
+        std::string shadow_error;
+        if (!rebuild_resident_spec_features(session, &shadow_error)) {
+            std::fprintf(stderr,
+                         "[ds4-resident-spec] shadow capture failed: %s; "
+                         "using target AR\n",
+                         shadow_error.c_str());
+            session.spec_eligible = false;
+            session.spec_feat_window.clear();
+        }
+        session.prefill_s += elapsed_s(shadow_t0);
+    }
     if (session.io.cancelled) {
         session.cancelled = true;
         session.terminal = true;

@@ -167,11 +167,12 @@ session before collecting it. The fixed Gen52 gate measured 1.4842x aggregate
 throughput over the two-session target-only control, with every proposal block
 accepted and about 6.89 ms of provider wait exposed per cycle.
 
-The remaining XDNA work is a correctness/promotion problem, not basic session
-plumbing. A low-acceptance fixture changed output when the sparse target graph
-added feature-capture outputs, even after a partial first proposal triggered
-the circuit breaker and rolled back all speculative state. The path must prove
-capture is observationally equivalent across a representative quality corpus
-before it can become a default. Its future profitability gate must use exposed
-provider wait and aggregate tokens/second; proposal age includes useful overlap
-and is not itself a reason to reject the NPU path.
+That fast capture was not promotable: a low-acceptance fixture changed output.
+The 2026-08-20 path leaves authoritative sparse prefill untouched and rebuilds
+four exact support rows in a shadow cache. It also restores the full ratio-4
+compressor window after rejection and caps resident blocks at compressor
+boundaries. The low fixture is now target-exact after fallback; the high fixture
+is target-exact with 100% acceptance. Including the shadow replay, the complete
+10-round gate measured 1.1765x throughput (1.1762x 95% lower bound) over the
+two-session control. A representative quality corpus is still the promotion
+gate for making the optional overlay the normal release path.

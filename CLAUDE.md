@@ -17,7 +17,8 @@ byte-exact); everything above the forward pass is *rewritten fresh in C*.
 The opt-in heterogeneous prototype remains below the same ABI: the GPU owns the
 target/verifier, XDNA2 owns resident DSpark projection/shared-expert runlists,
 and AVX-512 CPU code owns draft routing and ROCMFP4 routed experts. It is not
-release-default because feature capture still has a quality-equivalence gate.
+release-default because the fixed feature-capture fixtures pass, but the broader
+quality-equivalence corpus remains a promotion gate.
 
 ## Build & test
 
@@ -33,11 +34,11 @@ docker build --target dev -f docker/Dockerfile \
 scripts/build.sh                                          # -> build-rocm/ember-dflash
 ```
 
-The opt-in `release-xdna` Docker target packages the experimental XRT/IRON
-target-MoE and DSpark provider. It requires the host `amdxdna` driver, firmware,
-enabled IOMMU, and `/dev/accel/accel0`; use `compose.xdna.yaml`. The overlay
-selects the measured two-session DSpark placement, while ordinary HIP remains
-the normal release path and fallback.
+The opt-in `release-xdna` Docker target packages the pinned XRT runtime, IRON
+artifacts, and resident DSpark provider. It requires the host `amdxdna` driver,
+firmware, enabled IOMMU, and `/dev/accel/accel0`; use `compose.xdna.yaml`. The
+overlay selects the measured two-session DSpark placement, while ordinary HIP
+remains the normal release path and fallback.
 
 `build/` is already configured, so `cmake --build build` is the fast inner loop.
 

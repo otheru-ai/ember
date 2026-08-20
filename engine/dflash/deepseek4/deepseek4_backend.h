@@ -127,6 +127,8 @@ private:
                        std::unique_ptr<ResidentSession>> resident_sessions_;
     std::vector<DeepSeek4Cache> resident_cache_pool_;
     void swap_resident_state(ResidentSession &session);
+    bool rebuild_resident_spec_features(ResidentSession &session,
+                                        std::string *error = nullptr);
     bool resident_sample_next(ResidentSession &session);
     int resident_spec_commit_cap(const ResidentSession &session) const;
     bool resident_submit_spec(ResidentSession &session,
