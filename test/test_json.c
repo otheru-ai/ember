@@ -91,6 +91,17 @@ static void check_escaped(const char *input, size_t len, const char *expected,
 }
 
 static void test_json_output_utf8(void) {
+    check_escaped("\"\\\n\r\t\b\f\x01" "A", 9,
+                  "\"\\\"\\\\\\n\\r\\t\\b\\f\\u0001A\"",
+                  "ASCII controls and metacharacters are escaped");
+    check_escaped("\xc2\xa2", 2, "\"\xc2\xa2\"",
+                  "two-byte UTF-8 passes through");
+    check_escaped("\xe0\xa0\x80\xed\x9f\xbf\xe1\x80\x80", 9,
+                  "\"\xe0\xa0\x80\xed\x9f\xbf\xe1\x80\x80\"",
+                  "three-byte UTF-8 boundary cases pass through");
+    check_escaped("\xf0\x90\x80\x80\xf4\x8f\xbf\xbf\xf1\x80\x80\x80", 12,
+                  "\"\xf0\x90\x80\x80\xf4\x8f\xbf\xbf\xf1\x80\x80\x80\"",
+                  "four-byte UTF-8 boundary cases pass through");
     check_escaped("CJK \xe4\xb8\xad emoji \xf0\x9f\x91\x8b", 18,
                   "\"CJK \xe4\xb8\xad emoji \xf0\x9f\x91\x8b\"",
                   "valid UTF-8 passes through unchanged");
@@ -104,6 +115,28 @@ static void test_json_output_utf8(void) {
                   "codepoints above U+10FFFF are replaced");
     check_escaped("\xc0\x80", 2, "\"\xef\xbf\xbd\"",
                   "overlong UTF-8 is replaced");
+    check_escaped("\xc2" "A", 2, "\"\xef\xbf\xbd" "A\"",
+                  "bad two-byte continuation preserves following ASCII");
+    check_escaped("\xe2\x80" "A", 3, "\"\xef\xbf\xbd" "A\"",
+                  "bad three-byte continuation is one replacement");
+    check_escaped("\xf1\x80\x80" "A", 4, "\"\xef\xbf\xbd" "A\"",
+                  "bad four-byte continuation is one replacement");
+    check_escaped("\xf5\x80\x80\x80", 4, "\"\xef\xbf\xbd\"",
+                  "out-of-range leading byte and continuations are replaced once");
+    check_escaped("\x80\x80\x80", 3, "\"\xef\xbf\xbd\"",
+                  "stray continuation run is replaced once");
+
+    CHECK(ember_json_utf8_sequence_len(NULL, 0) == 0,
+          "empty UTF-8 input has no sequence");
+    CHECK(ember_json_invalid_utf8_span(NULL, 0) == 0,
+          "empty invalid input has no span");
+
+    ember_buf content = {0};
+    ember_json_escape_content(&content, NULL);
+    CHECK(content.len == 0, "NULL JSON content is empty");
+    ember_json_escape(&content, NULL);
+    CHECK(strcmp(content.ptr, "\"\"") == 0, "NULL JSON string becomes empty literal");
+    ember_buf_free(&content);
 }
 
 int main(void) {
