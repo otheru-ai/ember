@@ -161,19 +161,17 @@ Enable Repository Actions**.
 
 ### Automatic Forgejo-to-GitHub release chain
 
-`.forgejo/workflows/mirror-github.yml` mirrors Forgejo `main` and `v*` tags to
-`otheru-ai/ember` after each push. Configure one Forgejo repository secret:
+Forgejo's native push mirror sends source-of-truth refs to
+`https://github.com/otheru-ai/ember.git`. Configure it under repository
+**Settings → Repository → Push Mirrors** with synchronization after commits
+enabled. Use a fine-grained GitHub token restricted to `otheru-ai/ember` with
+repository **Contents: read and write**. The credential remains in Forgejo's
+encrypted mirror configuration and never enters this repository or a runner.
 
-| Name | Kind | Required permission |
-|---|---|---|
-| `EMBER_GITHUB_MIRROR_TOKEN` | secret | Fine-grained GitHub token restricted to `otheru-ai/ember`, repository **Contents: read and write** |
-
-The workflow checks out the exact event ref with full history and invokes
-`ci/push_github_mirror.sh`. The script accepts only `refs/heads/main` and
-`refs/tags/v*`, verifies that the ref and checkout resolve to the event SHA,
-passes the credential through `GIT_ASKPASS`, performs a non-forced push, and
-reads the destination ref back. A divergence therefore fails visibly instead
-of silently replacing public history. Do not put the token in a remote URL.
+The mirror is also reconciled every eight hours so a transient GitHub outage
+does not require another source commit. Forgejo currently has only the `main`
+branch; treat any future branch pushed there as public because the native
+mirror publishes repository refs, not a private allowlist.
 
 The resulting GitHub `main` push starts `.github/workflows/ci.yml`. Its
 `publish-candidate` job waits for invariants, both strict builds, sanitizers,
@@ -182,9 +180,7 @@ built-in `GITHUB_TOKEN` publishes `dev-<sha12>` and `sha-<sha12>` to GHCR. A
 mirrored version tag starts Container directly; its certification and VERSION
 checks must pass before the CalVer and `latest` tags are written.
 
-Forgejo's native push-mirror feature is no longer required for Ember. Disable
-it after the workflow secret is installed so there is one auditable mirror
-writer. `.forgejo/workflows/container.yml` remains a manually dispatched
+`.forgejo/workflows/container.yml` remains a manually dispatched
 disaster-recovery publisher; it no longer reacts to tags, preventing Forgejo
 and GitHub builders from racing to update the same GHCR tags.
 

@@ -24,8 +24,6 @@ COMPOSE_BUILD = ROOT / "compose.build.yaml"
 COMPOSE_XDNA = ROOT / "compose.xdna.yaml"
 PREFLIGHT = ROOT / "scripts" / "preflight.sh"
 SMOKE = ROOT / "scripts" / "smoke_test.sh"
-PUSH_GITHUB_MIRROR = ROOT / "ci" / "push_github_mirror.sh"
-FORGEJO_MIRROR = ROOT / ".forgejo" / "workflows" / "mirror-github.yml"
 
 
 class ReleaseScriptTests(unittest.TestCase):
@@ -66,7 +64,6 @@ class ReleaseScriptTests(unittest.TestCase):
             COLLECT_RUNTIME,
             PREFLIGHT,
             SMOKE,
-            PUSH_GITHUB_MIRROR,
         ):
             subprocess.run(["bash", "-n", str(script)], check=True)
 
@@ -176,17 +173,10 @@ class ReleaseScriptTests(unittest.TestCase):
         triggers = certify.split("permissions:", 1)[0]
         self.assertNotIn("pull_request", triggers)
 
-    def test_main_release_candidate_chain_is_gated_and_automatic(self) -> None:
+    def test_github_release_candidate_is_gated_and_automatic(self) -> None:
         ci = GITHUB_CI.read_text()
         container = GITHUB_CONTAINER.read_text()
         forgejo_container = CONTAINER_WORKFLOW.read_text()
-        mirror = FORGEJO_MIRROR.read_text()
-
-        self.assertIn("branches: [main]", mirror)
-        self.assertIn("tags: ['v*']", mirror)
-        self.assertIn("secrets.EMBER_GITHUB_MIRROR_TOKEN", mirror)
-        self.assertIn("bash ci/push_github_mirror.sh", mirror)
-        self.assertIn("persist-credentials: false", mirror)
         self.assertIn("publish-candidate:", ci)
         self.assertIn(
             "needs: [invariants, build-test, sanitizers, analyzer, coverage]", ci
@@ -194,69 +184,6 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/container.yml", ci)
         self.assertIn("workflow_call:", container)
         self.assertNotIn("tags: ['v*']", forgejo_container)
-
-    def test_github_mirror_pushes_only_the_exact_allowed_ref(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = pathlib.Path(directory)
-            source = temp / "source"
-            target = temp / "target.git"
-            subprocess.run(["git", "init", "-q", "-b", "main", source], check=True)
-            subprocess.run(["git", "init", "-q", "--bare", target], check=True)
-            subprocess.run(
-                ["git", "-C", source, "config", "user.email", "ci@example.invalid"],
-                check=True,
-            )
-            subprocess.run(
-                ["git", "-C", source, "config", "user.name", "CI"], check=True
-            )
-            (source / "file").write_text("candidate\n")
-            subprocess.run(["git", "-C", source, "add", "file"], check=True)
-            subprocess.run(
-                ["git", "-C", source, "commit", "-qm", "candidate"], check=True
-            )
-            sha = subprocess.check_output(
-                ["git", "-C", source, "rev-parse", "HEAD"], text=True
-            ).strip()
-            env = os.environ | {
-                "GITHUB_SHA": sha,
-                "GITHUB_REF": "refs/heads/main",
-                "EMBER_GITHUB_MIRROR_TOKEN": "test-token",
-                "EMBER_GITHUB_MIRROR_URL": str(target),
-                "EMBER_MIRROR_TEST_MODE": "1",
-            }
-            subprocess.run(
-                ["bash", str(PUSH_GITHUB_MIRROR)], cwd=source, env=env, check=True
-            )
-            mirrored = subprocess.check_output(
-                ["git", "--git-dir", target, "rev-parse", "refs/heads/main"],
-                text=True,
-            ).strip()
-            self.assertEqual(mirrored, sha)
-
-            tag = "v2026.8.21"
-            subprocess.run(
-                ["git", "-C", source, "tag", "-am", "release", tag], check=True
-            )
-            env["GITHUB_REF"] = f"refs/tags/{tag}"
-            subprocess.run(
-                ["bash", str(PUSH_GITHUB_MIRROR)], cwd=source, env=env, check=True
-            )
-            tag_type = subprocess.check_output(
-                ["git", "--git-dir", target, "cat-file", "-t", f"refs/tags/{tag}"],
-                text=True,
-            ).strip()
-            self.assertEqual(tag_type, "tag")
-
-            env["GITHUB_REF"] = "refs/heads/feature"
-            rejected = subprocess.run(
-                ["bash", str(PUSH_GITHUB_MIRROR)],
-                cwd=source,
-                env=env,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("not eligible", rejected.stderr)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
