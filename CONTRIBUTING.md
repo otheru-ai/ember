@@ -34,10 +34,10 @@ Ember uses calendar versions in `YEAR.MONTH.DAY` form without zero-padding.
 Do not update `VERSION` or create a release tag manually. Once an immutable
 candidate passes the protected gfx1151 certification workflow, release
 automation groups the conventional commits into `CHANGELOG.md`, updates the
-version and documented image pins in a metadata-only child commit, and creates
+version and Compose image pin in a metadata-only child commit, and creates
 the matching annotated `vYEAR.MONTH.DAY` tag. The container workflow rejects a
 tag unless that commit's parent is the certified executable tree and only the
-four approved metadata files changed.
+three approved metadata files changed.
 
 Only one release is published per calendar day. If another change is needed on
 the same day, keep it on `main` and include it in the next dated release.

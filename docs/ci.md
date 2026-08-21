@@ -126,12 +126,12 @@ The certification sequence is:
    digests; they cannot be substituted at dispatch time.
 3. After the validators and generation smoke test pass, the promotion job uses
    the current UTC date (or the optional dispatch `release_version`) to generate
-   a grouped changelog, update `VERSION` and the documented image pins, and
+   a grouped changelog, update `VERSION` and the Compose image pin, and
    create an annotated tag on that metadata-only child commit. It aborts if
    `main` advanced during certification or the date has already been released.
 4. The promotion job records the certified parent SHA on GitHub and atomically
    pushes the release commit plus tag to Forgejo. The native mirror carries both
-   to GitHub. The tag workflow verifies the parent and the exact four-file
+   to GitHub. The tag workflow verifies the parent and the exact three-file
    allowlist, publishes the CalVer and `latest` GHCR tags, then creates the
    GitHub release from the new `CHANGELOG.md` section.
 
@@ -186,7 +186,7 @@ The resulting GitHub `main` push starts `.github/workflows/ci.yml`. Its
 analyzers, and coverage, then calls the reusable Container workflow. GitHub's
 built-in `GITHUB_TOKEN` publishes `dev-<sha12>` and `sha-<sha12>` to GHCR. A
 release-metadata commit skips a redundant candidate build. Its mirrored version
-tag starts Container directly; the certified-parent, four-file allowlist, and
+tag starts Container directly; the certified-parent, three-file allowlist, and
 VERSION checks must pass before the CalVer and `latest` tags are written.
 
 The promotion job runs on `ember-builder` after the protected hardware job.
@@ -202,8 +202,8 @@ Configure these GitHub repository values in addition to the runner label:
 
 Keep the deploy key write-enabled only for this repository. Never commit its
 private half or the GitHub automation token. The generated release commit is
-deliberately limited to `CHANGELOG.md`, `README.md`, `VERSION`, and
-`compose.yaml`; any other path makes both promotion and publication fail closed.
+deliberately limited to `CHANGELOG.md`, `VERSION`, and `compose.yaml`; any other
+path makes both promotion and publication fail closed.
 
 `.forgejo/workflows/container.yml` remains a manually dispatched
 disaster-recovery publisher; it no longer reacts to tags, preventing Forgejo

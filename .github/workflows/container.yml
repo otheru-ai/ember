@@ -81,7 +81,7 @@ jobs:
                 exit 1
               }
               mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | sort)
-              expected=(CHANGELOG.md README.md VERSION compose.yaml)
+              expected=(CHANGELOG.md VERSION compose.yaml)
               test "${changed[*]}" = "${expected[*]}" || {
                 printf 'release commit changed executable inputs: %s\n' "${changed[*]}"
                 exit 1

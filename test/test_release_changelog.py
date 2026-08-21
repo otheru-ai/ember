@@ -25,9 +25,7 @@ class ReleaseChangelogTests(unittest.TestCase):
             "# Changelog\n\n## Unreleased\n\n- Curated operator note.\n\n"
             "## 2026.8.10\n\n- First release.\n"
         )
-        (self.repo / "README.md").write_text(
-            "Use ghcr.io/otheru-ai/ember:2026.8.10 here.\n"
-        )
+        (self.repo / "README.md").write_text("Use the current release link.\n")
         (self.repo / "compose.yaml").write_text(
             "image: ghcr.io/otheru-ai/ember:2026.8.10\n"
         )
@@ -67,13 +65,15 @@ class ReleaseChangelogTests(unittest.TestCase):
         self.assertIn("### Added\n\n- **engine:** add faster decode", changelog)
         self.assertIn("### Fixed\n\n- **Breaking:** **server:** reject malformed output", changelog)
         self.assertEqual((self.repo / "VERSION").read_text(), "2026.8.21\n")
-        self.assertIn("ember:2026.8.21", (self.repo / "README.md").read_text())
+        self.assertEqual(
+            (self.repo / "README.md").read_text(), "Use the current release link.\n"
+        )
         self.assertIn("ember:2026.8.21", (self.repo / "compose.yaml").read_text())
         changed = subprocess.check_output(
             ["git", "diff", "--name-only"], cwd=self.repo, text=True
         ).splitlines()
         self.assertEqual(
-            sorted(changed), ["CHANGELOG.md", "README.md", "VERSION", "compose.yaml"]
+            sorted(changed), ["CHANGELOG.md", "VERSION", "compose.yaml"]
         )
 
         notes = self.run_script("notes", "--version", "2026.8.21").stdout

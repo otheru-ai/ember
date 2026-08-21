@@ -193,7 +193,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/container.yml", ci)
         self.assertIn("workflow_call:", container)
         self.assertIn('git rev-parse "$GITHUB_SHA^"', container)
-        self.assertIn("CHANGELOG.md README.md VERSION compose.yaml", container)
+        self.assertIn("CHANGELOG.md VERSION compose.yaml", container)
         self.assertIn("workflow_run:", release_notes)
         self.assertIn("conclusion == 'success'", release_notes)
         self.assertIn("ci/release_changelog.py notes", release_notes)

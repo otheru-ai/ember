@@ -14,7 +14,6 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CHANGELOG = ROOT / "CHANGELOG.md"
 VERSION = ROOT / "VERSION"
-README = ROOT / "README.md"
 COMPOSE = ROOT / "compose.yaml"
 
 VERSION_RE = re.compile(r"^(\d{4})\.([1-9]|1[0-2])\.([1-9]|[12]\d|3[01])$")
@@ -145,7 +144,6 @@ def prepare(version: str, previous_tag: str | None) -> None:
         encoding="utf-8",
     )
     VERSION.write_text(version + "\n", encoding="utf-8")
-    replace_image_version(README, old_version, version)
     replace_image_version(COMPOSE, old_version, version)
 
 

@@ -40,7 +40,8 @@ From the repository root:
 scripts/preflight.sh && docker compose up -d
 ```
 
-The first start pulls `ghcr.io/otheru-ai/ember:2026.8.10`, downloads the pinned
+The first start pulls the [current Ember release](https://github.com/otheru-ai/ember/releases/latest)
+image pinned in [`compose.yaml`](compose.yaml), downloads the pinned
 [DeepSeek-V4-Flash Strix Halo model and DSpark drafter](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF)
 (about 95 GiB combined), verifies both, and starts Ember at
 `http://127.0.0.1:8080`. Interrupted downloads resume automatically.

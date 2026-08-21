@@ -20,6 +20,8 @@ using an ambiguous same-day suffix.
   proposal pipeline instead of the slower target-expert placement experiment.
 - Kept heterogeneous inference experimental: the fixed throughput fixture
   passed, while capture-graph output equivalence remains a promotion blocker.
+- Linked README installation guidance to the current GitHub release instead of
+  embedding a version that becomes stale after every release.
 
 ## 2026.8.10
 

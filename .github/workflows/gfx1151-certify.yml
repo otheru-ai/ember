@@ -288,7 +288,7 @@ jobs:
           python3 ci/release_changelog.py prepare --version "$version"
 
           mapfile -t changed < <(git diff --name-only | sort)
-          expected=(CHANGELOG.md README.md VERSION compose.yaml)
+          expected=(CHANGELOG.md VERSION compose.yaml)
           test "${changed[*]}" = "${expected[*]}" || {
             printf 'release preparation changed unexpected files: %s\n' "${changed[*]}"
             exit 1
@@ -296,7 +296,7 @@ jobs:
 
           git config user.name ember-release
           git config user.email release@otheru.ai
-          git add CHANGELOG.md README.md VERSION compose.yaml
+          git add CHANGELOG.md VERSION compose.yaml
           git commit -m "chore(release): v$version"
           release_sha="$(git rev-parse HEAD)"
           tag="v$version"
