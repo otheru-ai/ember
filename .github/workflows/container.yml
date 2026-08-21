@@ -151,25 +151,3 @@ jobs:
             aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
             image --image-src docker --exit-code 1 \
             --severity CRITICAL --ignore-unfixed "$image"
-
-  publish-release-notes:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: release-image
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-      - name: Create the GitHub release from CHANGELOG.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          version="$(tr -d '\n' < VERSION)"
-          notes="$RUNNER_TEMP/ember-release-notes.md"
-          python3 ci/release_changelog.py notes --version "$version" >"$notes"
-          gh release create "$GITHUB_REF_NAME" \
-            --verify-tag --title "Ember $version" --notes-file "$notes"

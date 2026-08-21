@@ -19,6 +19,7 @@ CONTAINER_WORKFLOW = ROOT / ".forgejo" / "workflows" / "container.yml"
 GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
 GITHUB_CONTAINER = ROOT / ".github" / "workflows" / "container.yml"
 GITHUB_CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
+GITHUB_RELEASE_NOTES = ROOT / ".github" / "workflows" / "release-notes.yml"
 COMPOSE = ROOT / "compose.yaml"
 COMPOSE_BUILD = ROOT / "compose.build.yaml"
 COMPOSE_XDNA = ROOT / "compose.xdna.yaml"
@@ -183,6 +184,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_github_release_candidate_is_gated_and_automatic(self) -> None:
         ci = GITHUB_CI.read_text()
         container = GITHUB_CONTAINER.read_text()
+        release_notes = GITHUB_RELEASE_NOTES.read_text()
         forgejo_container = CONTAINER_WORKFLOW.read_text()
         self.assertIn("publish-candidate:", ci)
         self.assertIn(
@@ -192,8 +194,10 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("workflow_call:", container)
         self.assertIn('git rev-parse "$GITHUB_SHA^"', container)
         self.assertIn("CHANGELOG.md README.md VERSION compose.yaml", container)
-        self.assertIn("publish-release-notes:", container)
-        self.assertIn("ci/release_changelog.py notes", container)
+        self.assertIn("workflow_run:", release_notes)
+        self.assertIn("conclusion == 'success'", release_notes)
+        self.assertIn("ci/release_changelog.py notes", release_notes)
+        self.assertIn("gh release create", release_notes)
         self.assertIn("!startsWith(github.event.head_commit.message", ci)
         self.assertNotIn("tags: ['v*']", forgejo_container)
 
