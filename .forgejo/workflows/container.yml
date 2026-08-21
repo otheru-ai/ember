@@ -5,8 +5,8 @@
 name: Container
 
 on:
-  push:
-    tags: ['v*']
+  # Manual disaster-recovery publisher. Normal publication happens once on
+  # GitHub after mirror + CI, avoiding two builders racing to update GHCR tags.
   workflow_dispatch:
 
 jobs:

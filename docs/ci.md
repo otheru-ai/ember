@@ -14,13 +14,14 @@ analysis and a coverage ratchet. That is the stub-backend pipeline —
 template → encode → generate → detokenize → SSE — which is where essentially
 all server logic lives.
 
-The separate `container.yml` workflow builds through the full ROCm `dev` stage
-and publishes the minimal `release` stage on `vYEAR.MONTH.DAY` tags or manual
+After every GitHub `main` push passes all CI jobs, CI calls `container.yml` and
+automatically builds the full ROCm `dev` stage and publishes the minimal
+`release` stage as immutable `dev-<commit>` and `sha-<commit>` candidates.
+`container.yml` also runs directly on `vYEAR.MONTH.DAY` tags or manual
 dispatch. A tag-triggered build must exactly match the root `VERSION` file;
-manual builds receive a non-release `dev-<commit>` image tag. Every publish
-first checks out and tests the exact event SHA. Versioned tags additionally
-require `EMBER_GFX1151_CERTIFIED_SHA` to name that same commit after the
-differential validator has passed on target hardware.
+every publish checks out and tests the exact event SHA. Versioned tags
+additionally require `EMBER_GFX1151_CERTIFIED_SHA` to name that same commit
+after the differential validator has passed on target hardware.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
@@ -43,12 +44,13 @@ Ordered cheapest-first so a break reports in seconds.
 | Job | Gates? | What it catches |
 |---|---|---|
 | `invariants` | yes | A `src/` file in only one CMake list (the `d8ace73` bug class); a test that compiles but is never registered with ctest; a target that escapes `-Werror`. |
-| `build-test` | yes | `EMBER_STRICT=ON` (warnings-as-errors) across Release **and** Debug, then the full 38-test suite. |
+| `build-test` | yes | `EMBER_STRICT=ON` (warnings-as-errors) across Release **and** Debug, then the full test suite. |
 | `sanitizers` | yes | ASan + UBSan + LeakSanitizer over the whole suite. |
 | `analyzer` | yes | New `gcc -fanalyzer` or `cppcheck` findings. |
 | `coverage` | yes | Per-file line-coverage regression against `ci/coverage_floors.json`. |
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
-| `release-image` | release gate | Requires gfx1151 certification for version tags, validates CalVer, builds the `dev` stage, extracts the minimal runtime closure, emits SBOM/provenance, pushes version plus commit tags, reports image size, and rejects fixed critical vulnerabilities. |
+| `publish-candidate` | release-candidate gate | After every `main` CI job passes, calls the container workflow for that exact SHA. |
+| `release-image` | release gate | Publishes immutable commit candidates automatically; for version tags it additionally requires gfx1151 certification, validates CalVer, pushes version and `latest`, and rejects fixed critical vulnerabilities. |
 | `certify-gfx1151` | manual hardware gate | Verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, optional DSpark, and a live generation request on Strix Halo. |
 
 ## Runner setup
@@ -94,12 +96,14 @@ same day instead of consuming the full 24-hour queue ceiling.
 The container workflow uses only GitHub's scoped `GITHUB_TOKEN` with
 `packages: write`; no long-lived GHCR token is stored in GitHub.
 
-Run the Container workflow manually on a candidate commit before certification.
-It publishes `dev-<sha12>` and `sha-<sha12>` images with SBOM/provenance, then
-reports size and runs the critical-vulnerability gate. After the first publish,
-make the `otheru-ai/ember` GHCR package public so Compose can pull it
-anonymously. GitHub exposes no REST endpoint for this; it is a one-time manual
-step under Package settings -> Danger Zone -> Change visibility.
+Every mirrored `main` commit automatically enters Container after the complete
+GitHub CI matrix passes. It publishes `dev-<sha12>` and `sha-<sha12>` images
+with SBOM/provenance, then reports size and runs the critical-vulnerability
+gate. Manual dispatch remains available to retry a failed infrastructure build
+without creating a new commit. After the first publish, make the
+`otheru-ai/ember` GHCR package public so Compose can pull it anonymously.
+GitHub exposes no REST endpoint for this; it is a one-time manual step under
+Package settings -> Danger Zone -> Change visibility.
 
 For the hardware gate, register the Halo host as a GitHub self-hosted runner
 with labels `self-hosted`, `linux`, `x64`, and `gfx1151`. Create a GitHub
@@ -110,7 +114,9 @@ workflow deliberately refuses to stop operator services itself.
 
 The certification sequence is:
 
-1. Manually run **Container** for the candidate SHA.
+1. Push the candidate to Forgejo `main`. The mirror, GitHub CI, and immutable
+   candidate-image publication happen automatically. Wait for the `sha-*`
+   image and vulnerability scan to complete.
 2. Run **gfx1151 certification** with that full SHA, the pinned quant and
    drafter paths, a short non-sensitive prompt that produces enough output to enter
    DSpark, a separate non-sensitive prompt of at least 512 model tokens for the
@@ -153,6 +159,35 @@ match — that is the single most common reason a workflow sits queued forever.
 Actions must also be enabled for the repository: **Settings → Advanced →
 Enable Repository Actions**.
 
+### Automatic Forgejo-to-GitHub release chain
+
+`.forgejo/workflows/mirror-github.yml` mirrors Forgejo `main` and `v*` tags to
+`otheru-ai/ember` after each push. Configure one Forgejo repository secret:
+
+| Name | Kind | Required permission |
+|---|---|---|
+| `EMBER_GITHUB_MIRROR_TOKEN` | secret | Fine-grained GitHub token restricted to `otheru-ai/ember`, repository **Contents: read and write** |
+
+The workflow checks out the exact event ref with full history and invokes
+`ci/push_github_mirror.sh`. The script accepts only `refs/heads/main` and
+`refs/tags/v*`, verifies that the ref and checkout resolve to the event SHA,
+passes the credential through `GIT_ASKPASS`, performs a non-forced push, and
+reads the destination ref back. A divergence therefore fails visibly instead
+of silently replacing public history. Do not put the token in a remote URL.
+
+The resulting GitHub `main` push starts `.github/workflows/ci.yml`. Its
+`publish-candidate` job waits for invariants, both strict builds, sanitizers,
+analyzers, and coverage, then calls the reusable Container workflow. GitHub's
+built-in `GITHUB_TOKEN` publishes `dev-<sha12>` and `sha-<sha12>` to GHCR. A
+mirrored version tag starts Container directly; its certification and VERSION
+checks must pass before the CalVer and `latest` tags are written.
+
+Forgejo's native push-mirror feature is no longer required for Ember. Disable
+it after the workflow secret is installed so there is one auditable mirror
+writer. `.forgejo/workflows/container.yml` remains a manually dispatched
+disaster-recovery publisher; it no longer reacts to tags, preventing Forgejo
+and GitHub builders from racing to update the same GHCR tags.
+
 Container publishing needs a separate host runner labeled `docker-build` with
 Docker Buildx and at least 200 GiB free. Configure these repository values:
 
@@ -169,11 +204,9 @@ needs `write:packages`. This token is needed only by Forgejo—GitHub Actions us
 its built-in `GITHUB_TOKEN`. Keep the immutable CalVer and `sha-*` tags even
 though the workflows also update `latest` for discovery.
 
-The internal Forgejo repository remains the source of truth. Configure its push
-mirrors in repository settings for each public GitHub, GitLab, or Gitea target;
-use a dedicated token with repository-write permission, mirror only `main` and
-release tags, and enable synchronization after pushes. Mirror credentials stay
-in Forgejo and never enter this repository.
+The internal Forgejo repository remains the source of truth. Public GitHub
+branches and release tags are outputs of the workflow above; do not commit on
+the GitHub mirror or configure a reverse code mirror.
 
 The builder never needs `/dev/kfd`, `/dev/dri`, or model weights. The separate
 `gfx1151` runner pulls the immutable commit image and performs the hardware

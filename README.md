@@ -174,11 +174,11 @@ measured heterogeneous decode prototype. Its current division of work is:
 | CPU | DSpark routing, AVX-512 ROCMFP4 routed experts, orchestration |
 
 Two resident sessions overlap NPU proposal work for one request with GPU target
-verification for another. The best fixed-fixture Gen52 run measured a 1.484x
-aggregate throughput speedup. The correctness-first Gen53 path subsequently
+verification for another. The best fixed-fixture run measured a 1.484x
+aggregate throughput speedup. The current correctness-first path subsequently
 matched a fresh target-only reference on all 100 frozen prompts and passed all
 15 agentic cases, including a cold-start replay of the nine cases that exposed
-the old q-wide rollback bug. On that representative serial corpus it remained
+an earlier rollback bug. On that representative serial corpus it remained
 25.7% slower than target-only, so the path is still experimental and opt-in;
 it is not the default release backend.
 

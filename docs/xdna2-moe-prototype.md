@@ -5,16 +5,17 @@ and 32-tile XDNA2 NPU during DeepSeek-V4-Flash inference. The normal HIP image
 is unchanged. The `release-xdna` image is a measurement and validation vehicle,
 not yet the release-default backend.
 
-The current Gen53 placement is not the original target-expert experiment. It
-keeps the target model and authoritative q=1 prefix verifier on the GPU, assigns
-resident DSpark projection/shared-expert work to the NPU, and executes DSpark
-routing plus routed ROCMFP4 experts with explicit AVX-512 on the CPU. With two
-resident sessions, the NPU prepares one proposal while the GPU verifies another
-session. On the fixed promotion fixture this produced a measured 1.4842x
-aggregate throughput speedup with a 1.4727x one-sided 95% lower bound.
+The current correctness-first placement is not the original target-expert
+experiment. It keeps the target model and authoritative q=1 prefix verifier on
+the GPU, assigns resident DSpark projection/shared-expert work to the NPU, and
+executes DSpark routing plus routed ROCMFP4 experts with explicit AVX-512 on the
+CPU. With two resident sessions, the NPU prepares one proposal while the GPU
+verifies another session. On the fixed promotion fixture this produced a
+measured 1.4842x aggregate throughput speedup with a 1.4727x one-sided 95% lower
+bound.
 
-That result is deliberately still called a prototype. Gen53 removed the
-state-perturbing q-wide admission pass and directly commits only prefixes
+That result is deliberately still called a prototype. The current path removed
+the state-perturbing q-wide admission pass and directly commits only prefixes
 verified by the ordinary fused q=1 target graph. It matched all 100 frozen
 target-only outputs and passed the 15-case agentic suite, but was 25.7% slower
 than target-only on the representative serial corpus. The default release
@@ -27,7 +28,7 @@ measured reason target decode should stay on the fused GPU path. The historical
 sections below retain those rejected designs because they constrain the current
 architecture.
 
-> Repository scope note (2026-08-19): only the selected Gen52 resident DSpark
+> Repository scope note (2026-08-19): only the selected resident DSpark
 > implementation remains in source. Historical sections preserve measurements,
 > filenames, and reproduction commands from the images that were tested; words
 > such as "packaged" in those sections describe those past images, not the
@@ -39,20 +40,24 @@ selected-expert accelerator work—and adapts TileFuse's full 4x8 XDNA2 GEMV
 dataflow to decode Ember's byte-exact affine ROCMFP2 blocks. Provenance and
 pins are recorded in `providers/xdna2/VENDOR.md`.
 
-## Lessons carried forward from ViT-Scout
+## Lessons from earlier Strix Halo NPU experiments
 
-The design explicitly incorporates the negative and positive results in
-[Ryzen AI / Strix Halo NPU — Findings](https://git.otheru.ai/otheru/vit-scout/src/branch/main/RYZEN_AI_FINDINGS.md):
+Before Ember's NPU path was built, a separate Strix Halo vision-transformer
+experiment documented several failure modes and deployment lessons. Ember does
+not depend on that project; the original
+[Ryzen AI / Strix Halo NPU findings](https://git.otheru.ai/otheru/vit-scout/src/branch/main/RYZEN_AI_FINDINGS.md)
+are linked only as research provenance. The applicable lessons are summarized
+here:
 
 - **Correctness gates every benchmark.** A compiled xclbin, low latency, or an
-  active-NPU signal is not evidence of correct output. The legacy ViT result
+  active-NPU signal is not evidence of correct output. That earlier experiment
   timed silently uncorrelated multi-output data. Ember must compare each NPU
   projection to the ROCMFP2 host reference, then run the full differential
   validator before reporting throughput.
-- **Dispatch-heavy hybrid paths usually lose.** ViT's small custom kernels
-  reached only 0.07% of peak, and AMD's hybrid LLM artifacts were 8x slower
-  than pure NPU in one measured case. This prototype therefore uses all 32
-  compute tiles, persistent instruction/context objects, bounded persistent
+- **Dispatch-heavy hybrid paths usually lose.** Small custom kernels in that
+  experiment reached only 0.07% of peak, and AMD's hybrid LLM artifacts were 8x
+  slower than pure NPU in one measured case. This prototype therefore uses all
+  32 compute tiles, persistent instruction/context objects, bounded persistent
   weight BOs, and selective BO synchronization. Its current three launches per
   selected expert are still a known red flag; a fused expert runlist is a
   prerequisite for promotion.
