@@ -179,13 +179,7 @@ static struct timespec monotonic_deadline(double when) {
 
 // JSON-escape `s` into `b` (no surrounding quotes).
 static void json_escape_str(ember_buf *b, const char *s) {
-    for (const char *p = s; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '"' || c == '\\') { ember_buf_putc(b, '\\'); ember_buf_putc(b, (char)c); }
-        else if (c == '\n') ember_buf_puts(b, "\\n");
-        else if (c >= 0x20) ember_buf_putc(b, (char)c);
-        else ember_buf_printf(b, "\\u%04x", c);
-    }
+    ember_json_escape_content(b, s);
 }
 
 static void append_tool_loop_json(ember_buf *b, int rounds,

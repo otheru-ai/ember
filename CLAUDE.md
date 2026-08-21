@@ -15,10 +15,11 @@ The load-bearing decision: the GPU kernels and the tokenizer are *reused*
 byte-exact); everything above the forward pass is *rewritten fresh in C*.
 
 The opt-in heterogeneous prototype remains below the same ABI: the GPU owns the
-target/verifier, XDNA2 owns resident DSpark projection/shared-expert runlists,
-and AVX-512 CPU code owns draft routing and ROCMFP4 routed experts. It is not
-release-default because the fixed feature-capture fixtures pass, but the broader
-quality-equivalence corpus remains a promotion gate.
+target and authoritative q=1 prefix verifier, XDNA2 owns resident DSpark
+projection/shared-expert runlists, and AVX-512 CPU code owns draft routing and
+ROCMFP4 routed experts. Its 100-prompt and 15-case quality corpora pass, but it
+is not release-default because representative serial throughput remains 25.7%
+below target-only.
 
 ## Build & test
 

@@ -716,7 +716,7 @@ bool deepseek4_dspark_resident_prepare(
     impl->committed = committed;
     impl->seed = seed;
     // Exact-prefix verification is deliberately capped at the validated
-    // ratio-4 width.  Unlike the batched verifier it never feeds a rejected
+    // ratio-4 width. Unlike the batched verifier it never feeds a rejected
     // token, so no rollback state is required.
     impl->q = std::min({4, drafter.block_size, max_commit_tokens});
     impl->noise_embed.resize((size_t)n_embd * drafter.block_size);
@@ -934,24 +934,39 @@ bool deepseek4_dspark_resident_finish(
         return true;
     }
 
-    // Resident speculation must use the q-wide verifier to save target work.
-    // The previous strict verifier evaluated q separate target forwards, so
-    // even a perfect NPU proposal could never accelerate decode.  A partial
-    // q-wide result is only an admission signal: its different reduction
-    // topology can disagree with ordinary AR at near-tied logits, including
-    // during a q=1 prefix replay. Roll the entire attempt back and let the
-    // coordinator commit the pending token through the ordinary AR graph.
-    DeepSeek4SpecRollback rollback;
-    deepseek4_spec_rollback_save(
-        target_cache, rollback, impl->committed, (int)draft_tokens.size());
+    // The resident commit boundary is the ordinary fused q=1 target graph.
+    // A q-wide prepass was previously used as an admission filter, then rolled
+    // back before exact replay. Cold-corpus testing showed that the prepass can
+    // perturb later q=1 output even after every documented cache tensor is
+    // restored. It also adds target work. Exact prefix verification already
+    // stops at the first rejected proposal and leaves KV at the accepted
+    // frontier, so commit that prefix directly.
+    //
+    // The approximate q-wide path remains an explicit diagnostic escape hatch;
+    // it is never enabled by the packaged overlay.
+    const bool approximate_commit =
+        spec_env_flag("DFLASH_DS4_RESIDENT_APPROX_COMMIT");
     std::vector<int32_t> target_argmax;
     int verify_last = -1;
     const SpecClock::time_point verify_t0 = SpecClock::now();
-    if (!target.verify_batch(draft_tokens, impl->committed, verify_last,
-                             &target_argmax)) {
-        deepseek4_spec_rollback_apply(
-            rollback, target_w, target_cache, impl->committed, true);
-        if (error) *error = "resident DSpark batched target verification failed";
+    DeepSeek4SpecRollback rollback;
+    if (approximate_commit) {
+        deepseek4_spec_rollback_save(
+            target_cache, rollback, impl->committed,
+            (int)draft_tokens.size());
+        if (!target.verify_batch(draft_tokens, impl->committed, verify_last,
+                                 &target_argmax)) {
+            deepseek4_spec_rollback_apply(
+                rollback, target_w, target_cache, impl->committed, true);
+            if (error) *error =
+                "resident DSpark batched target verification failed";
+            return false;
+        }
+    } else if (!target.verify_exact_prefix(
+                   draft_tokens, impl->committed, verify_last,
+                   &target_argmax)) {
+        if (error) *error =
+            "resident DSpark exact prefix verification failed";
         return false;
     }
 
@@ -965,13 +980,19 @@ bool deepseek4_dspark_resident_finish(
             break;
     }
     if ((int)target_argmax.size() < accept) {
-        deepseek4_spec_rollback_apply(
-            rollback, target_w, target_cache, impl->committed, true);
+        if (approximate_commit) {
+            deepseek4_spec_rollback_apply(
+                rollback, target_w, target_cache, impl->committed, true);
+        }
         if (error) *error = "resident DSpark verifier frontier mismatch";
         return false;
     }
 
-    if (accept < (int)draft_tokens.size()) {
+    // A partial approximate block cannot be committed because q-wide logits
+    // are non-authoritative. The exact verifier, in contrast, has evaluated
+    // precisely `accept` q=1 rows and can commit that prefix, including the
+    // already-pending seed token.
+    if (approximate_commit && accept < (int)draft_tokens.size()) {
         deepseek4_spec_rollback_apply(
             rollback, target_w, target_cache, impl->committed, true);
         const double verify_ms = spec_ms_since(verify_t0);
@@ -1040,11 +1061,12 @@ bool deepseek4_dspark_resident_finish(
         std::fprintf(stderr,
                      "[ds4-resident-spec] pos=%d q=%d accept=%d "
                      "provider_age=%.1fms provider_block=%.1fms "
-                     "head=%.1fms verify=%.1fms "
+                     "head=%.1fms verify=%.1fms mode=%s "
                      "graph(build/set/compute/read)=%.1f/%.1f/%.1f/%.1fms "
                      "fused(calls/rows)=%" PRIu64 "/%" PRIu64 "\n",
                      impl->committed, impl->q, accept,
                      provider_age_ms, provider_block_ms, head_ms, verify_ms,
+                     approximate_commit ? "qwide-approx" : "q1-exact",
                      verify_telemetry.full_graph_build_us / 1000.0,
                      verify_telemetry.full_graph_set_us / 1000.0,
                      verify_telemetry.full_graph_compute_us / 1000.0,

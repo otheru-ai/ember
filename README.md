@@ -169,15 +169,18 @@ measured heterogeneous decode prototype. Its current division of work is:
 
 | Processor | Role |
 |---|---|
-| GPU | Target model, DSpark main projection, q-wide authoritative verification |
+| GPU | Target model, DSpark main projection, authoritative q=1 prefix verification |
 | NPU | Asynchronous resident DSpark projection and shared-expert pipeline |
 | CPU | DSpark routing, AVX-512 ROCMFP4 routed experts, orchestration |
 
 Two resident sessions overlap NPU proposal work for one request with GPU target
 verification for another. The best fixed-fixture Gen52 run measured a 1.484x
-aggregate throughput speedup, but a separate low-acceptance fixture exposed a
-capture-graph output difference. The path therefore remains experimental and
-opt-in; it is not the default release backend or a general quality claim.
+aggregate throughput speedup. The correctness-first Gen53 path subsequently
+matched a fresh target-only reference on all 100 frozen prompts and passed all
+15 agentic cases, including a cold-start replay of the nine cases that exposed
+the old q-wide rollback bug. On that representative serial corpus it remained
+25.7% slower than target-only, so the path is still experimental and opt-in;
+it is not the default release backend.
 
 It requires a compatible host `amdxdna` driver and firmware, enabled IOMMU,
 `/dev/accel/accel0`, and render-group access. Build and start it with:

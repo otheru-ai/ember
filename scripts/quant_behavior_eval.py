@@ -110,6 +110,21 @@ def repeated_ngram_fraction(text: str, n: int = 8) -> float:
     return repeated / len(windows)
 
 
+# Keep the corpus verdict aligned with the marker families Ember actually
+# parses (tool_parser.c:12-28). A singular illustrative tag such as
+# ``<tool_call>`` is not an executable Ember marker and must not be reported as
+# a raw DSML leak merely because a response discusses protocol design.
+RAW_TOOL_MARKUP_RE = re.compile(
+    r"</?(?:(?:｜DSML｜|DSML｜|\?DSML\?)|"
+    r"(?:tool_calls|invoke|parameter|ds_engine_tool_use)(?:\s|>))",
+    re.IGNORECASE,
+)
+
+
+def contains_raw_tool_markup(text: str) -> bool:
+    return bool(RAW_TOOL_MARKUP_RE.search(text))
+
+
 def tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
     calls = message.get("tool_calls") or []
     return calls if isinstance(calls, list) else []
@@ -196,15 +211,20 @@ def classify(case: dict[str, Any], response: dict[str, Any], latency: float) -> 
     if identifier_integrity is False:
         errors.append("one or more required identifiers changed or disappeared")
 
-    repeat_fraction = repeated_ngram_fraction(content + " " + reasoning)
+    # Visible content and hidden reasoning are separate channels. Models often
+    # draft the final sentence once in reasoning and then emit it once in
+    # content; concatenating the channels misclassifies that normal handoff as
+    # an 8-gram loop. Gate on degeneration within either channel instead.
+    repeat_fraction = max(
+        repeated_ngram_fraction(content),
+        repeated_ngram_fraction(reasoning),
+    )
     repeat_limit = float(expected.get("max_repeated_ngram_fraction", 0.20))
     repetition_detected = repeat_fraction > repeat_limit
     if repetition_detected:
         errors.append(f"repeated 8-gram fraction {repeat_fraction:.3f} exceeds {repeat_limit:.3f}")
 
-    dsml_leak = bool(
-        re.search(r"<(?:｜)?(?:DSML|tool_calls?|parameter)(?:｜|>|\s|=)", content, re.I)
-    )
+    dsml_leak = contains_raw_tool_markup(content)
     thinking_leak = "<think>" in content or "</think>" in content
     if dsml_leak:
         errors.append("raw DSML marker leaked into visible content")

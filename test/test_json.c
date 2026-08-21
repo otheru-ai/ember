@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../src/common/json.h"
+#include "../src/common/json_util.h"
 
 static int g_pass = 0, g_fail = 0;
 #define CHECK(cond, msg)                                                    \
@@ -78,10 +79,38 @@ static void test_edge_cases(void) {
     ember_json_free(pair);
 }
 
+static void check_escaped(const char *input, size_t len, const char *expected,
+                          const char *message) {
+    ember_buf b = {0};
+    ember_json_escape_n(&b, input, len);
+    CHECK(strcmp(b.ptr ? b.ptr : "", expected) == 0, message);
+    ember_json *parsed = ember_json_parse(b.ptr ? b.ptr : "");
+    CHECK(parsed != NULL, "escaped UTF-8 is parseable JSON");
+    ember_json_free(parsed);
+    ember_buf_free(&b);
+}
+
+static void test_json_output_utf8(void) {
+    check_escaped("CJK \xe4\xb8\xad emoji \xf0\x9f\x91\x8b", 18,
+                  "\"CJK \xe4\xb8\xad emoji \xf0\x9f\x91\x8b\"",
+                  "valid UTF-8 passes through unchanged");
+    check_escaped("cut \xf0\x9f", 6, "\"cut \xef\xbf\xbd\"",
+                  "truncated UTF-8 becomes one replacement character");
+    check_escaped("bad \xe2" "x", 6, "\"bad \xef\xbf\xbdx\"",
+                  "invalid continuation does not consume next codepoint");
+    check_escaped("\xed\xa0\x80", 3, "\"\xef\xbf\xbd\"",
+                  "UTF-8 surrogate encoding is replaced");
+    check_escaped("\xf4\x90\x80\x80", 4, "\"\xef\xbf\xbd\"",
+                  "codepoints above U+10FFFF are replaced");
+    check_escaped("\xc0\x80", 2, "\"\xef\xbf\xbd\"",
+                  "overlong UTF-8 is replaced");
+}
+
 int main(void) {
     printf("ember json tests\n");
     test_chat_request();
     test_edge_cases();
+    test_json_output_utf8();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

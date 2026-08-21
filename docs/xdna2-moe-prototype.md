@@ -5,19 +5,21 @@ and 32-tile XDNA2 NPU during DeepSeek-V4-Flash inference. The normal HIP image
 is unchanged. The `release-xdna` image is a measurement and validation vehicle,
 not yet the release-default backend.
 
-The current Gen52 placement is not the original target-expert experiment. It
-keeps the target model and q-wide authoritative verifier on the GPU, assigns
+The current Gen53 placement is not the original target-expert experiment. It
+keeps the target model and authoritative q=1 prefix verifier on the GPU, assigns
 resident DSpark projection/shared-expert work to the NPU, and executes DSpark
 routing plus routed ROCMFP4 experts with explicit AVX-512 on the CPU. With two
 resident sessions, the NPU prepares one proposal while the GPU verifies another
 session. On the fixed promotion fixture this produced a measured 1.4842x
 aggregate throughput speedup with a 1.4727x one-sided 95% lower bound.
 
-That result is deliberately still called a prototype. A low-acceptance fixture
-exposed output differences caused by the target feature-capture graph even
-when no NPU proposal token was committed. The default release therefore remains
-GPU DSpark, and the XDNA overlay falls back to it unless validation explicitly
-sets `DFLASH_DSPARK_XDNA_REQUIRED=1`.
+That result is deliberately still called a prototype. Gen53 removed the
+state-perturbing q-wide admission pass and directly commits only prefixes
+verified by the ordinary fused q=1 target graph. It matched all 100 frozen
+target-only outputs and passed the 15-case agentic suite, but was 25.7% slower
+than target-only on the representative serial corpus. The default release
+therefore remains GPU DSpark, and the XDNA overlay falls back to it unless
+validation explicitly sets `DFLASH_DSPARK_XDNA_REQUIRED=1`.
 
 The work began as selected target-expert offload. That research established the
 provider ABI, XRT packaging, quantized AIE kernels, ownership rules, and the
@@ -186,10 +188,10 @@ Current resident DSpark controls:
 | `DFLASH_DSPARK_XDNA_PLUGIN` | unset | Whole-draft provider `.so`; the XDNA Compose overlay supplies the packaged module |
 | `DFLASH_DSPARK_XDNA_REQUIRED` | `0` | Fail rather than fall back to GPU DSpark |
 | `DFLASH_DSPARK_XDNA_GPU_MAIN` | `1` in overlay | Keep DSpark `main_proj`/`main_norm` on the GPU and submit the draft-layer body |
-| `DFLASH_DS4_FUSED_VERIFY` | `1` in overlay | Use the q-wide fused target verifier required for the measured resident speedup |
 | `DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS` | `4` in overlay | Rebuild four exact support-feature rows in an isolated cache without changing authoritative sparse prefill; `0` restores approximate layer-major capture |
 | `DFLASH_DS4_TIMING` | `0` | Report proposal age, blocking provider wait, tied-head, and verifier timing |
 | `DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` | `0` | Experimental admission threshold; keep disabled pending corpus calibration |
+| `DFLASH_DS4_RESIDENT_APPROX_COMMIT` | `0` | Unsafe diagnostic q-wide commit path; never use for serving or quality gates |
 | `EMBER_XDNA_BATCH_SESSIONS` | `2` in overlay | Compose-only resident session count used for overlap |
 | `EMBER_XDNA_ARTIFACT_DIR` | packaged path | xclbin and instruction directory |
 
@@ -1629,3 +1631,48 @@ method proven observationally equivalent to ordinary prefill. The optional
 `DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI` admission threshold defaults to zero;
 first-block confidence was anti-correlated on the two measured fixtures and
 must not be enabled as a quality heuristic without a broader calibration set.
+
+### Gen53 exact-prefix corpus result
+
+The broader frozen corpus invalidated q-wide verification as a resident commit
+or admission boundary. A fresh target-only run completed all 100 prompts with
+valid UTF-8. The q-wide-prefilter candidate completed every request and used
+the NPU on every row, but nine outputs differed deterministically from that
+fresh reference, including four cases whose first block accepted no proposal
+token. Repeating those nine cases reproduced every difference. The prepass had
+therefore changed later target execution despite restoring the documented KV,
+compressor, raw-ring, and HC tensors; warming a different graph sequence had
+hidden the problem in the earlier fixed-fixture comparison.
+
+Gen53 removes that prepass from the default path. It evaluates proposed rows
+through the same fused q=1 graph as ordinary resident AR, stops before feeding
+the first rejected candidate, and directly commits the exact prefix already in
+KV. `DFLASH_DS4_RESIDENT_APPROX_COMMIT=1` retains q-wide commit only as an
+unsafe diagnostic. A cold replay of the nine exposed cases then matched the
+fresh target reference exactly, followed by a full 100/100 exact comparison:
+
+| frozen 100-prompt corpus | target-only | Gen53 XDNA |
+| --- | ---: | ---: |
+| completed / errors | 100 / 0 | 100 / 0 |
+| invalid UTF-8 rows | 0 | 0 |
+| exact output matches | reference | 100 / 100 |
+| wall throughput | 20.031 tok/s | 14.876 tok/s |
+| mean backend decode | 24.537 tok/s | 22.032 tok/s |
+| speculative rows / cycles | 0 / 0 | 100 / 173 |
+
+The HTTP JSON boundary now replaces a truncated or malformed model byte
+sequence with U+FFFD, which removed the earlier invalid-UTF-8 `case_030`
+artifact in both arms. The agentic evaluator also stopped concatenating hidden
+reasoning with visible content for repetition detection: drafting a sentence
+once internally and emitting it once is not a loop. Repetition is now gated
+independently within each channel. With that false positive removed and the
+nested-markup prompt made unambiguous, the XDNA run passed all 15 agentic
+cases; the saved target responses reclassify 15/15 under the same rule.
+
+This clears the representative correctness gate but not the release throughput
+gate. Gen53 was 25.7% slower than target-only in the serial corpus even though
+its exact-only verifier improves on the q-wide-plus-replay design. The prior
+1.4842x result remains valid for its high-acceptance, two-session overlap
+fixture, but it cannot justify enabling XDNA by default for the broader request
+mix. The overlay stays opt-in until proposal acceptance or scheduling improves
+without weakening the q=1 authority boundary.

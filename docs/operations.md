@@ -116,12 +116,14 @@ correctness/performance gates that must reject fallback. The slower XDNA
 target-expert provider and its historical kernel generations have been removed;
 their measurements remain in the research guide.
 
-The XDNA overlay defaults to the fused q-wide verifier and a four-row exact
-shadow capture. The latter never changes authoritative sparse prefill. The
-fixed accepted/rejected fixtures are token-exact and the full two-session gate
-cleared its 1.10x lower-bound requirement; keep the overlay experimental until
-the broader quality corpus in
-[`xdna2-moe-prototype.md`](xdna2-moe-prototype.md) passes.
+The XDNA overlay defaults to authoritative q=1 prefix verification and a
+four-row exact shadow capture. The latter never changes authoritative sparse
+prefill. The 100-prompt frozen corpus and 15-case agentic suite pass, including
+a cold replay of the cases that exposed q-wide rollback differences. Keep the
+overlay experimental because the representative serial corpus remains 25.7%
+slower than target-only; the fixed high-acceptance two-session fixture is not a
+sufficient release-throughput gate. See
+[`xdna2-moe-prototype.md`](xdna2-moe-prototype.md) for the measurements.
 
 ## Reproducible model acquisition
 

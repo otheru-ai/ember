@@ -74,7 +74,39 @@ def main() -> int:
     result = MODULE.classify(leak_case, leak_response, 1.0)
     assert result["dsml_leak_detected"] is True
     assert result["success"] is False
+    leak_response["choices"][0]["message"]["content"] = (
+        "A plain XML degradation <tool_calls> is also executable markup"
+    )
+    result = MODULE.classify(leak_case, leak_response, 1.0)
+    assert result["dsml_leak_detected"] is True
+    leak_response["choices"][0]["message"]["content"] = (
+        "An illustrative <tool_call> tag is not an Ember protocol marker"
+    )
+    result = MODULE.classify(leak_case, leak_response, 1.0)
+    assert result["dsml_leak_detected"] is False
+    assert result["success"] is True
     assert MODULE.repeated_ngram_fraction("short text") == 0.0
+
+    draft = " ".join(f"word{index}" for index in range(40))
+    repetition_case = {
+        "id": "repetition",
+        "messages": [{"role": "user", "content": "x"}],
+        "expect": {"max_repeated_ngram_fraction": 0.10},
+    }
+    repetition_response = {
+        "choices": [{
+            "finish_reason": "stop",
+            "message": {"content": draft, "reasoning_content": draft},
+        }]
+    }
+    result = MODULE.classify(repetition_case, repetition_response, 1.0)
+    assert result["repetition_detected"] is False
+    repetition_response["choices"][0]["message"]["reasoning_content"] = (
+        "one two three four five six seven eight " * 6
+    )
+    result = MODULE.classify(repetition_case, repetition_response, 1.0)
+    assert result["repetition_detected"] is True
+    assert result["success"] is False
 
     payload_case = {
         "id": "route",

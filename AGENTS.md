@@ -19,10 +19,11 @@ forward pass is **rewritten fresh in C** in this repo. This is a *server rewrite
 with a kernel bridge*, not a kernel rewrite.
 
 The opt-in `release-xdna` prototype adds a second provider seam below the
-backend ABI. Its measured Gen52 placement keeps the target/verifier on the GPU,
-runs resident DSpark projection/shared-expert work on XDNA2, and runs routing
-plus ROCMFP4 experts through AVX-512 CPU code. It is not release-default: a
-capture-graph quality difference remains an explicit promotion blocker.
+backend ABI. Its measured Gen53 placement keeps the target and authoritative
+q=1 prefix verifier on the GPU, runs resident DSpark projection/shared-expert
+work on XDNA2, and runs routing plus ROCMFP4 experts through AVX-512 CPU code.
+Its 100-prompt and 15-case quality corpora pass, but it is not release-default:
+representative serial throughput remains 25.7% below target-only.
 
 The published full-ROCMFP affine fp2 model (85.3 GiB, 2.58 bpw) meets
 the Strix-Halo reference benchmarks (~248–253 tok/s sparse prefill, ~32 tok/s

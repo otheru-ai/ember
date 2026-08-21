@@ -367,11 +367,11 @@ opt-in `release-xdna` image adds a versioned DSpark provider seam below the
 backend ABI; HTTP, model semantics, snapshots, and the target model do not know
 about XRT.
 
-The current Gen52 resident placement assigns work by measured strength:
+The current Gen53 resident placement assigns work by measured strength:
 
 | Processor | Owned work |
 |---|---|
-| gfx1151 GPU | Target prefill/decode, attention and target MoE, DSpark main projection, q-wide verification |
+| gfx1151 GPU | Target prefill/decode, attention and target MoE, DSpark main projection, authoritative q=1 prefix verification |
 | XDNA2 NPU | Resident Q8 DSpark projection and shared-expert AIE runlists |
 | Zen 5 CPU | Draft routing, AVX-512 ROCMFP4 routed experts, accumulation, XRT/HIP ordering |
 
@@ -379,10 +379,11 @@ Each eligible resident session owns an asynchronous proposal job and captured
 target-feature window. Sparse prefill remains on the target-only graph; an
 isolated spare cache rebuilds four exact q=1 support rows, so capture cannot
 perturb target logits or KV. The coordinator submits NPU work for one session
-while the GPU verifies another, then commits only tokens accepted by the GPU's
-authoritative q-wide verifier. A provider initialization or execution failure
-falls back to ordinary GPU DSpark unless `DFLASH_DSPARK_XDNA_REQUIRED=1` makes
-the validation boundary fail closed.
+while the GPU verifies another, then commits only the prefix accepted by the
+ordinary fused q=1 target graph. A q-wide prefilter was rejected because it
+perturbed cold-start output even after rollback. A provider initialization or
+execution failure falls back to ordinary GPU DSpark unless
+`DFLASH_DSPARK_XDNA_REQUIRED=1` makes the validation boundary fail closed.
 
 Strix Halo's unified physical memory does not make HIP and XRT ownership
 implicit. The CPU orders completion and synchronization; provider weights and
@@ -390,11 +391,13 @@ buffers still cross explicit runtime ownership boundaries. Direct HIP/XRT
 dma-buf interoperability has been validated, but it does not create autonomous
 GPU-to-NPU dispatch—the CPU remains the command and fence authority.
 
-This path has a measured two-session throughput win and the shadow-capture path
-is observationally equivalent on both the accepted and rejected fixed
-fixtures. It remains an optional overlay until a representative output-quality
-corpus clears the same gate. The complete measurements, rejected placements,
-and promotion gates are in
+This path has a measured high-acceptance two-session throughput win. Its direct
+q=1 commit path also matched a fresh target-only reference on the 100-prompt
+frozen corpus and passed the 15-case agentic suite, including cold-start
+coverage. The same representative serial corpus measured 14.876 tok/s against
+20.031 tok/s target-only, so the optional overlay still fails the release
+throughput gate. The complete measurements, rejected placements, and promotion
+gates are in
 [`docs/xdna2-moe-prototype.md`](docs/xdna2-moe-prototype.md).
 
 ## Deployment architecture
