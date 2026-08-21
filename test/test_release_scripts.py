@@ -169,7 +169,14 @@ class ReleaseScriptTests(unittest.TestCase):
             certify,
         )
         self.assertIn("org.opencontainers.image.revision", certify)
-        self.assertNotIn("actions/checkout", certify)
+        certify_job = certify.split("\n  promote:", 1)[0]
+        self.assertNotIn("actions/checkout", certify_job)
+        self.assertIn("Promote certified candidate", certify)
+        self.assertIn("ci/release_changelog.py prepare", certify)
+        self.assertIn("git push --atomic", certify)
+        self.assertIn("FORGEJO_RELEASE_SSH_KEY", certify)
+        self.assertIn("StrictHostKeyChecking=yes", certify)
+        self.assertIn("RELEASE_AUTOMATION_TOKEN", certify)
         triggers = certify.split("permissions:", 1)[0]
         self.assertNotIn("pull_request", triggers)
 
@@ -183,6 +190,11 @@ class ReleaseScriptTests(unittest.TestCase):
         )
         self.assertIn("uses: ./.github/workflows/container.yml", ci)
         self.assertIn("workflow_call:", container)
+        self.assertIn('git rev-parse "$GITHUB_SHA^"', container)
+        self.assertIn("CHANGELOG.md README.md VERSION compose.yaml", container)
+        self.assertIn("publish-release-notes:", container)
+        self.assertIn("ci/release_changelog.py notes", container)
+        self.assertIn("!startsWith(github.event.head_commit.message", ci)
         self.assertNotIn("tags: ['v*']", forgejo_container)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:

@@ -130,7 +130,7 @@ jobs:
     # A mirrored main commit reaches GHCR only after every public CI gate has
     # passed. The called workflow repeats the compact source gate against the
     # exact publish SHA before building the expensive ROCm image.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
     needs: [invariants, build-test, sanitizers, analyzer, coverage]
     permissions:
       contents: read

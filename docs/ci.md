@@ -20,8 +20,10 @@ automatically builds the full ROCm `dev` stage and publishes the minimal
 `container.yml` also runs directly on `vYEAR.MONTH.DAY` tags or manual
 dispatch. A tag-triggered build must exactly match the root `VERSION` file;
 every publish checks out and tests the exact event SHA. Versioned tags
-additionally require `EMBER_GFX1151_CERTIFIED_SHA` to name that same commit
-after the differential validator has passed on target hardware.
+must point to a metadata-only release commit whose parent is named by
+`EMBER_GFX1151_CERTIFIED_SHA` after the differential validator has passed on
+target hardware. This keeps every executable input identical to the certified
+candidate while allowing automation to update the version and notes.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
@@ -50,8 +52,8 @@ Ordered cheapest-first so a break reports in seconds.
 | `coverage` | yes | Per-file line-coverage regression against `ci/coverage_floors.json`. |
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
 | `publish-candidate` | release-candidate gate | After every `main` CI job passes, calls the container workflow for that exact SHA. |
-| `release-image` | release gate | Publishes immutable commit candidates automatically; for version tags it additionally requires gfx1151 certification, validates CalVer, pushes version and `latest`, and rejects fixed critical vulnerabilities. |
-| `certify-gfx1151` | manual hardware gate | Verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, optional DSpark, and a live generation request on Strix Halo. |
+| `release-image` | release gate | Publishes immutable commit candidates automatically; for version tags it verifies the metadata-only child of the certified gfx1151 tree, validates CalVer, pushes version and `latest`, and rejects fixed critical vulnerabilities. |
+| `certify-gfx1151` | manual hardware gate | Verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, optional DSpark, and a live generation request on Strix Halo. A successful run automatically promotes the candidate. |
 
 ## Runner setup
 
@@ -122,10 +124,16 @@ The certification sequence is:
    DSpark, a separate non-sensitive prompt of at least 512 model tokens for the
    disk round trip. The workflow itself pins and verifies both published
    digests; they cannot be substituted at dispatch time.
-3. After the validators and generation smoke test pass, set the GitHub
-   repository variable `EMBER_GFX1151_CERTIFIED_SHA` to the full SHA.
-4. Create and mirror the matching `vYEAR.MONTH.DAY` tag. The tag workflow
-   refuses any other SHA and publishes the CalVer and `latest` GHCR tags.
+3. After the validators and generation smoke test pass, the promotion job uses
+   the current UTC date (or the optional dispatch `release_version`) to generate
+   a grouped changelog, update `VERSION` and the documented image pins, and
+   create an annotated tag on that metadata-only child commit. It aborts if
+   `main` advanced during certification or the date has already been released.
+4. The promotion job records the certified parent SHA on GitHub and atomically
+   pushes the release commit plus tag to Forgejo. The native mirror carries both
+   to GitHub. The tag workflow verifies the parent and the exact four-file
+   allowlist, publishes the CalVer and `latest` GHCR tags, then creates the
+   GitHub release from the new `CHANGELOG.md` section.
 
 The self-hosted runner needs Docker, `curl`, Python 3, `/dev/kfd`, `/dev/dri`,
 and read access to the model and validation prompt. The workflow pulls the
@@ -177,8 +185,25 @@ The resulting GitHub `main` push starts `.github/workflows/ci.yml`. Its
 `publish-candidate` job waits for invariants, both strict builds, sanitizers,
 analyzers, and coverage, then calls the reusable Container workflow. GitHub's
 built-in `GITHUB_TOKEN` publishes `dev-<sha12>` and `sha-<sha12>` to GHCR. A
-mirrored version tag starts Container directly; its certification and VERSION
-checks must pass before the CalVer and `latest` tags are written.
+release-metadata commit skips a redundant candidate build. Its mirrored version
+tag starts Container directly; the certified-parent, four-file allowlist, and
+VERSION checks must pass before the CalVer and `latest` tags are written.
+
+The promotion job runs on `ember-builder` after the protected hardware job.
+Configure these GitHub repository values in addition to the runner label:
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `RELEASE_AUTOMATION_TOKEN` | secret | Fine-grained GitHub token restricted to this repository with Actions variables read/write. |
+| `FORGEJO_RELEASE_SSH_KEY` | secret | Private half of a repository-scoped, write-enabled Forgejo deploy key. |
+| `FORGEJO_SSH_HOST_KEYS` | secret | Pinned SSH host keys for the source-of-truth Forgejo endpoint. |
+| `FORGEJO_RELEASE_REMOTE` | variable | Source-of-truth SSH URL, currently `ssh://git@git.otheru.ai:2222/otheru/ember.git`. |
+| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Managed by promotion; the executable-tree SHA accepted by the tag publisher. |
+
+Keep the deploy key write-enabled only for this repository. Never commit its
+private half or the GitHub automation token. The generated release commit is
+deliberately limited to `CHANGELOG.md`, `README.md`, `VERSION`, and
+`compose.yaml`; any other path makes both promotion and publication fail closed.
 
 `.forgejo/workflows/container.yml` remains a manually dispatched
 disaster-recovery publisher; it no longer reacts to tags, preventing Forgejo
@@ -191,7 +216,7 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 |---|---|---|
 | `EMBER_REGISTRY` | variable | `ghcr.io` |
 | `EMBER_IMAGE` | variable | `otheru-ai/ember` |
-| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full commit SHA that passed target validation |
+| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full executable-tree SHA that passed target validation (managed automatically) |
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
 

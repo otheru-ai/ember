@@ -31,10 +31,13 @@ agree that your contribution is licensed under the repository's MIT license.
 ## Release versions
 
 Ember uses calendar versions in `YEAR.MONTH.DAY` form without zero-padding.
-Before cutting a release, update the root `VERSION` file and add the matching
-dated section to `CHANGELOG.md`. Create a signed or annotated Git tag by adding
-`v` to that exact value (for example, `v2026.8.10`). The container workflow
-rejects release tags that do not match `VERSION`.
+Do not update `VERSION` or create a release tag manually. Once an immutable
+candidate passes the protected gfx1151 certification workflow, release
+automation groups the conventional commits into `CHANGELOG.md`, updates the
+version and documented image pins in a metadata-only child commit, and creates
+the matching annotated `vYEAR.MONTH.DAY` tag. The container workflow rejects a
+tag unless that commit's parent is the certified executable tree and only the
+four approved metadata files changed.
 
 Only one release is published per calendar day. If another change is needed on
 the same day, keep it on `main` and include it in the next dated release.

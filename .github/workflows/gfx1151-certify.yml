@@ -28,6 +28,10 @@ on:
         required: true
         default: '18080'
         type: string
+      release_version:
+        description: Optional YEAR.M.D override; defaults to the current UTC date
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -245,5 +249,98 @@ jobs:
             echo
             echo "Certified source SHA: \`$TARGET_SHA\`"
             echo
-            echo 'Set the repository variable EMBER_GFX1151_CERTIFIED_SHA to this full SHA before creating its version tag.'
+            echo 'Release promotion will now generate the changelog and tag automatically.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Promote certified candidate
+    needs: certify
+    runs-on: [self-hosted, ember-builder]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate release metadata and publish the source-of-truth tag
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          REQUESTED_VERSION: ${{ inputs.release_version }}
+          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          FORGEJO_RELEASE_SSH_KEY: ${{ secrets.FORGEJO_RELEASE_SSH_KEY }}
+          FORGEJO_SSH_HOST_KEYS: ${{ secrets.FORGEJO_SSH_HOST_KEYS }}
+          FORGEJO_RELEASE_REMOTE: ${{ vars.FORGEJO_RELEASE_REMOTE }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'HEAD^{commit}')" = "$TARGET_SHA"
+          test "$(git rev-parse 'origin/main^{commit}')" = "$TARGET_SHA" || {
+            echo 'main advanced after certification began; certify the new tip instead'
+            exit 1
+          }
+          test -n "$RELEASE_AUTOMATION_TOKEN"
+          test -n "$FORGEJO_RELEASE_SSH_KEY"
+          test -n "$FORGEJO_SSH_HOST_KEYS"
+          test -n "$FORGEJO_RELEASE_REMOTE"
+
+          version="${REQUESTED_VERSION:-$(date -u +%Y.%-m.%-d)}"
+          python3 ci/release_changelog.py prepare --version "$version"
+
+          mapfile -t changed < <(git diff --name-only | sort)
+          expected=(CHANGELOG.md README.md VERSION compose.yaml)
+          test "${changed[*]}" = "${expected[*]}" || {
+            printf 'release preparation changed unexpected files: %s\n' "${changed[*]}"
+            exit 1
+          }
+
+          git config user.name ember-release
+          git config user.email release@otheru.ai
+          git add CHANGELOG.md README.md VERSION compose.yaml
+          git commit -m "chore(release): v$version"
+          release_sha="$(git rev-parse HEAD)"
+          tag="v$version"
+          git tag -a "$tag" -m "Ember $version" \
+            -m "Certified-Parent: $TARGET_SHA"
+
+          # The tag publisher treats this repository variable as the
+          # authoritative record of which executable tree passed on gfx1151.
+          payload="$(CERTIFIED_SHA="$TARGET_SHA" python3 -c \
+            'import json, os; print(json.dumps({"name":"EMBER_GFX1151_CERTIFIED_SHA","value":os.environ["CERTIFIED_SHA"]}))')"
+          curl --fail --silent --show-error \
+            -X PATCH \
+            -H "Authorization: Bearer $RELEASE_AUTOMATION_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            -H 'Content-Type: application/json' \
+            --data "$payload" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/EMBER_GFX1151_CERTIFIED_SHA"
+
+          ssh_dir="$RUNNER_TEMP/ember-release-ssh-$GITHUB_RUN_ID"
+          cleanup() {
+            rm -f -- "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+            rmdir -- "$ssh_dir" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          umask 077
+          mkdir "$ssh_dir"
+          printf '%s\n' "$FORGEJO_RELEASE_SSH_KEY" >"$ssh_dir/id_ed25519"
+          printf '%s\n' "$FORGEJO_SSH_HOST_KEYS" >"$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/id_ed25519" "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+          test "$(git ls-remote "$FORGEJO_RELEASE_REMOTE" refs/heads/main | cut -f1)" = "$TARGET_SHA"
+          test -z "$(git ls-remote "$FORGEJO_RELEASE_REMOTE" "refs/tags/$tag")" || {
+            echo "$tag already exists on Forgejo"
+            exit 1
+          }
+          git push --atomic "$FORGEJO_RELEASE_REMOTE" \
+            "HEAD:refs/heads/main" "refs/tags/$tag:refs/tags/$tag"
+
+          {
+            echo '## Release promoted'
+            echo
+            echo "Version: \`$version\`"
+            echo "Certified source: \`$TARGET_SHA\`"
+            echo "Release commit: \`$release_sha\`"
+            echo "Tag: \`$tag\`"
           } >> "$GITHUB_STEP_SUMMARY"

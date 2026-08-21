@@ -436,6 +436,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_scripts.py)
   set_tests_properties(release_scripts PROPERTIES TIMEOUT 20)
   add_test(
+    NAME release_changelog
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_changelog.py)
+  set_tests_properties(release_changelog PROPERTIES TIMEOUT 20)
+  add_test(
     NAME mirror_gh_issues
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mirror_gh_issues.py)

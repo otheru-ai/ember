@@ -15,9 +15,9 @@ using an ambiguous same-day suffix.
   reach Ember while preserving the unauthenticated loopback default.
 - Added `EMBER_VERIFY_EXISTING_SHA256=0` for trusted immutable model stores;
   downloaded artifacts remain pinned and checksum-verified before promotion.
-- Integrated and documented the opt-in Gen52 CPU/GPU/XDNA2 resident DSpark
+- Integrated and documented the opt-in CPU/GPU/XDNA2 resident DSpark
   prototype. The XDNA Compose overlay now selects the measured two-session
-  proposal pipeline instead of the slower historical target-expert placement.
+  proposal pipeline instead of the slower target-expert placement experiment.
 - Kept heterogeneous inference experimental: the fixed throughput fixture
   passed, while capture-graph output equivalence remains a promotion blocker.
 
