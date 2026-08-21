@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
+    - ember-builder
     - gfx1151

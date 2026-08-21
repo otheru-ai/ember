@@ -1,0 +1,88 @@
+# Mirror public GitHub issues into the internal Forgejo repository.
+#
+# Issues arrive on the published GitHub mirror but the source of truth lives in
+# Forgejo, and issues are not git objects -- no remote configuration will ever
+# carry them across. Forgejo cannot pull them either: marking a repository as a
+# mirror greys out issue migration (forgejo#4962) and interval sync is an open
+# request with no implementation (forgejo#5367).
+#
+# The copy therefore runs here, on the self-hosted builder, because that host
+# is already on the tailnet that git.otheru.ai lives on. GitHub never needs a
+# route inward -- no webhook, no public ingress for Forgejo -- because the
+# runner reaches out. That is also why this is event-driven rather than polled;
+# the hourly schedule exists only to reconcile what arrived while the runner
+# was offline.
+#
+# Safety notes for anyone editing this file:
+#   * `issues` and `issue_comment` always execute the workflow definition from
+#     the default branch, so no fork-authored code runs on the builder here.
+#     Do not add a `pull_request` trigger -- see docs/ci.md.
+#   * Issue titles and bodies are attacker-controlled text from a public repo.
+#     Nothing from `github.event` is interpolated into `run:`; the script reads
+#     the payload file itself and trusts only the integer issue number.
+name: Mirror issues to Forgejo
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited]
+  schedule:
+    # Hourly reconcile. GitHub disables scheduled workflows after 60 days of
+    # repository inactivity; a manual dispatch re-arms them.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report intended writes without changing Forgejo
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: read
+
+# One writer at a time. The volume never justifies parallelism, and serialising
+# removes any chance of two events racing on the same mirrored issue.
+concurrency:
+  group: mirror-issues
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    # `issue_comment` also fires for pull request comments; those are not issues
+    # and have nothing to mirror.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request == null
+    runs-on: [self-hosted, ember-builder]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Mirror issues into Forgejo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A secret rather than a variable: `vars` are not redacted from
+          # logs, and this repository's Actions logs are world-readable
+          # while git.otheru.ai is not in public DNS.
+          FORGEJO_URL: ${{ secrets.FORGEJO_URL }}
+          FORGEJO_REPO: ${{ vars.FORGEJO_REPO }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          FORGEJO_CA_BUNDLE: ${{ vars.FORGEJO_CA_BUNDLE }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=()
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch) args+=(--all) ;;
+            *)                          args+=(--event-path "$EVENT_PATH") ;;
+          esac
+          # An `if` rather than `cond && action`: under `set -e` the latter is
+          # only safe while it is not the last statement in the block.
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          python3 ci/mirror_gh_issues.py "${args[@]}"
