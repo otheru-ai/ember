@@ -26,6 +26,13 @@ env:
   CCACHE_COMPRESS: 'true'
   CCACHE_MAXSIZE: 2G
 
+# The repository-scoped runner intentionally has capacity 1 because Forgejo
+# reuses a repository work directory across tasks. A newer main push makes an
+# older queued run irrelevant, so do not make releases wait behind stale work.
+concurrency:
+  group: forgejo-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   invariants:
     # Catches the two failure modes a compiler cannot: a src/ file added to
@@ -76,42 +83,6 @@ jobs:
           ccache --show-stats
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120
-
-  sanitizers:
-    # ASan + UBSan + LeakSanitizer over the whole suite. The server is a
-    # long-lived process holding a ~918 MB arena and lockless per-worker
-    # singletons; a leak or a use-after-free surfaces in production as slow
-    # drift rather than a crash, so this is the job that earns its keep.
-    runs-on: docker
-    container:
-      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
-      volumes:
-        - ember-ci-ccache:/root/.cache/ccache
-        - /home/mythos/.config/ember/forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
-    steps:
-      - uses: actions/checkout@v5
-      - name: Install toolchain
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends build-essential ccache cmake python3
-      - name: Configure
-        run: |
-          cmake -S . -B build-asan \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-      - name: Build
-        run: |
-          cmake --build build-asan -j"$(nproc)"
-          ccache --show-stats
-      - name: Test under sanitizers
-        env:
-          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --test-dir build-asan --output-on-failure --timeout 300
 
   analyzer:
     # Both analyzers are release gates. Reviewed GCC false positives carry

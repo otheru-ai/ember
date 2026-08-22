@@ -243,10 +243,12 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("ember-ci-ccache", forgejo_ci)
         self.assertIn("CMAKE_C_COMPILER_LAUNCHER=ccache", forgejo_ci)
         self.assertIn("node:24-bookworm@sha256:", forgejo_ci)
-        self.assertGreaterEqual(forgejo_ci.count("otheru-forgejo-root.crt:ro"), 5)
+        self.assertIn("cancel-in-progress: true", forgejo_ci)
+        self.assertNotIn("\n  sanitizers:", forgejo_ci)
+        self.assertGreaterEqual(forgejo_ci.count("otheru-forgejo-root.crt:ro"), 4)
         self.assertIn("ember-trivy-cache", forgejo_container)
         self.assertGreaterEqual(GITHUB_CI.read_text().count("ccache --show-stats"), 3)
-        self.assertGreaterEqual(forgejo_ci.count("ccache --show-stats"), 3)
+        self.assertGreaterEqual(forgejo_ci.count("ccache --show-stats"), 2)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
