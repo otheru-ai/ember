@@ -1,6 +1,6 @@
 services:
   ember:
-    image: ${EMBER_IMAGE_REF:-ghcr.io/otheru-ai/ember:2026.8.10}
+    image: ${EMBER_IMAGE_REF:-ghcr.io/otheru-ai/ember:2026.8.22}
     pull_policy: always
     init: true
     network_mode: host

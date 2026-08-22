@@ -11,6 +11,10 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.8.22
+
+### Curated notes
+
 - Added `--host` and `EMBER_HOST` so trusted container/Kubernetes gateways can
   reach Ember while preserving the unauthenticated loopback default.
 - Added `EMBER_VERIFY_EXISTING_SHA256=0` for trusted immutable model stores;
@@ -36,6 +40,97 @@ using an ambiguous same-day suffix.
   for seven days and using direct I/O on cache misses, preventing the 96 GiB
   checksum pass from consuming UMA and disabling monolithic DSpark validation.
 
+### Added
+
+- **release:** automate gfx1151 certification (`62205ed3`)
+- **release:** automate certified promotion (`324956c7`)
+- **ci:** automate candidate release chain (`a44a8205`)
+- **ci:** mirror GitHub issues to Forgejo (`ad46d678`)
+- **release:** finish deployment controls and XDNA docs (`4c37043a`)
+- **xdna:** validate asynchronous DSpark provider (`1b439f8f`)
+- **xdna:** schedule weighted expert runlists (`666c612d`)
+- **xdna:** add async DSpark draft provider seam (`ac541642`)
+- **xdna:** package ROCMFP2 XRT prototype (`e6f98a8d`)
+- **engine:** prototype XDNA2 expert offload (`d41d2642`)
+
+### Fixed
+
+- **release:** compare sorted metadata paths (`fff01830`)
+- **ci:** mount Forgejo CA in job containers (`4f64a037`)
+- **release:** quiesce production supervisor (`27a9effb`)
+- **ci:** make IOMMU preflight explicit (`3803c075`)
+- **release:** avoid stale README version (`9b918f43`)
+- **ci:** isolate release note permissions (`39de69f2`)
+- **ci:** use native Forgejo push mirror (`d0ddd613`)
+- **engine:** make XDNA corpus target-exact (`7472ac92`)
+- **engine:** make resident XDNA acceptance target-exact (`6d0cb138`)
+- **engine:** classify custom clamp types (`83a7b839`)
+- **engine:** isolate resident graphs and XDNA context (`115d3a79`)
+- **xdna:** validate mmap-backed model path (`907d0064`)
+- **ci:** let the vulnerability scanner reach its database (`0e57f256`)
+- **docker:** declare the image source so GHCR links the package (`0c33af6b`)
+- **ci:** give the BuildKit container a working network (`3df0939a`)
+- **release:** publish the container image where the docs promise it (`3ab6fada`)
+
+### Performance
+
+- **release:** cache model verification and expose hits (`a629fb25`)
+- **release:** cache builds and preserve UMA capacity (`f2627063`)
+- **engine:** batch resident verification safely (`06d15d7b`)
+- **xdna:** attribute resident pipeline phases (`5a3171c1`)
+- **xdna:** gate resident promotion by confidence (`d7d604b0`)
+- **xdna:** capture current design control (`56c25ad2`)
+- **xdna:** pipeline resident draft proposals (`6f8ba53c`)
+- **xdna:** vectorize draft routed experts on CPU (`0c98d313`)
+- **xdna:** keep draft Q8 stages resident (`cdec0696`)
+- **engine:** fuse DSpark context KV on GPU (`4cbba655`)
+- **xdna:** unify draft projection overlay (`358e1794`)
+- **xdna:** keep draft projections on fixed overlay (`732be598`)
+- **xdna:** parallelize DSpark CPU reductions (`3b830cab`)
+- **engine:** measure GPU DSpark preprojection (`54270615`)
+- **engine:** stage DSpark main projection on GPU (`f9f9d141`)
+- **xdna:** reuse weights across draft context (`4fc7f551`)
+- **xdna:** measure task-blocked Q8 projections (`a449b3ec`)
+- **xdna:** add compensated Q8 draft shared expert (`efad17c8`)
+- **xdna:** mask routed rows in gen8 (`5c97cd24`)
+- **xdna:** add five-row ROCMFP4 expert kernel (`6d3b7acb`)
+- **engine:** measure fused verifier MoE budget (`e888ef1a`)
+- **xdna:** batch shared experts in gen6 (`de55413a`)
+- **xdna:** measure concurrent GPU load (`f6e91bd7`)
+- **xdna:** validate zero-copy GPU buffers (`76b9d3cf`)
+- **xdna:** batch gen5 draft blocks (`8729f21b`)
+- **xdna:** fuse expert pipeline in gen5 (`252b813f`)
+- **xdna:** expose provider phase timings (`aaa0cf49`)
+- **xdna:** vectorize ROCMFP2 decode in gen4 (`e811dfde`)
+- **xdna:** preserve projection outputs in fp32 (`2de48a4f`)
+- **xdna:** prototype second-generation expert kernel (`4d3c55a6`)
+
+### Changed
+
+- **engine:** prune unsupported backends and prototypes (`eade92dd`)
+
+### Build and CI
+
+- **xdna:** refresh runtime for queued drafts (`452c2e7d`)
+
+### Documentation
+
+- **xdna:** pin gen43 benchmark candidate (`8d0c90fd`)
+- **xdna:** record whole-draft contention results (`8a05387a`)
+- **xdna:** record AIE-RT queue rejection (`571d5d8c`)
+- **xdna:** record gen5 validation scope (`b50e00bb`)
+- **ci:** record the self-hosted builder and its fork-PR constraint (`8b9c5f99`)
+
+### Testing
+
+- **json:** cover UTF-8 output boundary (`48e0ca53`)
+- **xdna:** enforce resident speculation gate (`37f7f6bf`)
+- **xdna:** reject bfp16 draft projections (`9a8b0647`)
+- **xdna:** validate trained draft experts (`41454f7f`)
+
+### Maintenance
+
+- **ci:** move checkout actions to Node 24 (`7987558a`)
 ## 2026.8.10
 
 - Prepared the first source release.
