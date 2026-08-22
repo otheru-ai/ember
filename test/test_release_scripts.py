@@ -215,6 +215,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("release_tag:", container)
         self.assertIn("inputs.release_tag || github.sha", container)
         self.assertIn("workflow_run:", release_notes)
+        self.assertIn("workflow_dispatch:", release_notes)
+        self.assertIn("inputs.release_tag || github.event.workflow_run.head_branch", release_notes)
         self.assertIn("conclusion == 'success'", release_notes)
         self.assertIn("ci/release_changelog.py notes", release_notes)
         self.assertIn("gh release create", release_notes)
