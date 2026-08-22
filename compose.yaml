@@ -17,15 +17,35 @@ services:
       # Writable so first start can download the model; later starts reuse it.
       - ${EMBER_MODELS_DIR:-./models}:/models
       - ${EMBER_CACHE_DIR:-./cache}:/cache
+    # List form on purpose. A bare NAME forwards the operator's value only when
+    # they actually set one, and leaves the variable unset otherwise -- so this
+    # file is authoritative for what an operator may tune WITHOUT restating any
+    # default. Writing `NAME: ${NAME:-16384}` would copy a default that already
+    # lives in the binary (kSpecMaxCtxDefault) and the two would drift.
     environment:
-      EMBER_AUTO_DOWNLOAD: ${EMBER_AUTO_DOWNLOAD:-1}
-      EMBER_VERIFY_EXISTING_SHA256: ${EMBER_VERIFY_EXISTING_SHA256:-1}
-      EMBER_HOST: ${EMBER_HOST:-127.0.0.1}
-      EMBER_PORT: ${EMBER_PORT:-8080}
-      EMBER_DRY_MULTIPLIER: ${EMBER_DRY_MULTIPLIER:-0}
-      EMBER_TOOL_LOOP_REPORT: ${EMBER_TOOL_LOOP_REPORT:-}
-      EMBER_NO_PROGRESS_REPORT: ${EMBER_NO_PROGRESS_REPORT:-}
-      EMBER_AUTO_ANSWER_AFTER_LOOP: ${EMBER_AUTO_ANSWER_AFTER_LOOP:-}
+      - EMBER_AUTO_DOWNLOAD=${EMBER_AUTO_DOWNLOAD:-1}
+      - EMBER_VERIFY_EXISTING_SHA256=${EMBER_VERIFY_EXISTING_SHA256:-1}
+      - EMBER_HOST=${EMBER_HOST:-127.0.0.1}
+      - EMBER_PORT=${EMBER_PORT:-8080}
+      - EMBER_DRY_MULTIPLIER=${EMBER_DRY_MULTIPLIER:-0}
+      - EMBER_TOOL_LOOP_REPORT=${EMBER_TOOL_LOOP_REPORT:-}
+      - EMBER_NO_PROGRESS_REPORT=${EMBER_NO_PROGRESS_REPORT:-}
+      - EMBER_AUTO_ANSWER_AFTER_LOOP=${EMBER_AUTO_ANSWER_AFTER_LOOP:-}
+      # Speculative-decode tuning. Unset means "use the engine default"; an
+      # empty value is NOT the same thing (SPEC_MAX_CTX would log an invalid
+      # -value warning, and LUCE_MMVQ_MAX_NCOLS uses "unset" to mean "derive
+      # from the verify width"), which is why these are pass-through, not
+      # defaulted here.
+      #   DFLASH_DS4_SPEC          1 enables speculation (engine default 1)
+      #   DFLASH_DS4_SPEC_MAX_CTX  hand back to AR above this KV position
+      #   DFLASH_DS4_Q5_VERIFY     opt-in wide verify; off by default
+      #   DFLASH_DS4_SPEC_Q        explicit verify width; unset derives it
+      #   LUCE_MMVQ_MAX_NCOLS      MMVQ ncols ceiling; unset tracks the width
+      - DFLASH_DS4_SPEC
+      - DFLASH_DS4_SPEC_MAX_CTX
+      - DFLASH_DS4_Q5_VERIFY
+      - DFLASH_DS4_SPEC_Q
+      - LUCE_MMVQ_MAX_NCOLS
     healthcheck:
       test: ["CMD-SHELL", "listen=$${EMBER_HOST:-127.0.0.1}; [ \"$$listen\" = 0.0.0.0 ] && listen=127.0.0.1; curl --fail --silent --show-error http://$$listen:$${EMBER_PORT:-8080}/health >/dev/null"]
       interval: 30s

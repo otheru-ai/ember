@@ -133,8 +133,14 @@ fi
 if [[ "$draft_verified" != 1 ]]; then
   verify_existing_artifact "$draft" "$draft_expected_sha256" "draft model"
 fi
-export DFLASH_DS4_SPEC=1
-export DFLASH_DS4_DRAFT="$draft"
+# Compose is authoritative for tuning knobs. These used to be unconditional
+# exports, which silently discarded anything the operator set in compose.yaml --
+# the rest of this script already honours the environment (EMBER_HOST,
+# EMBER_PORT, EMBER_KV_CACHE_DIR), so the two DFLASH lines were the odd ones out.
+# Note DFLASH_DS4_DRAFT is resolved, downloaded and SHA-verified above; an
+# explicit override points the server at a file this script has not verified.
+export DFLASH_DS4_SPEC="${DFLASH_DS4_SPEC:-1}"
+export DFLASH_DS4_DRAFT="${DFLASH_DS4_DRAFT:-$draft}"
 
 segvtrace="${EMBER_SEGVTRACE:-/usr/local/lib/libsegvtrace.so}"
 if [[ -n "$segvtrace" && -r "$segvtrace" ]]; then
