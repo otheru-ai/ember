@@ -109,18 +109,28 @@ scripts/build.sh                                          # -> build-rocm/ember-
 
 - Tests use a hand-rolled `CHECK(cond, msg)` macro with `g_pass`/`g_fail`
   counters — no framework. **Adding a test file requires a new
-  `add_executable` + `target_link_libraries(... ember_core m)` + `add_test`
-  triple in the root `CMakeLists.txt`.**
+  `add_executable` + `target_link_libraries` + `add_test` triple in the root
+  `CMakeLists.txt`**, and the new ctest name must be added to `EMBER_C_TESTS`
+  (which sets the 60s `TIMEOUT`). Link `ember_core`, plus `m` and/or `xgrammar`
+  as the test needs them — a bare `ember_core` is the common case. An
+  ember-owned target must also join `EMBER_STRICT_TARGETS`; see CI gates below.
 - **Two CMake source lists must stay in sync.** `ember_core` (stub build) and
   the `ember-dflash` executable list every `src/**.c` explicitly. `ember-dflash`
   cannot link `ember_core` because that would collide `backend_stub.c` with
   `backend_dflash.cc`'s ABI symbols. A new `src/` file added to only one list
   builds fine on the host and fails (or silently misses code) in the ROCm build
-  — this already caused one fix commit (`d8ace73`).
-- `test_dspark_scheduler.cpp`, `test_thinking_budget.cpp`,
-  `test_progress_cycle_detector.cpp`, and the `test_continuous_batch_*` /
-  `test_resident_batch_coordinator.cpp` tests compile engine headers/sources
-  directly (no `ember_core` link) so engine logic gets GPU-free coverage.
+  — this already caused one fix commit (`d8ace73`). `ci/check_invariants.py`
+  enforces this mechanically; a file legitimately in one list only needs an
+  entry in that script's `SINGLE_LIST_EXCEPTIONS` with a reason.
+- A growing set of C++ tests compiles engine, `providers/xdna2/`, or other
+  vendored sources directly instead of linking `ember_core`, so that logic gets
+  GPU-free coverage: `test_prefill_policy`, `test_dspark_scheduler`,
+  `test_thinking_budget`, `test_progress_cycle_detector`, `test_sampler`,
+  `test_pre_tokenizer`, `test_continuous_batch_{scheduler,executor}`,
+  `test_resident_batch_coordinator`, and the `test_xdna_*` set. These are
+  exactly the targets held *out* of `EMBER_STRICT_TARGETS` — upstream keeps its
+  own warning standard, and a directory-scoped strict flag would turn every
+  fork sync into a warning-fixing exercise.
 
 ## Runtime verification (GPU-dependent — read before running)
 
@@ -302,16 +312,94 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   (`test_qa.c`), plus C++ engine tests (prefill policy, DSpark scheduler,
   thinking budget, progress cycle detector, continuous batch
   scheduler/executor, resident batch coordinator).
-- Python tests run through ctest too: server-level integration
-  (`test_continuous_batch_server.py`, `test_tool_safety_server.py`, which spawn
-  the real `ember-server` binary) and the quant pipeline
-  (`test_quant_quality_report.py`, `test_quant_behavior_eval.py`,
-  `test_gguf_tensor_error.py`, `test_quant_manifest_corpus.py`). All Python is
-  stdlib-only.
+- Python tests run through ctest too, and are registered only when CMake finds
+  a Python 3 interpreter. Four spawn the real `ember-server` binary and carry a
+  tighter 20s timeout: `test_continuous_batch_server.py`,
+  `test_tool_safety_server.py`, `test_request_budgets_server.py`,
+  `test_client_compatibility_server.py`. The rest are offline analysis — the
+  quant pipeline (`test_quant_quality_report.py`, `test_quant_behavior_eval.py`,
+  `test_gguf_tensor_error.py`, `test_quant_manifest_corpus.py`,
+  `test_resident_benchmark.py`) and the release tooling
+  (`test_release_scripts.py`, `test_release_changelog.py`,
+  `test_mirror_gh_issues.py`). All Python is stdlib-only; there is no
+  `pyproject.toml` and no dependency install step.
 - GPU-dependent runtime validation requires exclusive access to a target GPU.
   XDNA claims additionally require the pinned host driver/firmware/XRT tuple,
   translated IOMMU domains, `/dev/accel/accel0`, provider validators, and the
   trained two-session differential/throughput gates.
+
+## CI gates
+
+Every gate below is GPU-free and reproducible locally — none of them need
+ROCm, a gfx1151 device, or model weights. They run on push and PR through
+`.forgejo/workflows/ci.yml`, ordered cheapest-first, and are mirrored in
+`.github/workflows/ci.yml`. A change can build and pass `ctest` locally and
+still fail three of these, so run them before pushing anything non-trivial.
+
+1. **Repo invariants** — `python3 ci/check_invariants.py`. Catches four things
+   a compiler cannot: a `src/` file added to only one of the two hand-maintained
+   CMake source lists (the ROCm-build-only failure mode, `d8ace73`); a test that
+   compiles but was never registered with ctest, which reads as coverage that
+   does not exist; an `add_test()` with no `TIMEOUT`, which lets a hang block
+   ctest forever rather than fail; and a target that links `ember_core` but is
+   missing from `EMBER_STRICT_TARGETS`. Takes under a second — run it after any
+   `CMakeLists.txt` edit.
+
+2. **Strict build and test**, in both `Release` *and* `Debug`:
+
+   ```bash
+   cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DEMBER_STRICT=ON
+   cmake --build build -j"$(nproc)" && ctest --test-dir build --output-on-failure
+   ```
+
+   `EMBER_STRICT=ON` adds `-Werror -Wshadow -Wconversion -Wsign-conversion
+   -Wformat=2 -Wnull-dereference`. `src/` compiles with zero warnings under it,
+   so it is a real gate rather than an aspiration. It is deliberately opt-in
+   locally (an in-progress edit should not be blocked by a warning) and applied
+   per-target via `EMBER_STRICT_TARGETS`, never via `add_compile_options` —
+   see the build-and-test section on which targets are excluded and why. Debug
+   matters independently of Release: the assertions and the different inlining
+   reach paths `-O3` folds away.
+
+3. **Analyzers** — both are release gates, and every new warning fails the job
+   rather than growing a baseline. Reviewed GCC false positives carry narrow
+   in-source suppressions with an ownership rationale:
+
+   ```bash
+   for f in src/common/*.c src/model/*.c src/server/*.c src/backend/backend_stub.c; do
+     gcc -fanalyzer -c -o /dev/null -std=c11 -Wall -Wextra -Werror -Isrc -D_GNU_SOURCE "$f"
+   done
+   cppcheck --enable=warning,portability --inline-suppr --std=c11 \
+            --error-exitcode=1 --suppress=missingIncludeSystem \
+            -I src src/common src/model src/server src/backend/backend_stub.c
+   ```
+
+4. **Per-file coverage ratchet** — `ci/coverage_floors.json` pins a line-coverage
+   floor for each file individually and only ever moves up. An aggregate
+   percentage would let a new untested 500-line module land unnoticed; the
+   flip side is that adding uncovered lines to an already well-covered file
+   (`sse.c` is at 94.6) fails CI even though the project total barely moves.
+   Reproduce with a `--coverage -O0 -g` build tree and
+   `python3 ci/coverage.py --build build-cov`.
+
+5. **Sanitizers (ASan + UBSan + LSan)** — an authoritative gate, but it runs
+   **only** in `.github/workflows/ci.yml`, not Forgejo. This is deliberate and
+   documented at the top of `.forgejo/workflows/ci.yml`: Forgejo 10's Docker
+   exec path on that runner hangs LeakSanitizer teardown and turns ctest's
+   timeout signal into an unbounded `AddressSanitizer:DEADLYSIGNAL` log, while
+   the same commits pass under GitHub. Do not "fix" the gap by duplicating the
+   job into Forgejo. Locally:
+
+   ```bash
+   cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+     -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+     -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+   ```
+
+The container workflow (`container.yml`) builds the ROCm `dev` and `release`
+images without a GPU; GPU runtime validation is separate and covered under
+runtime verification above. `docs/ci.md` is the long-form reference.
 
 ## Container deployment
 

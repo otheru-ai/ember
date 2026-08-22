@@ -7,9 +7,8 @@ upstream model card (typically the HuggingFace README +
 `dflash_server` reads these at startup to set sensible
 `--default-max-tokens`, `--think-max-tokens`, sampler, and
 `reasoning.effort` tier values for the loaded model. The CLI
-flags still override anything here. See
-[docs/specs/thinking-budget.md §3](../../docs/specs/thinking-budget.md)
-for the resolution order.
+flags still override anything here: CLI flag > sidecar value >
+per-family table built into the server > hard fallback.
 
 ## Lookup
 
@@ -33,8 +32,9 @@ fallback (`antirez/ds4 ds4_eval.c` reference values).
 
 ## Fields
 
-See [docs/specs/thinking-budget.md §3.3](../../docs/specs/thinking-budget.md)
-for the full field reference.
+[`_schema.json`](_schema.json) is the authoritative field reference —
+every field below carries a `description` there, including the
+constraints this table summarises.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -44,6 +44,9 @@ for the full field reference.
 | `max_tokens` | yes | The card's standard recommendation. |
 | `download_urls` | no | Map of variant tag (e.g. `Q4_K_M`, `bf16`) to GGUF download URL. Used by deployment tooling. |
 | `complex_problem_max_tokens` | no | For hard reasoning / benchmarking. Used to compute `x-high` and `max` effort tiers. |
+| `hard_limit_reply_budget` | no | Tokens reserved after `</think>` for the visible answer phase. |
+| `thinking_marker` | no | Bytes signalling end-of-thinking to parsers. Empty = per-arch default. |
+| `thinking_terminator_hint` | no | Trained directive injected mid-stream when the budget hook fires during thinking. |
 | `sampling` | no | Recommended sampler defaults. |
 | `reasoning_effort_tiers` | no | Explicit per-tier phase-1 budgets. Overrides any computed defaults. Use this when the ratio-based defaults don't fit the model. |
 | `notes` | no | Free-form notes about provenance, caveats, or non-card-derived choices. |
@@ -59,13 +62,13 @@ works; a couple of examples:
 python -m pip install jsonschema
 python -c "import json, jsonschema; \
   schema=json.load(open('share/model_cards/_schema.json')); \
-  doc=json.load(open('share/model_cards/qwen3.6-27b.json')); \
+  doc=json.load(open('share/model_cards/deepseek-v4-flash-src.json')); \
   jsonschema.Draft202012Validator(schema).validate(doc); print('OK')"
 
 # Node (ajv-cli)
 npx --yes ajv-cli@5 validate \
   -s share/model_cards/_schema.json \
-  -d share/model_cards/qwen3.6-27b.json \
+  -d share/model_cards/deepseek-v4-flash-src.json \
   --spec=draft2020
 ```
 
