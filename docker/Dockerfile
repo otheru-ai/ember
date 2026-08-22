@@ -17,7 +17,7 @@ FROM ${ROCM_DEV_IMAGE} AS toolchain
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      build-essential ca-certificates cmake curl \
+      build-essential ca-certificates ccache cmake curl \
  && rm -rf /var/lib/apt/lists/*
 
 RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
@@ -28,15 +28,21 @@ FROM toolchain AS dev
 WORKDIR /ember
 COPY . /ember
 
+ENV CCACHE_DIR=/root/.cache/ccache \
+    CCACHE_COMPRESS=true \
+    CCACHE_MAXSIZE=20G
+
 # Keep the complete current debug toolset in ember-dev. Only ember-dflash is
 # copied into the release runtime closure below.
-RUN cmake -S /ember -B /ember/build-rocm \
+RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharing=locked \
+    cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
       -DEMBER_ENGINE=ON \
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /ember/build-rocm \
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
-      ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench -j"$(nproc)"
+      ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench -j"$(nproc)" \
+ && ccache --show-stats
 
 RUN gcc -shared -fPIC -O2 -g \
       -o /usr/local/lib/libsegvtrace.so tools/segvtrace.c -ldl \

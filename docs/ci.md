@@ -87,6 +87,20 @@ repository runner `ember-builder-halo` with the label `ember-builder`, and
 (`systemctl --user status actions-runner-ember`) with lingering enabled, so it
 survives logout and reboot without a root-owned unit.
 
+Release builds reuse four cache layers. Hosted CPU jobs restore ccache
+objects by compiler/configuration; the Forgejo containers share the named
+`ember-ci-ccache` volume; the self-hosted image builder reuses one persistent
+BuildKit instance plus the Dockerfile's 20 GiB ccache mount; and both image
+publishers retain Trivy's database in `ember-trivy-cache`. Keep
+`EMBER_BUILDX_BUILDER` stable across runs—creating a run-specific builder
+strands the expensive ROCm layers in an unreachable BuildKit volume. GitHub
+serializes candidate and tag builds because they share that instance.
+
+Certification deliberately does not reuse runtime KV state or skip model
+digests. Those are correctness/security gates. The streamed digest verifier
+uses `POSIX_FADV_DONTNEED` after hashing so the 96 GiB model pair does not evict
+the UMA allocation budget immediately before HIP model load.
+
 Because Ember is a public repository, a fork pull request can edit a workflow to
 target the builder's label. Repository Actions settings therefore require
 approval for **all external contributors** before any fork workflow runs; do not
@@ -162,7 +176,7 @@ forgejo-runner register \
   --instance https://forge.example.com \
   --token <REGISTRATION_TOKEN> \
   --name ember-ci \
-  --labels docker:docker://node:20-bookworm
+  --labels docker:docker://node:24-bookworm
 
 forgejo-runner daemon
 ```
@@ -205,6 +219,7 @@ Configure these GitHub repository values in addition to the runner label:
 | `FORGEJO_RELEASE_SSH_KEY` | secret | Private half of a repository-scoped, write-enabled Forgejo deploy key. |
 | `FORGEJO_SSH_HOST_KEYS` | secret | Pinned SSH host keys for the source-of-truth Forgejo endpoint. |
 | `FORGEJO_RELEASE_REMOTE` | variable | Source-of-truth SSH URL, currently `ssh://git@git.otheru.ai:2222/otheru/ember.git`. |
+| `EMBER_BUILDX_BUILDER` | variable | Stable Buildx instance on `ember-builder`; defaults to `ember-release`. Never generate this per run. |
 | `EMBER_GFX1151_CERTIFIED_SHA` | variable | Managed by promotion; the executable-tree SHA accepted by the tag publisher. |
 | `EMBER_CERT_MODEL_PATH` | variable | Absolute Halo-host path to the pinned target GGUF. |
 | `EMBER_CERT_DRAFT_PATH` | variable | Absolute Halo-host path to the pinned DSpark draft GGUF. |
@@ -244,7 +259,7 @@ The builder never needs `/dev/kfd`, `/dev/dri`, or model weights. The separate
 `gfx1151` runner pulls the immutable commit image and performs the hardware
 checks before a versioned release is allowed.
 
-The workflow uses `actions/checkout@v4`, which Forgejo resolves against
+The workflow uses `actions/checkout@v5`, which Forgejo resolves against
 `code.forgejo.org` by default (`[actions] DEFAULT_ACTIONS_URL`). If the runner
 has no egress there, mirror the action locally or replace the step with a plain
 `git clone`.

@@ -2,3 +2,5 @@ self-hosted-runner:
   labels:
     - ember-builder
     - gfx1151
+    - docker
+    - docker-build

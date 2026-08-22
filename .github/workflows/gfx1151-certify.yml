@@ -69,6 +69,8 @@ jobs:
           command -v docker >/dev/null
           command -v curl >/dev/null
           command -v python3 >/dev/null
+          docker_config="$RUNNER_TEMP/ember-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$docker_config"
           prompt_path="$RUNNER_TEMP/ember-cert-short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           disk_prompt_path="$RUNNER_TEMP/ember-cert-disk-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
           printf '%s\n' \
@@ -78,6 +80,7 @@ jobs:
             >"$disk_prompt_path"
           printf 'PROMPT_PATH=%s\nDISK_PROMPT_PATH=%s\n' \
             "$prompt_path" "$disk_prompt_path" >>"$GITHUB_ENV"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
           if curl --fail --silent --max-time 2 \
               "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             echo "port $PORT already serves an HTTP health endpoint"
@@ -92,7 +95,7 @@ jobs:
           if docker inspect "$PRODUCTION_CONTAINER" >/dev/null 2>&1 &&
               [[ "$(docker inspect --format '{{.State.Running}}' "$PRODUCTION_CONTAINER")" = true ]]; then
             echo 'was_running=true' >>"$GITHUB_OUTPUT"
-            docker stop --time 180 "$PRODUCTION_CONTAINER"
+            docker stop --timeout 180 "$PRODUCTION_CONTAINER"
           fi
 
       - name: Log in to GHCR and pull the exact candidate
@@ -100,7 +103,12 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if ! login_output="$(echo "$GHCR_TOKEN" | \
+              docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin 2>&1)"; then
+            printf '%s\n' "$login_output"
+            exit 1
+          fi
+          echo 'GHCR login succeeded'
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
           docker pull "$image"
           revision="$(docker image inspect --format \
@@ -116,10 +124,32 @@ jobs:
           DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
         run: |
           set -euo pipefail
-          printf '%s  %s\n' "$MODEL_SHA256" "$MODEL_PATH" |
-            sha256sum --check --strict
-          printf '%s  %s\n' "$DRAFT_SHA256" "$DRAFT_PATH" |
-            sha256sum --check --strict
+          python3 -c '
+          import hashlib, os, sys
+          if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
+              raise SystemExit("POSIX_FADV_DONTNEED is required on the Halo runner")
+          pairs = zip(sys.argv[1::2], sys.argv[2::2])
+          for expected, path in pairs:
+              digest = hashlib.sha256()
+              with open(path, "rb", buffering=0) as stream:
+                  while chunk := stream.read(8 * 1024 * 1024):
+                      digest.update(chunk)
+                  os.posix_fadvise(
+                      stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED
+                  )
+              actual = digest.hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"{path}: expected {expected}, got {actual}")
+              print(f"{path}: OK (page cache released)")
+          ' "$MODEL_SHA256" "$MODEL_PATH" "$DRAFT_SHA256" "$DRAFT_PATH"
+          available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+          minimum_kib=$((100 * 1024 * 1024))
+          printf 'UMA memory available after verification: %d GiB\n' \
+            "$((available_kib / 1024 / 1024))"
+          (( available_kib >= minimum_kib )) || {
+            echo 'less than 100 GiB is available for monolithic model placement'
+            exit 1
+          }
 
       - name: Run HIP GEMM and generation differential validators
         run: |
@@ -256,6 +286,10 @@ jobs:
           for path in "${PROMPT_PATH:-}" "${DISK_PROMPT_PATH:-}"; do
             [[ -z "$path" ]] || rm -f -- "$path"
           done
+          if [[ -n "${DOCKER_CONFIG:-}" ]]; then
+            rm -f -- "$DOCKER_CONFIG/config.json"
+            rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+          fi
 
       - name: Record certification result
         run: |
@@ -273,6 +307,11 @@ jobs:
     runs-on: [self-hosted, ember-builder]
     timeout-minutes: 15
     steps:
+      - name: Quiet expected exact-SHA checkout advice
+        run: |
+          if git -C "$GITHUB_WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
+            git -C "$GITHUB_WORKSPACE" config advice.detachedHead false
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit_sha }}

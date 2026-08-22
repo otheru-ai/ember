@@ -334,6 +334,11 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
 - `scripts/build.sh` uses the `dev` image and does not require a GPU merely to
   compile because `gfx1151` is pinned explicitly. Override the image with
   `EMBER_IMAGE` and parallelism with `JOBS`.
+- Release CI reuses a stable BuildKit instance, a BuildKit-mounted 20 GiB
+  ccache, hosted/Forgejo compiler caches, and a persistent Trivy database. Do
+  not replace the stable builder with a per-run name. Hardware certification
+  still hashes both model files and uses disposable KV state; it drops the
+  resulting clean file pages with `POSIX_FADV_DONTNEED` before UMA allocation.
 - Key runtime env vars (`.env.example` lists container settings):
   `DFLASH_DS4_SPEC=1` +
   `DFLASH_DS4_DRAFT=<draft.gguf>` enable DSpark; `EMBER_BG_IDLE_SECS` /

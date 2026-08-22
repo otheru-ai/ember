@@ -30,6 +30,11 @@ using an ambiguous same-day suffix.
   restore production around exclusive GPU validation.
 - Upgraded GitHub checkout steps to the pinned Node 24 release so routine CI
   and release logs no longer carry Node 20 deprecation warnings.
+- Added persistent BuildKit, ccache, and Trivy database reuse across GitHub and
+  Forgejo runners, including compiler cache mounts inside the ROCm Docker build.
+- Kept full model digest verification while evicting its clean file pages before
+  HIP allocation, preventing the 96 GiB checksum pass from forcing hybrid mode
+  and disabling DSpark during unattended certification.
 
 ## 2026.8.10
 

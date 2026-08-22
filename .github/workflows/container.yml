@@ -12,7 +12,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: container-${{ github.ref }}
+  # One persistent BuildKit instance owns the large ROCm and compiler caches.
+  # Serialize all refs so a tag cannot race its candidate on that builder.
+  group: ember-container-builder
   cancel-in-progress: false
 
 jobs:
@@ -23,11 +25,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+      - name: Restore compiler cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ember-ccache-linux-x64-Release-${{ github.sha }}
+          restore-keys: ember-ccache-linux-x64-Release-
       - name: Verify and test the publish commit
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          command -v ccache >/dev/null || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ccache
+          }
           python3 ci/check_invariants.py
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DEMBER_STRICT=ON
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEMBER_STRICT=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure --timeout 120
 
@@ -44,6 +60,11 @@ jobs:
     # Fail in hours rather than burning a day against a missing runner.
     timeout-minutes: 180
     steps:
+      - name: Quiet expected exact-SHA checkout advice
+        run: |
+          if git -C "$GITHUB_WORKSPACE" rev-parse --git-dir >/dev/null 2>&1; then
+            git -C "$GITHUB_WORKSPACE" config advice.detachedHead false
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.sha }}
@@ -94,16 +115,21 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      - name: Create Buildx builder
+      - name: Reuse persistent Buildx builder
         # The docker-container driver is required for --provenance/--sbom, but it
         # puts BuildKit on the default bridge. Give it the host network namespace
         # so the build still reaches the package mirrors on runners where bridge
         # networking is unavailable; this does not affect build output.
+        env:
+          BUILDER_NAME: ${{ vars.EMBER_BUILDX_BUILDER || 'ember-release' }}
         run: |
-          docker buildx create \
-            --name "ember-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --driver docker-container \
-            --driver-opt network=host --use
+          if ! docker buildx inspect "$BUILDER_NAME" >/dev/null 2>&1; then
+            docker buildx create \
+              --name "$BUILDER_NAME" \
+              --driver docker-container \
+              --driver-opt network=host
+          fi
+          docker buildx use "$BUILDER_NAME"
           docker buildx inspect --bootstrap
 
       - name: Build and publish minimal release image
@@ -148,6 +174,7 @@ jobs:
           docker run --rm \
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            -v ember-trivy-cache:/root/.cache/trivy \
             aquasec/trivy:0.73.0@sha256:7cced7cae583819fc7806d4cbc0dbbc7cad18b99f7d3e235192e6da8c091045c \
             image --image-src docker --exit-code 1 \
             --severity CRITICAL --ignore-unfixed "$image"

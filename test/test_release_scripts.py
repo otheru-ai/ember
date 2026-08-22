@@ -20,6 +20,7 @@ GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
 GITHUB_CONTAINER = ROOT / ".github" / "workflows" / "container.yml"
 GITHUB_CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
 GITHUB_RELEASE_NOTES = ROOT / ".github" / "workflows" / "release-notes.yml"
+FORGEJO_CI = ROOT / ".forgejo" / "workflows" / "ci.yml"
 COMPOSE = ROOT / "compose.yaml"
 COMPOSE_BUILD = ROOT / "compose.build.yaml"
 COMPOSE_XDNA = ROOT / "compose.xdna.yaml"
@@ -161,6 +162,11 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("Quiesce production for exclusive GPU validation", certify)
         self.assertIn("Restore production", certify)
         self.assertIn("iommu|amd_iommu", certify)
+        self.assertIn("POSIX_FADV_DONTNEED", certify)
+        self.assertIn("docker stop --timeout", certify)
+        self.assertIn("DOCKER_CONFIG", certify)
+        self.assertIn("MemAvailable", certify)
+        self.assertIn("less than 100 GiB", certify)
         self.assertIn("--validate-gemm-batch 64", certify)
         self.assertIn("--validate-prompt", certify)
         self.assertIn("Validation sentence", certify)
@@ -210,7 +216,24 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/gfx1151-certify.yml", ci)
         self.assertIn("commit_sha: ${{ github.sha }}", ci)
         self.assertIn("secrets: inherit", ci)
+        self.assertIn("actions/cache@caa296126883cff596d87d8935842f9db880ef25", ci)
+        self.assertIn("actions/cache@caa296126883cff596d87d8935842f9db880ef25", container)
+        self.assertIn("EMBER_BUILDX_BUILDER", container)
+        self.assertIn("ember-trivy-cache", container)
+        self.assertIn("advice.detachedHead", container)
         self.assertNotIn("tags: ['v*']", forgejo_container)
+
+    def test_release_build_caches_are_persistent_and_bounded(self) -> None:
+        dockerfile = DOCKERFILE.read_text()
+        forgejo_ci = FORGEJO_CI.read_text()
+        forgejo_container = CONTAINER_WORKFLOW.read_text()
+        self.assertIn("ccache", dockerfile)
+        self.assertIn("id=ember-gfx1151-ccache", dockerfile)
+        self.assertIn("CCACHE_MAXSIZE=20G", dockerfile)
+        self.assertIn("ember-ci-ccache", forgejo_ci)
+        self.assertIn("CMAKE_C_COMPILER_LAUNCHER=ccache", forgejo_ci)
+        self.assertIn("node:24-bookworm@sha256:", forgejo_ci)
+        self.assertIn("ember-trivy-cache", forgejo_container)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -23,6 +23,8 @@ on:
 
 env:
   DEBIAN_FRONTEND: noninteractive
+  CCACHE_COMPRESS: 'true'
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   invariants:
@@ -33,9 +35,9 @@ jobs:
     # ctest, which reads as coverage that does not exist.
     runs-on: docker
     container:
-      image: node:20-bookworm
+      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check repo invariants
         run: python3 ci/check_invariants.py
 
@@ -45,22 +47,26 @@ jobs:
     # inlining reach code paths -O3 folds away.
     runs-on: docker
     container:
-      image: node:20-bookworm
+      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+      volumes:
+        - ember-ci-ccache:/root/.cache/ccache
     strategy:
       fail-fast: false
       matrix:
         build_type: [Release, Debug]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential cmake python3
+          apt-get install -y --no-install-recommends build-essential ccache cmake python3
       - name: Configure (EMBER_STRICT=ON)
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DEMBER_STRICT=ON
+            -DEMBER_STRICT=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build -j"$(nproc)"
       - name: Test
@@ -73,17 +79,21 @@ jobs:
     # drift rather than a crash, so this is the job that earns its keep.
     runs-on: docker
     container:
-      image: node:20-bookworm
+      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+      volumes:
+        - ember-ci-ccache:/root/.cache/ccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential cmake python3
+          apt-get install -y --no-install-recommends build-essential ccache cmake python3
       - name: Configure
         run: |
           cmake -S . -B build-asan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
@@ -101,9 +111,9 @@ jobs:
     # therefore fails the job instead of silently growing a baseline.
     runs-on: docker
     container:
-      image: node:20-bookworm
+      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
           apt-get update
@@ -128,17 +138,21 @@ jobs:
     # file individually and the ratchet only moves up.
     runs-on: docker
     container:
-      image: node:20-bookworm
+      image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
+      volumes:
+        - ember-ci-ccache:/root/.cache/ccache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends build-essential cmake python3
+          apt-get install -y --no-install-recommends build-essential ccache cmake python3
       - name: Configure with coverage
         run: |
           cmake -S . -B build-cov \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS="--coverage -O0 -g" \
             -DCMAKE_CXX_FLAGS="--coverage -O0 -g" \
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"

@@ -42,6 +42,11 @@ overlay selects the measured two-session DSpark placement, while ordinary HIP
 remains the normal release path and fallback.
 
 `build/` is already configured, so `cmake --build build` is the fast inner loop.
+Release CI reuses a stable BuildKit instance, a BuildKit-mounted 20 GiB ccache,
+hosted/Forgejo compiler caches, and a persistent Trivy database. Do not replace
+the stable builder with a per-run name. Hardware certification still hashes
+both model files and uses disposable KV state; it drops the resulting clean
+file pages with `POSIX_FADV_DONTNEED` before UMA allocation.
 
 Single test — every test is a plain binary with a `main()`; run it directly for
 full output, or via ctest by name:

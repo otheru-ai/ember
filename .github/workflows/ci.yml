@@ -15,6 +15,8 @@ concurrency:
 
 env:
   DEBIAN_FRONTEND: noninteractive
+  CCACHE_COMPRESS: 'true'
+  CCACHE_MAXSIZE: 1G
 
 jobs:
   invariants:
@@ -43,15 +45,23 @@ jobs:
         build_type: [Release, Debug]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Restore compiler cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ember-ccache-linux-x64-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: ember-ccache-linux-x64-${{ matrix.build_type }}-
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake python3
+          sudo apt-get install -y --no-install-recommends build-essential ccache cmake python3
       - name: Configure strict ${{ matrix.build_type }} build
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DEMBER_STRICT=ON
+            -DEMBER_STRICT=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build -j"$(nproc)"
       - name: Test
@@ -61,14 +71,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Restore compiler cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ember-ccache-linux-x64-asan-${{ github.sha }}
+          restore-keys: ember-ccache-linux-x64-asan-
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake python3
+          sudo apt-get install -y --no-install-recommends build-essential ccache cmake python3
       - name: Configure ASan, UBSan, and LSan
         run: |
           cmake -S . -B build-asan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
@@ -104,11 +122,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Restore compiler cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ember-ccache-linux-x64-coverage-${{ github.sha }}
+          restore-keys: ember-ccache-linux-x64-coverage-
       - name: Install toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake gcc-13 g++-13 python3
+            build-essential ccache cmake gcc-13 g++-13 python3
       - name: Configure coverage build
         env:
           CC: gcc-13
@@ -116,6 +140,8 @@ jobs:
         run: |
           cmake -S . -B build-cov \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS="--coverage -O0 -g" \
             -DCMAKE_CXX_FLAGS="--coverage -O0 -g" \
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
