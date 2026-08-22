@@ -201,6 +201,11 @@ add_executable(test_qa test/test_qa.c)
 target_link_libraries(test_qa ember_core m)
 add_test(NAME qa COMMAND test_qa)
 
+# Pure host arithmetic (no GPU, no ember_core): the ROCMFP UE4M3 scale decode
+# is exhaustively checked against the pre-rewrite reference for all 256 inputs.
+add_executable(test_rocmfp_scale test/test_rocmfp_scale.c)
+add_test(NAME rocmfp_scale COMMAND test_rocmfp_scale)
+
 add_executable(test_dspark_scheduler test/test_dspark_scheduler.cpp)
 target_include_directories(test_dspark_scheduler PRIVATE
   engine/dflash/deepseek4)
@@ -349,7 +354,7 @@ set(EMBER_C_TESTS
   sse tool_parser tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
   chat_api prefill_policy api_adapters http background_gate chat_template
-  compaction gguf model_card kv_cache qa dspark_scheduler thinking_budget
+  compaction gguf model_card kv_cache qa rocmfp_scale dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator
   xdna_dspark_provider xdna_dspark_cpu_ops
