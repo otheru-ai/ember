@@ -12,6 +12,12 @@
 #
 # Jobs are ordered cheapest-first so an obvious break reports in seconds rather
 # than after a coverage run.
+#
+# Sanitizers remain an authoritative gate in .github/workflows/ci.yml. They are
+# deliberately not duplicated here: Forgejo 10's Docker exec path on this
+# runner hangs LeakSanitizer teardown and turns ctest's timeout signal into an
+# unbounded AddressSanitizer:DEADLYSIGNAL log. Two isolated reproductions
+# produced no Ember diagnostic; the same commits passed GitHub ASan/UBSan/LSan.
 
 name: CI
 
