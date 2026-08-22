@@ -22,10 +22,16 @@ services:
       # and target-isolated exact support capture.
       # The provider stays optional unless an equivalence run explicitly makes
       # it required; ordinary HIP DSpark remains the safe fallback.
-      DFLASH_DSPARK_XDNA_PLUGIN: /usr/local/lib/ember/libember_xdna_dspark.so
-      DFLASH_DSPARK_XDNA_REQUIRED: ${DFLASH_DSPARK_XDNA_REQUIRED:-0}
-      DFLASH_DSPARK_XDNA_GPU_MAIN: ${DFLASH_DSPARK_XDNA_GPU_MAIN:-1}
-      DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS: ${DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS:-4}
-      DFLASH_DS4_TIMING: ${DFLASH_DS4_TIMING:-0}
-      DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI: ${DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI:-0}
+      # Values below are genuine overrides: the plugin path has no default, and
+      # XDNA_GPU_MAIN defaults to OFF in the binary (spec_env_flag treats unset
+      # as false), so 1 here is a real choice rather than a restatement.
+      - DFLASH_DSPARK_XDNA_PLUGIN=/usr/local/lib/ember/libember_xdna_dspark.so
+      - DFLASH_DSPARK_XDNA_REQUIRED=${DFLASH_DSPARK_XDNA_REQUIRED:-0}
+      - DFLASH_DSPARK_XDNA_GPU_MAIN=${DFLASH_DSPARK_XDNA_GPU_MAIN:-1}
+      # These three only ever restated the binary's own defaults (4, off, 0), so
+      # they are pass-through: settable by an operator, but not a second
+      # declaration free to drift from the code.
+      - DFLASH_DS4_SPEC_SHADOW_SUFFIX_ROWS
+      - DFLASH_DS4_TIMING
+      - DFLASH_DS4_RESIDENT_MIN_CONFIDENCE_MILLI
     command: ["--batch-sessions", "${EMBER_XDNA_BATCH_SESSIONS:-2}"]
