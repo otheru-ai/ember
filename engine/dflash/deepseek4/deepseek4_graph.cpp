@@ -57,6 +57,12 @@ static bool ds4_env_flag(const char * name) {
     return value && value[0] && std::strcmp(value, "0") != 0;
 }
 
+// PORTED from lucebox d03bcc4 "perf(ds4): reuse F16 KV in fused verification".
+// F32 key/value-side accumulation protects the short-context quality baseline
+// while still avoiding a full-cache F16 -> F32 conversion once attention is
+// large enough for that conversion to dominate verifier time.
+static constexpr int DS4_FUSED_VERIFY_F16_F32_KV_MAX_ATTN = 512;
+
 static int ds4_effective_expert_count(const DeepSeek4Weights & w) {
     const int requested = w.routed_expert_top_k;
     if (requested > 0 && requested < w.n_expert_used) {
@@ -1312,28 +1318,27 @@ static void build_compressor_step(
     if (batched_rows) {
         if (ratio == 4) {
             // Rotate the completed current window into the previous half.
-            // Reading through the first span makes the dependency explicit.
-            for (int r = 0; r < ratio; ++r) {
-                ggml_tensor * src_kv = ggml_view_2d(
-                    ctx, state_kv_source, comp_width, 1,
-                    state_kv_source->nb[1],
-                    (size_t) (ratio + r) * state_kv_source->nb[1]);
-                ggml_tensor * dst_kv = ggml_view_2d(
-                    ctx, state.state_kv, comp_width, 1,
-                    state.state_kv->nb[1],
-                    (size_t) r * state.state_kv->nb[1]);
-                ggml_build_forward_expand(gf, ggml_cpy(ctx, src_kv, dst_kv));
+            // Rows [ratio..2*ratio) and [0..ratio) are contiguous spans, so this
+            // is one block copy per tensor rather than 2*ratio single-row ones.
+            // Still read through state_*_source so the dependency on this step's
+            // write stays explicit.
+            ggml_tensor * src_kv = ggml_view_2d(
+                ctx, state_kv_source, comp_width, ratio,
+                state_kv_source->nb[1],
+                (size_t) ratio * state_kv_source->nb[1]);
+            ggml_tensor * dst_kv = ggml_view_2d(
+                ctx, state.state_kv, comp_width, ratio,
+                state.state_kv->nb[1], 0);
+            ggml_build_forward_expand(gf, ggml_cpy(ctx, src_kv, dst_kv));
 
-                ggml_tensor * src_sc = ggml_view_2d(
-                    ctx, state_score_source, comp_width, 1,
-                    state_score_source->nb[1],
-                    (size_t) (ratio + r) * state_score_source->nb[1]);
-                ggml_tensor * dst_sc = ggml_view_2d(
-                    ctx, state.state_score, comp_width, 1,
-                    state.state_score->nb[1],
-                    (size_t) r * state.state_score->nb[1]);
-                ggml_build_forward_expand(gf, ggml_cpy(ctx, src_sc, dst_sc));
-            }
+            ggml_tensor * src_sc = ggml_view_2d(
+                ctx, state_score_source, comp_width, ratio,
+                state_score_source->nb[1],
+                (size_t) ratio * state_score_source->nb[1]);
+            ggml_tensor * dst_sc = ggml_view_2d(
+                ctx, state.state_score, comp_width, ratio,
+                state.state_score->nb[1], 0);
+            ggml_build_forward_expand(gf, ggml_cpy(ctx, src_sc, dst_sc));
         }
         if (batched_nB > 0) {
             ggml_tensor * kv_v = ggml_cont(ctx, ggml_view_2d(
@@ -1368,30 +1373,25 @@ static void build_compressor_step(
         ggml_build_forward_expand(gf, ggml_set_rows(ctx, state.state_kv, cur_kv_vals, flush_rows_inp));
         ggml_build_forward_expand(gf, ggml_set_rows(ctx, state.state_score, cur_sc_vals, flush_rows_inp));
     } else if (ratio == 4) {
-        for (int r = 0; r < ratio; ++r) {
-            ggml_tensor * src_kv = ggml_view_2d(ctx, state.state_kv, comp_width, 1,
-                                                state.state_kv->nb[1],
-                                                (size_t)(ratio + r) * state.state_kv->nb[1]);
-            ggml_tensor * dst_kv = ggml_view_2d(ctx, state.state_kv, comp_width, 1,
-                                                state.state_kv->nb[1],
-                                                (size_t)r * state.state_kv->nb[1]);
-            ggml_tensor * src_sc = ggml_view_2d(ctx, state.state_score, comp_width, 1,
-                                                state.state_score->nb[1],
-                                                (size_t)(ratio + r) * state.state_score->nb[1]);
-            ggml_tensor * dst_sc = ggml_view_2d(ctx, state.state_score, comp_width, 1,
-                                                state.state_score->nb[1],
-                                                (size_t)r * state.state_score->nb[1]);
-            ggml_build_forward_expand(gf, ggml_cpy(ctx, src_kv, dst_kv));
-            ggml_build_forward_expand(gf, ggml_cpy(ctx, src_sc, dst_sc));
-            ggml_tensor * dup_kv = ggml_view_2d(ctx, state.state_kv, comp_width, 1,
-                                                state.state_kv->nb[1],
-                                                (size_t)(ratio + r) * state.state_kv->nb[1]);
-            ggml_tensor * dup_sc = ggml_view_2d(ctx, state.state_score, comp_width, 1,
-                                                state.state_score->nb[1],
-                                                (size_t)(ratio + r) * state.state_score->nb[1]);
-            ggml_build_forward_expand(gf, ggml_cpy(ctx, dst_kv, dup_kv));
-            ggml_build_forward_expand(gf, ggml_cpy(ctx, dst_sc, dup_sc));
-        }
+        // Rows [ratio..2*ratio) and [0..ratio) are each contiguous row spans, so
+        // the whole half-state move is two block copies, not 2*ratio single-row
+        // ones. This ran as 16 ggml_cpy dispatches per layer per token; the row
+        // loop moved exactly the same bytes as these four. The second pair is
+        // value-neutral (it writes the cur half back onto itself) and is kept
+        // because it carries the ordering edge the sibling set_rows path gets
+        // from reading through the state source.
+        auto half = [&](ggml_tensor * s, int first_row) {
+            return ggml_view_2d(ctx, s, comp_width, ratio, s->nb[1],
+                                (size_t) first_row * s->nb[1]);
+        };
+        ggml_tensor * cur_kv = half(state.state_kv, ratio);
+        ggml_tensor * cur_sc = half(state.state_score, ratio);
+        ggml_tensor * prev_kv = half(state.state_kv, 0);
+        ggml_tensor * prev_sc = half(state.state_score, 0);
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, cur_kv, prev_kv));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, cur_sc, prev_sc));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, prev_kv, half(state.state_kv, ratio)));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx, prev_sc, half(state.state_score, ratio)));
     }
 }
 
@@ -1683,6 +1683,7 @@ static ggml_tensor * build_mla_attention(
     const bool causal_batch = attention_shape.causal_batch;
     const bool layer_major_batch = attention_shape.layer_major_batch;
     ggml_tensor * old_rows_scratch = nullptr;
+    ggml_tensor * old_rows_scratch_f16 = nullptr;  // pre-cast alias (lucebox d03bcc4)
     int n_old_rows = 0;
     ggml_tensor * prior_rows_scratch = nullptr;
     int n_prior_rows = 0;
@@ -1700,6 +1701,7 @@ static ggml_tensor * build_mla_attention(
                 ? ggml_concat(ctx, old_rows_scratch, saved, 1) : saved;
             n_old_rows++;
         }
+        old_rows_scratch_f16 = old_rows_scratch;
         old_rows_scratch = ds4_cast_if_needed(ctx, old_rows_scratch, GGML_TYPE_F32);
     } else if (causal_batch && !layer_major_batch) {
         // Copy the to-be-overwritten rows FIRST; same-stream build order runs
@@ -1716,6 +1718,7 @@ static ggml_tensor * build_mla_attention(
             n_old_rows++;
         }
         if (old_rows_scratch) {
+            old_rows_scratch_f16 = old_rows_scratch;
             old_rows_scratch = ds4_cast_if_needed(ctx, old_rows_scratch, GGML_TYPE_F32);
         }
     } else if (layer_major_batch) {
@@ -1945,14 +1948,43 @@ static ggml_tensor * build_mla_attention(
     } else {
         kv_attn = raw_kv_view(0, n_raw);
     }
-    if (n_comp_attn > 0 && comp_kv_source) {
-        ggml_tensor * comp = ggml_view_2d(ctx, comp_kv_source, head_dim, n_comp_attn, comp_kv_source->nb[1], 0);
-        // match kv_attn's type: F16 on the decode WMMA path, F32 elsewhere
-        comp = ds4_cast_if_needed(ctx, comp, kv_attn->type);
-        kv_attn = ggml_concat(ctx, kv_attn, comp, 1);
-    }
-    if (old_rows_scratch) {
-        kv_attn = ggml_concat(ctx, kv_attn, old_rows_scratch, 1);
+    // PORTED from lucebox d03bcc4. Our decode path already keeps kv_attn in F16
+    // (see the cast-to-kv_attn->type below), but the BATCHED VERIFIER path --
+    // Explicit impl, n_tokens > 1, i.e. every DSpark speculative step at
+    // SPEC_Q=4 -- still cast the whole persistent cache to F32. That cast is
+    // pure bandwidth, and decode on gfx1151 is bandwidth-bound, so it is the
+    // expensive one. The MLA caches are already F16; feed them directly.
+    const bool fused_explicit_f16_kv = w.fused_verify_f16_kv &&
+        masked_kv && n_tokens > 1 &&
+        attention_impl == DeepSeek4AttentionImpl::Explicit &&
+        kv_attn->type == GGML_TYPE_F32 &&
+        raw_kv_source->type == GGML_TYPE_F16 &&
+        (!comp_kv_source || comp_kv_source->type == GGML_TYPE_F16) &&
+        (!old_rows_scratch_f16 || old_rows_scratch_f16->type == GGML_TYPE_F16);
+    if (fused_explicit_f16_kv) {
+        // Current writes are consumed through their set_rows results; preserved
+        // overwritten rows retain the same cached F16 values.
+        kv_attn = ggml_view_2d(
+            ctx, raw_kv_source, head_dim, n_raw, raw_kv_source->nb[1], 0);
+        if (n_comp_attn > 0 && comp_kv_source) {
+            ggml_tensor * comp = ggml_view_2d(
+                ctx, comp_kv_source, head_dim, n_comp_attn,
+                comp_kv_source->nb[1], 0);
+            kv_attn = ggml_concat(ctx, kv_attn, comp, 1);
+        }
+        if (old_rows_scratch_f16) {
+            kv_attn = ggml_concat(ctx, kv_attn, old_rows_scratch_f16, 1);
+        }
+    } else {
+        if (n_comp_attn > 0 && comp_kv_source) {
+            ggml_tensor * comp = ggml_view_2d(ctx, comp_kv_source, head_dim, n_comp_attn, comp_kv_source->nb[1], 0);
+            // match kv_attn's type: F16 on the decode WMMA path, F32 elsewhere
+            comp = ds4_cast_if_needed(ctx, comp, kv_attn->type);
+            kv_attn = ggml_concat(ctx, kv_attn, comp, 1);
+        }
+        if (old_rows_scratch) {
+            kv_attn = ggml_concat(ctx, kv_attn, old_rows_scratch, 1);
+        }
     }
     // kv_attn: [head_dim, n_attn]
 
@@ -2233,6 +2265,15 @@ static ggml_tensor * build_mla_attention(
         ggml_tensor * q_flat = ggml_reshape_2d(ctx, q, head_dim,
                                                n_head * n_tokens);
         ggml_tensor * scores = ggml_mul_mat(ctx, kv_attn, q_flat);
+        // PORTED from lucebox d03bcc4: keep Q and accumulation in F32 while the
+        // persistent cache stays F16. Bounded to short windows so the quality
+        // baseline that the F32 cache path established is preserved where it
+        // matters, without paying the full-cache conversion at long context.
+        const bool explicit_f16_f32_kv_short = fused_explicit_f16_kv &&
+            n_attn <= DS4_FUSED_VERIFY_F16_F32_KV_MAX_ATTN;
+        if (explicit_f16_f32_kv_short) {
+            ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        }
         scores = ggml_scale(ctx, scores, kq_scale);
         if (score_mask) {
             if (n_tokens > 1) {
@@ -2269,6 +2310,10 @@ static ggml_tensor * build_mla_attention(
         }
         ggml_tensor * kv_t = ggml_cont(ctx, ggml_transpose(ctx, kv_attn));
         context = ggml_mul_mat(ctx, kv_t, probs);
+        if (explicit_f16_f32_kv_short) {
+            // Same bounded precision policy on the value-side matmul.
+            ggml_mul_mat_set_prec(context, GGML_PREC_F32);
+        }
         context = ggml_reshape_3d(ctx, context, head_dim, n_head, n_tokens);
     }
 
@@ -6295,9 +6340,17 @@ bool deepseek4_step_layer_range(
     // enforces the same rule by clearing w.fused_decode for hybrid MoE, but a
     // cached fused graph snapshots its expert maps (lucebox 275cdc9), so this
     // predicate must remain fail-closed if backend configuration evolves.
+    // PORTED from lucebox: q5 wide verify. The fused graph models the
+    // learned-compressor boundary explicitly, so it -- unlike the generic
+    // dynamic graph -- can safely span a second ratio-4 boundary. Opt-in.
+    const bool wide_verify_candidate =
+        n_tokens == DS4_Q5_VERIFY_TOKENS &&
+        ds4_env_flag("DFLASH_DS4_Q5_VERIFY");
     const bool fused_verify_candidate =
         !w.moe_hybrid && w.fused_decode &&
-        n_tokens >= 2 && n_tokens <= 4 && verify_hooks &&
+        n_tokens >= 2 &&
+        (n_tokens <= DS4_CONSERVATIVE_VERIFY_MAX_TOKENS ||
+         wide_verify_candidate) && verify_hooks &&
         layer_begin == 0 && is_last_shard && out_logits &&
         ds4_backend_is_gpu(backend) && ds4_fused_verify_enabled();
     const int first_chunk =
@@ -6491,9 +6544,13 @@ bool deepseek4_step_layer_range(
         // splitter because the fused graph owns the boundary update. If graph
         // construction or dispatch was unavailable, do not run the unsafe
         // unsplit dynamic batch or quietly degrade into q3 + q1.
-        if (first_chunk > 0 && first_chunk < n_tokens) {
+        // PORTED from lucebox: a wide (q>4) verify has no safe fallback at all,
+        // so fail closed on width as well as on the boundary split.
+        if ((first_chunk > 0 && first_chunk < n_tokens) ||
+            n_tokens > DS4_CONSERVATIVE_VERIFY_MAX_TOKENS) {
             std::fprintf(stderr,
-                         "[ds4-fused-verify] boundary-spanning graph unavailable\n");
+                         "[ds4-fused-verify] safe graph unavailable for q=%d\n",
+                         n_tokens);
             return false;
         }
     }

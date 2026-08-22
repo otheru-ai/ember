@@ -48,6 +48,19 @@ struct MoeHybridConfig;
 struct MoeHybridRoutingStats;
 class MoeHybridStreamEngine;
 
+// PORTED from lucebox: verify-width bounds for DSpark speculative decode.
+// The conservative fused path is capped at the learned-compressor ratio (4):
+// one boundary per verify, so snapshot-free rollback stays exact. The q5 wide
+// path spans a second ratio-4 boundary in-graph and replays only a rejected
+// prefix, which is what makes q>4 viable without full snapshots.
+inline constexpr int DS4_CONSERVATIVE_VERIFY_MAX_TOKENS = 4;
+// Wide-verify ceiling. block_size is 5 for this drafter, so q_cap may legally
+// reach block+1 = 6, and MMVQ_MAX_BATCH_SIZE is 8, so the GEMV path still has
+// headroom at 6 provided LUCE_MMVQ_MAX_NCOLS is raised to match. Measured:
+// width 3.20 at ncols=4 fell off MMVQ onto MMQ for 34.69 tok/s; the same
+// width at ncols=5 stayed on MMVQ for 35.65.
+inline constexpr int DS4_Q5_VERIFY_TOKENS = 6;
+
 struct DeepSeek4StepTelemetry {
     uint64_t total_us = 0;
     uint64_t embed_us = 0;
@@ -247,6 +260,9 @@ struct DeepSeek4Weights {
     // GGUF is loaded; they are not model metadata.
     int  routed_expert_top_k = 0;  // 0 = model default (n_expert_used)
     bool fused_decode        = false;
+    // PORTED from lucebox d03bcc4: feed the persistent F16 MLA cache straight
+    // to batched verifier attention instead of casting it to F32 every  step.
+    bool fused_verify_f16_kv = false;
 };
 
 inline bool deepseek4_is_eos_tok(int tok, const DeepSeek4Weights & w) {

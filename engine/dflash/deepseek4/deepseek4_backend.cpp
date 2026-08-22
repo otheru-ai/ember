@@ -149,10 +149,36 @@ static void configure_gfx1151_dspark_mmvq_default(int gpu) {
         return;
     }
 
-    if (::setenv("LUCE_MMVQ_MAX_NCOLS", "4", 0) == 0) {
+    // Tie the MMVQ ncols ceiling to the speculation width. Above the ceiling a
+    // quantized mul_mat falls off MMVQ onto MMQ, and MMVQ is ~65% of decode
+    // here, so a width the ceiling does not cover silently moves the dominant
+    // kernel to the slower path. Measured on this box, same build, width 3.20:
+    //     ncols=4 (width falls to MMQ) : 34.69 tok/s
+    //     ncols=5 (width stays on MMVQ): 35.65 tok/s
+    // 4 remains the default when no width is requested. The hard kernel limit is
+    // MMVQ_MAX_BATCH_SIZE from ggml-cuda/mmvq.cuh, which is a private backend
+    // header this TU cannot include, so it is mirrored here; keep the two in
+    // step if ggml raises it.
+    constexpr int kMmvqMaxBatchSize = 8;
+    int ncols = DS4_CONSERVATIVE_VERIFY_MAX_TOKENS;
+    // The wide path raises the verify width on its own, without needing an
+    // explicit DFLASH_DS4_SPEC_Q, so key off the flag too. Keying only off
+    // SPEC_Q would leave the ceiling at 4 while the width went to 6 -- the
+    // exact mismatch that cost ~1 tok/s before it was diagnosed.
+    if (env_flag_enabled("DFLASH_DS4_Q5_VERIFY")) {
+        ncols = DS4_Q5_VERIFY_TOKENS;
+    }
+    if (const char * q = std::getenv("DFLASH_DS4_SPEC_Q")) {
+        const int v = std::atoi(q);
+        if (v > ncols) ncols = v;
+    }
+    if (ncols > kMmvqMaxBatchSize) ncols = kMmvqMaxBatchSize;
+    char ncols_buf[16];
+    std::snprintf(ncols_buf, sizeof(ncols_buf), "%d", ncols);
+    if (::setenv("LUCE_MMVQ_MAX_NCOLS", ncols_buf, 0) == 0) {
         std::fprintf(stderr,
                      "[deepseek4] gfx1151 DSpark: defaulting "
-                     "LUCE_MMVQ_MAX_NCOLS=4\n");
+                     "LUCE_MMVQ_MAX_NCOLS=%d\n", ncols);
     }
 #else
     (void) gpu;
@@ -844,6 +870,12 @@ bool DeepSeek4Backend::load_model() {
     }
     w_.routed_expert_top_k = cfg_.expert_top_k;
     w_.fused_decode = cfg_.fused_decode && !moe_hybrid_;
+    // PORTED from lucebox d03bcc4. Off by default: upstream documents that it
+    // changes verifier floating-point inputs and can change generated tokens,
+    // which is exactly the class of change Ember ships opt-in. Requires the
+    // monolithic single-device HIP path, same precondition as upstream.
+    w_.fused_verify_f16_kv =
+        env_flag_enabled("DFLASH_DS4_FUSED_VERIFY_F16_KV") && !moe_hybrid_;
     if (cfg_.fused_decode && moe_hybrid_) {
         std::fprintf(stderr,
                      "[deepseek4] fused decode unavailable with hybrid expert placement; "

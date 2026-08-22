@@ -1206,6 +1206,12 @@ bool run_deepseek4_dspark_spec_decode(
         if (std::fscanf(f, "%d", &v) == 1) adaptive_width = (v != 0);
         std::fclose(f);
     }
+    // PORTED from lucebox: the adaptive width policy was calibrated only
+    // through q=4. q5 is an explicit fixed-width mode and must not be silently
+    // narrowed back to 4 by the EWMA/confidence policy.
+    if (spec_env_flag("DFLASH_DS4_Q5_VERIFY")) {
+        adaptive_width = false;
+    }
     const bool confidence_width_available = adaptive_width && !force_strict_verify &&
         drafter.confidence_w != nullptr && drafter.confidence_b != nullptr &&
         (drafter.confidence_dim == n_embd ||
@@ -1234,7 +1240,16 @@ bool run_deepseek4_dspark_spec_decode(
     // Full snapshots change rollback strategy but not the compressor-window
     // limit below. The legacy sequential measurement path is validated only
     // through q=4.
-    int q_cap = full_snap ? block + 1 : 4;
+    // PORTED from lucebox: the conservative fused path stays capped at the
+    // compression ratio; the opt-in q5 wide path spans a second ratio-4
+    // boundary in-graph and replays only a rejected prefix, so it does not need
+    // full snapshots. Adaptive width is calibrated only through q=4, so q5 is
+    // an explicit fixed-width mode and must not be silently narrowed.
+    const bool q5_verify = spec_env_flag("DFLASH_DS4_Q5_VERIFY") && block >= 4;
+    const int fast_cap = std::min(
+        block + 1,
+        q5_verify ? DS4_Q5_VERIFY_TOKENS : DS4_CONSERVATIVE_VERIFY_MAX_TOKENS);
+    int q_cap = full_snap ? block + 1 : fast_cap;
     if (const char * qs = std::getenv("DFLASH_DS4_SPEC_Q")) {
         char * end = nullptr;
         errno = 0;
@@ -1242,7 +1257,7 @@ bool run_deepseek4_dspark_spec_decode(
         if (errno == 0 && end != qs && *end == '\0' &&
             parsed >= 2 && parsed <= block + 1) {
             const int v = static_cast<int>(parsed);
-            q_cap = full_snap ? v : std::min(v, 4);
+            q_cap = full_snap ? v : std::min(v, fast_cap);
         } else {
             std::fprintf(stderr,
                          "[ds4-spec] invalid DFLASH_DS4_SPEC_Q='%s'; "
@@ -1256,11 +1271,11 @@ bool run_deepseek4_dspark_spec_decode(
         // (diagnoses batched-vs-sequential target divergence).
         int v = 0;
         if (std::fscanf(qf, "%d", &v) == 1 && v >= 1 && v <= block + 1) {
-            q_cap = full_snap ? v : std::min(v, 4);
+            q_cap = full_snap ? v : std::min(v, fast_cap);
         }
         std::fclose(qf);
     }
-    if (force_strict_verify && q_cap > 4) {
+    if (force_strict_verify && !q5_verify && q_cap > DS4_CONSERVATIVE_VERIFY_MAX_TOKENS) {
         std::fprintf(stderr,
                      "[ds4-spec] exact prefix verify supports q<=4; "
                      "capping requested q=%d to 4\n",
@@ -1352,9 +1367,25 @@ bool run_deepseek4_dspark_spec_decode(
         // Decide the maximum useful width before invoking the support model.
         // Ratio-4 boundaries and rolling scheduler pauses allow only the seed
         // (q=1). Short tails leave this loop and use the normal AR seam.
+        // The conservative path stops at the next ratio-4 compression boundary,
+        // so the reachable width decays 4,3,2,1 with position-in-window and the
+        // mean offered width sits near 2.5 no matter how large q_cap is. That
+        // clamp, not the confidence policy, is what bounds speculation here.
+        // The opt-in q5 path verifies across a SECOND boundary in-graph and
+        // replays only a rejected prefix, so it is allowed to reach the second
+        // boundary instead of the first. Exactness is not assumed: the
+        // differential validator is the gate, and this stays off by default.
+        // The conservative path must stop at the next ratio-4 boundary. The wide
+        // path verifies across boundaries in-graph and replays only a rejected
+        // prefix, so bounding it by the phase term just clamps one step in four
+        // to 5 instead of 6 for no reason; bound it by q_cap alone. Exactness is
+        // still gated by the differential validator, and this path is opt-in.
+        const int boundary_cap = q5_verify ? q_cap : 4 - (pos & 3);
+        const int strict_ceiling =
+            q5_verify ? DS4_Q5_VERIFY_TOKENS : DS4_CONSERVATIVE_VERIFY_MAX_TOKENS;
         int q_step_cap = strict_cycle
-                       ? std::min(q_cap, 4)
-                       : std::min(q_cap, 4 - (pos & 3));
+                       ? std::min(q_cap, strict_ceiling)
+                       : std::min(q_cap, boundary_cap);
         if (adaptive_width && !use_confidence_width && !strict_cycle) {
             const int w_cap = (int) ewma_accept + 2;
             if (w_cap < q_step_cap) q_step_cap = w_cap;
