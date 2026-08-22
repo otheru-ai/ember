@@ -5,6 +5,11 @@ on:
     tags: ['v*']
   workflow_call:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing certified tag to republish after infrastructure failure
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,8 +28,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
+          ref: ${{ inputs.release_tag || github.sha }}
+          fetch-depth: 2
       - name: Restore compiler cache
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
@@ -32,8 +37,15 @@ jobs:
           key: ember-ccache-linux-x64-Release-${{ github.sha }}
           restore-keys: ember-ccache-linux-x64-Release-
       - name: Verify and test the publish commit
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
+          else
+            test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          fi
           command -v ccache >/dev/null || {
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends ccache
@@ -68,7 +80,7 @@ jobs:
           fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.release_tag || github.sha }}
           # Tag releases verify the metadata-only commit and its certified
           # parent, so both commits must be present locally.
           fetch-depth: 2
@@ -76,40 +88,49 @@ jobs:
       - name: Verify checkout, version, and hardware certification
         env:
           CERTIFIED_SHA: ${{ vars.EMBER_GFX1151_CERTIFIED_SHA }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          publish_sha="$(git rev-parse HEAD)"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test "$publish_sha" = "$(git rev-parse "$RELEASE_TAG^{commit}")"
+          else
+            test "$publish_sha" = "$GITHUB_SHA"
+          fi
           project_version="$(tr -d '\n' < VERSION)"
           printf '%s\n' "$project_version" | grep -Eq \
             '^[0-9]{4}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])$'
+          publish_tag="$RELEASE_TAG"
           case "$GITHUB_REF" in
-            refs/tags/*)
-              test "$GITHUB_REF_NAME" = "v$project_version" || {
-                echo "tag $GITHUB_REF_NAME does not match VERSION v$project_version"
+            refs/tags/*) publish_tag="$GITHUB_REF_NAME" ;;
+          esac
+          if [[ -n "$publish_tag" ]]; then
+              test "$publish_tag" = "v$project_version" || {
+                echo "tag $publish_tag does not match VERSION v$project_version"
                 exit 1
               }
               test -n "$CERTIFIED_SHA" || {
                 echo 'Set EMBER_GFX1151_CERTIFIED_SHA after Halo certification'
                 exit 1
               }
-              parent_line="$(git rev-list --parents -n 1 "$GITHUB_SHA")"
+              parent_line="$(git rev-list --parents -n 1 "$publish_sha")"
               test "$(wc -w <<<"$parent_line")" -eq 2 || {
                 echo 'release commit must have exactly one parent'
                 exit 1
               }
-              release_parent="$(git rev-parse "$GITHUB_SHA^")"
+              release_parent="$(git rev-parse "$publish_sha^")"
               test "$CERTIFIED_SHA" = "$release_parent" || {
                 echo "certified $CERTIFIED_SHA, but release parent is $release_parent"
                 exit 1
               }
-              mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" | sort)
-              expected=(CHANGELOG.md VERSION compose.yaml)
+              mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "$publish_sha" | sort)
+              expected=(CHANGELOG.md compose.yaml VERSION)
               test "${changed[*]}" = "${expected[*]}" || {
                 printf 'release commit changed executable inputs: %s\n' "${changed[*]}"
                 exit 1
               }
-              ;;
-          esac
+          fi
 
       - name: Log in to GHCR
         env:
@@ -134,29 +155,33 @@ jobs:
           docker buildx inspect --bootstrap
 
       - name: Build and publish minimal release image
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          short_sha="${GITHUB_SHA:0:12}"
+          publish_sha="$(git rev-parse HEAD)"
+          short_sha="${publish_sha:0:12}"
           project_version="$(tr -d '\n' < VERSION)"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           tag_args=(
             --tag "$image:sha-$short_sha"
           )
+          publish_tag="$RELEASE_TAG"
           case "$GITHUB_REF" in
-            refs/tags/*)
-              version="$project_version"
-              tag_args+=(--tag "$image:$version" --tag "$image:latest")
-              ;;
-            *)
-              version="dev-$short_sha"
-              tag_args+=(--tag "$image:$version")
-              ;;
+            refs/tags/*) publish_tag="$GITHUB_REF_NAME" ;;
           esac
+          if [[ -n "$publish_tag" ]]; then
+            version="$project_version"
+            tag_args+=(--tag "$image:$version" --tag "$image:latest")
+          else
+            version="dev-$short_sha"
+            tag_args+=(--tag "$image:$version")
+          fi
           docker buildx build \
             --platform linux/amd64 \
             --target release \
             --build-arg EMBER_VERSION="$version" \
-            --build-arg EMBER_VCS_REF="$GITHUB_SHA" \
+            --build-arg EMBER_VCS_REF="$publish_sha" \
             "${tag_args[@]}" \
             --provenance=mode=max \
             --sbom=true \
@@ -168,7 +193,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import json; d=json.load(open("image-metadata.json")); print(d.get("containerimage.digest", d))'
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA:0:12}"
+          publish_sha="$(git rev-parse HEAD)"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${publish_sha:0:12}"
           docker pull "$image"
           docker image inspect --format \
             'release image: {{.Size}} bytes (uncompressed)' "$image"
