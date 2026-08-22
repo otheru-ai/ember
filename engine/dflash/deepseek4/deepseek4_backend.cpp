@@ -1768,26 +1768,59 @@ int ds4_spec_emit_budget(const GenerateRequest & req) {
 
 // ── Context ceiling (MEMORY, not throughput) ────────────────────────────
 //
-// Speculation is only affordable on short contexts. The batched verify holds
-// activations for q tokens across every layer at the full KV length, so its
-// footprint grows with context on top of everything AR already needs.
+// Speculation stays profitable to the full context window. This ceiling exists
+// because of a real 2026-07-28 incident, not a throughput cliff, and both of its
+// original justifications were re-measured on 2026-08-22 before it was raised.
 //
-// Measured on the 128 GB Strix Halo box (2026-07-28), which holds a ~95 GB
-// model resident:
-//   AR   @ ~65k ctx -> GTT ~21-22 GB   (leaves ~12 GB headroom)
-//   spec @ ~65k ctx -> GTT  33.5 GB    -> avail 21 MB, PSI 8.91, OOM:
-//       "cudaMalloc failed: out of memory" -> [ds4-spec] verify failed
-// That deploy was rolled back after one user-visible turn failure. The +18-70%
-// speedup behind it was measured entirely at short context and does NOT
-// transfer: at Hermes's real lengths speculation does not fit in memory.
+// MEMORY (the real reason it existed). The batched verify holds activations for
+// q tokens across every layer at the full KV length, and that footprint is what
+// OOMed, not the KV cache -- the whole compressed cache at 65k is under 1 GB
+// (comp_cap = max_ctx/4 + 16 rows, ~21 MB/layer x 43). The 2026-07-28 numbers
+// were taken with a ~95 GB model resident:
+//   AR   @ ~65k -> GTT ~21-22 GB   (~12 GB headroom)
+//   spec @ ~65k -> GTT  33.5 GB    -> avail 21 MB -> "cudaMalloc failed"
+// Re-measured here with the ~85 GB published model, spec forced on, q=6,
+// sampling peak mem_info_gtt_used across the generation (GTT total 124 GiB):
+//   ctx 18553 tok -> peak 12.79 GiB
+//   ctx 38059 tok -> peak 13.98 GiB
+//   ctx 57562 tok -> peak 15.25 GiB   (~109 GiB spare)
+// Less than half the 2026-07-28 consumption with an order of magnitude more
+// headroom, so the OOM condition no longer applies at this model size.
 //
-// So gate on KV position. Controlled A/Bs put the performance knee between
-// ~14k (near parity) and ~28k (54% slower), while the 65k production turn ran
-// out of memory. Default to 16k: short auxiliary traffic can still benefit,
-// but the verifier is handed back to AR before the steep cost/memory regime.
-// Raise only with a measured GTT headroom and throughput check at the target
-// length.
-constexpr int kSpecMaxCtxDefault = 16384;
+// THROUGHPUT. The old note claimed a knee at "~14k (near parity), ~28k (54%
+// slower)". That does not reproduce. Those A/Bs appear to have confounded
+// context with draft ACCEPTANCE: a prompt whose continuation the drafter cannot
+// predict makes speculation lose at ANY length (measured: acceptance 0.17-0.35
+// loses even at 222 tokens), which looks like a context effect if length and
+// workload vary together. Holding the generation task identical and varying only
+// preceding context, acceptance stays ~0.98 and speculation wins throughout:
+//   ctx     43 tok -> 37.62 vs AR 23.48  (+60%)
+//   ctx   3925 tok -> 35.31 vs AR 22.71  (+56%)
+//   ctx   8800 tok -> 33.37 vs AR 22.01  (+52%)
+//   ctx  18553 tok -> 30.07 vs AR 20.93  (+44%)
+//   ctx  38059 tok -> 23.97 vs AR 19.07  (+26%)
+// The advantage decays with depth but never reaches parity. At the old 16384
+// default, an 18.5k-token request was handed to AR at 20.93 instead of 30.07 --
+// a 30% loss for no measured reason.
+//
+// What actually decides profitability is acceptance, not position: from the
+// per-phase timings the verify is ~90% of a step and is context-INDEPENDENT
+// (86.6 ms at 8764 tok vs 95.8 ms at 216 tok), so break-even sits near 2.3
+// accepted tokens per step (~0.40 acceptance at width 6). DSparkProfitScheduler
+// already measures that directly and stands down when it is not met, which is
+// the mechanism that should own this decision; a position ceiling is a proxy for
+// something the engine observes first-hand.
+//
+// So this is now a memory backstop at the context limit rather than a
+// throughput gate, and it tracks max_ctx (main.c, 131072). A ceiling pinned
+// below the context window just recreates the cliff this replaced: requests
+// past it lose the +26..60% speculation gives, for no measured reason.
+// Supporting measurements at the new value: the engine reports KV cache
+// 877.8 MB at ctx=131072, a load there was verified (GTT 11.2 GiB, 24 GiB host
+// free), and speculation ran at 77,068 prompt tokens with acceptance 1.00.
+// 0 still disables speculation entirely. Lower it again only with a measured
+// GTT peak at the target length, the same way it was raised.
+constexpr int kSpecMaxCtxDefault = 131072;
 
 int ds4_spec_max_ctx() {
     static const int v = [] {

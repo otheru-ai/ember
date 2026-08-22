@@ -3927,7 +3927,7 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --prefix-cache-slots N      resident prefix snapshots (default 8)\n"
         "  --batch-sessions N          resident concurrent sessions (default 1,\n"
         "                              max 64; >1 enables continuous batching)\n"
-        "  --max-ctx N                 context length (default 65536)\n"
+        "  --max-ctx N                 context length (default 131072)\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
         "  --validate-gemm-batch N     sweep HIP strided-batched GEMM counts 2..N\n"
         "                              against the one-row baseline, then exit\n"
@@ -4138,8 +4138,10 @@ int main(int argc, char **argv) {
     // never on by default. A bad summary costs the model its task state.
     bool auto_compact = false;
     // In-memory KV prefix-cache slots. Each committed slot holds a full-KV
-    // snapshot is ~448MB at ctx=65536. Eight slots retain ~3.5GiB; callers may
-    // lower this further on memory-tight UMA systems.
+    // snapshot, which tracks the KV cache itself: the engine reports 877.8 MB
+    // at ctx=131072 (measured), so ~448MB at the old 65536 default. Eight slots
+    // retain ~7GiB at the current default; callers may lower this on
+    // memory-tight UMA systems with --prefix-cache-slots.
     int prefix_slots = 8;
     int batch_sessions = 1;
     // A value of 8 reports the ninth identical round. Lower thresholds produced
@@ -4152,7 +4154,14 @@ int main(int argc, char **argv) {
     // at a consistent severity level.
     int no_progress_report = 8;
     int auto_answer_after_loop = 0;      // off: this one changes behaviour
-    int max_ctx = 65536;  // KV cache context; each snapshot is a full-KV buffer
+    // The model advertises deepseek4.context_length = 1048576; 65536 was a
+    // server-side default, not a model limit. Compressed MLA keeps the cache
+    // tiny -- measured 877.8 MB at ctx=131072, because most layers compress 4:1
+    // or 128:1 and the raw ring is a fixed 128 rows regardless of context. A
+    // load at 131072 was verified on the 128 GB box: GTT 11.2 GiB, 24 GiB host
+    // free. Raising further is mostly a prefix-slot budgeting question (each
+    // snapshot scales with this value), not a KV or model one.
+    int max_ctx = 131072;  // KV cache context; each snapshot is a full-KV buffer
     double bg_idle_secs = 5.0, bg_max_wait_secs = 60.0;
     bool options_ok = true;
     for (int i = 1; i < argc; i++) {
@@ -4304,7 +4313,7 @@ int main(int argc, char **argv) {
     ember_backend_config cfg = {0};
     cfg.model_path = model_path;
     cfg.model_name = model_name;
-    cfg.max_ctx = max_ctx > 0 ? max_ctx : 65536;
+    cfg.max_ctx = max_ctx > 0 ? max_ctx : 131072;
     cfg.expert_top_k = expert_top_k;
     cfg.kv_cache_dir = kv_dir;
     cfg.kv_cache_mb = kv_cache_mb;   // --kv-cache-mb, 0 = default

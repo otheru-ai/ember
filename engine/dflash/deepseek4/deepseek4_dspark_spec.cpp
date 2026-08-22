@@ -1329,6 +1329,13 @@ bool run_deepseek4_dspark_spec_decode(
     int pos = committed;      // absolute position of the seed (block slot 0)
     int n_generated = 0;
     long accept_sum = 0, offered_sum = 0, steps = 0;
+    // Width attribution. The kernel trace cannot tell a q=1 TARGET step from
+    // the drafter's own q=1 forwards, so count the decision here instead:
+    // which steps ran narrow, and whether that was forced (architecture) or
+    // chosen (policy). Printed in the [ds4-spec] summary.
+    long q_hist[9] = {0};
+    long n_strict = 0, n_sched_skip = 0, n_emit_clamp = 0, n_conf_nodraft = 0;
+    long n_cap_narrow = 0;
     long agreement_offered = 0, agreement_matched = 0;
     bool scheduler_tail_handoff = false;
     bool ok = true;
@@ -1357,6 +1364,10 @@ bool run_deepseek4_dspark_spec_decode(
 
     while (n_generated < n_gen) {
         const SpecClock::time_point cycle_t0 = SpecClock::now();
+        // Snapshot the cumulative phase timers so the per-step log can report
+        // deltas; tm_* are lifetime accumulators.
+        const double tm0_draft = tm_draft, tm0_head = tm_head, tm0_save = tm_save;
+        const double tm0_verify = tm_verify, tm0_apply = tm_apply, tm0_feat = tm_feat;
         const int ctx_len = feat_count < n_swa ? feat_count : n_swa;
         const int emit_left = n_gen - n_generated;
         const bool strict_cycle = batch_gate.strict_cycle();
@@ -1393,7 +1404,10 @@ bool run_deepseek4_dspark_spec_decode(
         // Never offer more tokens than this invocation may emit. This keeps KV
         // exactly at the spec→AR seam: accept <= q <= emit_left, so the final
         // verify cannot commit rejected phantom rows past the emitted stream.
-        if (emit_left < q_step_cap) q_step_cap = emit_left;
+        const int cap_before_emit = q_step_cap;
+        if (strict_cycle) ++n_strict;
+        if (cap_before_emit < 2) ++n_cap_narrow;   // boundary/ewma already narrowed
+        if (emit_left < q_step_cap) { q_step_cap = emit_left; if (q_step_cap < 2) ++n_emit_clamp; }
 
         if (scheduler.tail_should_skip(emit_left)) {
             scheduler_tail_handoff = true;
@@ -1407,7 +1421,7 @@ bool run_deepseek4_dspark_spec_decode(
         }
         const bool scheduled_skip =
             q_step_cap >= 2 && scheduler.take_scheduled_skip();
-        if (scheduled_skip) q_step_cap = 1;
+        if (scheduled_skip) { q_step_cap = 1; ++n_sched_skip; }
 
         if (scheduler_log && scheduled_skip) {
             std::fprintf(stderr,
@@ -1643,6 +1657,7 @@ bool run_deepseek4_dspark_spec_decode(
         // No usable candidate this step: back off rather than re-drafting every
         // step (ds4.c:47655-47675). Reachable only because the confident-prefix
         // rule can keep zero — the previous bucketed policy floored at one.
+        if (confidence_no_draft && q <= 1) ++n_conf_nodraft;
         if (confidence_no_draft && q <= 1) {
             const bool have_conf = !draft_confidence.empty();
             const uint32_t skip = scheduler.note_no_draft(
@@ -1824,6 +1839,7 @@ bool run_deepseek4_dspark_spec_decode(
         lt = bonus;                    // deferred bonus becomes next seed
         accept_sum += matched;
         offered_sum += q - 1;
+        q_hist[q < 0 ? 0 : (q > 8 ? 8 : q)]++;
         ewma_accept = 0.7 * ewma_accept + 0.3 * (double) matched;
         steps++;
 
@@ -1856,6 +1872,29 @@ bool run_deepseek4_dspark_spec_decode(
                         decision.many_no_draft ? "many-no-draft" : "");
                 }
             }
+        } else if (strict_cycle) {
+            // Do NOT feed warmup cycles to the profitability window.
+            //
+            // While the batch verifier is still qualifying, every cycle runs
+            // exact-prefix verification, which is ~2.9x slower by design:
+            // measured on the benchmark task, verify 260.8ms on strict cycles
+            // vs 90.5ms once the gate is active, with draft/head/save unchanged.
+            // Charging that startup cost to steady-state speculation made the
+            // scheduler declare a run unprofitable that was in fact running at
+            // +59% over AR (extra 955.9ms vs saved 862.3ms, extra_per_accept
+            // 47.8ms against a 43.3ms target eval).
+            //
+            // The response also fed back into the cause: a pause forces q=1,
+            // and DSparkBatchVerifyGate::note_cycle() returns early on
+            // offered_tokens < 2, so a paused step cannot advance warmup
+            // progress. Pausing therefore prolonged the strict phase whose cost
+            // triggered the pause -- the trips repeated at pos=69-72 and
+            // pos=97-100 rather than settling.
+            //
+            // The batch gate already governs this phase; it qualifies on exact
+            // token agreement and needs no help from the profit scheduler. The
+            // window resumes the moment the gate goes active.
+            (void) 0;
         } else {
             const DSparkSchedulerDecision decision =
                 scheduler.note_spec_cycle((uint32_t) matched, cycle_ms);
@@ -1872,6 +1911,20 @@ bool run_deepseek4_dspark_spec_decode(
                     decision.measured_unprofitable ? "unprofitable " : "",
                     decision.many_no_draft ? "many-no-draft" : "");
             }
+        }
+        // Per-step firehose for outlier hunting: the sampled line below cannot
+        // show WHICH cycles are slow, and the profitability pause fires on a
+        // handful of outliers (~282ms against a ~104ms body). Off by default.
+        static const bool step_log = spec_env_flag("DFLASH_DS4_SPEC_STEP_LOG");
+        if (step_log) {
+            std::fprintf(stderr,
+                "[ds4-step] step=%ld pos=%d posmod4=%d q=%d acc=%d cycle=%.1f "
+                "draft=%.1f head=%.1f save=%.1f verify=%.1f apply=%.1f feat=%.1f "
+                "strict=%d\n",
+                steps, pos, pos & 3, q, accept, cycle_ms,
+                tm_draft - tm0_draft, tm_head - tm0_head, tm_save - tm0_save,
+                tm_verify - tm0_verify, tm_apply - tm0_apply, tm_feat - tm0_feat,
+                strict_cycle ? 1 : 0);
         }
         if (timing && (steps <= 4 || (steps & 31) == 0)) {
             std::fprintf(stderr,
@@ -1899,6 +1952,14 @@ bool run_deepseek4_dspark_spec_decode(
                  force_strict_verify ? "exact-prefix" :
                  (batch_warmup_tokens ? "guarded-batch-replay" : "batch-replay"),
                  (int) full_snap);
+    if (steps > 0) {
+        std::fprintf(stderr, "[ds4-spec-width] steps=%ld q_hist=", steps);
+        for (int i = 1; i <= 8; ++i) std::fprintf(stderr, "%s%d:%ld", i > 1 ? "," : "", i, q_hist[i]);
+        std::fprintf(stderr,
+                     " | narrow_causes strict=%ld cap_pre=%ld emit_tail=%ld "
+                     "sched_pause=%ld no_draft=%ld\n",
+                     n_strict, n_cap_narrow, n_emit_clamp, n_sched_skip, n_conf_nodraft);
+    }
     if (spec_env_flag("DFLASH_DS4_AGREEMENT_LOG")) {
         std::fprintf(stderr,
                      "[ds4-agreement] summary offered=%ld matched=%ld rate=%.3f\n",
