@@ -416,7 +416,7 @@ jobs:
           python3 ci/release_changelog.py prepare --version "$version"
 
           mapfile -t changed < <(git diff --name-only | sort)
-          expected=(CHANGELOG.md VERSION compose.yaml)
+          expected=(CHANGELOG.md compose.yaml VERSION)
           test "${changed[*]}" = "${expected[*]}" || {
             printf 'release preparation changed unexpected files: %s\n' "${changed[*]}"
             exit 1

@@ -195,6 +195,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("FORGEJO_RELEASE_SSH_KEY", certify)
         self.assertIn("StrictHostKeyChecking=yes", certify)
         self.assertIn("RELEASE_AUTOMATION_TOKEN", certify)
+        self.assertIn("expected=(CHANGELOG.md compose.yaml VERSION)", certify)
         triggers = certify.split("permissions:", 1)[0]
         self.assertNotIn("pull_request", triggers)
 
