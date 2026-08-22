@@ -136,6 +136,9 @@ static void maybe_log_prefill_fingerprint(
                  top_value - runner_up);
 }
 
+// Paired with the LUCE_MMVQ_MAX_NCOLS fallback in ggml-cuda.cu, which defaults
+// to 3 (an sm_86 crossover) when this function does not run. Changing either
+// without the other splits the effective default by code path.
 static void configure_gfx1151_dspark_mmvq_default(int gpu) {
 #if defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
     if (!env_flag_enabled("DFLASH_DS4_SPEC") ||

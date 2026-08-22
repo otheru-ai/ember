@@ -2504,6 +2504,16 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // measured crossover on sm_86 (RTX 3090, Q4_K_M/Q6_K dense GEMVs) — MMVQ
     // wins at ncols<=3, MMQ wins at 4-8 (laguna w6 chain 199->237 tok/s,
     // qwen3.6 chain 127->137). Override via env for other hardware.
+    // SECOND DECLARATION WARNING: this fallback of 3 is the generic one, taken
+    // from the sm_86 crossover described above. It is NOT what a gfx1151 DSpark
+    // run sees -- deepseek4_backend.cpp's configure_gfx1151_dspark_mmvq_default()
+    // setenv()s this variable (overwrite=0) to 4, or to the speculative verify
+    // width when that is larger, before any mul_mat runs. So the effective
+    // default is 4 there and 3 here, and which one applies depends on whether
+    // that configure step ran: it early-returns when DFLASH_DS4_SPEC is off or
+    // the device is not gfx1151, and non-spec multi-row batches then land on 3
+    // on hardware whose only measurement says 4. Keep the two in step, and do
+    // not "simplify" either away without re-measuring both paths.
     static const int luce_mmvq_max_ncols = []() {
         const char * e = getenv("LUCE_MMVQ_MAX_NCOLS");
         const int v = e ? atoi(e) : 3;
