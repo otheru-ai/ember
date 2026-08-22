@@ -385,6 +385,18 @@ struct ggml_cuda_unroll<1> {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_sum(int x) {
+#if defined(EMBER_DPP_WAVE32_REDUCE)
+    if constexpr (width == 32) {
+        int y;
+        EMBER_DPP_SWAP16(y, x);
+        x += y;
+        EMBER_DPP_XMASK(v_add_nc_u32_dpp, 8, x);
+        EMBER_DPP_XMASK(v_add_nc_u32_dpp, 4, x);
+        EMBER_DPP_XMASK(v_add_nc_u32_dpp, 2, x);
+        EMBER_DPP_XMASK(v_add_nc_u32_dpp, 1, x);
+        return x;
+    }
+#endif // defined(EMBER_DPP_WAVE32_REDUCE)
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
     return __reduce_add_sync(0xffffffff, x);
 #else
@@ -417,31 +429,47 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 // Unlike the VOPD dual-issue path, DPP is a modifier on an ordinary VALU
 // instruction and imposes no register-parity or bank constraints, so it can be
 // written as inline asm without fighting the register allocator.
-#if defined(GGML_USE_HIP) && (defined(RDNA3) || defined(RDNA4))
+// RDNA3 only, deliberately. gfx12 renamed V_MAX_F32 to V_MAX_NUM_F32 (IEEE
+// 754-2019 maximumNumber), so the v_max_f32_dpp below does not assemble there.
+// Checked against AMD's machine-readable ISA: V_MAX_F32 is present in the
+// rdna3_5 spec and absent from rdna4, which lists V_MAX_NUM_F32 instead. This
+// project only ever builds gfx1151, so the guard states what is verified
+// rather than what looks symmetric.
+#if defined(GGML_USE_HIP) && defined(RDNA3)
 #define EMBER_DPP_WAVE32_REDUCE 1
 #endif
+
+#if defined(EMBER_DPP_WAVE32_REDUCE)
+// These reductions require a fully active wave, which is the same precondition
+// the __shfl_xor_sync path already had. row_mask/bank_mask gate the destination
+// write only, not the source fetch, so 0xf/0xf writes every lane. "bound_ctrl:0"
+// sets the BC field to 1 (DPP_BOUND_ZERO, ISA table 31): an EXEC-disabled source
+// lane reads 0 rather than its register value. That is the identity for the sum
+// reductions but NOT for warp_reduce_max, where 0 would beat any negative input.
+// ggml calls these warp-uniformly and encodes inactive elements in the value
+// (-INFINITY), so BC never fires; a divergent caller would need fi:1 instead.
+// One butterfly step inside a 16-lane row (ISA table 94, DPP_ROW_XMASK).
+#define EMBER_DPP_XMASK(op, mask, v) \
+    asm volatile(#op " %0, %0, %0 row_xmask:" #mask " row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(v))
+// The offset-16 step. DPP16 can never cross a 16-lane row because the source
+// index keeps (n & 0x30), so this uses PERMLANEX16 with the identity select
+// patterns -- 0x76543210 for lanes 0-7, 0xFEDCBA98 for lanes 8-15. Passing
+// -1,-1 instead sets every selector to 15 and silently fetches the wrong lane.
+#define EMBER_DPP_SWAP16(dst, src) \
+    asm volatile("v_permlanex16_b32 %0, %1, %2, %3" : "=v"(dst) : "v"(src), "s"(0x76543210), "s"(0xFEDCBA98))
+#endif // defined(EMBER_DPP_WAVE32_REDUCE)
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #if defined(EMBER_DPP_WAVE32_REDUCE)
     if constexpr (width == 32) {
         float y;
-        // offset 16: cross the two 16-lane rows.
-        //
-        // The two scalar operands are 4-bit-per-lane SELECT PATTERNS, not a
-        // swap flag. Passing -1,-1 sets every selector to 15, so every lane
-        // fetches lane 15 of the opposite half -- measured: lane0 got lane31's
-        // value instead of lane16's. The identity permutation is 0x76543210 for
-        // lanes 0-7 and 0xFEDCBA98 for lanes 8-15, which reproduces
-        // __shfl_xor(x,16) exactly.
-        asm volatile("v_permlanex16_b32 %0, %1, %2, %3"
-                     : "=v"(y) : "v"(x), "s"(0x76543210), "s"(0xFEDCBA98));
+        EMBER_DPP_SWAP16(y, x);
         x += y;
-        // offsets 8,4,2,1: XOR butterfly within each row
-        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:8 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
-        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:4 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
-        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:2 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
-        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:1 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
+        EMBER_DPP_XMASK(v_add_f32_dpp, 8, x);
+        EMBER_DPP_XMASK(v_add_f32_dpp, 4, x);
+        EMBER_DPP_XMASK(v_add_f32_dpp, 2, x);
+        EMBER_DPP_XMASK(v_add_f32_dpp, 1, x);
         return x;
     }
 #endif // defined(EMBER_DPP_WAVE32_REDUCE)
@@ -454,6 +482,15 @@ static __device__ __forceinline__ float warp_reduce_sum(float x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
+#if defined(EMBER_DPP_WAVE32_REDUCE)
+    if constexpr (width == 32) {
+        // Per component the addition order is still 16,8,4,2,1, so reducing x
+        // fully and then y is bit-identical to interleaving them.
+        a.x = warp_reduce_sum<width>(a.x);
+        a.y = warp_reduce_sum<width>(a.y);
+        return a;
+    }
+#endif // defined(EMBER_DPP_WAVE32_REDUCE)
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
         a.x += __shfl_xor_sync(0xffffffff, a.x, offset, width);
@@ -505,6 +542,18 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
+#if defined(EMBER_DPP_WAVE32_REDUCE)
+    if constexpr (width == 32) {
+        float y;
+        EMBER_DPP_SWAP16(y, x);
+        x = fmaxf(x, y);
+        EMBER_DPP_XMASK(v_max_f32_dpp, 8, x);
+        EMBER_DPP_XMASK(v_max_f32_dpp, 4, x);
+        EMBER_DPP_XMASK(v_max_f32_dpp, 2, x);
+        EMBER_DPP_XMASK(v_max_f32_dpp, 1, x);
+        return x;
+    }
+#endif // defined(EMBER_DPP_WAVE32_REDUCE)
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
         x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));

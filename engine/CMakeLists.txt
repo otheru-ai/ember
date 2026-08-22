@@ -49,6 +49,16 @@ set(GGML_CCACHE     OFF CACHE BOOL "" FORCE)
   # once per token, which is far worse than the ~64-token bucket crossing the
   # old comment described, and no pad stride can affect it.
   #
+  # RETESTED 2026-08-22 and still a loss, on a NEW hypothesis that turned out to
+  # be wrong. The theory was that q_step_cap = 4 - (pos & 3) cycled the spec
+  # verify width 4,3,2,1, so graph topology changed almost every decode step and
+  # replay could never hit. The q5 fixed-width path makes q_cap constant at 5
+  # (telemetry: q_cap=5, mean_accept=3.15/3.20 in both arms, so width really was
+  # identical). Graphs still lost:
+  #     graphs OFF: decode 34.69 tok/s, prefill-128 212.7
+  #     graphs ON : decode 33.51 tok/s, prefill-128 206.6   (-3.4% / -2.9%)
+  # So constant verify width is NOT sufficient. Whatever invalidates the graph
+  # survives a fixed topology, and the cost is not capture churn from width.
   # DO NOT re-enable this until the ring-buffer write offset stops being part of
   # the graph topology -- e.g. express it as a graph input / indirect index so
   # the captured nodes are position-independent, or capture one graph per ring
