@@ -10,6 +10,7 @@ ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3fea
 ARG EMBER_VERSION=dev
 ARG EMBER_VCS_REF=unknown
 ARG XDNA_DRIVER_REF=cdabc45a546d3e597976e5d70f0445bc5e4dc07d
+ARG HYPERLOOM_REF=434b26b958761cb5f6f323be7add4c795fc70d00
 ARG MLIR_AIE_VERSION=1.3.4
 ARG LLVM_AIE_VERSION=22.0.0.2026081201+046b11f9
 
@@ -34,6 +35,42 @@ FROM toolchain AS dev
 # image that cannot profile. Kept before COPY so it fails fast and stays cached.
 RUN command -v rocprofv3 >/dev/null 2>&1 \
  || { echo 'rocprofv3 missing: the dev image must be able to profile kernels' >&2; exit 1; }
+
+# Hyperloom (AMD-AGI): agentic inference-optimization toolkit -- TraceLens trace
+# analysis, the GEAK kernel optimizer, and the Arbor search engine. Dev image
+# only; collect-runtime.sh keeps profilers and tooling out of the release
+# closure and that stays true.
+#
+# Scope note, so nobody assumes more than it does: upstream targets MI300X/
+# MI325X/MI355X (CDNA) and drives vLLM/SGLang, none of which apply here. What
+# transfers to gfx1151 is the kernel-analysis half -- comparing HIP kernel
+# variants and mapping profiler names back to source, which is exactly the loop
+# scripts/profile_gpu.sh feeds. Treat the serving-side automation as untested on
+# this hardware.
+#
+# Installed into its own venv rather than the system interpreter: Ubuntu 24.04
+# marks its Python externally-managed (PEP 668), and an isolated prefix keeps a
+# large pure-Python dependency tree away from the ROCm toolchain's own Python.
+#
+# Deliberately NOT the [runtime] extra. That pulls openai-codex, whose
+# codex_cli_bin is a 301 MB vendored binary for OpenAI-only deployments; this
+# is a Claude deployment, so the Claude SDK alone is installed instead --
+# 417 MB rather than 738 MB, both entry points verified working. `packaging` is
+# listed explicitly because upstream imports it (orchestrator/knowledge/
+# recipe_kb_t0.py) without declaring it, and only got away with that because
+# openai-codex happened to pull it in.
+ARG HYPERLOOM_REF
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3-venv git \
+ && python3 -m venv /opt/hyperloom \
+ && /opt/hyperloom/bin/pip install --no-cache-dir \
+      "hyperloom-inference_optimizer[web] @ git+https://github.com/AMD-AGI/Hyperloom@${HYPERLOOM_REF}" \
+      "claude-agent-sdk>=0.2.110" "PyYAML>=6.0" "httpx>=0.27" "packaging>=23.0" \
+ && ln -s /opt/hyperloom/bin/inference_optimizer /usr/local/bin/inference_optimizer \
+ && ln -s /opt/hyperloom/bin/hyperloom /usr/local/bin/hyperloom \
+ && /opt/hyperloom/bin/inference_optimizer --help >/dev/null \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ember
 COPY . /ember
