@@ -436,6 +436,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_scripts.py)
   set_tests_properties(release_scripts PROPERTIES TIMEOUT 20)
   add_test(
+    NAME profile_scripts
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_profile_scripts.py)
+  set_tests_properties(profile_scripts PROPERTIES TIMEOUT 20)
+  add_test(
     NAME release_changelog
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_release_changelog.py)

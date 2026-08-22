@@ -156,6 +156,51 @@ gfx1151 runner after candidate publication. It checks IOMMU and the pinned model
 pair, quiesces the configured production container for exclusive GPU access,
 and restores production even when certification fails.
 
+### Kernel profiling
+
+`scripts/profile_gpu.sh` answers one question: **is decode bandwidth-bound or
+compute-bound?** That decides whether kernel-level work has headroom at all. If
+decode already runs near the ~212 GB/s measured roofline, no amount of
+instruction scheduling in the matmul kernels moves end-to-end throughput, and
+the useful direction is fusion (fewer passes over the weights) or quantization.
+
+```bash
+scripts/profile_gpu.sh --dry-run --model /models/model.gguf   # plan only, no GPU
+scripts/profile_gpu.sh --model /models/model.gguf --draft /models/draft.gguf
+scripts/profile_report.py reports/profile-<stamp>/
+```
+
+It runs **only on the gfx1151 host**, takes exclusive GPU access, and quiesces
+production through the same `/usr/local/sbin/ember-cert-production` wrapper
+certification uses -- restoring it on every exit path including failure and
+SIGINT. Stopping the production *container* alone is not enough; systemd
+recreates the ~90 GiB process mid-run.
+
+Three methodology points, because getting any of them wrong produces a
+confident wrong number:
+
+- **Timing and counters come from separate passes.** Counter collection
+  serializes dispatches, so durations measured under `--pmc` understate real
+  throughput and must never be the denominator of a bandwidth figure.
+- **Phases are separated by an idle gap, not by clock alignment.** The harness
+  drives warmup, sleeps past `--gap-secs`, then issues one shaped request;
+  the analyzer segments the dispatch stream and takes the last segment. Every
+  segment found is printed, so a bad split is visible rather than load-bearing.
+- **`FETCH_SIZE`/`WRITE_SIZE` are reported in kilobytes.** That factor is the
+  difference between "at the roofline" and "3% of it"; override with
+  `--counter-unit` if a ROCm release changes it.
+
+Before writing any kernel, check the fragment layout against
+`tools/bench_wmma_decode.hip`, which carries verified gfx1151 facts with ISA
+citations: RDNA 3.5 WMMA is 16 elements per lane with A/B replicated across
+lanes 0-15/16-31. That is **not** the RDNA 4 gfx12 layout (8 elements per lane,
+no replication) -- `RDNA4` is defined only for `__GFX12__`, so the gfx12 branch
+in `ggml-cuda/mma.cuh` compiles to `NO_DEVICE_CODE` on this hardware.
+
+`test/test_profile_scripts.py` covers the GPU-free half: argument contract,
+dry-run, unconditional production restore, and the analyzer end to end against
+synthetic rocprofv3 CSVs.
+
 ## Architecture: invariants you must not break
 
 ### The backend ABI is the seam

@@ -53,6 +53,13 @@ services:
     ipc: host
     security_opt:
       - seccomp=unconfined
+    # The engine mlock()s its ~85 GiB managed buffer to keep it unswappable.
+    # Docker's default memlock ceiling is 8 MiB, and there is no daemon-wide
+    # default-ulimits here, so without this the pin fails and the buffer stays
+    # swappable (ggml-cuda.cu warns "raise memlock ulimit" and continues).
+    # Profiling a swappable model buffer measures page faults, not kernels.
+    ulimits:
+      memlock: -1
     volumes:
       - .:/workspace
       - ${EMBER_MODELS_DIR:-./models}:/models

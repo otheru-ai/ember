@@ -25,6 +25,16 @@ RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
 
 FROM toolchain AS dev
 
+# Kernel profiling is a first-class dev-image capability (scripts/profile_gpu.sh,
+# and the rocprofv3 traces cited in quantize.cu and tools/bench_decode_attn.hip).
+# rocprofv3 arrives with the pinned rocm/dev-ubuntu-24.04:*-full base rather than
+# from apt, so nothing in this file would otherwise record that we depend on it.
+# Assert it here: a base-image bump that drops the profiler, or a switch to a
+# non-full ROCm variant, then fails the build instead of silently shipping a dev
+# image that cannot profile. Kept before COPY so it fails fast and stays cached.
+RUN command -v rocprofv3 >/dev/null 2>&1 \
+ || { echo 'rocprofv3 missing: the dev image must be able to profile kernels' >&2; exit 1; }
+
 WORKDIR /ember
 COPY . /ember
 
