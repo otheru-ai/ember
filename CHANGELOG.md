@@ -28,6 +28,8 @@ using an ambiguous same-day suffix.
 - Pinned the certification model pair to the published Hugging Face artifacts,
   added IOMMU/device preflight checks, and made the hardware job quiesce and
   restore production around exclusive GPU validation.
+- Upgraded GitHub checkout steps to the pinned Node 24 release so routine CI
+  and release logs no longer carry Node 20 deprecation warnings.
 
 ## 2026.8.10
 
