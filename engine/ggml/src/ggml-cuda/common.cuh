@@ -396,8 +396,55 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
 }
 
+// EMBER FORK DIVERGENCE (engine/VENDOR.md): DPP wave reduction for gfx1151.
+//
+// __shfl_xor_sync lowers to ds_bpermute_b32 on this target -- verified, not
+// assumed: the reduce_rows_f32 translation unit emits 10 of them and 15
+// s_waitcnt lgkmcnt. Every butterfly step is an LDS-unit round trip with a
+// latency wait, for a reduction that never leaves the wave.
+//
+// DPP16 does the same permutation inside the VALU. ISA table 94 gives
+// DPP_ROW_XMASK (160-16F): lane[n].src0 = lane[(n & 0x30) + ((n & 0xf) ^ mask)]
+// -- exactly the XOR butterfly, for masks 1/2/4/8. The (n & 0x30) term means
+// DPP16 cannot cross a 16-lane row, so the offset-16 step uses
+// V_PERMLANEX16_B32 instead.
+//
+// The order is load-bearing. The shuffle loop runs offsets 16,8,4,2,1 and
+// float addition is not associative, so the DPP sequence must run the same
+// order -- offset 16 first, then 8,4,2,1 -- to stay bit-identical. Reordering
+// this to the more natural 1,2,4,8,16 changes results.
+//
+// Unlike the VOPD dual-issue path, DPP is a modifier on an ordinary VALU
+// instruction and imposes no register-parity or bank constraints, so it can be
+// written as inline asm without fighting the register allocator.
+#if defined(GGML_USE_HIP) && (defined(RDNA3) || defined(RDNA4))
+#define EMBER_DPP_WAVE32_REDUCE 1
+#endif
+
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
+#if defined(EMBER_DPP_WAVE32_REDUCE)
+    if constexpr (width == 32) {
+        float y;
+        // offset 16: cross the two 16-lane rows.
+        //
+        // The two scalar operands are 4-bit-per-lane SELECT PATTERNS, not a
+        // swap flag. Passing -1,-1 sets every selector to 15, so every lane
+        // fetches lane 15 of the opposite half -- measured: lane0 got lane31's
+        // value instead of lane16's. The identity permutation is 0x76543210 for
+        // lanes 0-7 and 0xFEDCBA98 for lanes 8-15, which reproduces
+        // __shfl_xor(x,16) exactly.
+        asm volatile("v_permlanex16_b32 %0, %1, %2, %3"
+                     : "=v"(y) : "v"(x), "s"(0x76543210), "s"(0xFEDCBA98));
+        x += y;
+        // offsets 8,4,2,1: XOR butterfly within each row
+        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:8 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
+        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:4 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
+        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:2 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
+        asm volatile("v_add_f32_dpp %0, %0, %0 row_xmask:1 row_mask:0xf bank_mask:0xf bound_ctrl:0" : "+v"(x));
+        return x;
+    }
+#endif // defined(EMBER_DPP_WAVE32_REDUCE)
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
         x += __shfl_xor_sync(0xffffffff, x, offset, width);
