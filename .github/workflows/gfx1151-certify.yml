@@ -68,6 +68,7 @@ jobs:
             -print -quit | grep -q .
           command -v docker >/dev/null
           command -v curl >/dev/null
+          command -v dd >/dev/null
           command -v python3 >/dev/null
           docker_config="$RUNNER_TEMP/ember-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$docker_config"
@@ -125,22 +126,74 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c '
-          import hashlib, os, sys
-          if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
-              raise SystemExit("POSIX_FADV_DONTNEED is required on the Halo runner")
+          import hashlib, json, os, subprocess, sys, time
+
+          ttl = 7 * 24 * 60 * 60
+          cache_path = os.path.join(
+              os.path.dirname(os.environ["RUNNER_WORKSPACE"]),
+              ".ember-model-integrity-v1.json",
+          )
+          try:
+              with open(cache_path, encoding="utf-8") as stream:
+                  cache = json.load(stream)
+          except (FileNotFoundError, json.JSONDecodeError, OSError):
+              cache = {"version": 1, "records": {}}
+          if cache.get("version") != 1 or not isinstance(cache.get("records"), dict):
+              cache = {"version": 1, "records": {}}
+
+          now = int(time.time())
           pairs = zip(sys.argv[1::2], sys.argv[2::2])
           for expected, path in pairs:
+              stat = os.stat(path)
+              identity = {
+                  "device": stat.st_dev,
+                  "inode": stat.st_ino,
+                  "size": stat.st_size,
+                  "mtime_ns": stat.st_mtime_ns,
+                  "ctime_ns": stat.st_ctime_ns,
+              }
+              record = cache["records"].get(path, {})
+              age = now - int(record.get("verified_at", 0))
+              if (
+                  record.get("digest") == expected
+                  and record.get("identity") == identity
+                  and 0 <= age < ttl
+              ):
+                  print(f"{path}: OK (integrity cache hit, age {age}s)")
+                  continue
+
+              # The 96 GiB model pair shares DRAM with gfx1151.  Buffered reads
+              # consume the UMA budget even when POSIX_FADV_DONTNEED is issued
+              # afterward on XFS.  O_DIRECT keeps a cold integrity check from
+              # making the immediately following HIP allocation fail.
               digest = hashlib.sha256()
-              with open(path, "rb", buffering=0) as stream:
-                  while chunk := stream.read(8 * 1024 * 1024):
-                      digest.update(chunk)
-                  os.posix_fadvise(
-                      stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED
-                  )
+              process = subprocess.Popen(
+                  ["dd", f"if={path}", "iflag=direct", "bs=8M", "status=none"],
+                  stdout=subprocess.PIPE,
+              )
+              assert process.stdout is not None
+              while chunk := process.stdout.read(8 * 1024 * 1024):
+                  digest.update(chunk)
+              if process.wait() != 0:
+                  raise SystemExit(f"O_DIRECT read failed for {path}")
               actual = digest.hexdigest()
               if actual != expected:
                   raise SystemExit(f"{path}: expected {expected}, got {actual}")
-              print(f"{path}: OK (page cache released)")
+              cache["records"][path] = {
+                  "digest": actual,
+                  "identity": identity,
+                  "verified_at": now,
+              }
+              print(f"{path}: OK (O_DIRECT integrity check)")
+
+          temporary = f"{cache_path}.{os.getpid()}.tmp"
+          with open(temporary, "w", encoding="utf-8") as stream:
+              json.dump(cache, stream, sort_keys=True)
+              stream.write("\n")
+              stream.flush()
+              os.fsync(stream.fileno())
+          os.chmod(temporary, 0o600)
+          os.replace(temporary, cache_path)
           ' "$MODEL_SHA256" "$MODEL_PATH" "$DRAFT_SHA256" "$DRAFT_PATH"
           available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
           minimum_kib=$((100 * 1024 * 1024))

@@ -87,19 +87,23 @@ repository runner `ember-builder-halo` with the label `ember-builder`, and
 (`systemctl --user status actions-runner-ember`) with lingering enabled, so it
 survives logout and reboot without a root-owned unit.
 
-Release builds reuse four cache layers. Hosted CPU jobs restore ccache
+Release builds reuse five cache layers. Hosted CPU jobs restore ccache
 objects by compiler/configuration; the Forgejo containers share the named
 `ember-ci-ccache` volume; the self-hosted image builder reuses one persistent
 BuildKit instance plus the Dockerfile's 20 GiB ccache mount; and both image
-publishers retain Trivy's database in `ember-trivy-cache`. Keep
+publishers retain Trivy's database in `ember-trivy-cache`. The Halo runner also
+caches successful model-integrity checks for seven days, invalidating them on
+any device, inode, size, mtime, or ctime change. Keep
 `EMBER_BUILDX_BUILDER` stable across runs—creating a run-specific builder
 strands the expensive ROCm layers in an unreachable BuildKit volume. GitHub
 serializes candidate and tag builds because they share that instance.
 
-Certification deliberately does not reuse runtime KV state or skip model
-digests. Those are correctness/security gates. The streamed digest verifier
-uses `POSIX_FADV_DONTNEED` after hashing so the 96 GiB model pair does not evict
-the UMA allocation budget immediately before HIP model load.
+Certification deliberately does not reuse runtime KV state. Model digests are
+rechecked after seven days or immediately when filesystem identity changes.
+Cache misses use XFS direct I/O: buffered hashing followed by
+`POSIX_FADV_DONTNEED` was measured to leave only 24 GiB available on the Halo
+host, whereas HIP's monolithic placement needs at least 100 GiB. Direct I/O
+keeps the 96 GiB verification pass out of the shared CPU/GPU page cache.
 
 Because Ember is a public repository, a fork pull request can edit a workflow to
 target the builder's label. Repository Actions settings therefore require
@@ -164,7 +168,11 @@ file reaches the engine.
 
 ### Forgejo runners
 
-CI needs one Forgejo runner with the `docker` label. On a host with Docker:
+CI needs one repository-scoped Forgejo runner with `docker` and `docker-build`
+labels. Ember's runner is a persistent systemd user service; its `docker` label
+uses container isolation and permits only the `ember-ci-ccache` named volume,
+while the manually dispatched recovery publisher uses the trusted
+`docker-build:host` label. On a host with Docker:
 
 ```bash
 # 1. In Forgejo: Site Administration -> Actions -> Runners -> Create new runner
@@ -176,7 +184,7 @@ forgejo-runner register \
   --instance https://forge.example.com \
   --token <REGISTRATION_TOKEN> \
   --name ember-ci \
-  --labels docker:docker://node:24-bookworm
+  --labels docker:docker://node:24-bookworm,docker-build:host
 
 forgejo-runner daemon
 ```

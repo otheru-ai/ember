@@ -162,7 +162,9 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("Quiesce production for exclusive GPU validation", certify)
         self.assertIn("Restore production", certify)
         self.assertIn("iommu|amd_iommu", certify)
-        self.assertIn("POSIX_FADV_DONTNEED", certify)
+        self.assertIn("iflag=direct", certify)
+        self.assertIn(".ember-model-integrity-v1.json", certify)
+        self.assertIn("integrity cache hit", certify)
         self.assertIn("docker stop --timeout", certify)
         self.assertIn("DOCKER_CONFIG", certify)
         self.assertIn("MemAvailable", certify)
@@ -234,6 +236,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("CMAKE_C_COMPILER_LAUNCHER=ccache", forgejo_ci)
         self.assertIn("node:24-bookworm@sha256:", forgejo_ci)
         self.assertIn("ember-trivy-cache", forgejo_container)
+        self.assertGreaterEqual(GITHUB_CI.read_text().count("ccache --show-stats"), 3)
+        self.assertGreaterEqual(forgejo_ci.count("ccache --show-stats"), 3)
 
     def test_runtime_collector_copies_recursive_elf_closure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

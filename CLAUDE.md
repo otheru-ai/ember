@@ -45,8 +45,10 @@ remains the normal release path and fallback.
 Release CI reuses a stable BuildKit instance, a BuildKit-mounted 20 GiB ccache,
 hosted/Forgejo compiler caches, and a persistent Trivy database. Do not replace
 the stable builder with a per-run name. Hardware certification still hashes
-both model files and uses disposable KV state; it drops the resulting clean
-file pages with `POSIX_FADV_DONTNEED` before UMA allocation.
+both model files after seven days or a metadata-identity change and uses
+disposable KV state. Cache-miss hashing uses direct I/O because buffered reads
+were measured to starve the following UMA allocation even after
+`POSIX_FADV_DONTNEED` on the model XFS volume.
 
 Single test — every test is a plain binary with a `main()`; run it directly for
 full output, or via ctest by name:

@@ -32,9 +32,9 @@ using an ambiguous same-day suffix.
   and release logs no longer carry Node 20 deprecation warnings.
 - Added persistent BuildKit, ccache, and Trivy database reuse across GitHub and
   Forgejo runners, including compiler cache mounts inside the ROCm Docker build.
-- Kept full model digest verification while evicting its clean file pages before
-  HIP allocation, preventing the 96 GiB checksum pass from forcing hybrid mode
-  and disabling DSpark during unattended certification.
+- Kept periodic full model digest verification while caching unchanged results
+  for seven days and using direct I/O on cache misses, preventing the 96 GiB
+  checksum pass from consuming UMA and disabling monolithic DSpark validation.
 
 ## 2026.8.10
 

@@ -68,7 +68,9 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
-        run: cmake --build build -j"$(nproc)"
+        run: |
+          cmake --build build -j"$(nproc)"
+          ccache --show-stats
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 120
 
@@ -98,7 +100,9 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build
-        run: cmake --build build-asan -j"$(nproc)"
+        run: |
+          cmake --build build-asan -j"$(nproc)"
+          ccache --show-stats
       - name: Test under sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
@@ -157,7 +161,9 @@ jobs:
             -DCMAKE_CXX_FLAGS="--coverage -O0 -g" \
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
       - name: Build
-        run: cmake --build build-cov -j"$(nproc)"
+        run: |
+          cmake --build build-cov -j"$(nproc)"
+          ccache --show-stats
       - name: Test
         run: ctest --test-dir build-cov --output-on-failure --timeout 300
       - name: Enforce coverage floors
