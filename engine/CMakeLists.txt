@@ -25,14 +25,35 @@ set(GGML_CCACHE     OFF CACHE BOOL "" FORCE)
   #     graphs ON : prefill 22.9 tok/s, decode 21.39 tok/s
   #     graphs OFF: prefill 24.6 tok/s, decode 22.29 tok/s   (+7.4% / +4.2%)
   # Cause is visible in GGML_CUDA_GRAPH_STATS: continuous "warmup complete" /
-  # "warmup reset" churn plus [graph-mismatch] node=0 op=REPEAT. The graph key
-  # never stabilizes, so capture+validation cost is paid repeatedly and steady
-  # replay is never reached. The fused decode slot key includes per-layer padded
-  # comp rows, which grow monotonically (DS4_COMP_PAD_STRIDE=16), so the key
-  # changes roughly every 64 tokens by construction.
-  # DO NOT re-enable this until the graph key is made stable (e.g. a much larger
-  # DS4_COMP_PAD_STRIDE, or keying on the max padded value across layers);
-  # graph replay cannot pay off while every bucket crossing invalidates it.
+  # "warmup reset" churn plus [graph-mismatch] at node 0. The graph key never
+  # stabilizes, so capture+validation cost is paid repeatedly and steady replay
+  # is never reached.
+  #
+  # CORRECTION (2026-08-22, re-measured): an earlier version of this comment
+  # blamed the per-layer padded comp rows (DS4_COMP_PAD_STRIDE=16) and advised
+  # widening that stride. That diagnosis was wrong, and the suggested fix does
+  # not work. Tested directly: DS4_COMP_PAD_STRIDE=256 -- which reduces the
+  # comp-row key to 2 distinct values across a 256-token decode instead of ~16
+  # -- with GGML_HIP_GRAPHS=ON still produced 64 graph-mismatch events and 224
+  # warmup-churn events, and prefill still regressed at every context length:
+  #     graphs OFF: 213.0 / 327.1 / 397.4 / 338.6 / 311.4 tok/s
+  #     graphs ON : 206.8 / 317.7 / 391.0 / 332.4 / 308.0 tok/s
+  #                 (154 / 538 / 2074 / 8218 / 16410 evaluated prompt tokens)
+  #
+  # The actual mismatch is:
+  #     [graph-mismatch] node=0 op=VIEW name=ds4_raw_kv_1 (view)
+  # ds4_raw_kv_N itself is a fixed-size tensor (head_dim x n_swa), so it is not
+  # the tensor that changes -- it is the VIEW into it. The raw MLA KV cache is a
+  # sliding-window ring buffer, so the write row rotates every token and the
+  # view offset is baked into the captured topology. That invalidates the graph
+  # once per token, which is far worse than the ~64-token bucket crossing the
+  # old comment described, and no pad stride can affect it.
+  #
+  # DO NOT re-enable this until the ring-buffer write offset stops being part of
+  # the graph topology -- e.g. express it as a graph input / indirect index so
+  # the captured nodes are position-independent, or capture one graph per ring
+  # position and let the cache serve them round-robin. Graph replay cannot pay
+  # off while every token invalidates the capture.
 set(EMBER_GGML_BACKEND ggml-hip)
 set(EMBER_GGML_BACKEND "${EMBER_GGML_BACKEND}" PARENT_SCOPE)  # Phase 2 links this
 
