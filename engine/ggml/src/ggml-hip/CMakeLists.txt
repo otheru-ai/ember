@@ -91,6 +91,50 @@ target_compile_options(ggml-hip PRIVATE
     -Wno-unused-function
     -Wno-unneeded-internal-declaration)
 
+# EMBER FORK DIVERGENCE (engine/VENDOR.md): per-translation-unit CU mode.
+#
+# RDNA3.5 runs workgroups in WGP mode by default: two CUs share one 128 KB LDS.
+# -mcumode switches to one CU per workgroup with 64 KB LDS. Which is faster is
+# not a property of the architecture, it is a property of the kernel -- so this
+# is applied per TU, from measurement, not globally.
+#
+# MEASURED on gfx1151 (prefill probe, production quiesced, whole-build -mcumode
+# vs default, kernel times in ms):
+#
+#   rope_norm                          749.9 -> 377.9   -49.6%   <- CU mode
+#   ds4_flash_attn_d512 (compact)     2457.2 -> 2334.3   -5.0%   <- CU mode
+#   ds4_flash_attn_d512 (grouped)     5495.3 -> 5433.0   -1.1%   <- CU mode
+#   mul_mat_q<Q2_0_ROCMFP2,64>        5361.3 -> 5561.7   +3.7%   <- keep WGP
+#   mul_mat_q<Q4_0_ROCMFP4_FAST,64>   2462.5 -> 2604.5   +5.8%   <- keep WGP
+#
+# The split is what the LDS budget predicts: the MMQ tiles want the full 128 KB
+# a WGP provides and lose occupancy when halved, while rope and the attention
+# kernels use little LDS and gain from not sharing a CU pair. A whole-build
+# -mcumode was net -1.3% because those two effects nearly cancel; selecting per
+# TU keeps only the wins.
+#
+# Do NOT widen this list without re-measuring: mmq*.cu regressed, and the same
+# is likely for any kernel whose workgroup wants more than 64 KB of LDS.
+# Net effect per TU, summed over every kernel that TU owns (prefill probe):
+#   ds4-indexer.cu   561.8 ->  472.3 ms  -15.9%  (4 kernels)
+#   ds4-hc.cu       1028.4 ->  998.4 ms   -2.9%  (5 kernels)
+#   cpy.cu           423.2 ->  416.5 ms   -1.6%  (4 kernels)  -- left out, near noise
+#   norm.cu         1052.9 -> 1055.0 ms   +0.2%  (4 kernels)  -- regresses, excluded
+# The TU is the unit of decision, not the kernel: -mcumode cannot be applied to
+# one kernel inside a file, so a TU only qualifies if its kernels net out ahead.
+set(EMBER_CUMODE_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/rope.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/fattn.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/ds4-indexer.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/ds4-hc.cu")
+foreach(src IN LISTS EMBER_CUMODE_SOURCES)
+    if (NOT EXISTS "${src}")
+        message(FATAL_ERROR "EMBER_CUMODE_SOURCES names a file that does not exist: ${src}")
+    endif()
+endforeach()
+set_source_files_properties(${EMBER_CUMODE_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "-mcumode")
+
 # TODO: upstream's HIP substrate still uses the CUDA-compatible public ABI.
 target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
 
