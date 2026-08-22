@@ -22,6 +22,12 @@ using an ambiguous same-day suffix.
   passed, while capture-graph output equivalence remains a promotion blocker.
 - Linked README installation guidance to the current GitHub release instead of
   embedding a version that becomes stale after every release.
+- Made candidate certification and release promotion fully unattended: trusted
+  `main` commits proceed from immutable GHCR images through the dedicated
+  gfx1151 runner to changelog generation, tagging, and package publication.
+- Pinned the certification model pair to the published Hugging Face artifacts,
+  added IOMMU/device preflight checks, and made the hardware job quiesce and
+  restore production around exclusive GPU validation.
 
 ## 2026.8.10
 

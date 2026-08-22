@@ -31,8 +31,9 @@ agree that your contribution is licensed under the repository's MIT license.
 ## Release versions
 
 Ember uses calendar versions in `YEAR.MONTH.DAY` form without zero-padding.
-Do not update `VERSION` or create a release tag manually. Once an immutable
-candidate passes the protected gfx1151 certification workflow, release
+Do not update `VERSION` or create a release tag manually. Every trusted
+`main` commit automatically builds an immutable candidate; once it passes the
+dedicated gfx1151 certification workflow, release
 automation groups the conventional commits into `CHANGELOG.md`, updates the
 version and Compose image pin in a metadata-only child commit, and creates
 the matching annotated `vYEAR.MONTH.DAY` tag. The container workflow rejects a

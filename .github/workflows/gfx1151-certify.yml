@@ -1,32 +1,28 @@
 name: gfx1151 certification
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: Full 40-character candidate SHA to certify and promote
+        required: true
+        type: string
+      release_version:
+        description: Optional YEAR.M.D override; defaults to the current UTC date
+        required: false
+        type: string
+    secrets:
+      RELEASE_AUTOMATION_TOKEN:
+        required: true
+      FORGEJO_RELEASE_SSH_KEY:
+        required: true
+      FORGEJO_SSH_HOST_KEYS:
+        required: true
   workflow_dispatch:
     inputs:
       commit_sha:
         description: Full 40-character commit SHA whose sha-* image will be certified
         required: true
-        type: string
-      model_path:
-        description: Absolute path to the pinned GGUF on the runner host
-        required: true
-        type: string
-      prompt_path:
-        description: Absolute path to a non-sensitive prompt that generates at least one DSpark block
-        required: true
-        type: string
-      disk_prompt_path:
-        description: Absolute path to a non-sensitive prompt containing at least 512 model tokens
-        required: true
-        type: string
-      draft_model_path:
-        description: Absolute path to the pinned DSpark draft GGUF
-        required: true
-        type: string
-      port:
-        description: Unused loopback port for the generation smoke test
-        required: true
-        default: '18080'
         type: string
       release_version:
         description: Optional YEAR.M.D override; defaults to the current UTC date
@@ -43,42 +39,62 @@ concurrency:
 
 jobs:
   certify:
-    # Configure this environment with required reviewers. Never expose this
-    # runner to pull_request jobs: the container receives direct GPU access.
-    environment: gfx1151-certification
+    # This reusable workflow is called only after the exact main-branch
+    # candidate image passes every hosted and container gate. It is never
+    # referenced by pull_request jobs: the runner has direct GPU and production
+    # Docker access.
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 180
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      MODEL_PATH: ${{ vars.EMBER_CERT_MODEL_PATH }}
+      DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
+      PORT: ${{ vars.EMBER_CERT_PORT || '18080' }}
+      PRODUCTION_CONTAINER: ${{ vars.EMBER_PRODUCTION_CONTAINER || 'ember-server' }}
     steps:
-      - name: Validate operator inputs and devices
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-          MODEL_PATH: ${{ inputs.model_path }}
-          PROMPT_PATH: ${{ inputs.prompt_path }}
-          DISK_PROMPT_PATH: ${{ inputs.disk_prompt_path }}
-          DRAFT_PATH: ${{ inputs.draft_model_path }}
-          PORT: ${{ inputs.port }}
+      - name: Validate configured artifacts and devices
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MODEL_PATH" = /* && -f "$MODEL_PATH" ]]
-          [[ "$PROMPT_PATH" = /* && -f "$PROMPT_PATH" ]]
-          [[ "$DISK_PROMPT_PATH" = /* && -f "$DISK_PROMPT_PATH" ]]
           [[ "$DRAFT_PATH" = /* && -f "$DRAFT_PATH" ]]
           [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 ))
           [[ -r /dev/kfd && -d /dev/dri ]]
+          ! grep -Eq '(^| )(iommu|amd_iommu)=off( |$)' /proc/cmdline
+          find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d \
+            -print -quit | grep -q .
           command -v docker >/dev/null
           command -v curl >/dev/null
           command -v python3 >/dev/null
+          prompt_path="$RUNNER_TEMP/ember-cert-short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          disk_prompt_path="$RUNNER_TEMP/ember-cert-disk-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          printf '%s\n' \
+            'Explain why deterministic validation matters for an inference server. Use at least eight sentences.' \
+            >"$prompt_path"
+          awk 'BEGIN { for (i = 1; i <= 700; i++) printf "Validation sentence %d preserves a deterministic model context.\n", i }' \
+            >"$disk_prompt_path"
+          printf 'PROMPT_PATH=%s\nDISK_PROMPT_PATH=%s\n' \
+            "$prompt_path" "$disk_prompt_path" >>"$GITHUB_ENV"
           if curl --fail --silent --max-time 2 \
               "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
             echo "port $PORT already serves an HTTP health endpoint"
             exit 1
           fi
 
+      - name: Quiesce production for exclusive GPU validation
+        id: production
+        run: |
+          set -euo pipefail
+          echo 'was_running=false' >>"$GITHUB_OUTPUT"
+          if docker inspect "$PRODUCTION_CONTAINER" >/dev/null 2>&1 &&
+              [[ "$(docker inspect --format '{{.State.Running}}' "$PRODUCTION_CONTAINER")" = true ]]; then
+            echo 'was_running=true' >>"$GITHUB_OUTPUT"
+            docker stop --time 180 "$PRODUCTION_CONTAINER"
+          fi
+
       - name: Log in to GHCR and pull the exact candidate
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_SHA: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
@@ -93,9 +109,7 @@ jobs:
 
       - name: Verify the model artifact
         env:
-          MODEL_PATH: ${{ inputs.model_path }}
           MODEL_SHA256: a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
-          DRAFT_PATH: ${{ inputs.draft_model_path }}
           DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
         run: |
           set -euo pipefail
@@ -105,12 +119,6 @@ jobs:
             sha256sum --check --strict
 
       - name: Run HIP GEMM and generation differential validators
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-          MODEL_PATH: ${{ inputs.model_path }}
-          PROMPT_PATH: ${{ inputs.prompt_path }}
-          DISK_PROMPT_PATH: ${{ inputs.disk_prompt_path }}
-          DRAFT_PATH: ${{ inputs.draft_model_path }}
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
@@ -181,11 +189,6 @@ jobs:
           ' <<<"$disk_report"
 
       - name: Run end-to-end generation smoke test
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
-          MODEL_PATH: ${{ inputs.model_path }}
-          DRAFT_PATH: ${{ inputs.draft_model_path }}
-          PORT: ${{ inputs.port }}
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
@@ -240,9 +243,18 @@ jobs:
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
 
+      - name: Restore production
+        if: ${{ always() && steps.production.outputs.was_running == 'true' }}
+        run: docker start "$PRODUCTION_CONTAINER"
+
+      - name: Remove generated validation prompts
+        if: ${{ always() }}
+        run: |
+          for path in "${PROMPT_PATH:-}" "${DISK_PROMPT_PATH:-}"; do
+            [[ -z "$path" ]] || rm -f -- "$path"
+          done
+
       - name: Record certification result
-        env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
         run: |
           {
             echo '## gfx1151 certification passed'

@@ -137,3 +137,16 @@ jobs:
       packages: write
       id-token: write
     uses: ./.github/workflows/container.yml
+
+  certify-and-release:
+    # Only a trusted main push can reach this point. The reusable container
+    # workflow has already published and scanned the immutable sha-* candidate.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    needs: publish-candidate
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/gfx1151-certify.yml
+    with:
+      commit_sha: ${{ github.sha }}
+    secrets: inherit

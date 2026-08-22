@@ -128,8 +128,7 @@ scripts/build.sh                                          # -> build-rocm/ember-
 verification requires exclusive access to a gfx1151 device and model weights;
 the differential validator below is the supported end-to-end proof.
 
-Before deploying an engine build, run the differential validator (in-process,
-no production disruption beyond the GPU it needs):
+Before deploying an engine build manually, run the differential validator:
 
 ```bash
 ./build-rocm/ember-dflash -m /models/model.gguf \
@@ -141,6 +140,11 @@ It exits nonzero if greedy AR output diverges after snapshot restore, disk
 round-trip, or (when DSpark is configured) on the speculative path. With
 `--batch-sessions 2` it also verifies two resident sessions against the serial
 baseline.
+
+For releases, GitHub CI performs this validation automatically on the dedicated
+gfx1151 runner after candidate publication. It checks IOMMU and the pinned model
+pair, quiesces the configured production container for exclusive GPU access,
+and restores production even when certification fails.
 
 ## Architecture: invariants you must not break
 

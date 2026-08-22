@@ -27,17 +27,17 @@ candidate while allowing automation to update the version and notes.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
-The hosted workflows cannot cover these checks by themselves:
+The hosted workflows cannot execute these checks by themselves:
 
 | Out of scope | Why |
 |---|---|
-| End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights; `gfx1151-certify.yml` runs it on the protected Halo runner. |
+| End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights; `gfx1151-certify.yml` runs it on the dedicated Halo runner. |
 | Differential validator | Needs the GPU and the 85 GiB GGUF; `gfx1151-certify.yml` runs exact, batched, and optional DSpark validation. |
 
-Target-hardware certification is therefore manually dispatched and approval
-gated, while its checks are automated. The one ROCm failure mode hosted CI can
-catch cheaply is source-list drift between the two hand-maintained CMake lists
-— see `ci/check_invariants.py`.
+Target-hardware certification starts automatically after the immutable
+candidate passes the hosted and container gates. The one ROCm failure mode
+hosted CI can catch cheaply is source-list drift between the two hand-maintained
+CMake lists — see `ci/check_invariants.py`.
 
 ## Jobs
 
@@ -53,7 +53,7 @@ Ordered cheapest-first so a break reports in seconds.
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
 | `publish-candidate` | release-candidate gate | After every `main` CI job passes, calls the container workflow for that exact SHA. |
 | `release-image` | release gate | Publishes immutable commit candidates automatically; for version tags it verifies the metadata-only child of the certified gfx1151 tree, validates CalVer, pushes version and `latest`, and rejects fixed critical vulnerabilities. |
-| `certify-gfx1151` | manual hardware gate | Verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, optional DSpark, and a live generation request on Strix Halo. A successful run automatically promotes the candidate. |
+| `certify-and-release` | release gate | Calls the dedicated Strix Halo runner after candidate publication; it verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, DSpark, and a live generation request, then promotes the candidate. |
 
 ## Runner setup
 
@@ -107,23 +107,24 @@ without creating a new commit. After the first publish, make the
 GitHub exposes no REST endpoint for this; it is a one-time manual step under
 Package settings -> Danger Zone -> Change visibility.
 
-For the hardware gate, register the Halo host as a GitHub self-hosted runner
-with labels `self-hosted`, `linux`, `x64`, and `gfx1151`. Create a GitHub
-environment named `gfx1151-certification` with required reviewers. The workflow
-is manual-only and never runs for a pull request. Before approving it, schedule
-a maintenance window and stop any server already occupying the GPU; the
-workflow deliberately refuses to stop operator services itself.
+The hardware gate uses the dedicated repository runner
+`ember-gfx1151-prod`, registered on the Halo host with labels `self-hosted`,
+`linux`, `x64`, and `gfx1151`. Only a trusted push to `main` can call it; pull
+request jobs never target this runner. Certification checks IOMMU and device
+access, generates deterministic non-sensitive prompts in the runner temporary
+directory, stops the configured production container for exclusive GPU access,
+and restores it even when a validator fails. Manual dispatch remains available
+only for infrastructure recovery or an explicit CalVer override.
 
 The certification sequence is:
 
-1. Push the candidate to Forgejo `main`. The mirror, GitHub CI, and immutable
-   candidate-image publication happen automatically. Wait for the `sha-*`
-   image and vulnerability scan to complete.
-2. Run **gfx1151 certification** with that full SHA, the pinned quant and
-   drafter paths, a short non-sensitive prompt that produces enough output to enter
-   DSpark, a separate non-sensitive prompt of at least 512 model tokens for the
-   disk round trip. The workflow itself pins and verifies both published
-   digests; they cannot be substituted at dispatch time.
+1. Push the candidate to Forgejo `main`. The mirror, GitHub CI, immutable
+   candidate-image publication, vulnerability scan, and gfx1151 certification
+   happen automatically.
+2. The hardware job reads the fixed quant and drafter paths from repository
+   variables, verifies both published digests, and uses generated prompts for
+   DSpark and the disk round trip. Neither model can be substituted at dispatch
+   time.
 3. After the validators and generation smoke test pass, the promotion job uses
    the current UTC date (or the optional dispatch `release_version`) to generate
    a grouped changelog, update `VERSION` and the Compose image pin, and
@@ -136,10 +137,16 @@ The certification sequence is:
    GitHub release from the new `CHANGELOG.md` section.
 
 The self-hosted runner needs Docker, `curl`, Python 3, `/dev/kfd`, `/dev/dri`,
-and read access to the model and validation prompt. The workflow pulls the
+an enabled IOMMU, and read access to the model pair. The workflow pulls the
 already-built `sha-*` image, verifies its full OCI revision label, mounts model
 files read-only, uses disposable Docker volumes for KV state, and never checks
 out repository content onto the Halo runner.
+
+The pinned files are the target and DSpark draft from
+[`otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF`](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF).
+The Halo host keeps shorter internal filenames, but certification verifies the
+published SHA-256 digests (`a936e0a5…3d54` and `1a01c80e…ae6`) before either
+file reaches the engine.
 
 ### Forgejo runners
 
@@ -189,7 +196,7 @@ release-metadata commit skips a redundant candidate build. Its mirrored version
 tag starts Container directly; the certified-parent, three-file allowlist, and
 VERSION checks must pass before the CalVer and `latest` tags are written.
 
-The promotion job runs on `ember-builder` after the protected hardware job.
+The promotion job runs on `ember-builder` after the hardware job.
 Configure these GitHub repository values in addition to the runner label:
 
 | Name | Kind | Purpose |
@@ -199,6 +206,10 @@ Configure these GitHub repository values in addition to the runner label:
 | `FORGEJO_SSH_HOST_KEYS` | secret | Pinned SSH host keys for the source-of-truth Forgejo endpoint. |
 | `FORGEJO_RELEASE_REMOTE` | variable | Source-of-truth SSH URL, currently `ssh://git@git.otheru.ai:2222/otheru/ember.git`. |
 | `EMBER_GFX1151_CERTIFIED_SHA` | variable | Managed by promotion; the executable-tree SHA accepted by the tag publisher. |
+| `EMBER_CERT_MODEL_PATH` | variable | Absolute Halo-host path to the pinned target GGUF. |
+| `EMBER_CERT_DRAFT_PATH` | variable | Absolute Halo-host path to the pinned DSpark draft GGUF. |
+| `EMBER_CERT_PORT` | variable | Unused loopback port for the certification server; defaults to `18080`. |
+| `EMBER_PRODUCTION_CONTAINER` | variable | Container quiesced and restored around certification; defaults to `ember-server`. |
 
 Keep the deploy key write-enabled only for this repository. Never commit its
 private half or the GitHub automation token. The generated release commit is
