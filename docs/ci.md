@@ -180,7 +180,10 @@ while the manually dispatched recovery publisher uses the trusted
 `docker-build:host` label. On the current WSL/Docker 29 builder, configure
 `container.network: host`; Docker bridge creation returns `operation not
 supported`, while host networking preserves disposable container isolation and
-lets the runner cache endpoint resolve reliably. On a host with Docker:
+lets the runner cache endpoint resolve reliably. Because Forgejo uses an
+internal CA, each workflow container also mounts only the pinned root
+certificate read-only; add its exact source path to `container.valid_volumes`.
+On a host with Docker:
 
 ```bash
 # 1. In Forgejo: Site Administration -> Actions -> Runners -> Create new runner
