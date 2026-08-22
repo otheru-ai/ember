@@ -70,6 +70,7 @@ jobs:
           command -v curl >/dev/null
           command -v dd >/dev/null
           command -v python3 >/dev/null
+          [[ -x /usr/local/sbin/ember-cert-production ]]
           docker_config="$RUNNER_TEMP/ember-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$docker_config"
           prompt_path="$RUNNER_TEMP/ember-cert-short-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
@@ -92,11 +93,19 @@ jobs:
         id: production
         run: |
           set -euo pipefail
-          echo 'was_running=false' >>"$GITHUB_OUTPUT"
+          echo 'restore=none' >>"$GITHUB_OUTPUT"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'restore=service' >>"$GITHUB_OUTPUT"
+            sudo -n /usr/local/sbin/ember-cert-production stop
+          elif docker inspect "$PRODUCTION_CONTAINER" >/dev/null 2>&1 &&
+              [[ "$(docker inspect --format '{{.State.Running}}' "$PRODUCTION_CONTAINER")" = true ]]; then
+            echo 'restore=container' >>"$GITHUB_OUTPUT"
+            docker stop --timeout 180 "$PRODUCTION_CONTAINER"
+          fi
           if docker inspect "$PRODUCTION_CONTAINER" >/dev/null 2>&1 &&
               [[ "$(docker inspect --format '{{.State.Running}}' "$PRODUCTION_CONTAINER")" = true ]]; then
-            echo 'was_running=true' >>"$GITHUB_OUTPUT"
-            docker stop --timeout 180 "$PRODUCTION_CONTAINER"
+            echo 'production remained active after quiesce request'
+            exit 1
           fi
 
       - name: Log in to GHCR and pull the exact candidate
@@ -330,8 +339,20 @@ jobs:
           ' <<<"$response"
 
       - name: Restore production
-        if: ${{ always() && steps.production.outputs.was_running == 'true' }}
-        run: docker start "$PRODUCTION_CONTAINER"
+        if: ${{ always() && steps.production.outputs.restore != 'none' }}
+        run: |
+          case "${{ steps.production.outputs.restore }}" in
+            service)
+              sudo -n /usr/local/sbin/ember-cert-production start
+              ;;
+            container)
+              docker start "$PRODUCTION_CONTAINER"
+              ;;
+            *)
+              echo 'unknown production restore mode' >&2
+              exit 1
+              ;;
+          esac
 
       - name: Remove generated validation prompts
         if: ${{ always() }}

@@ -104,6 +104,11 @@ Cache misses use XFS direct I/O: buffered hashing followed by
 `POSIX_FADV_DONTNEED` was measured to leave only 24 GiB available on the Halo
 host, whereas HIP's monolithic placement needs at least 100 GiB. Direct I/O
 keeps the 96 GiB verification pass out of the shared CPU/GPU page cache.
+The gfx1151 runner controls production through the root-owned
+`/usr/local/sbin/ember-cert-production` wrapper. Its sudo policy permits only
+`is-active`, `stop`, and `start` for `ember-server.service`; stopping only the
+child container is incorrect because the root user service immediately
+recreates it.
 
 Because Ember is a public repository, a fork pull request can edit a workflow to
 target the builder's label. Repository Actions settings therefore require
@@ -172,7 +177,10 @@ CI needs one repository-scoped Forgejo runner with `docker` and `docker-build`
 labels. Ember's runner is a persistent systemd user service; its `docker` label
 uses container isolation and permits only the `ember-ci-ccache` named volume,
 while the manually dispatched recovery publisher uses the trusted
-`docker-build:host` label. On a host with Docker:
+`docker-build:host` label. On the current WSL/Docker 29 builder, configure
+`container.network: host`; Docker bridge creation returns `operation not
+supported`, while host networking preserves disposable container isolation and
+lets the runner cache endpoint resolve reliably. On a host with Docker:
 
 ```bash
 # 1. In Forgejo: Site Administration -> Actions -> Runners -> Create new runner

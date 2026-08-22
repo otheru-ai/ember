@@ -49,6 +49,9 @@ both model files after seven days or a metadata-identity change and uses
 disposable KV state. Cache-miss hashing uses direct I/O because buffered reads
 were measured to starve the following UMA allocation even after
 `POSIX_FADV_DONTNEED` on the model XFS volume.
+Certification must stop and restore the supervising `ember-server.service`
+through the fixed-purpose host wrapper; stopping its child container alone
+causes systemd to recreate the 90 GiB process during validation.
 
 Single test — every test is a plain binary with a `main()`; run it directly for
 full output, or via ctest by name:

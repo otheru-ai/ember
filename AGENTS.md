@@ -341,6 +341,9 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   seven days, invalidated by file identity/metadata changes. Cache-miss hashing
   must use direct I/O: buffered reads were measured to starve the following UMA
   allocation even after `POSIX_FADV_DONTNEED` on the model XFS volume.
+  Certification must stop and restore the supervising `ember-server.service`
+  through the fixed-purpose host wrapper; stopping its child container alone
+  causes systemd to recreate the 90 GiB process during validation.
 - Key runtime env vars (`.env.example` lists container settings):
   `DFLASH_DS4_SPEC=1` +
   `DFLASH_DS4_DRAFT=<draft.gguf>` enable DSpark; `EMBER_BG_IDLE_SECS` /
