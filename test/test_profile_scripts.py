@@ -155,6 +155,22 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("error code 38", body)
         self.assertIn('for counter in "${PMC_COUNTERS[@]}"', body)
 
+    def test_counter_query_has_gpu_access(self):
+        # rocprofv3 --list-avail enumerates counters PER AGENT. Without the
+        # device flags the container sees no GPU, returns an empty list, and the
+        # harness wrongly concludes FETCH_SIZE/WRITE_SIZE do not exist. Observed
+        # live on the gfx1151 box before this was fixed.
+        body = PROFILE_SH.read_text()
+        self.assertIn("GPU_ARGS=(", body)
+        avail = [ln for ln in body.splitlines() if "--list-avail" in ln and "docker run" in ln]
+        self.assertTrue(avail, "counter query is not a docker run line")
+        self.assertIn("GPU_ARGS", avail[0])
+
+    def test_all_gpu_containers_share_one_flag_set(self):
+        body = PROFILE_SH.read_text()
+        # No stray second copy of the device flags to drift out of sync.
+        self.assertEqual(body.count("--device /dev/kfd"), 1)
+
     def test_counter_pass_is_separate_from_timing_pass(self):
         # Durations under --pmc are serialized and must never be a bandwidth
         # denominator. The two passes existing separately is the whole guard.

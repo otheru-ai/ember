@@ -152,6 +152,16 @@ preflight_hard() {
     || die "rocprofv3 not found in $IMAGE -- the profiler lives in the ROCm dev stage"
 }
 
+# Every container that must SEE the GPU needs these. rocprofv3 --list-avail
+# reports counters per agent, so without them it returns an empty list and the
+# harness concludes the counters do not exist. Defined once; used everywhere.
+GPU_ARGS=(
+  --device /dev/kfd --device /dev/dri
+  --group-add video --group-add render
+  --ipc host --security-opt seccomp=unconfined
+  --ulimit memlock=-1:-1
+)
+
 # ── production quiesce, with unconditional restore ───────────────────────
 RESTORE_MODE=none
 
@@ -246,12 +256,6 @@ run_pass() {
     *)     die "unknown pass mode: $mode" ;;
   esac
 
-  local gpu_args=(
-    --device /dev/kfd --device /dev/dri
-    --group-add video --group-add render
-    --ipc host --security-opt seccomp=unconfined
-    --ulimit memlock=-1:-1
-  )
   local mounts=(
     -v "$REPO:/ember"
     -v "$outdir:/out"
@@ -270,7 +274,7 @@ run_pass() {
   # Pass rocprofv3 and its target as argv rather than a shell string: a model
   # path with a space would otherwise split and start a server on the wrong file.
   PROFILE_CONTAINER="$name"
-  docker run -d --name "$name" --network host "${gpu_args[@]}" "${mounts[@]}" "${env_args[@]}" \
+  docker run -d --name "$name" --network host "${GPU_ARGS[@]}" "${mounts[@]}" "${env_args[@]}" \
     --entrypoint rocprofv3 "$IMAGE" \
     "${prof[@]:1}" \
     -- "$BINARY" -m "$model_arg" --host 127.0.0.1 --port "$PORT" --max-ctx 65536 \
@@ -312,14 +316,16 @@ run_pass() {
 PMC_COUNTERS=()
 select_counters() {
   local avail
-  avail="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'rocprofv3 --list-avail 2>/dev/null' || true)"
+  avail="$(docker run --rm "${GPU_ARGS[@]}" --entrypoint /bin/sh "$IMAGE" \
+    -c 'rocprofv3 --list-avail 2>/dev/null' || true)"
   local want=(FETCH_SIZE WRITE_SIZE)
   local missing=()
   for c in "${want[@]}"; do
     if grep -qw "$c" <<<"$avail"; then PMC_COUNTERS+=("$c"); else missing+=("$c"); fi
   done
   if (( ${#PMC_COUNTERS[@]} == 0 )); then
-    die "none of ${want[*]} are available in $IMAGE; run 'rocprofv3 --list-avail' and set the counters by hand"
+    die "none of ${want[*]} are available on the GPU agent via $IMAGE. Check with:
+  docker run --rm ${GPU_ARGS[*]} --entrypoint rocprofv3 $IMAGE --list-avail"
   fi
   (( ${#missing[@]} == 0 )) || log "counters unavailable, bandwidth will be partial: ${missing[*]}"
 }
