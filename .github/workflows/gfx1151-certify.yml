@@ -60,7 +60,10 @@ jobs:
           [[ "$DRAFT_PATH" = /* && -f "$DRAFT_PATH" ]]
           [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 ))
           [[ -r /dev/kfd && -d /dev/dri ]]
-          ! grep -Eq '(^| )(iommu|amd_iommu)=off( |$)' /proc/cmdline
+          if grep -Eq '(^| )(iommu|amd_iommu)=off( |$)' /proc/cmdline; then
+            echo 'IOMMU is disabled in the kernel command line'
+            exit 1
+          fi
           find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 -type d \
             -print -quit | grep -q .
           command -v docker >/dev/null
