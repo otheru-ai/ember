@@ -881,6 +881,19 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_kernel(
     }
 }
 
+// Reading the compressed rows at their F16 storage width was tried and is
+// slower, despite halving that span's bytes. Prefill attends over
+// [raw F32 | compressed, widened from F16], and about 80% of the rows a query
+// token touches are compressed ones, so the byte saving is real and the values
+// are bit-identical (widening F16 is lossless). But the 512-deep unrolled dot
+// below has to exist once per KV width, and the second copy took the kernel
+// from 8,442 to 13,482 instructions with v_dual_fmac_f32 packing falling 834 ->
+// 514. One binary, A/B'd on an env flag so nothing else moved: prefill 3.6-5.9%
+// slower at every length above 2k. rocprof says this kernel reads at 92% of the
+// 212 GB/s roofline, which is what made the trade look free -- but FETCH_SIZE
+// counts L2 misses that Strix Halo's 32 MB MALL serves, so that number is an
+// upper bound, and this kernel has VALU headroom being spent, not bandwidth.
+//
 // Dense-prefill variant of the grouped kernel with compact score storage.
 // The mask-derived envelopes only change the address used to retain a score;
 // every visible row keeps its original owner thread, dot-product order,

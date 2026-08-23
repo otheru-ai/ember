@@ -37,6 +37,8 @@ Primary documentation to consult, in order:
 - `ARCHITECTURE.md` — the layering and why the server was rewritten but the
   kernels reused.
 - `docs/continuous-batching.md` — resident-session batching design.
+- `docs/performance.md` — measured TTFT (cold and prefix-cache warm), decode
+  throughput against context, and per-kernel roofline position.
 - `docs/quant-quality-reports.md` — quant evaluation workflow and release gates.
 - `CLAUDE.md` — a parallel guidance file with overlapping content; keep both
   files consistent when you change build/test/convention facts.

@@ -198,6 +198,7 @@ validation or benchmarking.
 ## Documentation
 
 - [Operations and troubleshooting](docs/operations.md)
+- [Measured performance: TTFT, decode, roofline](docs/performance.md)
 - [Experimental CPU/GPU/XDNA2 inference](docs/xdna2-moe-prototype.md)
 - [Client configuration](docs/client-compatibility.md)
 - [Architecture](ARCHITECTURE.md)
