@@ -1378,6 +1378,30 @@ bool run_deepseek4_dspark_spec_decode(
     // chance; strict cycles past it are steady-state cost and are charged.
     const long strict_grace_cycles = (long) spec_env_u32(
         "DFLASH_DS4_SPEC_STRICT_GRACE_CYCLES", 16);
+    // A profitability pause is temporary: it runs skip_cycles at q=1 and then
+    // speculates again. For a request that oscillates in and out of
+    // qualification that never settles, because a q=1 cycle cannot advance
+    // warmup -- note_cycle() returns early on offered_tokens < 2 -- so the
+    // request alternates between losing speculation and AR forever. Measured on
+    // the "code" prompt at 0.967x against AR: better than paying full strict
+    // cost throughout, still a loss.
+    //
+    // A pause with the verifier still unqualified is the scheduler saying this
+    // request is not paying and has not earned the wide path. Stop retrying and
+    // give the remainder to AR, which is 1.0x by definition. Pauses taken while
+    // the gate IS active do not count: those are a qualified request hitting a
+    // rough patch, which is what the temporary skip is for.
+    //
+    // One is the right threshold, measured. At 3 the mechanism barely fires --
+    // "code" runs ~29 cycles, and with the grace bound only ~13 are chargeable
+    // against a 4-cycle window, so three pauses is at the edge of what the
+    // request's length permits: 0.967x -> 0.969x, inside noise. At 1 it reaches
+    // 0.986x with every winning prompt unmoved. The evidence a single pause
+    // carries is already strong: extra_ms exceeded saved_ms over a full window
+    // on a request that has never qualified.
+    const long max_unqualified_pauses = (long) spec_env_u32(
+        "DFLASH_DS4_SPEC_MAX_UNQUALIFIED_PAUSES", 1);
+    long n_unqualified_pauses = 0;
     long consecutive_strict = 0;
     bool warmup_abandoned = false;
     long agreement_offered = 0, agreement_matched = 0;
@@ -1477,6 +1501,18 @@ bool run_deepseek4_dspark_spec_decode(
         // stops it. Catching that needs the profit scheduler's time-based
         // extra_ms/saved_ms test, which af16fe4 stopped feeding on strict
         // cycles; see the note at that call site.
+        if (max_unqualified_pauses > 0 && !batch_gate.active() &&
+            n_unqualified_pauses >= max_unqualified_pauses) {
+            warmup_abandoned = true;
+            scheduler_tail_handoff = true;
+            if (scheduler_log) {
+                std::fprintf(stderr,
+                             "[ds4-spec-sched] %ld profitability pauses without "
+                             "qualifying -- handing %d remaining tokens to AR\n",
+                             n_unqualified_pauses, emit_left);
+            }
+            break;
+        }
         if (batch_warmup_max_cycles > 0 && !batch_gate.active() &&
             consecutive_strict > batch_warmup_max_cycles) {
             warmup_abandoned = true;
@@ -1984,6 +2020,9 @@ bool run_deepseek4_dspark_spec_decode(
         } else {
             const DSparkSchedulerDecision decision =
                 scheduler.note_spec_cycle((uint32_t) matched, cycle_ms);
+            if (decision.paused && !batch_gate.active()) {
+                ++n_unqualified_pauses;
+            }
             if (scheduler_log && decision.paused) {
                 std::fprintf(stderr,
                     "[ds4-spec-sched] pause=%u avg_accept=%.2f "
