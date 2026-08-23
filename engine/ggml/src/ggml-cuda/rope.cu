@@ -374,8 +374,19 @@ static void rope_norm_cuda(const T *            x,
                            const int            set_rows_stride,
                            cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    // Each thread rotates one dim-pair, so a fixed 256-wide block covers 512
+    // dims whether or not the tensor has them. DS4 ropes n_rot = 64, where that
+    // leaves 32 of 256 threads with work and launches seven dead waves per block
+    // -- measured 241.5 ms across 42 calls at grid (131072, 256).
+    //
+    // Size the block to the row instead. Every output element is computed
+    // independently from its own (row, i0) with no shared memory and no
+    // cross-thread reads, so the block shape cannot change any value.
+    const int  n_pairs    = (ne00 + 1) / 2;
+    const int  pairs_pad  = ((n_pairs + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    const int  block_y    = pairs_pad < CUDA_ROPE_BLOCK_SIZE ? pairs_pad : CUDA_ROPE_BLOCK_SIZE;
+    const dim3 block_dims(1, block_y, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_y - 1) / (2 * block_y);
     const dim3 block_nums(nr, n_blocks_x, 1);
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
@@ -416,8 +427,19 @@ static void rope_neox_cuda(const T *            x,
                            const int            set_rows_stride,
                            cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    // Each thread rotates one dim-pair, so a fixed 256-wide block covers 512
+    // dims whether or not the tensor has them. DS4 ropes n_rot = 64, where that
+    // leaves 32 of 256 threads with work and launches seven dead waves per block
+    // -- measured 241.5 ms across 42 calls at grid (131072, 256).
+    //
+    // Size the block to the row instead. Every output element is computed
+    // independently from its own (row, i0) with no shared memory and no
+    // cross-thread reads, so the block shape cannot change any value.
+    const int  n_pairs    = (ne00 + 1) / 2;
+    const int  pairs_pad  = ((n_pairs + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    const int  block_y    = pairs_pad < CUDA_ROPE_BLOCK_SIZE ? pairs_pad : CUDA_ROPE_BLOCK_SIZE;
+    const dim3 block_dims(1, block_y, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_y - 1) / (2 * block_y);
     const dim3 block_nums(nr, n_blocks_x, 1);
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
@@ -458,8 +480,19 @@ static void rope_multi_cuda(const T *            x,
                             const bool           is_imrope,
                             cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    // Each thread rotates one dim-pair, so a fixed 256-wide block covers 512
+    // dims whether or not the tensor has them. DS4 ropes n_rot = 64, where that
+    // leaves 32 of 256 threads with work and launches seven dead waves per block
+    // -- measured 241.5 ms across 42 calls at grid (131072, 256).
+    //
+    // Size the block to the row instead. Every output element is computed
+    // independently from its own (row, i0) with no shared memory and no
+    // cross-thread reads, so the block shape cannot change any value.
+    const int  n_pairs    = (ne00 + 1) / 2;
+    const int  pairs_pad  = ((n_pairs + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    const int  block_y    = pairs_pad < CUDA_ROPE_BLOCK_SIZE ? pairs_pad : CUDA_ROPE_BLOCK_SIZE;
+    const dim3 block_dims(1, block_y, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_y - 1) / (2 * block_y);
     const dim3 block_nums(nr, n_blocks_x, 1);
 
     const float theta_scale = powf(freq_base, -2.0f / n_dims);
@@ -499,8 +532,19 @@ static void rope_vision_cuda(const T *            x,
                              const mrope_sections sections,
                              cudaStream_t         stream) {
     GGML_ASSERT(ne00 % 2 == 0);
-    const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
-    const int  n_blocks_x = (ne00 + 2 * CUDA_ROPE_BLOCK_SIZE - 1) / (2 * CUDA_ROPE_BLOCK_SIZE);
+    // Each thread rotates one dim-pair, so a fixed 256-wide block covers 512
+    // dims whether or not the tensor has them. DS4 ropes n_rot = 64, where that
+    // leaves 32 of 256 threads with work and launches seven dead waves per block
+    // -- measured 241.5 ms across 42 calls at grid (131072, 256).
+    //
+    // Size the block to the row instead. Every output element is computed
+    // independently from its own (row, i0) with no shared memory and no
+    // cross-thread reads, so the block shape cannot change any value.
+    const int  n_pairs    = (ne00 + 1) / 2;
+    const int  pairs_pad  = ((n_pairs + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+    const int  block_y    = pairs_pad < CUDA_ROPE_BLOCK_SIZE ? pairs_pad : CUDA_ROPE_BLOCK_SIZE;
+    const dim3 block_dims(1, block_y, 1);
+    const int  n_blocks_x = (ne00 + 2 * block_y - 1) / (2 * block_y);
     const dim3 block_nums(nr, n_blocks_x, 1);
     // break down (head_dim, heads, seq) into (CUDA_ROPE_BLOCK_SIZE, x, heads * seq)
     // where x ~= ceil(head_dim / CUDA_ROPE_BLOCK_SIZE);
