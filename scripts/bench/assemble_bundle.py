@@ -113,22 +113,37 @@ def summarise_workloads(on_rows, off_rows):
 
 
 def summarise_context(rows):
-    on = {r["prompt_tokens"]: r for r in rows if r["config"] == "spec-on"}
-    off = {r["prompt_tokens"]: r for r in rows if r["config"] == "spec-off"}
+    """Depth series keyed on the requested depth, not the measured prompt length.
+
+    sweep_probe.py sizes its filler with a words-per-token estimate that drifts
+    badly at depth -- a target of 65536 measures 77068 tokens -- so keying on the
+    measurement puts unrepeatable numbers like 77068 on the axis instead of the
+    64k that was asked for, and makes two releases impossible to line up. It also
+    silently drops a point whenever the two configs happen to tokenise
+    differently, since the spec-off lookup would miss.
+
+    The measured count is kept as prompt_tokens, and every rate that depends on
+    how much text was really prefilled still uses it.
+    """
+    on = {r["target"]: r for r in rows if r["config"] == "spec-on"}
+    off = {r["target"]: r for r in rows if r["config"] == "spec-off"}
     out = []
-    for d in sorted(on):
-        p, c = on[d]["prefill_tps"], on[d]["decode_tps"]
-        b = off.get(d, {}).get("decode_tps")
-        ttft = d / p if p else None
+    for t in sorted(on):
+        r = on[t]
+        n = r["prompt_tokens"]
+        p, c = r["prefill_tps"], r["decode_tps"]
+        b = off.get(t, {}).get("decode_tps")
+        ttft = n / p if p else None
         out.append({
-            "depth": d,
+            "depth": t,
+            "prompt_tokens": n,
             "prefill_tok_s": round(p, 1),
             "decode_tok_s": round(c, 2),
             "autoregressive_tok_s": round(b, 2) if b else None,
             "speedup": round(c / b, 3) if b else None,
             "ttft_ms": round(ttft * 1000) if ttft else None,
-            "total_tok_s": round((d + 256) / (ttft + 256 / c), 1) if ttft else None,
-            "accept_rate": on[d].get("accept"),
+            "total_tok_s": round((n + 256) / (ttft + 256 / c), 1) if ttft else None,
+            "accept_rate": r.get("accept"),
         })
     return out
 

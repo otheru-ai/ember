@@ -22,7 +22,6 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .back-link{color:var(--muted);text-decoration:none;font-size:13px}
 .back-link:hover{color:var(--ink)}
 #system-info{margin:0;color:var(--muted);font-size:13px}
-.intro{margin:10px 0 0;color:var(--muted);max-width:70ch}
 main{padding:22px 0 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
   padding:18px 20px;margin:0 0 18px}
@@ -52,11 +51,6 @@ th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.05em;text
 td.num{font-family:var(--mono)}
 .gain{color:var(--ok)} .loss{color:var(--bad)}
 .note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
-.badge-row{margin:12px 0 0;max-width:70ch;font-size:13px;color:var(--muted)}
-.badge{display:inline-block;background:var(--accent);color:#fff;border-radius:5px;
-  padding:1px 7px;font-size:11px;font-weight:700;letter-spacing:.05em;
-  text-transform:uppercase;margin-right:8px;vertical-align:1px}
-.caveat{border-left:3px solid var(--accent);padding-left:12px;margin:14px 0 0;color:var(--muted);font-size:13px}
 footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:12.5px}
 code{font-family:var(--mono);font-size:12.5px}
 </style>
@@ -66,10 +60,6 @@ code{font-family:var(--mono);font-size:12.5px}
   <a class="back-link" href="https://github.com/otheru-ai/ember">← Ember on GitHub</a>
   <h1>Ember — Performance</h1>
   <p id="system-info">Loading results…</p>
-  <p class="intro">Every figure here is a measurement taken on the machine that runs the
-  release &mdash; no estimates, no scaling from other hardware. Each release states how its
-  numbers were produced, and a release that has not been through certification says so.</p>
-  <p id="uncertified" class="badge-row" hidden></p>
 </div></header>
 
 <main class="layout">
@@ -90,10 +80,17 @@ code{font-family:var(--mono);font-size:12.5px}
 
   <section class="card">
     <div class="section-heading">
+      <div><span class="eyebrow">Across releases</span><h2>Release history</h2></div>
+      <div id="h-sel" class="tabs" role="tablist"></div>
+    </div>
+    <div id="h-chart" class="chart"></div>
+  </section>
+
+  <section class="card">
+    <div class="section-heading">
       <div><span class="eyebrow">Generation</span><h2 id="wl-title">Decode throughput by workload</h2></div>
     </div>
     <div id="wl-chart" class="chart"></div>
-    <p class="caveat" id="wl-caveat"></p>
   </section>
 
   <section class="card">
@@ -107,7 +104,6 @@ code{font-family:var(--mono);font-size:12.5px}
   <section class="card">
     <div class="section-heading"><div><span class="eyebrow">Exact measurements</span><h2>Per request</h2></div></div>
     <div id="table"></div>
-    <p class="note" id="prov"></p>
   </section>
 </main>
 <footer><div class="layout">
@@ -118,11 +114,15 @@ code{font-family:var(--mono);font-size:12.5px}
 </div></footer>
 
 <script>
-const S={w:new Set(),r:new Set(),view:"absolute",metric:"decode",baseline:null};
+const S={w:new Set(),r:new Set(),view:"absolute",metric:"decode",hist:"decode",baseline:null};
 let DATA=null;
 
 const fmt=(n,d=2)=>n==null?"—":Number(n).toFixed(d);
-const depthLabel=n=>n>=1000?(n>=10000?(n/1000).toFixed(0):(n/1000).toFixed(1))+"k":String(n);
+const depthLabel=n=>{
+  if(n<1024)return String(n);
+  const k=n/1024;
+  return (Number.isInteger(k)?k:k.toFixed(1))+"k";
+};
 
 function readHash(){
   const h=new URLSearchParams(location.hash.slice(1));
@@ -130,13 +130,14 @@ function readHash(){
   if(h.get("releases"))h.get("releases").split(",").filter(Boolean).forEach(x=>S.r.add(x));
   if(h.get("view"))S.view=h.get("view");
   if(h.get("metric"))S.metric=h.get("metric");
+  if(h.get("hist"))S.hist=h.get("hist");
   if(h.get("baseline"))S.baseline=h.get("baseline");
 }
 function writeHash(){
   const h=new URLSearchParams();
   h.set("workloads",[...S.w].join(","));
   h.set("releases",[...S.r].join(","));
-  h.set("view",S.view); h.set("metric",S.metric);
+  h.set("view",S.view); h.set("metric",S.metric); h.set("hist",S.hist);
   if(S.baseline)h.set("baseline",S.baseline);
   history.replaceState(null,"","#"+h.toString());
 }
@@ -186,10 +187,15 @@ function barChart(rows,unit,relative){
 
 function lineChart(series,yLabel,logx,markPeak){
   const W=1080,H=300,padL=64,padR=120,padT=16,padB=44;
+  // The depth ladder is a fixed set of requested sizes, one of which is 0 (no
+  // filler at all), so a log axis is out -- log10(0) is -Infinity and collapses
+  // every point onto the left edge. Space the rungs evenly instead: it reads as
+  // the discrete ladder it is, and keeps releases on a shared x position even
+  // when one of them swept a different set.
   const xs=[...new Set(series.flatMap(s=>s.pts.map(p=>p[0])))].sort((a,b)=>a-b);
-  const lo=Math.log10(xs[0]),hi=Math.log10(xs[xs.length-1]);
+  const xi=new Map(xs.map((n,i)=>[n,i]));
   const vmax=Math.max(...series.flatMap(s=>s.pts.map(p=>p[1])))*1.12;
-  const X=n=>padL+(Math.log10(n)-lo)/(hi-lo)*(W-padL-padR);
+  const X=n=>xs.length<2?padL:padL+xi.get(n)/(xs.length-1)*(W-padL-padR);
   const Y=v=>padT+(H-padT-padB)-(v/vmax)*(H-padT-padB);
   let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
   for(let f=0;f<=1.0001;f+=0.25){const v=vmax*f,y=Y(v);
@@ -231,15 +237,10 @@ function lineChart(series,yLabel,logx,markPeak){
 
 function render(){
   const rels=DATA.releases.filter(r=>S.r.has(r.id));
-  if(!S.baseline||!S.r.has(S.baseline))S.baseline=rels.length?rels[0].id:null;
+  const withWl=rels.filter(r=>Object.keys(r.workloads).length);
+  if(!S.baseline||!S.r.has(S.baseline))
+    S.baseline=(withWl[0]||rels[0]||{}).id||null;
   const wl=DATA.workloads.filter(w=>S.w.has(w));
-  const unc=rels.filter(r=>r.provenance&&r.provenance.certified===false).map(r=>r.id);
-  const ub=document.getElementById("uncertified");
-  ub.hidden=!unc.length;
-  if(unc.length) ub.innerHTML=`<span class="badge">candidate</span>`+
-    `${unc.join(", ")} ${unc.length===1?"has":"have"} not been through release certification. `+
-    `The figures are real measurements from the candidate build; certification regenerates them.`;
-
   document.getElementById("result-count").textContent=
     `${wl.length} workload${wl.length===1?"":"s"} · ${rels.length} release${rels.length===1?"":"s"}`;
 
@@ -251,6 +252,23 @@ function render(){
   tabs(document.getElementById("d-sel"),[["decode","Decode"],["prefill","Prefill"],["ttft","TTFT"]],
     S.metric,v=>S.metric=v);
 
+  // release history -- aggregate decode, and peak prefill across the groups.
+  // Both come from the two legs every bundle has ever run.
+  tabs(document.getElementById("h-sel"),
+    [["decode","Decode median"],["prefill","Prefill peak"]],S.hist,v=>S.hist=v);
+  const hrows=[];
+  DATA.releases.filter(r=>S.r.has(r.id)).forEach(r=>{
+    if(S.hist==="decode"){
+      const v=(r.throughput||{}).median_tps;
+      if(v!=null) hrows.push({label:r.id,v,text:fmt(v)+" tok/s"});
+    }else{
+      const g=Object.values(r.prefill_groups||{}).map(x=>x.median_tps).filter(v=>v!=null);
+      if(g.length) hrows.push({label:r.id,v:Math.max(...g),text:fmt(Math.max(...g),1)+" tok/s"});
+    }
+  });
+  document.getElementById("h-chart").innerHTML=hrows.length?barChart(hrows,"tok/s",false)
+    :`<p class="note">Select at least one release.</p>`;
+
   // workload chart
   const base=rels.find(r=>r.id===S.baseline);
   const rows=[];
@@ -260,54 +278,58 @@ function render(){
     if(S.view==="absolute")rows.push({label:name,v:e.tok_s,text:fmt(e.tok_s)+" tok/s"});
     else if(S.view==="vs-ar"){const g=(e.speedup||1)-1;
       rows.push({label:name,v:g,text:(g>=0?"+":"")+(g*100).toFixed(1)+"%"});}
-    else{const b=base&&base.workloads[w];
+    else{if(withWl.length<2)return;      // comparing a release against itself is a row of +0.0%
+      const b=base&&base.workloads[w];
       if(!b)return; const g=e.tok_s/b.tok_s-1;
       rows.push({label:name,v:g,text:(g>=0?"+":"")+(g*100).toFixed(1)+"%"});}
   }));
   document.getElementById("wl-chart").innerHTML=rows.length?barChart(rows,"tok/s",S.view!=="absolute")
-    :`<p class="note">Select at least one workload and release.</p>`;
+    :`<p class="note">${S.view==="vs-baseline"&&withWl.length===1
+        ?`Only ${withWl[0].id} carries per-workload figures, so there is nothing to `+
+         `compare it against. The workload breakdown was added to the bundle on `+
+         `2026-08-23; select it alongside a later release once one exists.`
+        :`No per-workload data in the selected release${rels.length===1?"":"s"}. `+
+         `The workload breakdown was added to the bundle on 2026-08-23; earlier `+
+         `bundles measured only the aggregate shown under Release history.`}</p>`;
   document.getElementById("wl-title").textContent=
     S.view==="absolute"?"Decode throughput by workload":
     S.view==="vs-ar"?"Decode gain over autoregressive":"Decode change against "+(S.baseline||"baseline");
-  document.getElementById("wl-caveat").textContent=
-    "Decode depends on how predictable the continuation is, not on the prompt. "+
-    "The spread across these workloads is roughly 1.8x, so a single throughput number "+
-    "describes only whichever task produced it.";
 
   // depth chart
   const palette=["var(--accent)","var(--accent2)","#8957e5","#3fb950"];
   const series=[];
-  rels.forEach((r,i)=>{
-    if(!r.depths.length)return;
+  const swept=rels.filter(r=>r.depths.length);
+  const solo=swept.length===1&&S.metric==="decode";
+  swept.forEach((r,i)=>{
     const pick=d=>S.metric==="decode"?d.decode_tok_s:S.metric==="prefill"?d.prefill_tok_s:d.ttft_ms;
-    series.push({name:(rels.length>1||S.metric!=="decode")?r.id:"speculative",colour:palette[i%palette.length],
+    series.push({name:solo?"speculative":r.id,colour:palette[i%palette.length],
       pts:r.depths.map(d=>[d.depth,pick(d)]).filter(p=>p[1]!=null)});
-    if(S.metric==="decode"&&rels.length===1)
+    if(solo)
       series.push({name:"autoregressive",colour:"var(--muted)",
         pts:r.depths.map(d=>[d.depth,d.autoregressive_tok_s]).filter(p=>p[1]!=null)});
   });
   document.getElementById("d-chart").innerHTML=series.length
     ?lineChart(series,S.metric==="ttft"?"milliseconds":"tokens / second",true,S.metric!=="ttft")
-    :`<p class="note">No context sweep in the selected releases.</p>`;
+    :`<p class="note">No context sweep in the selected release${rels.length===1?"":"s"}. `+
+      `Depth data needs benchmark_bundle.sh run without --skip-context-sweep.</p>`;
 
   // table
-  const r0=rels[0];
-  if(r0&&r0.depths.length){
-    let t=`<table><thead><tr><th>Depth</th><th>tok/s out</th><th>Prefill tok/s</th>`+
+  const r0=rels.find(r=>r.depths.length);
+  if(r0){
+    // Depth is the size that was asked for; prompt tokens is what the prompt
+    // actually came to. Every rate below is computed from the latter.
+    let t=`<table><thead><tr><th>Depth</th><th>Prompt tokens</th><th>tok/s out</th><th>Prefill tok/s</th>`+
           `<th>tok/s total</th><th>TTFT ms</th><th>vs AR</th></tr></thead><tbody>`;
     r0.depths.forEach(d=>{
       const g=d.speedup?((d.speedup-1)*100):null;
-      t+=`<tr><td>${d.depth.toLocaleString()}</td><td class="num">${fmt(d.decode_tok_s)}</td>`+
+      t+=`<tr><td>${depthLabel(d.depth)}</td>`+
+         `<td class="num">${d.prompt_tokens==null?"—":d.prompt_tokens.toLocaleString()}</td>`+
+         `<td class="num">${fmt(d.decode_tok_s)}</td>`+
          `<td class="num">${fmt(d.prefill_tok_s,1)}</td><td class="num">${fmt(d.total_tok_s,1)}</td>`+
          `<td class="num">${d.ttft_ms==null?"—":d.ttft_ms.toLocaleString()}</td>`+
          `<td class="num ${g>=0?"gain":"loss"}">${g==null?"—":(g>=0?"+":"")+g.toFixed(1)+"%"}</td></tr>`;
     });
     document.getElementById("table").innerHTML=t+`</tbody></table>`;
-    const pv=r0.provenance||{};
-    document.getElementById("prov").textContent=
-      `${r0.id} · measured ${r0.measured} · ${r0.model.target||""} `+
-      `(sha256 ${(r0.model.target_sha256||"").slice(0,12)}…) · 256 tokens generated, greedy.`+
-      (pv.note?" "+pv.note:"");
   }
   writeHash();
 }

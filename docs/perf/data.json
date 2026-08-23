@@ -1,22 +1,204 @@
 {
   "depths": [
-    43,
-    862,
-    3925,
-    18553,
-    38059,
-    77068,
-    116077
+    0,
+    1024,
+    4096,
+    16384,
+    32768,
+    65536,
+    98304
   ],
   "releases": [
+    {
+      "depths": [],
+      "host": {
+        "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+        "gpu": "AMD Radeon 8060S (gfx1151), integrated",
+        "kernel": "7.1.3-201.fc44.x86_64",
+        "memory_gib": 125,
+        "os": "Fedora Linux 44 (Server Edition)"
+      },
+      "id": "2026.8.10",
+      "image": "ember-rocm:7.14",
+      "measured": "2026-08-10",
+      "model": {
+        "drafter": "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf",
+        "drafter_sha256": "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
+        "target": "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf",
+        "target_sha256": "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54"
+      },
+      "prefill_groups": {
+        "prefill-128": {
+          "evaluated_prompt_tokens": 154,
+          "max_tps": 209.3,
+          "median_tps": 208.2,
+          "median_wall_s": 0.74,
+          "min_tps": 204.1,
+          "restored_prefix": 0,
+          "samples": 3
+        },
+        "prefill-16384": {
+          "evaluated_prompt_tokens": 16410,
+          "max_tps": 309.1,
+          "median_tps": 308.6,
+          "median_wall_s": 53.178,
+          "min_tps": 308.1,
+          "restored_prefix": 0,
+          "samples": 2
+        },
+        "prefill-2048": {
+          "evaluated_prompt_tokens": 2074,
+          "max_tps": 401.1,
+          "median_tps": 375.1,
+          "median_wall_s": 5.531,
+          "min_tps": 365.4,
+          "restored_prefix": 0,
+          "samples": 3
+        },
+        "prefill-32768": {
+          "evaluated_prompt_tokens": 32794,
+          "max_tps": 278.3,
+          "median_tps": 278.1,
+          "median_wall_s": 117.938,
+          "min_tps": 277.9,
+          "restored_prefix": 0,
+          "samples": 2
+        },
+        "prefill-512": {
+          "evaluated_prompt_tokens": 538,
+          "max_tps": 325.7,
+          "median_tps": 325.7,
+          "median_wall_s": 1.653,
+          "min_tps": 317.5,
+          "restored_prefix": 0,
+          "samples": 3
+        },
+        "prefill-8192": {
+          "evaluated_prompt_tokens": 8218,
+          "max_tps": 336.5,
+          "median_tps": 335.9,
+          "median_wall_s": 24.466,
+          "min_tps": 333.9,
+          "restored_prefix": 0,
+          "samples": 3
+        }
+      },
+      "provenance": {
+        "bundle": "ember-2026-08-10",
+        "certified": false,
+        "depths_from": null,
+        "has_depths": false
+      },
+      "throughput": {
+        "completion_tokens": 256,
+        "max_tps": 33.8,
+        "median_accept_rate": 1.0,
+        "median_tps": 33.6,
+        "median_wall_s": 9.354,
+        "min_accept_rate": 1.0,
+        "min_tps": 33.5,
+        "samples": 3,
+        "spec_ran": 3
+      },
+      "workloads": {}
+    },
+    {
+      "depths": [],
+      "host": {
+        "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+        "gpu": "AMD Radeon 8060S (gfx1151), integrated",
+        "kernel": "7.1.3-201.fc44.x86_64",
+        "memory_gib": 125,
+        "os": "Fedora Linux 44 (Server Edition)"
+      },
+      "id": "2026.8.22",
+      "image": "ember-rocm:7.14",
+      "measured": "2026-08-22",
+      "model": {
+        "drafter": "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf",
+        "drafter_sha256": "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
+        "note": "Byte-identical to the pair measured on 2026-08-10; both SHA-256 values were re-verified against the local files before this run.",
+        "target": "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf",
+        "target_sha256": "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54"
+      },
+      "prefill_groups": {
+        "prefill-128": {
+          "evaluated_prompt_tokens": 154,
+          "max_tps": 210.9,
+          "median_tps": 209.6,
+          "median_wall_s": 0.736,
+          "min_tps": 206.4,
+          "samples": 3
+        },
+        "prefill-16384": {
+          "evaluated_prompt_tokens": 16410,
+          "max_tps": 311.4,
+          "median_tps": 310.7,
+          "median_wall_s": 52.812,
+          "min_tps": 310.0,
+          "samples": 2
+        },
+        "prefill-2048": {
+          "evaluated_prompt_tokens": 2074,
+          "max_tps": 391.1,
+          "median_tps": 386.8,
+          "median_wall_s": 5.364,
+          "min_tps": 365.4,
+          "samples": 3
+        },
+        "prefill-32768": {
+          "evaluated_prompt_tokens": 32794,
+          "max_tps": 282.6,
+          "median_tps": 282.3,
+          "median_wall_s": 116.165,
+          "min_tps": 282.0,
+          "samples": 2
+        },
+        "prefill-512": {
+          "evaluated_prompt_tokens": 538,
+          "max_tps": 320.5,
+          "median_tps": 319.2,
+          "median_wall_s": 1.686,
+          "min_tps": 313.2,
+          "samples": 3
+        },
+        "prefill-8192": {
+          "evaluated_prompt_tokens": 8218,
+          "max_tps": 337.9,
+          "median_tps": 337.2,
+          "median_wall_s": 24.37,
+          "min_tps": 331.6,
+          "samples": 3
+        }
+      },
+      "provenance": {
+        "bundle": "ember-2026-08-22",
+        "certified": false,
+        "depths_from": null,
+        "has_depths": false
+      },
+      "throughput": {
+        "completion_tokens": 256,
+        "max_tps": 34.16,
+        "median_accept_rate": 0.989,
+        "median_tps": 34.16,
+        "median_wall_s": 7.897,
+        "min_accept_rate": 0.989,
+        "min_tps": 33.67,
+        "samples": 3,
+        "spec_ran": 3
+      },
+      "workloads": {}
+    },
     {
       "depths": [
         {
           "accept_rate": 0.981,
           "autoregressive_tok_s": 23.37,
           "decode_tok_s": 39.24,
-          "depth": 43,
+          "depth": 0,
           "prefill_tok_s": 72.6,
+          "prompt_tokens": 43,
           "speedup": 1.679,
           "total_tok_s": 42.0,
           "ttft_ms": 592
@@ -25,8 +207,9 @@
           "accept_rate": 0.981,
           "autoregressive_tok_s": 22.69,
           "decode_tok_s": 39.47,
-          "depth": 862,
+          "depth": 1024,
           "prefill_tok_s": 280.3,
+          "prompt_tokens": 862,
           "speedup": 1.74,
           "total_tok_s": 116.9,
           "ttft_ms": 3075
@@ -35,8 +218,9 @@
           "accept_rate": 0.981,
           "autoregressive_tok_s": 22.73,
           "decode_tok_s": 37.98,
-          "depth": 3925,
+          "depth": 4096,
           "prefill_tok_s": 343.3,
+          "prompt_tokens": 3925,
           "speedup": 1.671,
           "total_tok_s": 230.1,
           "ttft_ms": 11433
@@ -45,8 +229,9 @@
           "accept_rate": 0.981,
           "autoregressive_tok_s": 20.94,
           "decode_tok_s": 32.22,
-          "depth": 18553,
+          "depth": 16384,
           "prefill_tok_s": 300.6,
+          "prompt_tokens": 18553,
           "speedup": 1.539,
           "total_tok_s": 270.0,
           "ttft_ms": 61720
@@ -55,8 +240,9 @@
           "accept_rate": 0.953,
           "autoregressive_tok_s": 19.02,
           "decode_tok_s": 24.94,
-          "depth": 38059,
+          "depth": 32768,
           "prefill_tok_s": 272.3,
+          "prompt_tokens": 38059,
           "speedup": 1.311,
           "total_tok_s": 255.4,
           "ttft_ms": 139769
@@ -65,8 +251,9 @@
           "accept_rate": 0.978,
           "autoregressive_tok_s": 16.61,
           "decode_tok_s": 18.25,
-          "depth": 77068,
+          "depth": 65536,
           "prefill_tok_s": 226.2,
+          "prompt_tokens": 77068,
           "speedup": 1.099,
           "total_tok_s": 218.0,
           "ttft_ms": 340707
@@ -75,8 +262,9 @@
           "accept_rate": 0.978,
           "autoregressive_tok_s": 14.88,
           "decode_tok_s": 14.63,
-          "depth": 116077,
+          "depth": 98304,
           "prefill_tok_s": 186.7,
+          "prompt_tokens": 116077,
           "speedup": 0.983,
           "total_tok_s": 182.0,
           "ttft_ms": 621730
@@ -93,10 +281,10 @@
       "image": "ember-rocm:7.14",
       "measured": "2026-08-23",
       "model": {
-        "drafter": "DeepSeek-V4-Flash-0731-ablit1042-DSpark-draft.gguf",
-        "drafter_sha256": "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
-        "target": "DeepSeek-V4-Flash-0731-ablit1042-v2.gguf",
-        "target_sha256": "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54"
+        "drafter": "d.gguf",
+        "drafter_sha256": "1a01c80e",
+        "target": "t.gguf",
+        "target_sha256": "a936e0a5"
       },
       "prefill_groups": {
         "prefill-128": {
@@ -145,8 +333,8 @@
       "provenance": {
         "bundle": "ember-2026-08-23",
         "certified": false,
-        "has_depths": true,
-        "note": "Release candidate, not a certified release. The aggregate and per-workload figures come from a benchmark bundle; the depth series was measured by the standalone context sweep (scripts/bench/sweep_probe.py), because the bundle dry run was invoked with --skip-context-sweep. Certification regenerates all of it at the next release."
+        "depths_from": "context-sweep.jsonl",
+        "has_depths": true
       },
       "throughput": {
         "completion_tokens": 256,

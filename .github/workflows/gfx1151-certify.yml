@@ -387,6 +387,27 @@ jobs:
                   print(f"| {k} | {v['tok_s']} | {sp} |")
           PY
 
+      - name: Build the performance page data
+        if: env.BENCH_BUNDLE != ''
+        run: |
+          set -euo pipefail
+          # Ship the page's data file inside the bundle artifact. The release
+          # drops it into docs/perf/ and renames the SHA-labelled release to the
+          # version, so the published page is regenerated from the certified run
+          # rather than carried over by hand.
+          python3 "$GITHUB_WORKSPACE/scripts/bench/build_perf_site_data.py" \
+            --bundle "$BENCH_BUNDLE" --certified \
+            --out "$BENCH_BUNDLE/perf-site-data.json"
+          python3 - "$BENCH_BUNDLE/perf-site-data.json" <<'PY' >>"$GITHUB_STEP_SUMMARY"
+          import json, sys
+          r = json.load(open(sys.argv[1]))['releases'][0]
+          n = len(r['depths'])
+          print(f"\nPage data: {len(r['workloads'])} workloads, {n} context depths.\n")
+          if not n:
+              print("> No context sweep in this bundle, so the depth chart would be "
+                    "empty. Check the sweep was not skipped before publishing.\n")
+          PY
+
       - name: Upload the performance bundle
         if: always() && env.BENCH_BUNDLE != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
