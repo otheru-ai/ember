@@ -144,6 +144,14 @@ def main():
     summary = summarise_groups(rows)
     if wl_on:
         summary["by_workload"] = summarise_workloads(wl_on, wl_off)
+        # A file of connection errors still parses as JSONL and used to assemble
+        # into a bundle with an empty by_workload and no complaint. Refuse it:
+        # a bundle missing its headline table is worse than a failed run.
+        if not summary["by_workload"]:
+            errs = [r.get("error") for r in wl_on if r.get("error")]
+            raise SystemExit(
+                f"workload sweep produced no usable rows "
+                f"({len(errs)} of {len(wl_on)} errored; first: {errs[0] if errs else 'n/a'})")
     if ctx:
         summary["by_context_depth"] = summarise_context(ctx)
 
@@ -186,15 +194,26 @@ def main():
              f"{environment['host']['memory_gib']} GiB unified memory, "
              f"{environment['host']['os']}.", "",
              "## Contents", "",
-             "| File | What it is |", "| --- | --- |",
-             "| `raw-results.jsonl` | Every throughput request, unaggregated |",
-             "| `workloads-spec-on.jsonl` / `-off.jsonl` | Decode across ten generation tasks, speculation on and off |",
-             "| `context-sweep.jsonl` | Prefill and decode against prompt depth, both configurations |",
-             "| `summary.json` | Aggregates: medians, ranges, speedups |",
-             "| `environment.json` | Host, model SHA-256, runtime release, flags |",
-             "| `ember-context-scaling.svg` | Chart generated from `context-sweep.jsonl` |",
-             "| `benchmark.py`, `accept_sweep.py`, `sweep_probe.py` | The harnesses that produced the above |",
-             ""]
+             "| File | What it is |", "| --- | --- |"]
+    # Describe only what is actually here. A run with --skip-context-sweep used
+    # to advertise a chart and a sweep it had not produced.
+    catalogue = [
+        ("raw-results.jsonl", "Every throughput request, unaggregated"),
+        ("workloads-spec-on.jsonl", "Decode across ten generation tasks, speculation on"),
+        ("workloads-spec-off.jsonl", "The same ten tasks, autoregressive baseline"),
+        ("context-sweep.jsonl", "Prefill and decode against prompt depth, both configurations"),
+        ("ember-context-scaling.svg", "Chart generated from `context-sweep.jsonl`"),
+        ("summary.json", "Aggregates: medians, ranges, speedups"),
+        ("environment.json", "Host, model SHA-256, runtime release, flags"),
+        ("host.json", "Host facts captured on the machine that ran the benchmark"),
+        ("benchmark.py", "Throughput harness"),
+        ("accept_sweep.py", "Workload harness"),
+        ("sweep_probe.py", "Context-depth harness"),
+    ]
+    for name, what in catalogue:
+        if (bundle / name).exists():
+            lines.append(f"| `{name}` | {what} |")
+    lines.append("")
     if summary.get("decode"):
         d = summary["decode"]
         lines += [f"Decode on the throughput group: **{d['median_tps']} tok/s** median "

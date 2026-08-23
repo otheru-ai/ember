@@ -21,6 +21,10 @@
 # restarted production mid-job would hand the GPU away underneath it.
 set -uo pipefail
 
+# Saved before parsing: the argument loop shifts $@ empty, so the flock re-exec
+# below must replay these rather than "$@".
+ORIG_ARGS=("$@")
+
 OUT=""; RELEASE=""; MODEL_DIR=${MODEL_DIR:-/srv/models}
 IMAGE=${IMAGE:-ember-rocm:7.14}
 BIN=${BIN:-/ember/build-rocm/ember-dflash}
@@ -65,7 +69,7 @@ if [ "$EXCLUSIVE" = 1 ]; then
   # numbers. Guard against looping if flock is unavailable.
   if [ -z "${BENCH_BUNDLE_LOCKED:-}" ] && command -v flock >/dev/null 2>&1; then
     export BENCH_BUNDLE_LOCKED=1
-    exec flock -w 7200 "$LOCK" "$0" "$@"
+    exec flock -w 7200 "$LOCK" "$0" "${ORIG_ARGS[@]}"
   fi
   # Order matters: production holds /dev/kfd, so trap first, then quiesce, THEN
   # wait for the device to drain. Waiting before quiescing deadlocks.
@@ -82,8 +86,17 @@ fi
 for _ in $(seq 1 60); do [ "$(free -g | awk '/^Mem:/{print $7}')" -ge 100 ] && break; sleep 5; done
 
 echo "=== model integrity ==="
-TARGET_SHA=$(sha256sum "$TARGET" | cut -d' ' -f1)
-DRAFT_SHA=$(sha256sum "$DRAFT" | cut -d' ' -f1)
+# Hashing the pair is ~96 GiB of reads. The certification job already verifies
+# both digests against pinned constants before this runs, so accept them from
+# the environment when the caller has them and only hash when it does not.
+if [ -z "${TARGET_SHA:-}" ]; then
+  echo "  hashing target (85 GiB, this takes a while)..."
+  TARGET_SHA=$(sha256sum "$TARGET" | cut -d' ' -f1)
+fi
+if [ -z "${DRAFT_SHA:-}" ]; then
+  DRAFT_SHA=$(sha256sum "$DRAFT" | cut -d' ' -f1)
+fi
+[ -n "$TARGET_SHA" ] && [ -n "$DRAFT_SHA" ] || { echo "  model digests unavailable" >&2; exit 1; }
 echo "  target $TARGET_SHA"
 echo "  draft  $DRAFT_SHA"
 
@@ -125,11 +138,11 @@ python3 "$HERE/scripts/bench/benchmark.py" --endpoint "$EP" \
 echo "  $(wc -l < "$BUNDLE/raw-results.jsonl") rows"
 
 echo "=== 2/3 decode by workload (speculation on) ==="
-python3 "$HERE/scripts/bench/accept_sweep.py" "$BUNDLE/workloads-spec-on.jsonl" >/dev/null 2>&1
+python3 "$HERE/scripts/bench/accept_sweep.py" "$EP" "$BUNDLE/workloads-spec-on.jsonl" >/dev/null 2>&1
 stop_server
 echo "=== 2/3 decode by workload (autoregressive baseline) ==="
 start_server "-e DFLASH_DS4_SPEC=0 -e DFLASH_DS4_DECODE_FLASH=1 -e GGML_CUDA_DISABLE_GRAPHS=1" 65536 \
-  && python3 "$HERE/scripts/bench/accept_sweep.py" "$BUNDLE/workloads-spec-off.jsonl" >/dev/null 2>&1
+  && python3 "$HERE/scripts/bench/accept_sweep.py" "$EP" "$BUNDLE/workloads-spec-off.jsonl" >/dev/null 2>&1
 stop_server
 
 if [ "$SKIP_CTX" = 0 ]; then

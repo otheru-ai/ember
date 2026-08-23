@@ -1,6 +1,9 @@
-import json, urllib.request, sys, time
+import json, sys, urllib.request, time
 
-EP = "http://127.0.0.1:8000/v1/chat/completions"
+# Endpoint is an argument, not a constant: the bundle orchestrator serves on a
+# private port, and a hardcoded one silently produced a file of connection
+# errors that still assembled into a bundle.
+EP = sys.argv[1] if len(sys.argv) > 2 else "http://127.0.0.1:8000/v1/chat/completions"
 # Prompts chosen to span predictability of the CONTINUATION, which is what
 # acceptance actually depends on -- not properties of the prompt text.
 PROMPTS = [
@@ -29,7 +32,7 @@ def run(label, prompt, max_tokens=256):
             "decode_tps":t.get("decode_tokens_per_sec"),
             "accept_rate":b.get("accept_rate")}
 
-out = sys.argv[1]
+out = sys.argv[2] if len(sys.argv) > 2 else sys.argv[1]
 with open(out,"w") as f:
     for label, p in PROMPTS:
         try:
