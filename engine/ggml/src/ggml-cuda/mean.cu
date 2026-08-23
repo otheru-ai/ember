@@ -58,18 +58,22 @@ void ggml_cuda_op_mean(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     }
 #endif // GGML_CUDA_USE_CUB
 
-    const dim3 block_nums(nrows, 1, 1);
-
     const int id  = ggml_cuda_get_device();
     const int nsm = ggml_cuda_info().devices[id].nsm;
+    // Cap gridDim and let each block walk a strided run of rows. One block per
+    // row makes launch cost scale with nrows, which is the dominant term for
+    // short rows (DS4's [4 x 8.4M] hyper-connection sum). The per-row reduction
+    // is unchanged, so this is bit-identical to the uncapped launch.
+    const int64_t max_blocks = (int64_t) nsm * 128;
+    const dim3 block_nums(nrows > max_blocks ? max_blocks : nrows, 1, 1);
 
     // Heuristic for block size selection to optimize occupancy.
     // See discussion in: https://github.com/ggml-org/llama.cpp/pull/15132
     if ((nrows / nsm) < 2) {
         const dim3 block_dims(512, 1, 1);
-        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
+        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
     } else {
         const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
-        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
+        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
     }
 }
