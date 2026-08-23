@@ -1404,6 +1404,14 @@ bool run_deepseek4_dspark_spec_decode(
     long n_unqualified_pauses = 0;
     long consecutive_strict = 0;
     bool warmup_abandoned = false;
+    // Block-full RATE, which is what DSparkBatchVerifyGate actually gates on --
+    // it needs consecutive fully accepted blocks, so P(qualify) is p^8 for
+    // warmup_tokens=48 at ~6 tokens per block. Mean acceptance does not give
+    // this: a request can average 4.13 of 5 and still almost never land a whole
+    // block. Logged so the qualification policy can be judged against the
+    // distribution of p rather than against mean acceptance.
+    long n_blocks_offered = 0;
+    long n_blocks_full = 0;
     long agreement_offered = 0, agreement_matched = 0;
     bool scheduler_tail_handoff = false;
     bool ok = true;
@@ -1961,6 +1969,10 @@ bool run_deepseek4_dspark_spec_decode(
         ewma_accept = 0.7 * ewma_accept + 0.3 * (double) matched;
         steps++;
 
+        if (q >= 2 && accept >= 1) {
+            ++n_blocks_offered;
+            if (accept == q) ++n_blocks_full;
+        }
         if (!force_strict_verify) {
             const bool was_active = batch_gate.active();
             batch_gate.note_cycle(q, accept);
@@ -2083,9 +2095,12 @@ bool run_deepseek4_dspark_spec_decode(
         for (int i = 1; i <= 8; ++i) std::fprintf(stderr, "%s%d:%ld", i > 1 ? "," : "", i, q_hist[i]);
         std::fprintf(stderr,
                      " | narrow_causes strict=%ld cap_pre=%ld emit_tail=%ld "
-                     "sched_pause=%ld no_draft=%ld warmup_abandoned=%d\n",
+                     "sched_pause=%ld no_draft=%ld warmup_abandoned=%d "
+                     "blocks_full=%ld/%ld p=%.3f\n",
                      n_strict, n_cap_narrow, n_emit_clamp, n_sched_skip,
-                     n_conf_nodraft, warmup_abandoned ? 1 : 0);
+                     n_conf_nodraft, warmup_abandoned ? 1 : 0,
+                     n_blocks_full, n_blocks_offered,
+                     n_blocks_offered ? (double) n_blocks_full / (double) n_blocks_offered : 0.0);
     }
     if (spec_env_flag("DFLASH_DS4_AGREEMENT_LOG")) {
         std::fprintf(stderr,

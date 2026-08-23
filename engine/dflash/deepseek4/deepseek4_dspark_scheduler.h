@@ -32,43 +32,89 @@ inline bool dspark_request_can_prepare(bool spec_enabled,
 }
 
 // Per-request qualification gate for the numerically different q-wide target
-// graph. Exact q=1 verification must first observe `warmup_tokens` worth of
-// consecutive fully accepted blocks. A partial batched block is replayed by
-// the caller and sends the request back through qualification from that exact
-// frontier. Keeping this policy GPU-free makes its safety transitions directly
-// unit-testable.
+// graph. A partial batched block is replayed by the caller through the ordinary
+// q=1 graph, so exactness never depends on this gate; what it decides is purely
+// whether the wide path is worth its cost. Keeping the policy GPU-free makes
+// its transitions directly unit-testable.
+//
+// The wide path pays off as a function of p, the fraction of offered blocks
+// that come back FULLY accepted -- a partial block there costs the wide verify
+// AND an exact-prefix replay of the committed prefix, so cost per token climbs
+// steeply as p falls. Against the measured 152ms wide verify, ~232ms
+// exact-prefix replay and 42ms AR baseline, break-even sits near p = 0.62.
+//
+// This gate used to require warmup_tokens worth of CONSECUTIVE full blocks,
+// which is P(qualify) = p^k. Measured over ten workloads, that denied the wide
+// path to requests that would have profited from it:
+//
+//     counting/json/alphabet   p = 0.95-0.98   p^8 = 67-82%   qualified
+//     factual list             p = 0.750       p^8 = 10%      never qualified
+//     code                     p = 0.667       p^8 =  4%      never qualified
+//     prose/essay/creative     p = 0.000       p^8 =  0%      never qualified
+//
+// p = 0.750 is comfortably profitable and was refused by an improbable-run test
+// rather than by its economics. So estimate p over a sliding window and apply
+// hysteresis -- the same shape DSparkProfitScheduler already uses for
+// acceptance: qualify at 3/4 of the window full, drop out below 1/2. The window
+// derives from warmup_tokens so that knob still means "how much evidence".
+//
+// prose at p = 0.000 shows the strict rule was right about the bottom of the
+// range. Only the middle band was mispriced.
 class DSparkBatchVerifyGate {
 public:
     DSparkBatchVerifyGate(bool requested, uint32_t warmup_tokens)
         : requested_(requested), warmup_tokens_(warmup_tokens),
-          active_(requested && warmup_tokens == 0) {}
+          active_(requested && warmup_tokens == 0),
+          window_(window_for(warmup_tokens)),
+          enable_full_((window_for(warmup_tokens) * 3 + 3) / 4),
+          disable_full_(window_for(warmup_tokens) / 2) {}
 
     bool active() const { return active_; }
     bool strict_cycle() const { return !active_; }
-    uint32_t progress() const { return progress_; }
+    // Full blocks within the current window, not tokens: see note_cycle.
+    uint32_t progress() const { return full_; }
+    uint32_t window() const { return window_; }
 
     void note_cycle(int offered_tokens, int accepted_tokens) {
         if (!requested_ || offered_tokens < 2 || accepted_tokens < 1) return;
+        history_ = (history_ << 1) |
+                   (accepted_tokens == offered_tokens ? 1u : 0u);
+        if (samples_ < window_) ++samples_;
+        if (samples_ < window_) return;
+        const uint32_t mask = window_ >= 32
+            ? 0xffffffffu : ((1u << window_) - 1u);
+        full_ = (uint32_t) popcount32(history_ & mask);
         if (active_) {
-            if (accepted_tokens < offered_tokens) {
-                active_ = false;
-                progress_ = 0;
-            }
-            return;
+            if (full_ < disable_full_) active_ = false;
+        } else if (full_ >= enable_full_) {
+            active_ = true;
         }
-        if (accepted_tokens != offered_tokens) {
-            progress_ = 0;
-            return;
-        }
-        progress_ += (uint32_t) accepted_tokens;
-        if (progress_ >= warmup_tokens_) active_ = true;
     }
 
 private:
+    static int popcount32(uint32_t v) {
+        int n = 0;
+        while (v) { v &= v - 1; ++n; }
+        return n;
+    }
+
+    static uint32_t window_for(uint32_t warmup_tokens) {
+        // ~6 tokens per offered block at the shipped verify width.
+        const uint32_t w = warmup_tokens / 6;
+        if (w < 4) return 4;
+        if (w > 32) return 32;
+        return w;
+    }
+
     bool requested_ = false;
     uint32_t warmup_tokens_ = 0;
     bool active_ = false;
-    uint32_t progress_ = 0;
+    uint32_t window_ = 8;
+    uint32_t enable_full_ = 6;
+    uint32_t disable_full_ = 4;
+    uint32_t history_ = 0;
+    uint32_t samples_ = 0;
+    uint32_t full_ = 0;
 };
 
 struct DSparkSchedulerConfig {
