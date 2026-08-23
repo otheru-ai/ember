@@ -73,6 +73,11 @@ void ggml_cuda_op_mean(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         const dim3 block_dims(512, 1, 1);
         reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
     } else {
+        // Short rows: the block-per-row path would give each lane one element
+        // and spend the butterfly adding zeros. Bit-exact, see reduce_rows.cuh.
+        if (reduce_rows_short_f32_cuda</*norm=*/true>(src0_d, dst_d, ncols, nrows, stream)) {
+            return;
+        }
         const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
         reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
     }
