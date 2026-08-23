@@ -19,34 +19,8 @@ Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
 Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
 on one local endpoint.
 
-## Performance
-
-One AMD Strix Halo (`gfx1151`), DeepSeek-V4-Flash at 2.5 bpw, 85.3 GiB resident.
-
-| | |
-| --- | --- |
-| **Decode** | **23-40 tok/s**, depending on how predictable the output is |
-| **TTFT, cold** | 3.1 s at 862 prompt tokens · 11.9 s at 3.9k · 64 s at 18.5k |
-| **TTFT, warm** | **0.19 s** — the prefix cache restores the conversation after the first turn |
-
-Decode spans a wide range because speculative decoding pays in proportion to how
-well the drafter predicts the *continuation*, so a single number would be
-misleading either way:
-
-| output | tok/s |
-| --- | ---: |
-| repetitive or highly structured (counting, JSON, lists) | ~40 |
-| code and structured factual answers | ~28 |
-| prose, essays, creative writing | ~23 |
-
-The bottom row is also what Ember achieves with speculation disabled, so 23 tok/s
-is the floor rather than a bad case. Warm TTFT is the figure that matters for
-agent and chat loops: a 6,063-token prompt whose first 6,053 tokens are already
-cached prefills in 194 ms instead of 17.7 s.
-
-Full methodology, the context-scaling curve out to 131,072 tokens, and the
-per-kernel roofline position are in
-[docs/performance.md](docs/performance.md).
+**23-40 tok/s decode, 194 ms warm TTFT** on a single Ryzen AI Max 395+.
+[Details below.](#performance)
 
 ## Requirements
 
@@ -134,6 +108,46 @@ Ember has no built-in authentication and listens on loopback by default. Use an
 authenticating reverse proxy before exposing it to another host. Set
 `EMBER_HOST=0.0.0.0` (or pass `--host 0.0.0.0` to the binary) when a trusted
 container or Kubernetes gateway must reach the API.
+
+## Performance
+
+One Ryzen AI Max 395+ (`gfx1151`, 128 GB), DeepSeek-V4-Flash-0731 at
+ROCMFPX 2.5 bpw, 85.3 GiB resident. Each row is one request: a prompt of the
+given depth, 256 tokens generated, greedy. `tok/s total` counts prompt plus
+generated tokens over the whole request, so it folds prefill and decode
+together.
+
+| Depth | tok/s out | Prefill tok/s | tok/s total | TTFT ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 43 | 37.78 | 71.1 | 40.5 | 605 |
+| 862 | 37.98 | 274.5 | 113.2 | 3,140 |
+| 3,925 | 36.56 | 330.9 | 221.6 | 11,862 |
+| 18,553 | 30.65 | 289.7 | 259.8 | 64,042 |
+| 38,059 | 24.32 | 263.2 | 247.0 | 144,601 |
+| 77,068 | 18.01 | 218.8 | 211.0 | 352,230 |
+| 116,077 | 14.50 | 182.1 | 177.6 | 637,435 |
+
+![Prefill and decode against context depth](docs/assets/ember-context-scaling.svg)
+
+Decode depends on how predictable the output is, because speculative decoding
+pays in proportion to how well the drafter guesses the continuation:
+
+| Output | tok/s |
+| --- | ---: |
+| Repetitive or structured (counting, JSON, lists) | 40 |
+| Code, structured factual answers | 28 |
+| Prose, essays, creative writing | 23 |
+
+23 tok/s is also the rate with speculation off, so it is the floor rather than a
+bad case.
+
+TTFT above is cold. The prefix cache restores a conversation after the first
+turn, and that is the figure agent and chat loops actually see: a 6,063-token
+prompt whose first 6,053 tokens are cached prefills in **194 ms** instead of
+17,693 ms.
+
+Full methodology and the per-kernel roofline position are in
+[docs/performance.md](docs/performance.md).
 
 ## Configure
 
