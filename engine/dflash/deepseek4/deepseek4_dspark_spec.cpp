@@ -1336,6 +1336,32 @@ bool run_deepseek4_dspark_spec_decode(
     long q_hist[9] = {0};
     long n_strict = 0, n_sched_skip = 0, n_emit_clamp = 0, n_conf_nodraft = 0;
     long n_cap_narrow = 0;
+    // ── Abandon speculation when the batch verifier will not qualify ────────
+    //
+    // DSparkBatchVerifyGate::note_cycle() resets progress_ on any partially
+    // accepted block, so warmup needs CONSECUTIVE fully accepted blocks. A
+    // generation whose acceptance is merely good never supplies them, and every
+    // one of its cycles then pays the exact-prefix verify -- ~2.9x the qualified
+    // cost -- for the whole request.
+    //
+    // Measured on ten prompts (production, 2026-08-23, spec on vs off, same
+    // prompt both sides). The split is by warmup, not by acceptance:
+    //   qualified   strict  9-12 of ~42 steps -> 1.53-1.66x
+    //   never       strict 28-128, all steps  -> 0.86-0.94x
+    // "factual" accepted 4.13 of 5 drafts -- excellent -- and still lost 7%,
+    // because it never assembled a run of whole blocks. Acceptance does not
+    // separate these two groups; whether warmup completes separates them
+    // perfectly.
+    //
+    // So give up rather than keep paying: hand the remainder to the AR seam,
+    // which is the faster path once qualification is out of reach. The default
+    // sits in the measured gap, nearer the losing side because the risk is
+    // asymmetric -- cutting a genuine winner forfeits up to 1.66x, while
+    // running on costs 6-14%. 0 disables the bail-out.
+    const long batch_warmup_max_cycles = (long) spec_env_u32(
+        "DFLASH_DS4_BATCH_WARMUP_MAX_CYCLES", 20);
+    long consecutive_strict = 0;
+    bool warmup_abandoned = false;
     long agreement_offered = 0, agreement_matched = 0;
     bool scheduler_tail_handoff = false;
     bool ok = true;
@@ -1409,6 +1435,27 @@ bool run_deepseek4_dspark_spec_decode(
         if (cap_before_emit < 2) ++n_cap_narrow;   // boundary/ewma already narrowed
         if (emit_left < q_step_cap) { q_step_cap = emit_left; if (q_step_cap < 2) ++n_emit_clamp; }
 
+        if (strict_cycle) {
+            ++consecutive_strict;
+        } else {
+            consecutive_strict = 0;
+        }
+        // batch_gate.active() is monotonic, so a long strict run means
+        // qualification has not happened yet, not that it lapsed.
+        if (batch_warmup_max_cycles > 0 && !batch_gate.active() &&
+            consecutive_strict > batch_warmup_max_cycles) {
+            warmup_abandoned = true;
+            scheduler_tail_handoff = true;
+            if (scheduler_log) {
+                std::fprintf(stderr,
+                             "[ds4-spec-sched] batch warmup unreachable after "
+                             "%ld strict cycles (progress=%u/%u) -- handing "
+                             "%d remaining tokens to AR\n",
+                             consecutive_strict, batch_gate.progress(),
+                             batch_warmup_tokens, emit_left);
+            }
+            break;
+        }
         if (scheduler.tail_should_skip(emit_left)) {
             scheduler_tail_handoff = true;
             if (scheduler_log) {
@@ -1957,8 +2004,9 @@ bool run_deepseek4_dspark_spec_decode(
         for (int i = 1; i <= 8; ++i) std::fprintf(stderr, "%s%d:%ld", i > 1 ? "," : "", i, q_hist[i]);
         std::fprintf(stderr,
                      " | narrow_causes strict=%ld cap_pre=%ld emit_tail=%ld "
-                     "sched_pause=%ld no_draft=%ld\n",
-                     n_strict, n_cap_narrow, n_emit_clamp, n_sched_skip, n_conf_nodraft);
+                     "sched_pause=%ld no_draft=%ld warmup_abandoned=%d\n",
+                     n_strict, n_cap_narrow, n_emit_clamp, n_sched_skip,
+                     n_conf_nodraft, warmup_abandoned ? 1 : 0);
     }
     if (spec_env_flag("DFLASH_DS4_AGREEMENT_LOG")) {
         std::fprintf(stderr,
