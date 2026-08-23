@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ember — Performance</title>
+<style>
+:root{
+  --bg:#0f1115; --card:#171a21; --line:#252a34; --ink:#e6e9ef; --muted:#98a1b3;
+  --accent:#d94f2b; --accent2:#2b8cd9; --ok:#3fb950; --bad:#f85149;
+  --radius:12px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ec;--ink:#1a1d23;--muted:#5f6875}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.layout{max-width:1180px;margin:0 auto;padding:0 20px}
+.page-header{padding:34px 0 22px;border-bottom:1px solid var(--line)}
+.page-header h1{margin:6px 0 8px;font-size:30px;letter-spacing:-.01em}
+.back-link{color:var(--muted);text-decoration:none;font-size:13px}
+.back-link:hover{color:var(--ink)}
+#system-info{margin:0;color:var(--muted);font-size:13px}
+.intro{margin:10px 0 0;color:var(--muted);max-width:70ch}
+main{padding:22px 0 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:18px 20px;margin:0 0 18px}
+.section-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:14px}
+.eyebrow{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.section-heading h2{margin:2px 0 0;font-size:18px}
+.result-count{color:var(--muted);font-size:13px;font-family:var(--mono)}
+.selector-heading{display:flex;justify-content:space-between;align-items:center;margin:14px 0 8px}
+.selector-heading strong{font-size:13px}
+.text-button{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:12px;padding:0 6px}
+.text-button:hover{text-decoration:underline}
+.chips{display:flex;flex-wrap:wrap;gap:7px}
+.chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:99px;
+  padding:5px 12px;font-size:12.5px;cursor:pointer;transition:.12s}
+.chip:hover{border-color:var(--accent2);color:var(--ink)}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:8px;
+  padding:6px 12px;font-size:12.5px;cursor:pointer}
+.tab[aria-selected="true"]{background:var(--accent2);border-color:var(--accent2);color:#fff}
+.chart{width:100%;overflow-x:auto}
+svg{display:block}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+th,td{text-align:right;padding:7px 10px;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
+td.num{font-family:var(--mono)}
+.gain{color:var(--ok)} .loss{color:var(--bad)}
+.note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
+.badge-row{margin:12px 0 0;max-width:70ch;font-size:13px;color:var(--muted)}
+.badge{display:inline-block;background:var(--accent);color:#fff;border-radius:5px;
+  padding:1px 7px;font-size:11px;font-weight:700;letter-spacing:.05em;
+  text-transform:uppercase;margin-right:8px;vertical-align:1px}
+.caveat{border-left:3px solid var(--accent);padding-left:12px;margin:14px 0 0;color:var(--muted);font-size:13px}
+footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:12.5px}
+code{font-family:var(--mono);font-size:12.5px}
+</style>
+</head>
+<body>
+<header class="page-header"><div class="layout">
+  <a class="back-link" href="https://github.com/otheru-ai/ember">← Ember on GitHub</a>
+  <h1>Ember — Performance</h1>
+  <p id="system-info">Loading results…</p>
+  <p class="intro">Every figure here is a measurement taken on the machine that runs the
+  release &mdash; no estimates, no scaling from other hardware. Each release states how its
+  numbers were produced, and a release that has not been through certification says so.</p>
+  <p id="uncertified" class="badge-row" hidden></p>
+</div></header>
+
+<main class="layout">
+  <section class="card">
+    <div class="section-heading">
+      <div><span class="eyebrow">Choose comparisons</span><h2>Workloads and releases</h2></div>
+      <span id="result-count" class="result-count">Loading…</span>
+    </div>
+    <div class="selector-heading"><strong>Workloads</strong>
+      <span><button class="text-button" data-all="w">All</button><button class="text-button" data-none="w">None</button></span></div>
+    <div id="w-sel" class="chips" role="group" aria-label="Workloads"></div>
+    <div class="selector-heading"><strong>Releases</strong>
+      <span><button class="text-button" data-all="r">All</button><button class="text-button" data-none="r">None</button></span></div>
+    <div id="r-sel" class="chips" role="group" aria-label="Releases"></div>
+    <div class="selector-heading"><strong>View</strong><span></span></div>
+    <div id="v-sel" class="tabs" role="tablist"></div>
+  </section>
+
+  <section class="card">
+    <div class="section-heading">
+      <div><span class="eyebrow">Generation</span><h2 id="wl-title">Decode throughput by workload</h2></div>
+    </div>
+    <div id="wl-chart" class="chart"></div>
+    <p class="caveat" id="wl-caveat"></p>
+  </section>
+
+  <section class="card">
+    <div class="section-heading">
+      <div><span class="eyebrow">Context</span><h2>Prefill and decode against prompt depth</h2></div>
+      <div id="d-sel" class="tabs" role="tablist"></div>
+    </div>
+    <div id="d-chart" class="chart"></div>
+  </section>
+
+  <section class="card">
+    <div class="section-heading"><div><span class="eyebrow">Exact measurements</span><h2>Per request</h2></div></div>
+    <div id="table"></div>
+    <p class="note" id="prov"></p>
+  </section>
+</main>
+<footer><div class="layout">
+  Built from <code>benchmarks/ember-&lt;date&gt;/summary.json</code> by
+  <code>scripts/bench/build_perf_site_data.py</code>. Reproduce any row with
+  <code>scripts/benchmark_bundle.sh</code>; the depth series needs that script run
+  <em>without</em> <code>--skip-context-sweep</code>.
+</div></footer>
+
+<script>
+const S={w:new Set(),r:new Set(),view:"absolute",metric:"decode",baseline:null};
+let DATA=null;
+
+const fmt=(n,d=2)=>n==null?"—":Number(n).toFixed(d);
+const depthLabel=n=>n>=1000?(n>=10000?(n/1000).toFixed(0):(n/1000).toFixed(1))+"k":String(n);
+
+function readHash(){
+  const h=new URLSearchParams(location.hash.slice(1));
+  if(h.get("workloads"))h.get("workloads").split(",").filter(Boolean).forEach(x=>S.w.add(x));
+  if(h.get("releases"))h.get("releases").split(",").filter(Boolean).forEach(x=>S.r.add(x));
+  if(h.get("view"))S.view=h.get("view");
+  if(h.get("metric"))S.metric=h.get("metric");
+  if(h.get("baseline"))S.baseline=h.get("baseline");
+}
+function writeHash(){
+  const h=new URLSearchParams();
+  h.set("workloads",[...S.w].join(","));
+  h.set("releases",[...S.r].join(","));
+  h.set("view",S.view); h.set("metric",S.metric);
+  if(S.baseline)h.set("baseline",S.baseline);
+  history.replaceState(null,"","#"+h.toString());
+}
+
+function chips(el,items,set,label){
+  el.innerHTML="";
+  items.forEach(k=>{
+    const b=document.createElement("button");
+    b.className="chip"; b.type="button"; b.textContent=label?label(k):k;
+    b.setAttribute("aria-pressed",set.has(k));
+    b.onclick=()=>{set.has(k)?set.delete(k):set.add(k);render();};
+    el.appendChild(b);
+  });
+}
+function tabs(el,items,cur,onpick){
+  el.innerHTML="";
+  items.forEach(([v,t])=>{
+    const b=document.createElement("button");
+    b.className="tab"; b.type="button"; b.textContent=t;
+    b.setAttribute("aria-selected",v===cur);
+    b.onclick=()=>{onpick(v);render();};
+    el.appendChild(b);
+  });
+}
+
+/* Horizontal bars: workloads differ by ~1.8x, and a bar chart reads that
+   ordering far better than a line. */
+function barChart(rows,unit,relative){
+  const W=1080,rowH=30,padL=150,padR=90,padT=8;
+  const H=padT+rows.length*rowH+10;
+  const max=Math.max(...rows.map(r=>Math.abs(r.v)),relative?0.25:1);
+  const zero=relative?padL+(W-padL-padR)/2:padL;
+  const span=relative?(W-padL-padR)/2:(W-padL-padR);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
+  rows.forEach((r,i)=>{
+    const y=padT+i*rowH, w=Math.abs(r.v)/max*span;
+    const x=relative&&r.v<0?zero-w:zero;
+    const col=relative?(r.v>=0?"var(--ok)":"var(--bad)"):(r.colour||"var(--accent)");
+    s+=`<text x="${padL-12}" y="${y+19}" text-anchor="end" font-size="12.5" fill="var(--muted)">${r.label}</text>`;
+    s+=`<rect x="${x}" y="${y+6}" width="${Math.max(w,1)}" height="16" rx="3" fill="${col}"/>`;
+    const tx=relative&&r.v<0?x-8:x+w+8, ta=relative&&r.v<0?"end":"start";
+    s+=`<text x="${tx}" y="${y+19}" text-anchor="${ta}" font-size="12.5" font-family="var(--mono)" fill="var(--ink)">${r.text}</text>`;
+  });
+  if(relative)s+=`<line x1="${zero}" y1="${padT}" x2="${zero}" y2="${H-10}" stroke="var(--line)"/>`;
+  return s+`</svg>`;
+}
+
+function lineChart(series,yLabel,logx,markPeak){
+  const W=1080,H=300,padL=64,padR=120,padT=16,padB=44;
+  const xs=[...new Set(series.flatMap(s=>s.pts.map(p=>p[0])))].sort((a,b)=>a-b);
+  const lo=Math.log10(xs[0]),hi=Math.log10(xs[xs.length-1]);
+  const vmax=Math.max(...series.flatMap(s=>s.pts.map(p=>p[1])))*1.12;
+  const X=n=>padL+(Math.log10(n)-lo)/(hi-lo)*(W-padL-padR);
+  const Y=v=>padT+(H-padT-padB)-(v/vmax)*(H-padT-padB);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
+  for(let f=0;f<=1.0001;f+=0.25){const v=vmax*f,y=Y(v);
+    s+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--line)"/>`;
+    const tick=v>=10000?(v/1000).toFixed(0)+"k":v.toFixed(0);
+    s+=`<text x="${padL-10}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--muted)">${tick}</text>`;}
+  xs.forEach(n=>s+=`<text x="${X(n)}" y="${H-22}" text-anchor="middle" font-size="11" fill="var(--muted)">${depthLabel(n)}</text>`);
+  s+=`<text x="${(padL+W-padR)/2}" y="${H-5}" text-anchor="middle" font-size="11" fill="var(--muted)">prompt depth (tokens)</text>`;
+  s+=`<text x="${padL}" y="${padT-4}" font-size="11" fill="var(--muted)">${yLabel}</text>`;
+  // Peaks are annotated on the curve; the series names sit at the right-hand end.
+  // Both lines converge at deep context, so the end labels are de-overlapped
+  // rather than drawn at whatever y the last point happens to land on.
+  const labels=[];
+  series.forEach(se=>{
+    const d=se.pts.map((p,i)=>`${i?"L":"M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
+    s+=`<path d="${d}" fill="none" stroke="${se.colour}" stroke-width="2.2" stroke-linejoin="round"/>`;
+    se.pts.forEach(p=>s+=`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="3.2" fill="var(--card)" stroke="${se.colour}" stroke-width="1.8"/>`);
+    if(markPeak){
+      const pk=se.pts.reduce((a,b)=>b[1]>a[1]?b:a);
+      const px=X(pk[0]), py=Y(pk[1]);
+      s+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4.6" fill="${se.colour}"/>`;
+      const near=px>W-padR-70, ta=near?"end":"middle";
+      s+=`<text x="${(px+(near?6:0)).toFixed(1)}" y="${(py-12).toFixed(1)}" text-anchor="${ta}" `+
+         `font-size="11" font-family="var(--mono)" font-weight="700" fill="${se.colour}">`+
+         `peak ${fmt(pk[1],1)} @ ${depthLabel(pk[0])}</text>`;
+    }
+    const last=se.pts[se.pts.length-1];
+    labels.push({name:se.name,colour:se.colour,x:X(last[0])+9,y:Y(last[1])+4});
+  });
+  const GAP=15, top=padT+10, bot=H-padB-6;
+  labels.sort((a,b)=>a.y-b.y);
+  for(let i=0;i<labels.length;i++) labels[i].y=Math.max(labels[i].y, top+i*GAP);
+  for(let i=labels.length-1;i>=0;i--) labels[i].y=Math.min(labels[i].y, bot-(labels.length-1-i)*GAP);
+  for(let i=1;i<labels.length;i++) if(labels[i].y-labels[i-1].y<GAP) labels[i].y=labels[i-1].y+GAP;
+  labels.forEach(l=>s+=`<text x="${l.x.toFixed(1)}" y="${l.y.toFixed(1)}" font-size="11.5" `+
+    `fill="${l.colour}" font-weight="600">${l.name}</text>`);
+  return s+`</svg>`;
+}
+
+function render(){
+  const rels=DATA.releases.filter(r=>S.r.has(r.id));
+  if(!S.baseline||!S.r.has(S.baseline))S.baseline=rels.length?rels[0].id:null;
+  const wl=DATA.workloads.filter(w=>S.w.has(w));
+  const unc=rels.filter(r=>r.provenance&&r.provenance.certified===false).map(r=>r.id);
+  const ub=document.getElementById("uncertified");
+  ub.hidden=!unc.length;
+  if(unc.length) ub.innerHTML=`<span class="badge">candidate</span>`+
+    `${unc.join(", ")} ${unc.length===1?"has":"have"} not been through release certification. `+
+    `The figures are real measurements from the candidate build; certification regenerates them.`;
+
+  document.getElementById("result-count").textContent=
+    `${wl.length} workload${wl.length===1?"":"s"} · ${rels.length} release${rels.length===1?"":"s"}`;
+
+  chips(document.getElementById("w-sel"),DATA.workloads,S.w);
+  chips(document.getElementById("r-sel"),DATA.releases.map(r=>r.id),S.r);
+  tabs(document.getElementById("v-sel"),
+    [["absolute","Tokens/s"],["vs-ar","Gain vs autoregressive"],["vs-baseline","Gain vs baseline release"]],
+    S.view,v=>S.view=v);
+  tabs(document.getElementById("d-sel"),[["decode","Decode"],["prefill","Prefill"],["ttft","TTFT"]],
+    S.metric,v=>S.metric=v);
+
+  // workload chart
+  const base=rels.find(r=>r.id===S.baseline);
+  const rows=[];
+  wl.forEach(w=>rels.forEach(r=>{
+    const e=r.workloads[w]; if(!e)return;
+    const name=rels.length>1?`${w} · ${r.id}`:w;
+    if(S.view==="absolute")rows.push({label:name,v:e.tok_s,text:fmt(e.tok_s)+" tok/s"});
+    else if(S.view==="vs-ar"){const g=(e.speedup||1)-1;
+      rows.push({label:name,v:g,text:(g>=0?"+":"")+(g*100).toFixed(1)+"%"});}
+    else{const b=base&&base.workloads[w];
+      if(!b)return; const g=e.tok_s/b.tok_s-1;
+      rows.push({label:name,v:g,text:(g>=0?"+":"")+(g*100).toFixed(1)+"%"});}
+  }));
+  document.getElementById("wl-chart").innerHTML=rows.length?barChart(rows,"tok/s",S.view!=="absolute")
+    :`<p class="note">Select at least one workload and release.</p>`;
+  document.getElementById("wl-title").textContent=
+    S.view==="absolute"?"Decode throughput by workload":
+    S.view==="vs-ar"?"Decode gain over autoregressive":"Decode change against "+(S.baseline||"baseline");
+  document.getElementById("wl-caveat").textContent=
+    "Decode depends on how predictable the continuation is, not on the prompt. "+
+    "The spread across these workloads is roughly 1.8x, so a single throughput number "+
+    "describes only whichever task produced it.";
+
+  // depth chart
+  const palette=["var(--accent)","var(--accent2)","#8957e5","#3fb950"];
+  const series=[];
+  rels.forEach((r,i)=>{
+    if(!r.depths.length)return;
+    const pick=d=>S.metric==="decode"?d.decode_tok_s:S.metric==="prefill"?d.prefill_tok_s:d.ttft_ms;
+    series.push({name:(rels.length>1||S.metric!=="decode")?r.id:"speculative",colour:palette[i%palette.length],
+      pts:r.depths.map(d=>[d.depth,pick(d)]).filter(p=>p[1]!=null)});
+    if(S.metric==="decode"&&rels.length===1)
+      series.push({name:"autoregressive",colour:"var(--muted)",
+        pts:r.depths.map(d=>[d.depth,d.autoregressive_tok_s]).filter(p=>p[1]!=null)});
+  });
+  document.getElementById("d-chart").innerHTML=series.length
+    ?lineChart(series,S.metric==="ttft"?"milliseconds":"tokens / second",true,S.metric!=="ttft")
+    :`<p class="note">No context sweep in the selected releases.</p>`;
+
+  // table
+  const r0=rels[0];
+  if(r0&&r0.depths.length){
+    let t=`<table><thead><tr><th>Depth</th><th>tok/s out</th><th>Prefill tok/s</th>`+
+          `<th>tok/s total</th><th>TTFT ms</th><th>vs AR</th></tr></thead><tbody>`;
+    r0.depths.forEach(d=>{
+      const g=d.speedup?((d.speedup-1)*100):null;
+      t+=`<tr><td>${d.depth.toLocaleString()}</td><td class="num">${fmt(d.decode_tok_s)}</td>`+
+         `<td class="num">${fmt(d.prefill_tok_s,1)}</td><td class="num">${fmt(d.total_tok_s,1)}</td>`+
+         `<td class="num">${d.ttft_ms==null?"—":d.ttft_ms.toLocaleString()}</td>`+
+         `<td class="num ${g>=0?"gain":"loss"}">${g==null?"—":(g>=0?"+":"")+g.toFixed(1)+"%"}</td></tr>`;
+    });
+    document.getElementById("table").innerHTML=t+`</tbody></table>`;
+    const pv=r0.provenance||{};
+    document.getElementById("prov").textContent=
+      `${r0.id} · measured ${r0.measured} · ${r0.model.target||""} `+
+      `(sha256 ${(r0.model.target_sha256||"").slice(0,12)}…) · 256 tokens generated, greedy.`+
+      (pv.note?" "+pv.note:"");
+  }
+  writeHash();
+}
+
+fetch("data.json").then(r=>r.json()).then(d=>{
+  DATA=d;
+  readHash();
+  if(!S.w.size)DATA.workloads.forEach(w=>S.w.add(w));
+  if(!S.r.size)DATA.releases.forEach(r=>S.r.add(r.id));
+  const h=DATA.releases[0]?.host||{};
+  document.getElementById("system-info").textContent=
+    [h.cpu,h.memory_gib?h.memory_gib+" GiB unified":null,h.os].filter(Boolean).join(" · ");
+  document.querySelectorAll("[data-all]").forEach(b=>b.onclick=()=>{
+    const s=b.dataset.all==="w"?S.w:S.r;
+    (b.dataset.all==="w"?DATA.workloads:DATA.releases.map(r=>r.id)).forEach(x=>s.add(x));render();});
+  document.querySelectorAll("[data-none]").forEach(b=>b.onclick=()=>{
+    (b.dataset.none==="w"?S.w:S.r).clear();render();});
+  render();
+}).catch(e=>{document.getElementById("system-info").textContent="Could not load data.json: "+e;});
+</script>
+</body>
+</html>
