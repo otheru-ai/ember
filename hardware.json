@@ -1,0 +1,7 @@
+{
+  "chipFamily": "Ryzen AI Max",
+  "chipVariant": "395+",
+  "chipVendor": "AMD",
+  "hwClass": "UNIFIED",
+  "unifiedMemoryGb": 128
+}

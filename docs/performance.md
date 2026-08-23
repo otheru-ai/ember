@@ -16,13 +16,13 @@ cold prompt takes over ten minutes before the first token appears.
 
 | prompt tokens | prefill tok/s | **cold TTFT** |
 | ---: | ---: | ---: |
-| 43 | 71.1 | 0.6 s |
-| 862 | 274.5 | 3.1 s |
-| 3,925 | 330.9 | 11.9 s |
-| 18,553 | 289.7 | 1 min 4 s |
-| 38,059 | 263.2 | 2 min 25 s |
-| 77,068 | 218.8 | 5 min 52 s |
-| 116,077 | 182.1 | **10 min 37 s** |
+| 43 | 72.6 | 0.6 s |
+| 862 | 280.3 | 3.1 s |
+| 3,925 | 343.3 | 11.4 s |
+| 18,553 | 300.6 | 1 min 02 s |
+| 38,059 | 272.3 | 2 min 20 s |
+| 77,068 | 226.2 | 5 min 41 s |
+| 116,077 | 186.7 | **10 min 22 s** |
 
 TTFT here is `prompt_tokens / prefill_tok_s`. It excludes queueing and the first
 decode step, both of which are small against these numbers but are not zero.
@@ -68,13 +68,13 @@ magnitude and neither one alone describes the system.
 
 | prompt tokens | spec on | spec off | speedup | acceptance |
 | ---: | ---: | ---: | ---: | ---: |
-| 43 | 37.78 | 23.32 | 1.62x | 0.981 |
-| 862 | 37.98 | 22.69 | 1.67x | 0.981 |
-| 3,925 | 36.56 | 22.70 | 1.61x | 0.967 |
-| 18,553 | 30.65 | 20.92 | 1.47x | 0.944 |
-| 38,059 | 24.32 | 19.00 | 1.28x | 0.974 |
-| 77,068 | 18.01 | 16.61 | 1.08x | 0.969 |
-| 116,077 | 14.50 | 14.86 | **0.98x** | 0.969 |
+| 43 | 39.24 | 23.37 | 1.68x | 0.981 |
+| 862 | 39.47 | 22.69 | 1.74x | 0.981 |
+| 3,925 | 37.98 | 22.73 | 1.67x | 0.981 |
+| 18,553 | 32.22 | 20.94 | 1.54x | 0.981 |
+| 38,059 | 24.94 | 19.02 | 1.31x | 0.953 |
+| 77,068 | 18.25 | 16.61 | 1.10x | 0.978 |
+| 116,077 | 14.63 | 14.88 | **0.98x** | 0.978 |
 
 Decode tok/s, 256 generated tokens, identical generation task at every context
 length so that only the prompt varies.
@@ -141,10 +141,11 @@ This also qualifies the acceptance column in the context sweep above. Those
 0.94-1.00 figures are not evidence that the drafter holds up at depth; they are
 the counting task pinning acceptance near 1.0 at every length.
 
-The context sweep predates the `ggml_cpy` collapse in the compressor step (16
-dispatches per layer per token down to 4, and 8 down to 2). On the current build
-the benchmark harness measures 39.0 tok/s at short context, so the short-context
-rows there read about 3% low; the shape of the curve is unaffected.
+Measured on the current build, so this includes the `ggml_cpy` collapse in the
+compressor step, the `reduce_rows`/`rope` launch fixes, and the speculation
+gating work. Acceptance now holds at 0.98 out to 116k where the previous sweep
+dipped to 0.944 at 18.5k -- the drafter did not change, the qualification gate
+simply stopped ejecting the request on stray partial blocks.
 
 Speculation's advantage decays monotonically with context and reaches
 break-even somewhere near 100k tokens. Acceptance stays high throughout

@@ -11,3 +11,7 @@ __pycache__/
 /cache/
 /reports/
 .env
+
+# local benchmark submission credential (never commit)
+*.key
+localmaxxing.key
