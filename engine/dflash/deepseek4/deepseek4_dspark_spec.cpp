@@ -1360,6 +1360,24 @@ bool run_deepseek4_dspark_spec_decode(
     // running on costs 6-14%. 0 disables the bail-out.
     const long batch_warmup_max_cycles = (long) spec_env_u32(
         "DFLASH_DS4_BATCH_WARMUP_MAX_CYCLES", 20);
+    // How long a request may spend in strict verification before its cost is
+    // charged to the profitability window. af16fe4 excluded strict cycles from
+    // that window unconditionally, which is right while the batch verifier is
+    // still qualifying -- exact-prefix verify is ~2.9x the qualified cost by
+    // design, and charging it killed a run that was in fact +59% over AR.
+    //
+    // Unconditional is too strong. DSparkBatchVerifyGate clears active_ on the
+    // first partial block, so a request can qualify and lose it repeatedly and
+    // never accumulate a long enough run of strict cycles for the bail-out to
+    // fire. The "code" prompt does exactly that: 25 of 29 cycles strict, never
+    // 21 consecutively, 0.939x against AR. Its acceptance is good (3.72 of 4.38
+    // offered), so no acceptance test can see it either -- only the scheduler's
+    // extra_ms/saved_ms measurement can, and that is what was switched off.
+    //
+    // Winners qualify in 9-12 cycles, so after this many a request has had its
+    // chance; strict cycles past it are steady-state cost and are charged.
+    const long strict_grace_cycles = (long) spec_env_u32(
+        "DFLASH_DS4_SPEC_STRICT_GRACE_CYCLES", 16);
     long consecutive_strict = 0;
     bool warmup_abandoned = false;
     long agreement_offered = 0, agreement_matched = 0;
@@ -1936,8 +1954,8 @@ bool run_deepseek4_dspark_spec_decode(
                         decision.many_no_draft ? "many-no-draft" : "");
                 }
             }
-        } else if (strict_cycle) {
-            // Do NOT feed warmup cycles to the profitability window.
+        } else if (strict_cycle && steps <= strict_grace_cycles) {
+            // Do NOT feed EARLY warmup cycles to the profitability window.
             //
             // While the batch verifier is still qualifying, every cycle runs
             // exact-prefix verification, which is ~2.9x slower by design:
@@ -1958,6 +1976,10 @@ bool run_deepseek4_dspark_spec_decode(
             // The batch gate already governs this phase; it qualifies on exact
             // token agreement and needs no help from the profit scheduler. The
             // window resumes the moment the gate goes active.
+            //
+            // Bounded by strict_grace_cycles: past it, a request that is still
+            // paying exact-prefix verify is not warming up, it is simply slow,
+            // and the scheduler is the thing that can tell.
             (void) 0;
         } else {
             const DSparkSchedulerDecision decision =
