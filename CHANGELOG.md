@@ -11,6 +11,42 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.8.23
+
+### Fixed
+
+- **test:** assert the compose environment syntax the file actually uses (`5f6241cc`)
+- **deepseek4:** stop charging warmup cost to steady-state speculation (`af16fe4b`)
+- **docker:** drop compose declarations that only restated engine defaults (`7810971a`)
+- **docker:** stop the entrypoint overriding compose, make compose authoritative (`8c999fee`)
+- **engine:** correct two profiling-harness bugs found on hardware (`3da625c0`)
+
+### Performance
+
+- **deepseek4:** 33.60 -> 37.49 tok/s decode via width-6 verify (`027ed106`)
+- **engine:** extend DPP wave reductions, verified against the RDNA 3.5 ISA (`3a54084c`)
+- **engine:** DPP wave reduction in hand-written assembly for gfx1151 (`5f460a0c`)
+- **engine:** select WGP vs CU mode per translation unit on gfx1151 (`410d61d1`)
+- **engine:** branch-free UE4M3 scale decode for gfx1151 (`b6291ce6`)
+
+### Build and CI
+
+- **docker:** add Hyperloom to the dev image (`88898ac8`)
+
+### Documentation
+
+- **perf:** document TTFT, and record why narrowing the FA KV read failed (`1cb30f76`)
+- **engine:** link the two competing LUCE_MMVQ_MAX_NCOLS defaults (`4a1ccfef`)
+- **engine:** correct the HIP-graph diagnosis, which blamed the wrong tensor (`dcc00326`)
+
+### Maintenance
+
+- **release:** add gfx1151 kernel profiling harness (`e5a0d064`)
+- **release:** document CI gates and clear prune residue (`f02f7d10`)
+- **release:** document Forgejo sanitizer split (`b760adb8`)
+- **release:** stabilize Forgejo queue (`02305c07`)
+- **release:** recover release-note publication (`08f4f9f8`)
+- **release:** repair certified tag publication (`45ac7d3c`)
 ## 2026.8.22
 
 ### Curated notes
