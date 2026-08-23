@@ -107,6 +107,16 @@ SPEC_ENV="-e DFLASH_DS4_SPEC=1 -e DFLASH_DS4_DRAFT=$DRAFT -e DFLASH_DS4_Q5_VERIF
  -e DFLASH_DS4_TIMING=0 -e EMBER_GTT_TRACE=0
  -e GGML_CUDA_DISABLE_GRAPHS=1 -e GGML_CUDA_POOL_MAX_MB=8192"
 
+# Older releases do not all take --host; it was added partway through, and a
+# build that predates it binds loopback anyway. Benchmarking a shipped release
+# means running it as it shipped, so probe rather than assume. The usage text is
+# printed on any unrecognised option, so this works even where --help is not one.
+HOST_ARG="--host 127.0.0.1"
+if ! docker run --rm --entrypoint "$BIN" "$IMAGE" --help 2>&1 | grep -q -- '--host'; then
+  HOST_ARG=""
+  echo "  note: $IMAGE predates --host; it binds loopback by default"
+fi
+
 start_server() { # $1 = extra env, $2 = max_ctx
   docker rm -f "$NAME" >/dev/null 2>&1
   local mount=""
@@ -115,13 +125,21 @@ start_server() { # $1 = extra env, $2 = max_ctx
   docker run -d --name "$NAME" --network host $DOCKER_RUN \
     $mount -v "$MODEL_DIR:$MODEL_DIR" $1 \
     --entrypoint "$BIN" "$IMAGE" \
-    -m "$TARGET" --host 127.0.0.1 --port "$PORT" --max-ctx "$2" \
+    -m "$TARGET" $HOST_ARG --port "$PORT" --max-ctx "$2" \
     --ds4-expert-top-k 4 --default-temperature 0.6 >/dev/null
   for _ in $(seq 1 400); do
     curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
-    docker ps --format '{{.Names}}' | grep -q "^$NAME$" || return 1
+    # Keep the reason before the next docker rm -f discards it. Reporting only
+    # "server failed to start" cost a full re-run to learn the server had
+    # rejected a command-line flag.
+    docker ps --format '{{.Names}}' | grep -q "^$NAME$" || {
+      docker logs "$NAME" >"$BUNDLE/server-failure.log" 2>&1 || true
+      sed 's/^/    /' "$BUNDLE/server-failure.log" | head -8
+      return 1
+    }
     sleep 5
   done
+  docker logs "$NAME" >"$BUNDLE/server-failure.log" 2>&1 || true
   return 1
 }
 stop_server() {
