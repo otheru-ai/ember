@@ -6,24 +6,44 @@
 # summary JSON, and a README. The bundle is the unit published alongside the
 # Hugging Face model card, so everything needed to re-run it is inside.
 #
+#   # a repo build
 #   scripts/benchmark_bundle.sh --out /tmp/bundle --release 2026.8.24
 #
-# Requires the GPU, the model pair, and exclusive use of the box. Takes the
-# documented flock so a concurrent agent does not perturb the numbers.
+#   # the published image, which is what certification measures
+#   scripts/benchmark_bundle.sh --out /tmp/bundle --release 2026.8.24 \
+#     --image ghcr.io/otheru-ai/ember:sha-abc123456789 \
+#     --binary /usr/local/bin/ember-dflash --no-repo-mount
+#
+# Requires the GPU, the model pair, and exclusive use of the box. By default it
+# takes /root/gpu.lock and stops production for the duration, restoring it on
+# every exit path. Pass --no-exclusive when the caller already owns the machine
+# and manages production itself -- the certification job does, and a trap that
+# restarted production mid-job would hand the GPU away underneath it.
 set -uo pipefail
 
 OUT=""; RELEASE=""; MODEL_DIR=${MODEL_DIR:-/srv/models}
 IMAGE=${IMAGE:-ember-rocm:7.14}
 BIN=${BIN:-/ember/build-rocm/ember-dflash}
+# Bind-mounted only when benchmarking a repo build. Certification measures the
+# published image, which carries its own binary -- benchmarking anything else
+# would attribute numbers to something that did not ship. Set REPO_MOUNT= to
+# disable.
+REPO_MOUNT=${REPO_MOUNT-/root/ember}
 TARGET=${TARGET:-$MODEL_DIR/DeepSeek-V4-Flash-0731-ablit1042-v2.gguf}
 DRAFT=${DRAFT:-$MODEL_DIR/DeepSeek-V4-Flash-0731-ablit1042-DSpark-draft.gguf}
 PORT=${PORT:-18083}
 SKIP_CTX=0
+EXCLUSIVE=${EXCLUSIVE:-1}
+LOCK=${LOCK:-/root/gpu.lock}
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
     --release) RELEASE="$2"; shift 2 ;;
+    --image) IMAGE="$2"; shift 2 ;;
+    --binary) BIN="$2"; shift 2 ;;
+    --no-repo-mount) REPO_MOUNT=""; shift ;;
+    --no-exclusive) EXCLUSIVE=0; shift ;;
     --skip-context-sweep) SKIP_CTX=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -40,14 +60,25 @@ DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add video --group-add re
 DOCKER_RUN="$DOCKER_GPU --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit core=-1"
 NAME="bench-bundle-$$"
 
-# Order matters: production holds /dev/kfd, so trap first, then quiesce, THEN
-# wait for the device to drain. Waiting before quiescing deadlocks.
-restore() {
-  docker rm -f "$NAME" >/dev/null 2>&1
-  sudo -n /usr/local/sbin/ember-cert-production start >/dev/null 2>&1 && echo "  production restored"
-}
-trap restore EXIT INT TERM
-sudo -n /usr/local/sbin/ember-cert-production stop >/dev/null 2>&1 && echo "  production quiesced"
+if [ "$EXCLUSIVE" = 1 ]; then
+  # Re-exec under the documented lock so a concurrent agent cannot perturb the
+  # numbers. Guard against looping if flock is unavailable.
+  if [ -z "${BENCH_BUNDLE_LOCKED:-}" ] && command -v flock >/dev/null 2>&1; then
+    export BENCH_BUNDLE_LOCKED=1
+    exec flock -w 7200 "$LOCK" "$0" "$@"
+  fi
+  # Order matters: production holds /dev/kfd, so trap first, then quiesce, THEN
+  # wait for the device to drain. Waiting before quiescing deadlocks.
+  restore() {
+    docker rm -f "$NAME" >/dev/null 2>&1
+    sudo -n /usr/local/sbin/ember-cert-production start >/dev/null 2>&1 && echo "  production restored"
+  }
+  trap restore EXIT INT TERM
+  sudo -n /usr/local/sbin/ember-cert-production stop >/dev/null 2>&1 && echo "  production quiesced"
+else
+  # Caller owns the machine and production; only clean up our own container.
+  trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT INT TERM
+fi
 for _ in $(seq 1 60); do [ "$(free -g | awk '/^Mem:/{print $7}')" -ge 100 ] && break; sleep 5; done
 
 echo "=== model integrity ==="
@@ -65,9 +96,11 @@ SPEC_ENV="-e DFLASH_DS4_SPEC=1 -e DFLASH_DS4_DRAFT=$DRAFT -e DFLASH_DS4_Q5_VERIF
 
 start_server() { # $1 = extra env, $2 = max_ctx
   docker rm -f "$NAME" >/dev/null 2>&1
+  local mount=""
+  [ -n "$REPO_MOUNT" ] && mount="-v $REPO_MOUNT:/ember"
   # shellcheck disable=SC2086
   docker run -d --name "$NAME" --network host $DOCKER_RUN \
-    -v /root/ember:/ember -v "$MODEL_DIR:$MODEL_DIR" $1 \
+    $mount -v "$MODEL_DIR:$MODEL_DIR" $1 \
     --entrypoint "$BIN" "$IMAGE" \
     -m "$TARGET" --host 127.0.0.1 --port "$PORT" --max-ctx "$2" \
     --ds4-expert-top-k 4 --default-temperature 0.6 >/dev/null

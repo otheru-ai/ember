@@ -338,6 +338,59 @@ jobs:
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
 
+      - name: Benchmark the certified image
+        env:
+          BENCH_TIMEOUT_MIN: '110'
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
+          out="$RUNNER_TEMP/bench-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$out"
+          # Measure the image that was just certified, not a local build: a
+          # bundle attributed to anything else describes something that did not
+          # ship. Production is already quiesced by the step above and this job
+          # owns the machine, so --no-exclusive keeps the script from taking the
+          # lock again or restarting production underneath us.
+          MODEL_DIR="$(dirname "$MODEL_PATH")" \
+          TARGET="$MODEL_PATH" DRAFT="$DRAFT_PATH" PORT="$PORT" \
+          timeout "${BENCH_TIMEOUT_MIN}m" "$GITHUB_WORKSPACE/scripts/benchmark_bundle.sh" \
+            --out "$out" --release "${TARGET_SHA:0:12}" \
+            --image "$image" --binary /usr/local/bin/ember-dflash \
+            --no-repo-mount --no-exclusive
+          bundle="$(find "$out" -maxdepth 1 -type d -name 'ember-*' | head -1)"
+          test -n "$bundle"
+          test -s "$bundle/summary.json"
+          echo "BENCH_BUNDLE=$bundle" >>"$GITHUB_ENV"
+          python3 - "$bundle/summary.json" <<'PY' >>"$GITHUB_STEP_SUMMARY"
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          print('## Performance bundle\n')
+          d = s.get('decode') or {}
+          if d:
+              print(f"Decode, throughput group: **{d['median_tps']} tok/s** median "
+                    f"of {d['samples']} ({d['min_tps']}-{d['max_tps']}).\n")
+          w = s.get('by_workload') or {}
+          if w:
+              lo = min(w.values(), key=lambda r: r['tok_s'])['tok_s']
+              hi = max(w.values(), key=lambda r: r['tok_s'])['tok_s']
+              print(f"Across {len(w)} workloads decode spans **{lo}-{hi} tok/s**. "
+                    "The throughput group above is the most predictable case and "
+                    "sits at the top of that range.\n")
+              print('| Workload | tok/s | vs AR |')
+              print('| --- | ---: | ---: |')
+              for k, v in sorted(w.items(), key=lambda kv: -kv[1]['tok_s']):
+                  sp = f"{v['speedup']}x" if v.get('speedup') else '-'
+                  print(f"| {k} | {v['tok_s']} | {sp} |")
+          PY
+
+      - name: Upload the performance bundle
+        if: always() && env.BENCH_BUNDLE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-bundle-${{ inputs.commit_sha }}
+          path: ${{ env.BENCH_BUNDLE }}
+          retention-days: 90
+
       - name: Restore production
         if: ${{ always() && steps.production.outputs.restore != 'none' }}
         run: |
