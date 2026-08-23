@@ -79,10 +79,67 @@ magnitude and neither one alone describes the system.
 Decode tok/s, 256 generated tokens, identical generation task at every context
 length so that only the prompt varies.
 
-This sweep predates the `ggml_cpy` collapse in the compressor step (16 dispatches
-per layer per token down to 4, and 8 down to 2). On the current build the
-benchmark harness measures 39.0 tok/s at short context, so the short-context rows
-here read about 3% low; the shape of the curve is unaffected.
+**Read the generation task before reading the numbers.** It is
+`benchmark.py`'s decode prompt: *"Write a very long comma-separated sequence of
+consecutive positive integers beginning at 1."* Counting is close to the easiest
+possible workload for a drafter, and every decode figure this project has
+published -- 33.60, 37.49, 39.0 -- is that task. It is a ceiling, not a typical
+result.
+
+The same server, same configuration, measured across ten prompts spanning how
+predictable the *continuation* is (speculation on vs off, same prompt both
+sides):
+
+Medians of three repeats each. Run-to-run range was at most 0.07 tok/s on every
+row except `count` (1.31), so these are reproducible to well under a percent.
+
+| workload | accepted / offered | spec | AR | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| multiples of 7 | 4.95 / 5.00 | 39.58 | 23.68 | 1.671x |
+| count integers | 4.90 / 5.00 | 38.81 | 23.66 | 1.640x |
+| repeat a sentence | 4.93 / 5.00 | 38.21 | 23.68 | 1.614x |
+| alphabet | 4.86 / 5.00 | 38.00 | 23.67 | 1.605x |
+| JSON array | 4.90 / 5.00 | 36.41 | 23.65 | 1.540x |
+| code | 3.72 / 4.38 | 22.39 | 23.84 | **0.939x** |
+| factual list | 4.13 / 5.00 | 22.99 | 23.72 | **0.969x** |
+| prose | 1.37 / 5.00 | 23.09 | 23.71 | **0.974x** |
+| essay | 1.34 / 5.00 | 23.07 | 23.69 | **0.974x** |
+| creative | 0.94 / 5.00 | 23.08 | 23.70 | **0.974x** |
+
+The distribution is bimodal -- roughly 1.6x or roughly 0.95x, with nothing in
+between -- and on half of these prompts speculation still does not pay. The AR
+baseline is flat at 23.6-23.8 tok/s regardless of prompt, so a fair one-line
+summary of decode on ordinary prose is about **23 tok/s**, not 39.
+
+The four rows nearest parity are held there by a bail-out that abandons
+speculation once the batch verifier has visibly failed to qualify. Without it
+they were considerably worse:
+
+| workload | without bail-out | with |
+| --- | ---: | ---: |
+| factual list | 0.931x | 0.969x |
+| prose | 0.877x | 0.974x |
+| essay | 0.876x | 0.974x |
+| creative | 0.856x | 0.974x |
+
+It fired on exactly those four prompts, on all three repeats, and never on the
+six others -- 12 bail-outs in 30 requests. `code` is the one losing case it does
+not catch: that request re-qualifies and loses qualification repeatedly rather
+than never qualifying, so no run of consecutive strict cycles gets long enough.
+
+Acceptance does not predict which side a prompt lands on: the factual list
+accepts 4.13 of 5 drafts and still loses 7%. What separates them is whether the
+batch verifier qualifies, which needs consecutive *fully* accepted blocks --
+see `DSparkBatchVerifyGate` and the note in `deepseek4_dspark_spec.cpp`.
+
+This also qualifies the acceptance column in the context sweep above. Those
+0.94-1.00 figures are not evidence that the drafter holds up at depth; they are
+the counting task pinning acceptance near 1.0 at every length.
+
+The context sweep predates the `ggml_cpy` collapse in the compressor step (16
+dispatches per layer per token down to 4, and 8 down to 2). On the current build
+the benchmark harness measures 39.0 tok/s at short context, so the short-context
+rows there read about 3% low; the shape of the curve is unaffected.
 
 Speculation's advantage decays monotonically with context and reaches
 break-even somewhere near 100k tokens. Acceptance stays high throughout
@@ -115,10 +172,27 @@ rather than by memory:
 | `mul_mat_q<ROCMFP4_FAST>` | 10.1% | 136 GB/s | 64% |
 | D=512 flash attention (dense) | 8.9% | 53 GB/s | 25% |
 
+**Two ways this table misleads, both of which cost real work before they were
+noticed.**
+
 `FETCH_SIZE` counts L2 misses, which the 32 MB MALL can serve without touching
-DRAM, so "vs peak" is an upper bound on true memory utilisation -- one kernel
-(`rms_norm_f32`) reads at an apparent 131% of DRAM peak. The ordering is still
-meaningful, but a high score here is not evidence that a kernel is DRAM-bound.
+DRAM, so "vs peak" is an upper bound on memory utilisation, not a measurement of
+it -- `rms_norm_f32` reads at an apparent 131% of DRAM peak. A high score here is
+not evidence that a kernel is DRAM-bound.
+
+And GB/s is not comparable across quantisation formats. The ROCMFP2 row looks
+like half the efficiency of the ROCMFP4_FAST row, but ROCMFP2 is 2.50 bpw
+against 4.25, so it moves fewer bytes for the same arithmetic. Per weight the
+two are within 5% of each other:
+
+| kernel | bytes/weight | weights processed |
+| --- | ---: | ---: |
+| `mul_mat_q<ROCMFP2>` | 0.3125 | 1.88e11 /s |
+| `mul_mat_q<ROCMFP4_FAST>` | 0.53125 | 1.98e11 /s |
+
+Both are instruction-issue bound -- 16 WMMA instructions in roughly 1,315 -- and
+neither has a bandwidth problem. There is no 2x sitting in the ROCMFP2 unpack,
+and an earlier revision of this document claimed there was.
 
 The flash-attention row is a worked example. At an apparent 92% it looks like
 only bytes could matter, so the compressed half of its KV span was made readable
@@ -129,12 +203,103 @@ instantiated once per KV width and the second copy costs more VALU throughput
 than the bandwidth saves. The change was reverted. Settle bandwidth-versus-VALU
 questions with an A/B, not with this counter.
 
+## Prefill kernel work
+
+Two kernels were 5.3% of prefill between them and neither was slow -- both were
+launched wrong, for a tensor shape DS4 does not have.
+
+| kernel | before | after | |
+| --- | ---: | ---: | --- |
+| `reduce_rows_f32` | 1001.8 ms | 131.5 ms | 7.6x |
+| `rope_norm` | 420.0 ms | 212.5 ms | 2.0x |
+| **prefill total** | **26632 ms** | **25577 ms** | **-4.0%** |
+
+`reduce_rows_f32` mapped one block per row irrespective of row length. DS4 sums
+its 4 hyper-connection streams as a `[4 x 8388608]` `sum_rows`, so that launched
+8.4 million workgroups of 32 threads to add four floats each, with 28 lanes idle
+in every one. Fixed in two steps: cap `gridDim` and walk rows with a stride
+(-36%), then collapse the reduction for short rows to its minimal exact form
+(a further 4.9x).
+
+`rope_norm` hardcodes a 256-thread block, and each thread rotates one dim-pair --
+so a block always covers 512 dims. DS4 ropes `n_rot = 64`, leaving 32 of 256
+threads with work and launching seven dead waves per block. Fixed by sizing the
+block to the row.
+
+Both changes are bit-exact, and both were verified by differential test rather
+than by the DSpark validator. That validator compares AR against speculative
+against batched decode *within one build*; when every path uses the changed
+kernel it will pass whether or not the arithmetic moved. `GGML_REDUCE_ROWS_SHORT`
+exists so one binary can produce both reductions and they can be diffed
+directly. Output over four prompts x 256 deterministic tokens is byte-identical
+in both cases.
+
+What is left in these two: `rope_norm`'s remaining 212 ms is dominated by
+`rope_theta_fp64`, which computes theta in double precision at a small fraction
+of fp32 rate on gfx1151 -- narrowing it would change every rotated value, so it
+is a quality decision rather than a launch fix. `reduce_rows_f32` now runs at
+about 0.75 ms per call against a ~0.8 ms memory-bound floor and is finished.
+
+### What was investigated and rejected
+
+The two largest prefill kernels -- D=512 flash attention at 23.3% and
+`mul_mat_q<ROCMFP2>` at 23.0% -- were both examined for a rewrite and neither
+was taken.
+
+An instruction census of the shipped flash-attention kernel
+(`<float, half, 4, indexed, 4>`, 7,287 instructions) is:
+
+| class | share |
+| --- | ---: |
+| select (`v_cndmask`, `s_cselect`) | 23.6% |
+| FMA | 19.4% |
+| address arithmetic | 18.3% |
+| waits, `s_delay_alu` | 14.9% |
+| memory | 9.7% |
+| moves | 5.6% |
+
+Two conclusions follow. WMMA is not the lever: the dot product is under a fifth
+of the work, so collapsing it caps at 1.24x by Amdahl -- and every matrix form on
+RDNA 3.5 takes f16/bf16/iu8/iu4 (ISA table 33; there is no fp32 matrix path), so
+that 1.24x would also cost prefill its fp32 baseline.
+
+The better theory was that head grouping amortises overhead: the first three
+eighths of the kernel are sparse-index bookkeeping with almost no FMA, and the
+grid is (n_tokens, n_heads/4), so a token pays it 16 times over identical rows.
+Widening the group to 8 heads -- the ceiling this kernel body allows -- gave 34%
+fewer instructions per head and 58% fewer selects per head, and ran **8.9%
+slower**, taking prefill from 25520 to 26349 ms. Two costs scale against it:
+
+  * `scores[HEADS * score_stride]` is staged in LDS, so 15.4 KB becomes 30.1 KB
+    and occupancy halves from 4 resident blocks per CU to 2.
+  * The value pass walks the union of per-head envelopes, so a wider group loads
+    more rows only to discard them per head.
+
+Both worsen monotonically with group width, which is why 4 is the setting.
+
+So a 64-head kernel cannot be this kernel with more heads. It would have to be
+row-tiled the way `ds4_decode_attn_wmma_partial` is -- staging a 16-row tile
+whose LDS is constant in the span, with online softmax and no envelopes -- which
+is a rewrite, not a parameter change, and it would still carry the f16 numerics
+change. Not attempted.
+
+`mul_mat_q<ROCMFP2>` was rejected for a different reason: it is not slow. See
+the per-weight comparison under Roofline position.
+
+Prefill is cold-start work. The prefix cache removes nearly all of it after the
+first turn, so a 4% prefill gain is worth far less than it looks next to the
+decode figures above.
+
 ## Reproducing
 
 The context sweep holds the generation task fixed and varies only prompt length,
 alternating `DFLASH_DS4_SPEC=1` and `DFLASH_DS4_SPEC=0` per point. Both prefill
 and decode throughput are read from the server's `usage.timings` block, not from
 wall-clock timing at the client, so client-side overhead is excluded.
+
+Anything measured through `benchmark.py` inherits its decode prompt, which is
+integer counting. Quoting a decode number without saying so overstates ordinary
+throughput by roughly 1.6x -- see the workload table above.
 
 Profiling uses one `rocprofv3` pass per counter -- requesting two `--pmc`
 counters in one pass faults on `gfx1151` -- plus a separate trace pass for
