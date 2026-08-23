@@ -4,60 +4,81 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ember — Performance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
+/* Palette lifted from otheru.ai/themes/default.css so the page reads as part of
+   the same site. Dark only, as the corporate site is -- a light variant would
+   be a second set of brand decisions nobody has made. --bad has no counterpart
+   there (the site never shows a regression) so rose is chosen to sit against
+   the indigo without clashing. */
 :root{
-  --bg:#0f1115; --card:#171a21; --line:#252a34; --ink:#e6e9ef; --muted:#98a1b3;
-  --accent:#d94f2b; --accent2:#2b8cd9; --ok:#3fb950; --bad:#f85149;
-  --radius:12px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-}
-@media (prefers-color-scheme:light){
-  :root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ec;--ink:#1a1d23;--muted:#5f6875}
+  --bg:#0a0a0f; --card:#12121a; --card-hover:#1a1a28;
+  --line:#1e1e2e; --line-hover:#2e2e42;
+  --ink:#e4e4ef; --muted:#8888a0; --micro:#5e5e76;
+  --accent:#6366f1; --accent2:#a78bfa; --cyan:#06b6d4;
+  --ok:#10b981; --bad:#f43f5e;
+  --glow:rgba(99,102,241,.15);
+  --gradient-text:linear-gradient(135deg,#e4e4ef 0%,#a78bfa 50%,#6366f1 100%);
+  --radius:16px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  font:15px/1.55 'Inter',-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
 .layout{max-width:1180px;margin:0 auto;padding:0 20px}
-.page-header{padding:34px 0 22px;border-bottom:1px solid var(--line)}
-.page-header h1{margin:6px 0 8px;font-size:30px;letter-spacing:-.01em}
-.back-link{color:var(--muted);text-decoration:none;font-size:13px}
-.back-link:hover{color:var(--ink)}
+.page-header{padding:34px 0 24px;border-bottom:1px solid var(--line)}
+.page-header h1{margin:8px 0 10px;font-size:34px;font-weight:800;letter-spacing:-.025em;
+  color:var(--ink);background:var(--gradient-text);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.eyebrow-links{display:flex;gap:14px;align-items:center;font-size:13px}
+.eyebrow-links a{color:var(--muted);text-decoration:none}
+.eyebrow-links a:hover{color:var(--ink)}
+.eyebrow-links .sep{color:var(--micro)}
+.wordmark{color:var(--accent2);font-weight:600}
 #system-info{margin:0;color:var(--muted);font-size:13px}
-main{padding:22px 0 60px}
+main{padding:24px 0 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:18px 20px;margin:0 0 18px}
+  padding:20px 22px;margin:0 0 18px;transition:border-color .15s}
+.card:hover{border-color:var(--line-hover)}
 .section-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:14px}
-.eyebrow{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
-.section-heading h2{margin:2px 0 0;font-size:18px}
+.eyebrow{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--micro)}
+.section-heading h2{margin:3px 0 0;font-size:18px;font-weight:600;letter-spacing:-.01em}
 .result-count{color:var(--muted);font-size:13px;font-family:var(--mono)}
-.selector-heading{display:flex;justify-content:space-between;align-items:center;margin:14px 0 8px}
-.selector-heading strong{font-size:13px}
+.selector-heading{display:flex;justify-content:space-between;align-items:center;margin:16px 0 8px}
+.selector-heading strong{font-size:13px;font-weight:600}
 .text-button{background:none;border:none;color:var(--accent2);cursor:pointer;font-size:12px;padding:0 6px}
 .text-button:hover{text-decoration:underline}
 .chips{display:flex;flex-wrap:wrap;gap:7px}
 .chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:99px;
-  padding:5px 12px;font-size:12.5px;cursor:pointer;transition:.12s}
-.chip:hover{border-color:var(--accent2);color:var(--ink)}
-.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+  padding:5px 13px;font-size:12.5px;cursor:pointer;transition:.14s}
+.chip:hover{border-color:var(--line-hover);color:var(--ink)}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff;
+  box-shadow:0 0 0 3px var(--glow)}
 .tabs{display:flex;gap:6px;flex-wrap:wrap}
-.tab{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:8px;
-  padding:6px 12px;font-size:12.5px;cursor:pointer}
-.tab[aria-selected="true"]{background:var(--accent2);border-color:var(--accent2);color:#fff}
+.tab{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:9px;
+  padding:6px 13px;font-size:12.5px;cursor:pointer;transition:.14s}
+.tab:hover{border-color:var(--line-hover);color:var(--ink)}
+.tab[aria-selected="true"]{background:var(--accent2);border-color:var(--accent2);color:#0a0a0f;font-weight:600}
 .chart{width:100%;overflow-x:auto}
 svg{display:block}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
-th,td{text-align:right;padding:7px 10px;border-bottom:1px solid var(--line)}
+th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line)}
 th:first-child,td:first-child{text-align:left}
-th{color:var(--muted);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
+th{color:var(--micro);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
+tbody tr:hover{background:var(--card-hover)}
 td.num{font-family:var(--mono)}
 .gain{color:var(--ok)} .loss{color:var(--bad)}
 .note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
-footer{border-top:1px solid var(--line);padding:18px 0 40px;color:var(--muted);font-size:12.5px}
-code{font-family:var(--mono);font-size:12.5px}
+footer{border-top:1px solid var(--line);padding:20px 0 40px;color:var(--micro);font-size:12.5px}
+code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 </style>
 </head>
 <body>
 <header class="page-header"><div class="layout">
-  <a class="back-link" href="https://github.com/otheru-ai/ember">← Ember on GitHub</a>
+  <p class="eyebrow-links"><a class="wordmark" href="https://otheru.ai/">otheru</a>
+    <span class="sep">/</span><a href="https://github.com/otheru-ai/ember">Ember on GitHub</a></p>
   <h1>Ember — Performance</h1>
   <p id="system-info">Loading results…</p>
 </div></header>
@@ -296,7 +317,7 @@ function render(){
     S.view==="vs-ar"?"Decode gain over autoregressive":"Decode change against "+(S.baseline||"baseline");
 
   // depth chart
-  const palette=["var(--accent)","var(--accent2)","#8957e5","#3fb950"];
+  const palette=["var(--accent)","var(--accent2)","var(--cyan)","var(--ok)"];
   const series=[];
   const swept=rels.filter(r=>r.depths.length);
   const solo=swept.length===1&&S.metric==="decode";
