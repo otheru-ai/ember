@@ -1440,8 +1440,25 @@ bool run_deepseek4_dspark_spec_decode(
         } else {
             consecutive_strict = 0;
         }
-        // batch_gate.active() is monotonic, so a long strict run means
-        // qualification has not happened yet, not that it lapsed.
+        // Consecutive, not cumulative. DSparkBatchVerifyGate::note_cycle()
+        // CLEARS active_ on the first partial block after qualifying, so the
+        // gate is a latch that drops, not a one-way flag, and a request can
+        // qualify and lose it repeatedly. Measured on the "code" prompt:
+        //   step=12 acc=6/6 -> act=1 prog=48   qualifies
+        //   step=15 acc=4/6 -> act=0 prog=0    de-qualifies
+        //   step=25 acc=6/6 -> act=1 prog=48   re-qualifies
+        //   step=26 acc=5/6 -> act=0 prog=0    de-qualifies again
+        // That run was strict for 25 of 29 cycles yet never 21 in a row, so it
+        // is deliberately NOT caught here: a cumulative count would also fire on
+        // a long generation that qualifies, drifts, and re-qualifies while
+        // staying profitable overall. What this test detects is the narrower and
+        // unambiguous case -- a request that cannot qualify at all.
+        //
+        // KNOWN GAP: an oscillating request like that one still pays the strict
+        // verify on most cycles (measured 0.939x against AR) and nothing here
+        // stops it. Catching that needs the profit scheduler's time-based
+        // extra_ms/saved_ms test, which af16fe4 stopped feeding on strict
+        // cycles; see the note at that call site.
         if (batch_warmup_max_cycles > 0 && !batch_gate.active() &&
             consecutive_strict > batch_warmup_max_cycles) {
             warmup_abandoned = true;
@@ -1967,11 +1984,12 @@ bool run_deepseek4_dspark_spec_decode(
             std::fprintf(stderr,
                 "[ds4-step] step=%ld pos=%d posmod4=%d q=%d acc=%d cycle=%.1f "
                 "draft=%.1f head=%.1f save=%.1f verify=%.1f apply=%.1f feat=%.1f "
-                "strict=%d\n",
+                "strict=%d cs=%ld act=%d prog=%u\n",
                 steps, pos, pos & 3, q, accept, cycle_ms,
                 tm_draft - tm0_draft, tm_head - tm0_head, tm_save - tm0_save,
                 tm_verify - tm0_verify, tm_apply - tm0_apply, tm_feat - tm0_feat,
-                strict_cycle ? 1 : 0);
+                strict_cycle ? 1 : 0, consecutive_strict,
+                batch_gate.active() ? 1 : 0, batch_gate.progress());
         }
         if (timing && (steps <= 4 || (steps & 31) == 0)) {
             std::fprintf(stderr,
