@@ -19,6 +19,35 @@ Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
 Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
 on one local endpoint.
 
+## Performance
+
+One AMD Strix Halo (`gfx1151`), DeepSeek-V4-Flash at 2.5 bpw, 85.3 GiB resident.
+
+| | |
+| --- | --- |
+| **Decode** | **23-40 tok/s**, depending on how predictable the output is |
+| **TTFT, cold** | 3.1 s at 862 prompt tokens · 11.9 s at 3.9k · 64 s at 18.5k |
+| **TTFT, warm** | **0.19 s** — the prefix cache restores the conversation after the first turn |
+
+Decode spans a wide range because speculative decoding pays in proportion to how
+well the drafter predicts the *continuation*, so a single number would be
+misleading either way:
+
+| output | tok/s |
+| --- | ---: |
+| repetitive or highly structured (counting, JSON, lists) | ~40 |
+| code and structured factual answers | ~28 |
+| prose, essays, creative writing | ~23 |
+
+The bottom row is also what Ember achieves with speculation disabled, so 23 tok/s
+is the floor rather than a bad case. Warm TTFT is the figure that matters for
+agent and chat loops: a 6,063-token prompt whose first 6,053 tokens are already
+cached prefills in 194 ms instead of 17.7 s.
+
+Full methodology, the context-scaling curve out to 131,072 tokens, and the
+per-kernel roofline position are in
+[docs/performance.md](docs/performance.md).
+
 ## Requirements
 
 - Native x86_64 Linux on AMD Strix Halo (`gfx1151`)
