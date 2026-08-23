@@ -90,42 +90,47 @@ The same server, same configuration, measured across ten prompts spanning how
 predictable the *continuation* is (speculation on vs off, same prompt both
 sides):
 
-Medians of three repeats each. Run-to-run range was at most 0.07 tok/s on every
-row except `count` (1.31), so these are reproducible to well under a percent.
+Medians of three repeats each. `p` is the fraction of offered draft blocks that
+come back FULLY accepted, which is what decides whether the wide verify path is
+worth taking.
 
-| workload | accepted / offered | spec | AR | speedup |
+| workload | p | spec | AR | speedup |
 | --- | ---: | ---: | ---: | ---: |
-| multiples of 7 | 4.95 / 5.00 | 39.58 | 23.68 | 1.671x |
-| count integers | 4.90 / 5.00 | 38.81 | 23.66 | 1.640x |
-| repeat a sentence | 4.93 / 5.00 | 38.21 | 23.68 | 1.614x |
-| alphabet | 4.86 / 5.00 | 38.00 | 23.67 | 1.605x |
-| JSON array | 4.90 / 5.00 | 36.41 | 23.65 | 1.540x |
-| code | 3.72 / 4.38 | 22.39 | 23.84 | **0.939x** |
-| factual list | 4.13 / 5.00 | 22.99 | 23.72 | **0.969x** |
-| prose | 1.37 / 5.00 | 23.09 | 23.71 | **0.974x** |
-| essay | 1.34 / 5.00 | 23.07 | 23.69 | **0.974x** |
-| creative | 0.94 / 5.00 | 23.08 | 23.70 | **0.974x** |
+| alphabet | 0.976 | 40.70 | 23.66 | 1.720x |
+| multiples of 7 | 0.952 | 40.50 | 23.67 | 1.711x |
+| repeat a sentence | 0.976 | 39.97 | 23.67 | 1.689x |
+| count integers | 0.952 | 39.73 | 23.64 | 1.681x |
+| JSON array | 0.952 | 39.70 | 23.64 | 1.679x |
+| code | 0.760 | 28.92 | 23.84 | 1.213x |
+| factual list | 0.714 | 27.88 | 23.71 | 1.176x |
+| prose | 0.056 | 23.15 | 23.69 | **0.977x** |
+| essay | 0.000 | 23.20 | 23.67 | **0.980x** |
+| creative | 0.000 | 23.20 | 23.69 | **0.979x** |
 
-The distribution is bimodal -- roughly 1.6x or roughly 0.95x, with nothing in
-between -- and on half of these prompts speculation still does not pay. The AR
-baseline is flat at 23.6-23.8 tok/s regardless of prompt, so a fair one-line
-summary of decode on ordinary prose is about **23 tok/s**, not 39.
+Speculation pays on seven of ten and is a small loss on the three where the
+drafter never lands a whole block. The AR baseline is flat at 23.6-23.8 tok/s
+regardless of prompt, so decode on genuinely unpredictable prose is about
+**23 tok/s** against 40 on highly predictable output.
 
-The four rows nearest parity are held there by a bail-out that abandons
-speculation once the batch verifier has visibly failed to qualify. Without it
-they were considerably worse:
+Note that `p` is not acceptance. `factual list` averages 4.13 of 5 tokens
+accepted -- excellent -- but only 71% of its blocks are whole, and it is
+wholeness that the batched verifier qualifies on. Mean acceptance and `p` rank
+these workloads differently, which is why acceptance-based gating could not
+price them.
 
-| workload | without bail-out | with |
+Getting the bottom three to parity took a per-request abandon once the verifier
+has visibly failed to qualify; getting `code` and `factual list` above 1.0x took
+replacing the qualification rule itself. Before that work:
+
+| workload | before | after |
 | --- | ---: | ---: |
-| factual list | 0.931x | 0.969x |
-| prose | 0.877x | 0.974x |
-| essay | 0.876x | 0.974x |
-| creative | 0.856x | 0.974x |
-
-It fired on exactly those four prompts, on all three repeats, and never on the
-six others -- 12 bail-outs in 30 requests. `code` is the one losing case it does
-not catch: that request re-qualifies and loses qualification repeatedly rather
-than never qualifying, so no run of consecutive strict cycles gets long enough.
+| code | 0.939x | 1.213x |
+| factual list | 0.931x | 1.176x |
+| prose | 0.877x | 0.977x |
+| essay | 0.876x | 0.980x |
+| creative | 0.856x | 0.979x |
+| JSON array | 1.528x | 1.679x |
+| alphabet | 1.592x | 1.720x |
 
 Acceptance does not predict which side a prompt lands on: the factual list
 accepts 4.13 of 5 drafts and still loses 7%. What separates them is whether the

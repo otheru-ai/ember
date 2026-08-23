@@ -46,35 +46,65 @@ int main() {
     // requires consecutive full exact blocks; a partial q-wide block returns
     // to exact mode from the caller's replayed frontier.
     {
+        // Not requested: never qualifies however clean the blocks are.
         DSparkBatchVerifyGate gate(false, 48);
         for (int i = 0; i < 20; ++i) gate.note_cycle(4, 4);
         CHECK(gate.strict_cycle());
         CHECK(!gate.active());
     }
     {
+        // warmup_tokens == 0 keeps the legacy immediate-batch behaviour, and a
+        // single partial block no longer ejects a qualified request: the gate
+        // now tracks a rate, and one miss in a window of eight is 7/8.
         DSparkBatchVerifyGate gate(true, 0);
         CHECK(gate.active());
         gate.note_cycle(4, 3);
-        CHECK(gate.strict_cycle());
-        CHECK(gate.progress() == 0);
+        CHECK(gate.active());
     }
     {
+        // warmup_tokens 48 -> window 8, qualify at 6/8 full, drop below 4/8.
         DSparkBatchVerifyGate gate(true, 48);
+        CHECK(gate.window() == 8);
         CHECK(gate.strict_cycle());
-        for (int i = 0; i < 11; ++i) gate.note_cycle(4, 4);
-        CHECK(!gate.active());
-        CHECK(gate.progress() == 44);
-        // Scheduler-inserted q=1 cycles neither qualify nor reset the streak.
-        gate.note_cycle(1, 1);
-        CHECK(gate.progress() == 44);
+        // No verdict before the window has filled, even on a perfect streak.
+        for (int i = 0; i < 7; ++i) gate.note_cycle(4, 4);
+        CHECK(gate.strict_cycle());
         gate.note_cycle(4, 4);
         CHECK(gate.active());
-        CHECK(gate.progress() == 48);
+        CHECK(gate.progress() == 8);
+        // Scheduler-inserted q=1 cycles are not evidence either way.
+        gate.note_cycle(1, 1);
+        CHECK(gate.active());
+        CHECK(gate.progress() == 8);
+        // One partial block is noise, not a verdict -- this is the behaviour
+        // the old consecutive-streak rule got wrong.
         gate.note_cycle(4, 3);
+        CHECK(gate.active());
+        CHECK(gate.progress() == 7);
+        // Sustained partials do drop it: below 4 of 8 full.
+        for (int i = 0; i < 4; ++i) gate.note_cycle(4, 3);
+        CHECK(gate.progress() == 3);
         CHECK(gate.strict_cycle());
-        CHECK(gate.progress() == 0);
-        gate.note_cycle(4, 4);
-        gate.note_cycle(4, 2);
+    }
+    {
+        // A p=0.75 workload qualifies now. Three full blocks then one partial,
+        // repeating, is 6/8 in every window -- profitable, and previously
+        // refused because it never lands eight in a row.
+        DSparkBatchVerifyGate gate(true, 48);
+        for (int cycle = 0; cycle < 4; ++cycle) {
+            gate.note_cycle(4, 4);
+            gate.note_cycle(4, 4);
+            gate.note_cycle(4, 4);
+            gate.note_cycle(4, 3);
+        }
+        CHECK(gate.progress() == 6);
+        CHECK(gate.active());
+    }
+    {
+        // p = 0 is still refused: prose never lands a whole block.
+        DSparkBatchVerifyGate gate(true, 48);
+        for (int i = 0; i < 40; ++i) gate.note_cycle(6, 2);
+        CHECK(gate.strict_cycle());
         CHECK(gate.progress() == 0);
     }
 
