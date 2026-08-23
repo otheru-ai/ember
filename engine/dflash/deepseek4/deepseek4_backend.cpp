@@ -1799,22 +1799,37 @@ int ds4_spec_emit_budget(const GenerateRequest & req) {
 //   ctx   8800 tok -> 33.37 vs AR 22.01  (+52%)
 //   ctx  18553 tok -> 30.07 vs AR 20.93  (+44%)
 //   ctx  38059 tok -> 23.97 vs AR 19.07  (+26%)
-// The advantage decays with depth but never reaches parity. At the old 16384
-// default, an 18.5k-token request was handed to AR at 20.93 instead of 30.07 --
-// a 30% loss for no measured reason.
+// The advantage decays with depth. At the old 16384 default, an 18.5k-token
+// request was handed to AR at 20.93 instead of 30.07 -- a 30% loss for no
+// measured reason.
+//
+// A later sweep carried those measurements past 38k and found where the decay
+// ends, which the list above was too short to show:
+//   ctx  77068 tok -> 18.01 vs AR 16.61  (+8%)
+//   ctx 116077 tok -> 14.50 vs AR 14.86  (-2%)
+// So speculation reaches parity near 100k and is very slightly negative beyond
+// it -- one measurement per point, so treat -2% as neutral rather than as a
+// regression worth a cliff. Acceptance was 0.97-1.00 across that whole range,
+// which is why the position ceiling is the wrong lever: the drafter is not
+// getting worse, the verify is growing with the KV span while the draft step is
+// not. The default is left at the context limit because handing back to AR at
+// some pinned position would trade a measured +8% at 77k for a neutral result
+// at 116k.
 //
 // What actually decides profitability is acceptance, not position: from the
-// per-phase timings the verify is ~90% of a step and is context-INDEPENDENT
-// (86.6 ms at 8764 tok vs 95.8 ms at 216 tok), so break-even sits near 2.3
-// accepted tokens per step (~0.40 acceptance at width 6). DSparkProfitScheduler
-// already measures that directly and stands down when it is not met, which is
-// the mechanism that should own this decision; a position ceiling is a proxy for
-// something the engine observes first-hand.
+// per-phase timings the verify is ~90% of a step and is context-independent
+// over the range those timings cover (86.6 ms at 8764 tok vs 95.8 ms at 216
+// tok), so break-even sits near 2.3 accepted tokens per step (~0.40 acceptance
+// at width 6). That flatness does NOT extend to the top of the window -- the
+// parity point above is what it looks like once the verify does grow with the
+// KV span. DSparkProfitScheduler measures the ratio directly and stands down
+// when it is not met, which is the mechanism that should own this decision; a
+// position ceiling is a proxy for something the engine observes first-hand.
 //
 // So this is now a memory backstop at the context limit rather than a
 // throughput gate, and it tracks max_ctx (main.c, 131072). A ceiling pinned
-// below the context window just recreates the cliff this replaced: requests
-// past it lose the +26..60% speculation gives, for no measured reason.
+// below the context window recreates the cliff this replaced for every request
+// between it and ~100k, where speculation still measures +8..60%.
 // Supporting measurements at the new value: the engine reports KV cache
 // 877.8 MB at ctx=131072, a load there was verified (GTT 11.2 GiB, 24 GiB host
 // free), and speculation ran at 77,068 prompt tokens with acceptance 1.00.

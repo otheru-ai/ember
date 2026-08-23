@@ -123,11 +123,25 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn(f"ghcr.io/otheru-ai/ember:{version}", release_service)
         self.assertIn("pull_policy: always", release_service)
         self.assertNotIn("build:", release_service)
-        self.assertIn("EMBER_HOST: ${EMBER_HOST:-127.0.0.1}", release_service)
+        # List form, not mapping form: a bare NAME entry forwards the
+        # operator's value only when they set one, which is what lets this file
+        # stay authoritative without restating a default that already lives in
+        # the binary. Assert the syntax the file actually uses so a silent
+        # switch back to mapping form fails here.
+        self.assertIn("- EMBER_HOST=${EMBER_HOST:-127.0.0.1}", release_service)
         self.assertIn(
-            "EMBER_VERIFY_EXISTING_SHA256: ${EMBER_VERIFY_EXISTING_SHA256:-1}",
+            "- EMBER_VERIFY_EXISTING_SHA256=${EMBER_VERIFY_EXISTING_SHA256:-1}",
             release_service,
         )
+        # Pass-through entries carry no "=" at all.
+        for name in (
+            "DFLASH_DS4_SPEC",
+            "DFLASH_DS4_SPEC_MAX_CTX",
+            "DFLASH_DS4_Q5_VERIFY",
+            "DFLASH_DS4_SPEC_Q",
+            "LUCE_MMVQ_MAX_NCOLS",
+        ):
+            self.assertIn(f"\n      - {name}\n", release_service)
         self.assertIn("$${EMBER_HOST:-127.0.0.1}", release_service)
         self.assertIn("target: release", build)
         self.assertIn("pull_policy: build", build)
