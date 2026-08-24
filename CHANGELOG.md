@@ -11,42 +11,6 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
-### Documentation
-
-- Clarify the distinction between engineering performance bundles and hardware
-  certification, add the production upgrade checklist, document the current
-  resident-batching limits, and record the current engineering/certification
-  performance split.
-- Correct model-storage guidance: 100 GiB remains the enforced minimum, while
-  120 GiB is the recommended working margin for resumable downloads and cache
-  overhead; add the exact differential-validator invocation to the operations
-  guide.
-
-## 2026.8.24
-
-### Added
-
-- **bench:** automate the per-release performance bundle (`ac741304`)
-- **ci(gfx1151):** benchmark the certified image as part of certification (`adf64ec4`)
-- **perf:** a browsable performance page, built from benchmark bundles (`f9dfa52a`)
-
-### Changed
-
-- **deepseek4:** qualify the wide verify path on a rate, not a lucky streak (`b66595d3`)
-- **ggml:** stop launching one block per row in `reduce_rows_f32` (`00556dd2`)
-- **ggml:** size the rope block to the row instead of a fixed 256 (`57f11cd8`)
-- **ggml:** collapse the short-row reduction to its exact minimal form (`f3da20c9`)
-- **bench:** re-measure 2026.8.10, .22 and .23 against the current model (`f8805587`)
-
-### Fixed
-
-- **deepseek4:** hand back to AR when batch-verify warmup is unreachable (`b2428026`)
-- **deepseek4:** abandon speculation after one unqualified profitability pause (`d616074f`)
-- **deepseek4:** bound the warmup exclusion so the profit scheduler can still see (`d8993ed3`)
-- **bench:** plot the depth that was asked for, not the one that drifted (`dba6c38f`)
-- **bench:** benchmark an old release as it shipped, and keep failure reasons (`212bf2af`)
-- **bench:** repair four defects the first dry run exposed (`6c976290`)
-
 ## 2026.8.23
 
 ### Fixed
