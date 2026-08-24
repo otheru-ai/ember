@@ -245,6 +245,16 @@ jobs:
             -e DFLASH_DS4_SPEC=1
             -e "DFLASH_DS4_DRAFT=/cert-draft/$draft_file"
           )
+          # docker rm returning does not mean the previous container's 85 GiB
+          # mlock'd buffer is back. Loading the next model into that pressure
+          # produced a server that ran at 4.78 tok/s and never speculated, which
+          # failed the smoke test's spec_ran assertion and looked like a
+          # regression in the engine. Wait for the memory instead.
+          for _ in $(seq 1 60); do
+            available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+            (( available_kib >= 100 * 1024 * 1024 )) && break
+            sleep 5
+          done
           cache_volume="ember-cert-validator-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           docker volume create "$cache_volume" >/dev/null
           cleanup_validator() { docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true; }
@@ -287,6 +297,16 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
+          # docker rm returning does not mean the previous container's 85 GiB
+          # mlock'd buffer is back. Loading the next model into that pressure
+          # produced a server that ran at 4.78 tok/s and never speculated, which
+          # failed the smoke test's spec_ran assertion and looked like a
+          # regression in the engine. Wait for the memory instead.
+          for _ in $(seq 1 60); do
+            available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+            (( available_kib >= 100 * 1024 * 1024 )) && break
+            sleep 5
+          done
           name="ember-cert-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           cache_volume="$name-cache"
           docker volume create "$cache_volume" >/dev/null
