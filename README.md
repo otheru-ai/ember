@@ -111,6 +111,9 @@ container or Kubernetes gateway must reach the API.
 
 ## Performance
 
+[**Performance dashboard**](https://otheru-ai.github.io/ember/perf/) — every
+measurement below, browsable by workload, release, and context depth.
+
 One Ryzen AI Max 395+ (`gfx1151`, 128 GB), DeepSeek-V4-Flash-0731 at
 ROCMFPX 2.5 bpw, 85.3 GiB resident. Each row is one request: a prompt of the
 given depth, 256 tokens generated, greedy. Depth is the prompt size asked
@@ -146,9 +149,7 @@ prompt whose first 6,053 tokens are cached prefills in **194 ms** instead of
 17,693 ms.
 
 Full methodology and the per-kernel roofline position are in
-[docs/performance.md](docs/performance.md). The same measurements are browsable
-by workload, release, and context depth at
-[otheru-ai.github.io/ember/perf](https://otheru-ai.github.io/ember/perf/).
+[docs/performance.md](docs/performance.md).
 
 ## Configure
 
