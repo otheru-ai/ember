@@ -19,7 +19,11 @@ Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
 Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
 on one local endpoint.
 
-**23-40 tok/s decode, 194 ms warm TTFT** on a single Ryzen AI Max 395+.
+**23-40 tok/s decode** on a single Ryzen AI Max 395+. The latest
+2026.8.24 release-candidate sweep measured **39.59 tok/s median** on a
+structured workload (23.69 tok/s autoregressive baseline); prose and code are
+slower, as shown below. The 194 ms warm-TTFT figure is from the certified
+long-context run documented in the performance section.
 [Details below.](#performance)
 
 ## Requirements
@@ -150,6 +154,28 @@ prompt whose first 6,053 tokens are cached prefills in **194 ms** instead of
 
 Full methodology and the per-kernel roofline position are in
 [docs/performance.md](docs/performance.md).
+
+### Latest release-candidate sweep
+
+The 2026.8.24 bundle was measured on 2026-08-23 with the same Ryzen AI Max+ 395
+(`gfx1151`, 125 GiB) and 85.3 GiB target model. These are three-sample medians
+from the release-candidate harness; they are a current engineering reference,
+not a replacement for the dedicated certification gate:
+
+| Workload | Speculative tok/s | Autoregressive tok/s | Speedup |
+| --- | ---: | ---: | ---: |
+| Structured alphabet | 40.75 | 23.69 | 1.72× |
+| Counting | 40.60 | 23.42 | 1.734× |
+| Code | 28.92 | 23.86 | 1.212× |
+| Repetitive text | 39.97 | 23.70 | 1.686× |
+
+Across the three-run 256-token throughput sweep, the median was 39.59 tok/s
+with a 98.1% median draft acceptance rate.
+
+The corresponding prefill medians were 216.1 tok/s at 128 tokens, 412.8 at
+2,048, 352.5 at 8,192, and 324.3 at 16,384. See the [performance
+dashboard](https://otheru-ai.github.io/ember/perf/) for the complete bundle and
+provenance.
 
 ## Configure
 
