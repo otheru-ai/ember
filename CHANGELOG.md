@@ -11,6 +11,78 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.8.24
+
+### Added
+
+- **perf:** show decode and prefill history together, not behind a toggle (`9c654963`)
+- **perf:** show the number when one release is selected (`33f01641`)
+- **perf:** group workload decode into columns, one per release (`e093985c`)
+- **perf:** plot release history as a line, not a row of bars (`8ae85095`)
+- **bench:** automate the per-release performance bundle (`ac74130d`)
+
+### Fixed
+
+- **ci:** take the GPU lock through a wrapper, and repair the restore guard (`11954c59`)
+- **ci:** block production from restarting during certification (`02a520fc`)
+- **ci:** fail loudly when production restarts during certification (`bb0f0824`)
+- **ci:** hold the documented GPU lock through certification (`f6815452`)
+- **ci:** wait for memory before each certification model load (`a20b8104`)
+- **perf:** repair the page, and test that it actually renders (`6460b35b`)
+- **ci:** check out the harness in the job that runs it (`885200f0`)
+- **perf:** stop peak callouts landing on each other and on the lines (`b6eb39d2`)
+- **perf:** crop the release-history axis to the range the data occupies (`994c6b8e`)
+- **perf:** make the performance page usable on a phone (`789d4eb5`)
+- **ci:** stop TARGET_SHA meaning two things in the benchmark step (`27ec72d8`)
+- **bench:** benchmark an old release as it shipped, and keep failure reasons (`212bf2a7`)
+- **bench:** plot the depth that was asked for, not the one that drifted (`dba6c388`)
+- **bench:** repair four defects the first dry run exposed (`6c97629b`)
+- **deepseek4:** abandon speculation after one unqualified profitability pause (`d616074c`)
+- **deepseek4:** bound the warmup exclusion so the profit scheduler can still see (`d8993edd`)
+- **deepseek4:** correct the warmup bail-out's false monotonicity claim (`b3720a50`)
+
+### Performance
+
+- **bench:** re-measure 2026.8.10, .22 and .23 against the current model (`f8805583`)
+- **deepseek4:** qualify the wide verify path on a rate, not a lucky streak (`b66595d6`)
+- **ggml:** size the rope block to the row instead of a fixed 256 (`57f11cdf`)
+- **ggml:** collapse the short-row reduction to its exact minimal form (`f3da20c2`)
+- **ggml:** stop launching one block per row in reduce_rows_f32 (`00556dd1`)
+- **deepseek4:** hand back to AR when batch-verify warmup is unreachable (`b2428029`)
+
+### Build and CI
+
+- benchmark the released image in its own job after promotion (`87c2e099`)
+- do not certify a push that only changed documentation (`140bbc24`)
+- **gfx1151:** benchmark the certified image as part of certification (`adf64ec2`)
+
+### Documentation
+
+- **operations:** clarify storage and release validation (`fa83e82f`)
+- refresh contributor and performance guidance (`a9d51367`)
+- refresh release and performance guidance (`07ef572c`)
+- refresh runtime and performance references (`b4d6348c`)
+- link current performance bundle (`40b6e065`)
+- refresh release performance summary (`00cb4148`)
+- **readme:** name the performance page instead of printing its URL (`865a21cf`)
+- **readme:** standard depths in the performance table, and a link to the page (`e060f4e3`)
+- **readme:** drop the context-scaling chart from the performance section (`170c772b`)
+- **perf:** a browsable performance page, built from benchmark bundles (`f9dfa520`)
+- refresh performance numbers from a sweep on the current build (`d24b6d5d`)
+- **assets:** give the context chart a legend and peak callouts (`601ce8cd`)
+- **readme:** headline plus a measured performance section (`f02650ed`)
+- **readme:** put measured performance above the fold (`357c84c8`)
+- **perf:** correct the decode and roofline claims, record the prefill work (`2d90f648`)
+
+### Maintenance
+
+- **release:** v2026.8.24 (`721e6389`)
+
+### Other
+
+- hand-written release metadata the automation owns (`0be0764f`)
+- **ci:** take benchmarking back out of the certification job (`89bc6dc2`)
+- **perf:** dress the performance page in the otheru palette (`487df24b`)
 ## 2026.8.23
 
 ### Fixed
