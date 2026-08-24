@@ -575,6 +575,17 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           persist-credentials: false
 
+      - name: Take the GPU lock and quiesce production
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            sudo -n /usr/local/sbin/ember-cert-production stop
+            echo 'restore=yes' >>"$GITHUB_OUTPUT"
+          fi
+          sudo -n /usr/local/sbin/ember-cert-production mask
+        id: bench-exclusive
+
       - name: Run the performance bundle
         env:
           BENCH_TIMEOUT_MIN: '150'
@@ -597,7 +608,7 @@ jobs:
           timeout "${BENCH_TIMEOUT_MIN}m" "$GITHUB_WORKSPACE/scripts/benchmark_bundle.sh" \
             --out "$out" --release "$RELEASE_VERSION" \
             --image "$image" --binary /usr/local/bin/ember-dflash \
-            --no-repo-mount
+            --no-repo-mount --no-exclusive
           bundle="$(find "$out" -maxdepth 1 -type d -name 'ember-*' | head -1)"
           test -n "$bundle"
           test -s "$bundle/summary.json"
@@ -632,6 +643,15 @@ jobs:
               print('> No context sweep in this bundle, so the depth chart would be '
                     'empty. Check the sweep was not skipped before publishing.\n')
           PY
+
+      - name: Restore production and release the GPU lock
+        if: ${{ always() }}
+        run: |
+          sudo -n /usr/local/sbin/ember-cert-production unmask || true
+          if [ "${{ steps.bench-exclusive.outputs.restore }}" = yes ]; then
+            sudo -n /usr/local/sbin/ember-cert-production start || true
+          fi
+          sudo -n /usr/local/sbin/ember-gpu-lock release || true
 
       - name: Upload the performance bundle
         if: ${{ always() && env.BENCH_BUNDLE != '' }}
