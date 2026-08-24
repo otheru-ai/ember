@@ -38,7 +38,7 @@ body{margin:0;background:var(--bg);color:var(--ink);
 .eyebrow-links .sep{color:var(--micro)}
 .wordmark{color:var(--accent2);font-weight:600}
 #system-info{margin:0;color:var(--muted);font-size:13px}
-main{padding:24px 0 60px}
+main{padding:40px 0 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
   padding:20px 22px;margin:0 0 18px;transition:border-color .15s}
 .card:hover{border-color:var(--line-hover)}
@@ -79,6 +79,7 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 @media (max-width:640px){
   .layout{padding:0 14px}
   .page-header{padding:22px 0 16px}
+  main{padding:26px 0 40px}
   .page-header h1{font-size:26px;margin:6px 0 8px}
   .card{padding:15px 14px;margin-bottom:14px;border-radius:12px}
   .section-heading h2{font-size:16px}
@@ -468,6 +469,11 @@ function render(){
       ?`<p class="note">${hids[0]} at ${fmt(hpts[0][1])} tok/s. Select a second release to see the trend.</p>`
       :`<p class="note">Select at least one release.</p>`;
 
+  // Colour ramp shared by both charts, so a release keeps one colour across the
+  // page. Declared before the first use: as a const beside the depth chart it
+  // sat in the temporal dead zone for the workload chart above it.
+  const palette=["var(--accent)","var(--accent2)","var(--cyan)","var(--ok)"];
+
   // workload chart: one column per release, grouped by workload
   const base=rels.find(r=>r.id===S.baseline);
   const wseries=rels.map((r,i)=>({
@@ -497,7 +503,6 @@ function render(){
     S.view==="vs-ar"?"Decode gain over autoregressive":"Decode change against "+(S.baseline||"baseline");
 
   // depth chart
-  const palette=["var(--accent)","var(--accent2)","var(--cyan)","var(--ok)"];
   const series=[];
   const swept=rels.filter(r=>r.depths.length);
   const solo=swept.length===1&&S.metric==="decode";
