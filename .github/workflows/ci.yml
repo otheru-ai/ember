@@ -158,12 +158,47 @@ jobs:
       - name: Enforce per-file coverage floors
         run: python3 ci/coverage.py --build build-cov --gcov gcov-13
 
+  scope:
+    # Publishing a candidate and certifying it takes the gfx1151 box for about
+    # two hours and quiesces production for the duration. That is the right
+    # price for a change to the engine and the wrong one for a change to a
+    # documentation page, which cannot alter the image being certified.
+    #
+    # Anything not explicitly recognised as documentation counts as code, so a
+    # new top-level path errs towards certifying rather than silently skipping.
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - id: classify
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != push ] || [ -z "${BEFORE:-}" ] \
+             || [ "$BEFORE" = 0000000000000000000000000000000000000000 ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo 'no usable base commit; treating as code'
+            echo 'code=true' >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          changed="$(git diff --name-only "$BEFORE" "$GITHUB_SHA")"
+          echo "changed files:"; echo "$changed" | sed 's/^/  /'
+          if printf '%s\n' "$changed" | grep -qvE '^(docs/|README\.md$|AGENTS\.md$|ARCHITECTURE\.md$|CLAUDE\.md$|CHANGELOG\.md$|LICENSE$)'; then
+            echo 'code=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'documentation only; skipping candidate publication and certification'
+            echo 'code=false' >>"$GITHUB_OUTPUT"
+          fi
+
   publish-candidate:
     # A mirrored main commit reaches GHCR only after every public CI gate has
     # passed. The called workflow repeats the compact source gate against the
     # exact publish SHA before building the expensive ROCm image.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
-    needs: [invariants, build-test, sanitizers, analyzer, coverage]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') && needs.scope.outputs.code == 'true' }}
+    needs: [invariants, build-test, sanitizers, analyzer, coverage, scope]
     permissions:
       contents: read
       packages: write
@@ -173,8 +208,8 @@ jobs:
   certify-and-release:
     # Only a trusted main push can reach this point. The reusable container
     # workflow has already published and scanned the immutable sha-* candidate.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') }}
-    needs: publish-candidate
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') && needs.scope.outputs.code == 'true' }}
+    needs: [publish-candidate, scope]
     permissions:
       contents: read
       packages: read
