@@ -197,6 +197,28 @@ The model and KV cache are host directories, so rolling back the image does not
 remove them. KV snapshots are disposable acceleration state, not backups; stop
 Ember before copying or removing the cache directory.
 
+### Release verification checklist
+
+For a production upgrade, keep the checks in this order so a fast smoke test
+cannot hide a model, image, or hardware mismatch:
+
+1. Confirm the tag and `VERSION` agree, then read the matching section of
+   [`CHANGELOG.md`](../CHANGELOG.md).
+2. Run `scripts/preflight.sh` and record its device, memory, disk, and Docker
+   output.
+3. Start the image and wait for `/health`; run
+   `scripts/smoke_test.sh --generate`.
+4. On the exclusive gfx1151 host, run the differential validator with the
+   disposable KV directory described in the README. For `--batch-sessions 2`,
+   require both resident streams to match the serial reference.
+5. If the candidate enables XDNA2, repeat the provider validator with
+   `DFLASH_DSPARK_XDNA_REQUIRED=1`; otherwise a GPU fallback can make an
+   apparently successful test meaningless.
+
+The release workflow performs these checks against immutable image and model
+digests. A local dashboard bundle is useful for comparison, but its
+`certified` field must be true before calling a result certified.
+
 ## Common failures
 
 | Symptom | Meaning and action |

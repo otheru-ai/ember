@@ -22,8 +22,9 @@ on one local endpoint.
 **23-40 tok/s decode** on a single Ryzen AI Max 395+. The latest
 2026.8.24 release-candidate sweep measured **39.59 tok/s median** on a
 structured workload (23.69 tok/s autoregressive baseline); prose and code are
-slower, as shown below. The 194 ms warm-TTFT figure is from the certified
-long-context run documented in the performance section.
+slower, as shown below. These are engineering measurements from the pinned
+model pair, not a promise for every prompt. The 194 ms warm-TTFT figure is
+from the long-context cache run documented in the performance section.
 [Details below.](#performance)
 
 ## Requirements
@@ -176,7 +177,10 @@ with a 98.1% median draft acceptance rate.
 The corresponding prefill medians were 216.1 tok/s at 128 tokens, 412.8 at
 2,048, 352.5 at 8,192, and 324.3 at 16,384. See the [performance
 dashboard](https://otheru-ai.github.io/ember/perf/) for the complete bundle and
-provenance.
+provenance. The dashboard marks this bundle `certified: false`: its repeatable
+workload harness is separate from hardware certification, which additionally
+runs the differential validator, resident-session checks, and a live request
+against immutable image and model digests.
 
 ## Configure
 
@@ -269,6 +273,8 @@ validation or benchmarking.
 
 ## Documentation
 
+- [Release notes](CHANGELOG.md)
+- [CI and hardware certification](docs/ci.md)
 - [Operations and troubleshooting](docs/operations.md)
 - [Measured performance: TTFT, decode, roofline](docs/performance.md)
 - [Experimental CPU/GPU/XDNA2 inference](docs/xdna2-moe-prototype.md)

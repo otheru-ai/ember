@@ -94,6 +94,13 @@ counts, current scheduler states, admission/release/submission totals, decode
 batch/row counts, prefill tokens, mixed plans, coalesce waits, backend failures,
 and the largest planned decode batch.
 
+Batching is a resident-session feature, not a promise that every kernel runs as
+one dense matrix. The current DeepSeek backend still evaluates decode rows one
+at a time in its correctness fallback, so increasing `--batch-sessions` can
+improve overlap and fairness without increasing single-request tok/s. Keep the
+value at `1` for the smallest memory footprint; choose a larger value only after
+checking that the host has room for another session's KV and working state.
+
 ## Validation
 
 GPU-free tests cover scheduler state-space invariants, executor result

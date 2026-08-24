@@ -11,6 +11,12 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Documentation
+
+- Clarify the distinction between engineering performance bundles and hardware
+  certification, add the production upgrade checklist, and document the
+  current resident-batching limits.
+
 ## 2026.8.24
 
 ### Added

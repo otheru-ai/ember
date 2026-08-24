@@ -12,8 +12,10 @@ The current release-candidate bundle (`2026.8.24`, measured 2026-08-23) is
 tracked separately in [`docs/perf/data.json`](perf/data.json) and the
 [performance dashboard](https://otheru-ai.github.io/ember/perf/). It reports a
 39.59 tok/s median over three 256-token throughput samples, with a 98.1% median
-draft acceptance rate; the tables below retain the longer context-depth series
-used for the certified reference.
+draft acceptance rate. That bundle is explicitly **not certified**: it has no
+depth series and was produced by the engineering harness. The tables below
+retain the longer context-depth series used for the certified-reference
+workflow, and are not interchangeable with the dashboard's release history.
 
 ## Time to first token
 
@@ -318,3 +320,13 @@ throughput by roughly 1.6x -- see the workload table above.
 Profiling uses one `rocprofv3` pass per counter -- requesting two `--pmc`
 counters in one pass faults on `gfx1151` -- plus a separate trace pass for
 durations.
+
+### Which number should be quoted?
+
+Use the workload table for user-facing expectations and always name the
+workload. The integer-counting task is intentionally drafter-friendly and is a
+ceiling, not a typical decode rate. Use the autoregressive column when comparing
+against a server without DSpark. Use the dashboard only for release-to-release
+comparisons, because it records the image, model digests, sample count, and
+certification flag alongside every number. Hardware certification is the
+authoritative release gate; a faster local harness run does not replace it.
