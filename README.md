@@ -127,8 +127,6 @@ together.
 | 77,068 | 18.25 | 226.2 | 218.0 | 340,707 |
 | 116,077 | 14.63 | 186.7 | 182.0 | 621,730 |
 
-![Prefill and decode against context depth](docs/assets/ember-context-scaling.svg)
-
 Decode depends on how predictable the output is, because speculative decoding
 pays in proportion to how well the drafter guesses the continuation:
 
@@ -147,7 +145,9 @@ prompt whose first 6,053 tokens are cached prefills in **194 ms** instead of
 17,693 ms.
 
 Full methodology and the per-kernel roofline position are in
-[docs/performance.md](docs/performance.md).
+[docs/performance.md](docs/performance.md). The same measurements are browsable
+by workload, release, and context depth at
+[otheru-ai.github.io/ember/perf](https://otheru-ai.github.io/ember/perf/).
 
 ## Configure
 
