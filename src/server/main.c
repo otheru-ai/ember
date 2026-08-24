@@ -1671,6 +1671,30 @@ static bool stream_retry_forbidden(const ember_chat_request *req,
 // able to emit, which is exactly the class of change this repo ships dark and
 // enables in deployment explicitly (see CLAUDE.md). tool_schema.c still
 // validates every call afterwards either way, so this is defence in depth
+// A tool result is evidence that the previous action already happened, so the
+// next decision is kept on the target's autoregressive path: speculative
+// verification can change a near-tied token, and was once observed to re-emit
+// an identical successful write_file call.
+//
+// That observation was never quantified. A 37,869-token differential against
+// autoregressive (scripts/bench/tool_loop_differential.py, plus the engine's
+// own --validate-prompt) found no divergence at all, while the rule withholds
+// speculation from most turns of an agent workload. Setting this to 0 lifts it
+// so the tool-result case can be measured directly, which is the one shape the
+// differential cannot otherwise reach: eligible requests are forced to AR, so
+// the comparison would be AR against AR.
+//
+// Default is unchanged. This exists to make the measurement possible, not to
+// recommend turning the rule off.
+static bool tool_result_forces_ar(void) {
+    static _Thread_local int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("EMBER_TOOL_RESULT_AR");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
 // rather than a replacement for the validator.
 static bool tool_grammar_enabled(void) {
     static _Thread_local int cached = -1;
@@ -2396,6 +2420,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // path. This does not force q=1 exact prefill, and older tool messages no
     // longer constrain unrelated later user turns.
     greq.force_ar_decode =
+        tool_result_forces_ar() &&
         ember_chat_request_is_tool_result_continuation(req);
     greq.force_exact_prefill = false;
     // Lucebox parity (server/src/server/http_server.cpp): each omitted sampler

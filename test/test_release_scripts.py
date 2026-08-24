@@ -19,6 +19,7 @@ CONTAINER_WORKFLOW = ROOT / ".forgejo" / "workflows" / "container.yml"
 GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
 GITHUB_CONTAINER = ROOT / ".github" / "workflows" / "container.yml"
 GITHUB_CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
+SERVER_MAIN = ROOT / "src" / "server" / "main.c"
 GITHUB_RELEASE_NOTES = ROOT / ".github" / "workflows" / "release-notes.yml"
 FORGEJO_CI = ROOT / ".forgejo" / "workflows" / "ci.yml"
 COMPOSE = ROOT / "compose.yaml"
@@ -531,3 +532,25 @@ class ReleaseScriptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ToolResultDecodePolicyTest(unittest.TestCase):
+    """The escape hatch that lets the tool-result rule be measured.
+
+    Speculation is withheld from every turn that follows a tool result, because
+    speculative verification was once seen to change a near-tied token and
+    re-emit an already-successful write_file call. EMBER_TOOL_RESULT_AR=0 lifts
+    that so the case can be measured; it must never become the default by
+    accident, since the rule guards a real incident.
+    """
+
+    def test_rule_is_on_unless_explicitly_disabled(self) -> None:
+        src = SERVER_MAIN.read_text()
+        self.assertIn("EMBER_TOOL_RESULT_AR", src)
+        # Only the literal "0" disables it: an unset or malformed value keeps
+        # today's behaviour rather than silently lifting the rule.
+        self.assertIn('cached = (e && e[0] == \'0\') ? 0 : 1;', src)
+        self.assertIn("tool_result_forces_ar() &&", src)
+        self.assertIn(
+            "ember_chat_request_is_tool_result_continuation(req);", src)
+
