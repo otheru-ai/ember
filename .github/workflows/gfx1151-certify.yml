@@ -353,12 +353,22 @@ jobs:
           # lock again or restarting production underneath us.
           # Digests are the pinned constants the verify step already checked;
           # rehashing 96 GiB here would add minutes for no extra assurance.
-          MODEL_DIR="$(dirname "$MODEL_PATH")" \
-          TARGET="$MODEL_PATH" DRAFT="$DRAFT_PATH" PORT="$PORT" \
-          TARGET_SHA=a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54 \
-          DRAFT_SHA=1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6 \
+          #
+          # TARGET_SHA means two different things here: the commit being
+          # certified in this job, and the model digest benchmark_bundle.sh
+          # checks. Passing the second as a command prefix while expanding the
+          # first in the same command worked only by evaluation order, which is
+          # what shellcheck SC2097/SC2098 objected to. Resolve the commit first,
+          # then export the model digests.
+          commit="${TARGET_SHA:0:12}"
+          export MODEL_DIR TARGET DRAFT PORT TARGET_SHA DRAFT_SHA
+          MODEL_DIR="$(dirname "$MODEL_PATH")"
+          TARGET="$MODEL_PATH"
+          DRAFT="$DRAFT_PATH"
+          TARGET_SHA=a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
+          DRAFT_SHA=1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
           timeout "${BENCH_TIMEOUT_MIN}m" "$GITHUB_WORKSPACE/scripts/benchmark_bundle.sh" \
-            --out "$out" --release "${TARGET_SHA:0:12}" \
+            --out "$out" --release "$commit" \
             --image "$image" --binary /usr/local/bin/ember-dflash \
             --no-repo-mount --no-exclusive
           bundle="$(find "$out" -maxdepth 1 -type d -name 'ember-*' | head -1)"
