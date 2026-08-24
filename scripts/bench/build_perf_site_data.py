@@ -124,7 +124,15 @@ def main():
     for r in releases:
         if r["id"] in renames:
             r["id"] = renames[r["id"]]
-    releases.sort(key=lambda r: (r.get("measured") or "", r["id"]))
+    # Order by release, not by when it was measured. Re-benchmarking an old
+    # release against the current model gives it today's date, and 2026.8.10
+    # measured after 2026.8.23 is still the older release.
+    def key(r):
+        parts = r["id"].split(".")
+        if all(x.isdigit() for x in parts):
+            return (0, tuple(int(x) for x in parts), "")
+        return (1, (), r.get("measured") or "")
+    releases.sort(key=key)
 
     workloads = sorted({w for r in releases for w in r["workloads"]})
     depths = sorted({d["depth"] for r in releases for d in r["depths"]})

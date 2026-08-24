@@ -335,7 +335,9 @@ function render(){
       `Depth data needs benchmark_bundle.sh run without --skip-context-sweep.</p>`;
 
   // table
-  const r0=rels.find(r=>r.depths.length);
+  // Newest release that actually swept, not the first in the list: with older
+  // releases now carrying depth data too, "first" is the oldest one.
+  const r0=[...rels].reverse().find(r=>r.depths.length);
   if(r0){
     // Depth is the size that was asked for; prompt tokens is what the prompt
     // actually came to. Every rate below is computed from the latter.
