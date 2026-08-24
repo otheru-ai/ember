@@ -140,6 +140,14 @@ jobs:
             echo 'production remained active after quiesce request'
             exit 1
           fi
+          # Stopping is not enough. Quiescing happens once and the job then runs
+          # for twenty minutes assuming production stays down; the other agent on
+          # this box restarted it mid-run through this same wrapper, and two
+          # loaders on one 125 GiB device degraded the candidate to hybrid expert
+          # placement. Block starts for the duration, so an attempt fails with an
+          # assertion error rather than quietly costing the run.
+          sudo -n /usr/local/sbin/ember-cert-production mask
+          echo 'blocked=yes' >>"$GITHUB_OUTPUT"
 
       - name: Log in to GHCR and pull the exact candidate
         env:
@@ -416,6 +424,10 @@ jobs:
           assert message.get("content") or message.get("reasoning_content"), response
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
+
+      - name: Unblock production
+        if: ${{ always() && steps.production.outputs.blocked == 'yes' }}
+        run: sudo -n /usr/local/sbin/ember-cert-production unmask
 
       - name: Restore production
         if: ${{ always() && steps.production.outputs.restore != 'none' }}
