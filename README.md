@@ -130,13 +130,13 @@ the whole request, so it folds prefill and decode together.
 
 | Depth | Prompt tokens | tok/s out | Prefill tok/s | tok/s total | TTFT ms |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 43 | 39.24 | 72.6 | 42.0 | 592 |
-| 1k | 862 | 39.47 | 280.3 | 116.9 | 3,075 |
-| 4k | 3,925 | 37.98 | 343.3 | 230.1 | 11,433 |
-| 16k | 18,553 | 32.22 | 300.6 | 270.0 | 61,720 |
-| 32k | 38,059 | 24.94 | 272.3 | 255.4 | 139,769 |
-| 64k | 77,068 | 18.25 | 226.2 | 218.0 | 340,707 |
-| 96k | 116,077 | 14.63 | 186.7 | 182.0 | 621,730 |
+| 0 | 43 | 39.19 | 71.0 | 41.9 | 606 |
+| 1k | 862 | 39.43 | 281.0 | 116.9 | 3,068 |
+| 4k | 3,925 | 38.00 | 342.0 | 229.6 | 11,477 |
+| 16k | 18,553 | 32.62 | 299.2 | 269.3 | 62,009 |
+| 32k | 38,059 | 24.79 | 271.0 | 254.1 | 140,439 |
+| 64k | 77,068 | 16.58 | 223.5 | 214.6 | 344,823 |
+| 96k | 116,077 | 14.86 | 184.1 | 179.6 | 630,511 |
 
 Decode depends on how predictable the output is, because speculative decoding
 pays in proportion to how well the drafter guesses the continuation:
@@ -144,7 +144,7 @@ pays in proportion to how well the drafter guesses the continuation:
 | Output | tok/s |
 | --- | ---: |
 | Repetitive or structured (counting, JSON, lists) | 40 |
-| Code, structured factual answers | 28 |
+| Code, structured factual answers | 30 |
 | Prose, essays, creative writing | 23 |
 
 23 tok/s is also the rate with speculation off, so it is the floor rather than a
