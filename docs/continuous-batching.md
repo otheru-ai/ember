@@ -163,7 +163,7 @@ output launches as the backend permits.
 
 The XDNA2 prototype now pipelines one asynchronous whole-draft proposal per
 eligible session and schedules q-wide GPU verification for another ready
-session before collecting it. The fixed Gen52 gate measured 1.4842x aggregate
+session before collecting it. The historical Gen52 gate measured 1.4842x aggregate
 throughput over the two-session target-only control, with every proposal block
 accepted and about 6.89 ms of provider wait exposed per cycle.
 

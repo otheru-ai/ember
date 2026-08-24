@@ -74,7 +74,7 @@ short end-to-end inference request.
 ## Opt-in CPU/GPU/NPU deployment
 
 The `release-xdna` image is a measured prototype, not the default release
-backend. Its current Gen52 placement keeps the target model and authoritative
+backend. Its current Gen53 placement keeps the target model and authoritative
 verification on the GPU, runs the resident DSpark projection/shared-expert
 pipeline on XDNA2, and uses AVX-512 CPU code for DSpark routing and routed
 ROCMFP4 experts. Two resident sessions are required to overlap one session's

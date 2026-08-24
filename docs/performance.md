@@ -1,7 +1,8 @@
 # Measured performance
 
-All figures below come from one host: AMD Strix Halo (`gfx1151`), 128 GiB
-unified memory, native Linux, ROCm 7.1. The model is the 85.3 GiB
+All figures below come from one host: AMD Strix Halo (`gfx1151`), 125 GiB
+installed unified memory, native Linux, ROCm 7.14 (the version pinned by the
+release and development images). The model is the 85.3 GiB
 DeepSeek-V4-Flash ROCMFPx quant with the DSpark drafter loaded and speculative
 decoding on unless a column says otherwise. One measurement per data point --
 these are not averaged over repeats, so treat single-digit-percent differences

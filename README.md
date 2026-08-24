@@ -158,7 +158,8 @@ Full methodology and the per-kernel roofline position are in
 ### Latest release-candidate sweep
 
 The 2026.8.24 bundle was measured on 2026-08-23 with the same Ryzen AI Max+ 395
-(`gfx1151`, 125 GiB) and 85.3 GiB target model. These are three-sample medians
+(`gfx1151`, 125 GiB installed unified memory) and 85.3 GiB target model. These
+are three-sample medians
 from the release-candidate harness; they are a current engineering reference,
 not a replacement for the dedicated certification gate:
 
