@@ -12,9 +12,11 @@ architectures.
 - AMD Strix Halo (`gfx1151`). The image is compiled specifically for this ISA.
 - Approximately 128 GiB unified memory. The tested model is 85.3 GiB and uses
   about 89 GiB resident before context and operating-system overhead.
-- At least 100 GiB free in the model directory for the 91,547,243,200-byte
-  quant, 10,897,111,840-byte drafter, download staging, and filesystem
-  headroom.
+- At least 100 GiB free in the model directory for the verified pair. The final
+  artifacts occupy about 95.4 GiB together (91,547,243,200 bytes for the quant
+  and 10,897,111,840 bytes for the drafter); 120 GiB free is recommended so a
+  resumed `.part` file, checksum pass, and filesystem overhead do not consume
+  the last margin. The preflight script enforces the 100 GiB minimum.
 - Docker Engine with the Compose v2 plugin.
 
 The normal release needs no NPU software. The opt-in heterogeneous image also
@@ -209,11 +211,28 @@ cannot hide a model, image, or hardware mismatch:
 3. Start the image and wait for `/health`; run
    `scripts/smoke_test.sh --generate`.
 4. On the exclusive gfx1151 host, run the differential validator with the
-   disposable KV directory described in the README. For `--batch-sessions 2`,
-   require both resident streams to match the serial reference.
+   disposable KV directory below. For `--batch-sessions 2`, require both
+   resident streams to match the serial reference.
 5. If the candidate enables XDNA2, repeat the provider validator with
    `DFLASH_DSPARK_XDNA_REQUIRED=1`; otherwise a GPU fallback can make an
    apparently successful test meaningless.
+
+The validator must use a prompt that is safe to regenerate and a disposable
+cache. Run it from the ROCm build directory (or replace the binary path):
+
+```bash
+printf '%s\n' 'Return the first 32 positive integers, one per line.' \
+  > /tmp/ember-validation-prompt.txt
+./build-rocm/ember-dflash \
+  -m /models/DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf \
+  --kv-cache-dir "$(mktemp -d /tmp/ember-validation-cache.XXXXXX)" \
+  --validate-prompt /tmp/ember-validation-prompt.txt \
+  --validate-tokens 32
+```
+
+Append `--batch-sessions 2` when certifying resident batching. The command exits
+nonzero on a greedy mismatch after snapshot restore, disk round-trip, or the
+speculative path; keep its complete output with the release record.
 
 The release workflow performs these checks against immutable image and model
 digests. A local dashboard bundle is useful for comparison, but its

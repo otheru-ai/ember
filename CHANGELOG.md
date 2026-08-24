@@ -17,6 +17,10 @@ using an ambiguous same-day suffix.
   certification, add the production upgrade checklist, document the current
   resident-batching limits, and record the current engineering/certification
   performance split.
+- Correct model-storage guidance: 100 GiB remains the enforced minimum, while
+  120 GiB is the recommended working margin for resumable downloads and cache
+  overhead; add the exact differential-validator invocation to the operations
+  guide.
 
 ## 2026.8.24
 

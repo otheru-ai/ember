@@ -31,7 +31,9 @@ from the long-context cache run documented in the performance section.
 
 - Native x86_64 Linux on AMD Strix Halo (`gfx1151`)
 - Approximately 128 GiB unified memory
-- At least 100 GiB free disk space
+- At least 100 GiB free disk space for the minimum preflight check; 120 GiB is
+  recommended so a resumed download has room for staging and filesystem
+  headroom
 - Docker Engine with Docker Compose v2
 - `/dev/kfd` and `/dev/dri` available to Docker
 
