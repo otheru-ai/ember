@@ -14,8 +14,9 @@ using an ambiguous same-day suffix.
 ### Documentation
 
 - Clarify the distinction between engineering performance bundles and hardware
-  certification, add the production upgrade checklist, and document the
-  current resident-batching limits.
+  certification, add the production upgrade checklist, document the current
+  resident-batching limits, and record the current engineering/certification
+  performance split.
 
 ## 2026.8.24
 

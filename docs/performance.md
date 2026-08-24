@@ -17,6 +17,22 @@ depth series and was produced by the engineering harness. The tables below
 retain the longer context-depth series used for the certified-reference
 workflow, and are not interchangeable with the dashboard's release history.
 
+### How to read the numbers
+
+There are two deliberately separate result sets:
+
+1. Dashboard bundles are release-to-release engineering comparisons. They use
+   fixed prompts, multiple samples, and record exact image/model provenance,
+   but do not certify a release.
+2. The context and roofline tables below are the longer reference runs used to
+   reason about capacity and bottlenecks. They are representative measurements,
+   not a service-level guarantee.
+
+Hardware certification is the release gate: it adds the differential validator,
+resident-session checks, and a live request against immutable image and model
+digests. Do not describe an engineering bundle as certified unless its
+dashboard record has `certified: true`.
+
 ## Time to first token
 
 TTFT is dominated by prefill, and prefill on this model is superlinear in a way

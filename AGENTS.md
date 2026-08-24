@@ -27,8 +27,12 @@ representative serial throughput remains 25.7% below target-only.
 
 The published full-ROCMFP affine fp2 model (85.3 GiB, 2.58 bpw) meets
 the Strix-Halo reference benchmarks (~248–253 tok/s sparse prefill, ~32 tok/s
-decode with DSpark). See `README.md` for installation and first use, and
-`ARCHITECTURE.md` for the layering rationale.
+decode with DSpark). The latest 2026.8.24 engineering bundle reports a
+39.59 tok/s median on a highly predictable structured workload (23.69 tok/s
+autoregressive baseline), but it is not the hardware-certification result.
+Keep those two result classes separate when updating performance claims. See
+`README.md` for installation and first use, and `ARCHITECTURE.md` for the
+layering rationale.
 
 Primary documentation to consult, in order:
 

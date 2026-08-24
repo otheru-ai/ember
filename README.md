@@ -273,16 +273,24 @@ validation or benchmarking.
 
 ## Documentation
 
+- [Architecture and backend boundaries](ARCHITECTURE.md)
 - [Release notes](CHANGELOG.md)
 - [CI and hardware certification](docs/ci.md)
 - [Operations and troubleshooting](docs/operations.md)
+- [Continuous batching](docs/continuous-batching.md)
 - [Measured performance: TTFT, decode, roofline](docs/performance.md)
+- [Quantisation quality and release gates](docs/quant-quality-reports.md)
 - [Experimental CPU/GPU/XDNA2 inference](docs/xdna2-moe-prototype.md)
+- [Lessons from upstream engines](docs/upstream-lessons.md)
 - [Client configuration](docs/client-compatibility.md)
-- [Architecture](ARCHITECTURE.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Vendor provenance](engine/VENDOR.md)
+
+The contributor-facing contract is in [`AGENTS.md`](AGENTS.md). It records the
+source-list invariants, GPU validation protocol, and architectural rules that
+are easy to break while changing the server or vendored engine. Keep it and
+[`CLAUDE.md`](CLAUDE.md) aligned when build or test conventions change.
 
 Ember is licensed under the [MIT License](LICENSE). Model weights are distributed
 separately under the license on their Hugging Face model card.
