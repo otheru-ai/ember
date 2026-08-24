@@ -7,6 +7,13 @@ decoding on unless a column says otherwise. One measurement per data point --
 these are not averaged over repeats, so treat single-digit-percent differences
 between adjacent rows as noise.
 
+The current release-candidate bundle (`2026.8.24`, measured 2026-08-23) is
+tracked separately in [`docs/perf/data.json`](perf/data.json) and the
+[performance dashboard](https://otheru-ai.github.io/ember/perf/). It reports a
+39.59 tok/s median over three 256-token throughput samples, with a 98.1% median
+draft acceptance rate; the tables below retain the longer context-depth series
+used for the certified reference.
+
 ## Time to first token
 
 TTFT is dominated by prefill, and prefill on this model is superlinear in a way
