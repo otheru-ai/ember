@@ -177,6 +177,11 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("Restore production", certify)
         self.assertIn("/usr/local/sbin/ember-cert-production stop", certify)
         self.assertIn("/usr/local/sbin/ember-cert-production start", certify)
+        # One gfx1151 and 125 GiB: a second model-loading process does not
+        # fail, it silently degrades to hybrid expert placement. Certification
+        # must hold the documented lock, not merely quiesce production.
+        self.assertIn("/root/gpu.lock", certify)
+        self.assertIn("GPU_LOCK_SENTINEL", certify)
         self.assertIn("restore=service", certify)
         self.assertIn("iommu|amd_iommu", certify)
         self.assertIn("iflag=direct", certify)

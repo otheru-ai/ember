@@ -89,6 +89,39 @@ jobs:
             exit 1
           fi
 
+      - name: Take the GPU lock
+        # /root/GPU-LOCK.md is the protocol both agents on this box follow, and
+        # certification was not following it. Two model-loading processes do not
+        # fail loudly: the second falls back to hybrid expert placement, which
+        # disables DSpark and changes generated tokens. That is what a failing
+        # smoke test with spec_ran=False and a fifth of normal throughput looks
+        # like, and GPU-LOCK.md records it having produced a false validator
+        # failure once already.
+        #
+        # A run: step is its own shell, so a file descriptor cannot be held
+        # across steps. A background flock holds it and exits when the sentinel
+        # is removed by the release step.
+        run: |
+          set -euo pipefail
+          sentinel="$RUNNER_TEMP/gpu-lock-hold-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          held="$sentinel.held"
+          rm -f "$held"
+          : >"$sentinel"
+          setsid nohup flock -w 7200 /root/gpu.lock \
+            bash -c "touch '$held'; while [ -e '$sentinel' ]; do sleep 5; done" \
+            >/dev/null 2>&1 &
+          for _ in $(seq 1 1440); do
+            [ -e "$held" ] && break
+            sleep 5
+          done
+          if [ ! -e "$held" ]; then
+            rm -f "$sentinel"
+            echo 'could not take /root/gpu.lock within two hours; another agent holds the GPU'
+            exit 1
+          fi
+          echo "GPU_LOCK_SENTINEL=$sentinel" >>"$GITHUB_ENV"
+          echo 'holding /root/gpu.lock for the duration of certification'
+
       - name: Quiesce production for exclusive GPU validation
         id: production
         run: |
@@ -373,6 +406,10 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Release the GPU lock
+        if: ${{ always() && env.GPU_LOCK_SENTINEL != '' }}
+        run: rm -f -- "$GPU_LOCK_SENTINEL"
 
       - name: Remove generated validation prompts
         if: ${{ always() }}
