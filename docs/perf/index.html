@@ -244,11 +244,14 @@ function barChart(rows,unit,relative){
   return s+`</svg>`;
 }
 
-function lineChart(series,yLabel,logx,markPeak){
+function lineChart(series,yLabel,opts){
+  opts=opts||{};
+  const markPeak=opts.markPeak, annotate=opts.annotate;
+  const xFmt=opts.xFmt||depthLabel, xTitle=opts.xTitle||"prompt depth (tokens)";
   const W=chartWidth(), narrow=W<620;
   // Narrow: series names move to a legend above the plot, because the
   // right-hand gutter they normally sit in would eat a third of a phone screen.
-  const H=narrow?250:300;
+  const H=opts.height||(narrow?250:300);
   const padL=narrow?38:64, padR=narrow?10:120;
   const padT=narrow?34:16, padB=44;
   // The depth ladder is a fixed set of requested sizes, one of which is 0 (no
@@ -266,10 +269,20 @@ function lineChart(series,yLabel,logx,markPeak){
     s+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--line)"/>`;
     const tick=v>=10000?(v/1000).toFixed(0)+"k":v.toFixed(0);
     s+=`<text x="${padL-6}" y="${y+4}" text-anchor="end" font-size="10.5" fill="var(--muted)">${tick}</text>`;}
-  xs.forEach(n=>s+=`<text x="${X(n)}" y="${H-22}" text-anchor="middle" font-size="10.5" fill="var(--muted)">${depthLabel(n)}</text>`);
-  s+=`<text x="${(padL+W-padR)/2}" y="${H-5}" text-anchor="middle" font-size="10.5" fill="var(--muted)">prompt depth (tokens)</text>`;
+  // A centred label at either end hangs outside the canvas and gets clipped, so
+  // the first and last anchor inward. And once ticks are closer together than
+  // their own text, drop every other one rather than let them overlap.
+  const tickGap=xs.length>1?(W-padL-padR)/(xs.length-1):W;
+  const widest=Math.max(...xs.map(n=>String(xFmt(n)).length))*6.1;
+  const stride=tickGap<widest?Math.ceil(widest/tickGap):1;
+  xs.forEach((n,i)=>{
+    if(i%stride && i!==xs.length-1) return;
+    const ta=i===0?"start":i===xs.length-1?"end":"middle";
+    s+=`<text x="${X(n)}" y="${H-22}" text-anchor="${ta}" font-size="10.5" fill="var(--muted)">${xFmt(n)}</text>`;
+  });
+  s+=`<text x="${(padL+W-padR)/2}" y="${H-5}" text-anchor="middle" font-size="10.5" fill="var(--muted)">${xTitle}</text>`;
   s+=`<text x="${padL}" y="${padT-(narrow?20:4)}" font-size="10.5" fill="var(--muted)">${yLabel}</text>`;
-  if(narrow){
+  if(narrow&&series.length>1){
     let lx=padL;
     series.forEach(se=>{
       s+=`<rect x="${lx}" y="${padT-13}" width="9" height="9" rx="2" fill="${se.colour}"/>`;
@@ -285,6 +298,15 @@ function lineChart(series,yLabel,logx,markPeak){
     const d=se.pts.map((p,i)=>`${i?"L":"M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
     s+=`<path d="${d}" fill="none" stroke="${se.colour}" stroke-width="2.2" stroke-linejoin="round"/>`;
     se.pts.forEach(p=>s+=`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="${narrow?2.6:3.2}" fill="var(--card)" stroke="${se.colour}" stroke-width="1.8"/>`);
+    if(annotate){
+      se.pts.forEach((pt,i)=>{
+        const px=X(pt[0]), py=Y(pt[1]);
+        const ta=i===0?"start":i===se.pts.length-1?"end":"middle";
+        s+=`<text x="${px.toFixed(1)}" y="${(py-11).toFixed(1)}" text-anchor="${ta}" `+
+           `font-size="11" font-family="var(--mono)" font-weight="700" `+
+           `fill="${se.colour}">${fmt(pt[1],2)}</text>`;
+      });
+    }
     if(markPeak){
       const pk=se.pts.reduce((a,b)=>b[1]>a[1]?b:a);
       const px=X(pk[0]), py=Y(pk[1]);
@@ -294,7 +316,7 @@ function lineChart(series,yLabel,logx,markPeak){
          `font-size="${narrow?10:11}" font-family="var(--mono)" font-weight="700" fill="${se.colour}">`+
          `peak ${fmt(pk[1],1)}${narrow?"":" @ "+depthLabel(pk[0])}</text>`;
     }
-    if(!narrow){
+    if(!narrow&&!annotate){
       const last=se.pts[se.pts.length-1];
       labels.push({name:se.name,colour:se.colour,x:X(last[0])+9,y:Y(last[1])+4});
     }
@@ -330,18 +352,24 @@ function render(){
   // Both come from the two legs every bundle has ever run.
   tabs(document.getElementById("h-sel"),
     [["decode","Decode median"],["prefill","Prefill peak"]],S.hist,v=>S.hist=v);
-  const hrows=[];
+  const hids=[], hpts=[];
   DATA.releases.filter(r=>S.r.has(r.id)).forEach(r=>{
+    let v=null;
     if(S.hist==="decode"){
-      const v=(r.throughput||{}).median_tps;
-      if(v!=null) hrows.push({label:r.id,v,text:fmt(v)+" tok/s"});
+      v=(r.throughput||{}).median_tps;
     }else{
-      const g=Object.values(r.prefill_groups||{}).map(x=>x.median_tps).filter(v=>v!=null);
-      if(g.length) hrows.push({label:r.id,v:Math.max(...g),text:fmt(Math.max(...g),1)+" tok/s"});
+      const g=Object.values(r.prefill_groups||{}).map(x=>x.median_tps).filter(x=>x!=null);
+      v=g.length?Math.max(...g):null;
     }
+    if(v!=null){ hpts.push([hids.length,v]); hids.push(r.id); }
   });
-  document.getElementById("h-chart").innerHTML=hrows.length?barChart(hrows,"tok/s",false)
-    :`<p class="note">Select at least one release.</p>`;
+  document.getElementById("h-chart").innerHTML=hpts.length>1
+    ?lineChart([{name:S.hist==="decode"?"decode median":"prefill peak",
+                 colour:"var(--accent)",pts:hpts}],"tokens / second",
+               {xFmt:i=>hids[i], xTitle:"release", annotate:true, height:230})
+    :hpts.length===1
+      ?`<p class="note">${hids[0]} at ${fmt(hpts[0][1])} tok/s. Select a second release to see the trend.</p>`
+      :`<p class="note">Select at least one release.</p>`;
 
   // workload chart
   const base=rels.find(r=>r.id===S.baseline);
@@ -383,7 +411,7 @@ function render(){
         pts:r.depths.map(d=>[d.depth,d.autoregressive_tok_s]).filter(p=>p[1]!=null)});
   });
   document.getElementById("d-chart").innerHTML=series.length
-    ?lineChart(series,S.metric==="ttft"?"milliseconds":"tokens / second",true,S.metric!=="ttft")
+    ?lineChart(series,S.metric==="ttft"?"milliseconds":"tokens / second",{markPeak:S.metric!=="ttft"})
     :`<p class="note">No context sweep in the selected release${rels.length===1?"":"s"}. `+
       `Depth data needs benchmark_bundle.sh run without --skip-context-sweep.</p>`;
 
