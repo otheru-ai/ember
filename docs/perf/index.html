@@ -73,6 +73,8 @@ tbody tr:hover{background:var(--card-hover)}
 td.num{font-family:var(--mono)}
 .gain{color:var(--ok)} .loss{color:var(--bad)}
 .note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
+.chart-half h3{margin:0 0 2px;font-size:11px;font-weight:600;color:var(--micro);
+  letter-spacing:.09em;text-transform:uppercase}
 .stat{margin:10px 0 4px;display:flex;align-items:baseline;gap:10px}
 .stat-value{font-family:var(--mono);font-size:52px;font-weight:800;color:var(--accent);
   letter-spacing:-.03em;line-height:1}
@@ -126,7 +128,6 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
   <section class="card">
     <div class="section-heading">
       <div><span class="eyebrow">Across releases</span><h2>Release history</h2></div>
-      <div id="h-sel" class="tabs" role="tablist"></div>
     </div>
     <div id="h-chart" class="chart"></div>
   </section>
@@ -159,7 +160,7 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 </div></footer>
 
 <script>
-const S={w:new Set(),r:new Set(),view:"absolute",metric:"decode",hist:"decode",baseline:null};
+const S={w:new Set(),r:new Set(),view:"absolute",metric:"decode",baseline:null};
 let DATA=null;
 
 const fmt=(n,d=2)=>n==null?"—":Number(n).toFixed(d);
@@ -175,14 +176,13 @@ function readHash(){
   if(h.get("releases"))h.get("releases").split(",").filter(Boolean).forEach(x=>S.r.add(x));
   if(h.get("view"))S.view=h.get("view");
   if(h.get("metric"))S.metric=h.get("metric");
-  if(h.get("hist"))S.hist=h.get("hist");
   if(h.get("baseline"))S.baseline=h.get("baseline");
 }
 function writeHash(){
   const h=new URLSearchParams();
   h.set("workloads",[...S.w].join(","));
   h.set("releases",[...S.r].join(","));
-  h.set("view",S.view); h.set("metric",S.metric); h.set("hist",S.hist);
+  h.set("view",S.view); h.set("metric",S.metric);
   if(S.baseline)h.set("baseline",S.baseline);
   history.replaceState(null,"","#"+h.toString());
 }
@@ -293,7 +293,7 @@ function lineChart(series,yLabel,opts){
   opts=opts||{};
   const markPeak=opts.markPeak, annotate=opts.annotate;
   const xFmt=opts.xFmt||depthLabel, xTitle=opts.xTitle||"prompt depth (tokens)";
-  const W=chartWidth(), narrow=W<620;
+  const W=opts.width||chartWidth(), narrow=W<620;
   // Narrow: series names move to a legend above the plot, because the
   // right-hand gutter they normally sit in would eat a third of a phone screen.
   const H=opts.height||(narrow?250:300);
@@ -452,32 +452,40 @@ function render(){
   tabs(document.getElementById("d-sel"),[["decode","Decode"],["prefill","Prefill"],["ttft","TTFT"]],
     S.metric,v=>S.metric=v);
 
-  // release history -- aggregate decode, and peak prefill across the groups.
-  // Both come from the two legs every bundle has ever run.
-  tabs(document.getElementById("h-sel"),
-    [["decode","Decode median"],["prefill","Prefill peak"]],S.hist,v=>S.hist=v);
-  const hids=[], hpts=[];
-  DATA.releases.filter(r=>S.r.has(r.id)).forEach(r=>{
-    let v=null;
-    if(S.hist==="decode"){
-      v=(r.throughput||{}).median_tps;
-    }else{
+  // release history -- aggregate decode and peak prefill, side by side. Both
+  // come from the two legs every bundle has ever run, and both fit in the width
+  // the card already has, so neither sits behind a toggle.
+  const histFull=chartWidth(), histStacked=histFull<700;
+  const histW=histStacked?histFull:Math.floor((histFull-24)/2);
+  const halves=[
+    ["Decode median","var(--accent)",r=>(r.throughput||{}).median_tps],
+    ["Prefill peak","var(--cyan)",r=>{
       const g=Object.values(r.prefill_groups||{}).map(x=>x.median_tps).filter(x=>x!=null);
-      v=g.length?Math.max(...g):null;
-    }
-    if(v!=null){ hpts.push([hids.length,v]); hids.push(r.id); }
-  });
-  document.getElementById("h-chart").innerHTML=hpts.length>1
-    ?lineChart([{name:S.hist==="decode"?"decode median":"prefill peak",
-                 colour:"var(--accent)",pts:hpts}],"tokens / second",
-               {xFmt:i=>hids[i], xTitle:"release", annotate:true, height:230, tightY:true})
-    :hpts.length===1
+      return g.length?Math.max(...g):null;
+    }],
+  ].map(([title,colour,pick])=>{
+    const ids=[], pts=[];
+    DATA.releases.filter(r=>S.r.has(r.id)).forEach(r=>{
+      const v=pick(r);
+      if(v!=null){ pts.push([ids.length,v]); ids.push(r.id); }
+    });
+    const body=pts.length>1
+      ?lineChart([{name:title,colour,pts}],"tokens / second",
+                 {xFmt:i=>ids[i], xTitle:"release", annotate:true,
+                  height:215, tightY:true, width:histW})
       // One release is a value, not a trend. Show the number itself rather than
-      // a sentence explaining why there is no line.
-      // Two decimals suit a decode figure and are noise on a prefill one.
-      ?`<p class="stat"><span class="stat-value">${fmt(hpts[0][1],hpts[0][1]>=100?1:2)}</span>`+
-       `<span class="stat-unit">tok/s</span></p>`
-      :`<p class="note">Select at least one release.</p>`;
+      // a sentence explaining why there is no line. Two decimals suit a decode
+      // figure and are noise on a prefill one.
+      :pts.length===1
+        ?`<p class="stat"><span class="stat-value" style="color:${colour}">`+
+         `${fmt(pts[0][1],pts[0][1]>=100?1:2)}</span>`+
+         `<span class="stat-unit">tok/s</span></p>`
+        :`<p class="note">Select at least one release.</p>`;
+    return `<div class="chart-half"><h3>${title}</h3>${body}</div>`;
+  });
+  document.getElementById("h-chart").innerHTML=
+    `<div style="display:grid;grid-template-columns:${histStacked?"1fr":"1fr 1fr"};gap:24px">`+
+    halves.join("")+`</div>`;
 
   // Colour ramp shared by both charts, so a release keeps one colour across the
   // page. Declared before the first use: as a const beside the depth chart it

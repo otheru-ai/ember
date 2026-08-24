@@ -63,9 +63,9 @@ let checked = 0;
 function sweep(label, requiredCards) {
   for (const view of ['absolute', 'vs-ar', 'vs-baseline']) {
     for (const metric of ['decode', 'prefill', 'ttft']) {
-      for (const hist of ['decode', 'prefill']) {
-        api.S.view = view; api.S.metric = metric; api.S.hist = hist;
-        const where = `${label} view=${view} metric=${metric} hist=${hist}`;
+      {
+        api.S.view = view; api.S.metric = metric;
+        const where = `${label} view=${view} metric=${metric}`;
         checked++;
         cards.forEach((c) => { byId(c).innerHTML = ''; });
         try {
@@ -98,15 +98,24 @@ api.S.r.add(newest.id);
 api.S.baseline = null;
 sweep('one-release', ['wl-chart', 'h-chart']);
 
-api.S.hist = 'decode';
 api.render();
 const hist = byId('h-chart').innerHTML;
-if (!/stat-value/.test(hist)) {
-  console.log('  MISSING  single release should render a stat value, got: '
-    + hist.slice(0, 80));
+// Both measures are shown together, so one release means two stat values.
+const stats = (hist.match(/stat-value/g) || []).length;
+if (stats !== 2) {
+  console.log(`  MISSING  single release should render 2 stat values, got ${stats}`);
   failures++;
-} else if (/Select a second release/.test(hist)) {
+}
+if (/Select a second release/.test(hist)) {
   console.log('  STALE    single release still renders the explanatory sentence');
+  failures++;
+}
+// And more than one release means two charts, not one behind a toggle.
+data.releases.forEach((r) => api.S.r.add(r.id));
+api.render();
+const svgs = (byId('h-chart').innerHTML.match(/<svg /g) || []).length;
+if (svgs !== 2) {
+  console.log(`  MISSING  history should render 2 charts side by side, got ${svgs}`);
   failures++;
 }
 
