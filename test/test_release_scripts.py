@@ -219,9 +219,14 @@ class ReleaseScriptTests(unittest.TestCase):
         release_notes = GITHUB_RELEASE_NOTES.read_text()
         forgejo_container = CONTAINER_WORKFLOW.read_text()
         self.assertIn("publish-candidate:", ci)
+        # The scope job gates the expensive pair, so a documentation-only push
+        # does not take the gfx1151 box for two hours; both must depend on it.
         self.assertIn(
-            "needs: [invariants, build-test, sanitizers, analyzer, coverage]", ci
+            "needs: [invariants, build-test, sanitizers, analyzer, coverage, scope]",
+            ci,
         )
+        self.assertIn("scope:", ci)
+        self.assertIn("needs.scope.outputs.code == 'true'", ci)
         self.assertIn("uses: ./.github/workflows/container.yml", ci)
         self.assertIn("workflow_call:", container)
         self.assertIn('git rev-parse "$publish_sha^"', container)
@@ -236,7 +241,7 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("gh release create", release_notes)
         self.assertIn("!startsWith(github.event.head_commit.message", ci)
         self.assertIn("certify-and-release:", ci)
-        self.assertIn("needs: publish-candidate", ci)
+        self.assertIn("needs: [publish-candidate, scope]", ci)
         self.assertIn("uses: ./.github/workflows/gfx1151-certify.yml", ci)
         self.assertIn("commit_sha: ${{ github.sha }}", ci)
         self.assertIn("secrets: inherit", ci)
