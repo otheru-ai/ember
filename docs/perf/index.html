@@ -244,6 +244,12 @@ function barChart(rows,unit,relative){
   return s+`</svg>`;
 }
 
+function niceStep(x){
+  if(!(x>0)) return 1;
+  const e=Math.pow(10,Math.floor(Math.log10(x))), f=x/e;
+  return (f<=1?1:f<=2?2:f<=2.5?2.5:f<=5?5:10)*e;
+}
+
 function lineChart(series,yLabel,opts){
   opts=opts||{};
   const markPeak=opts.markPeak, annotate=opts.annotate;
@@ -261,13 +267,42 @@ function lineChart(series,yLabel,opts){
   // when one of them swept a different set.
   const xs=[...new Set(series.flatMap(s=>s.pts.map(p=>p[0])))].sort((a,b)=>a-b);
   const xi=new Map(xs.map((n,i)=>[n,i]));
-  const vmax=Math.max(...series.flatMap(s=>s.pts.map(p=>p[1])))*1.12;
+  const vals=series.flatMap(s=>s.pts.map(p=>p[1]));
+  // A zero baseline is right when the question is "how big", and wrong when it
+  // is "what changed": release to release the whole story lives between 32 and
+  // 40 tok/s, and anchoring at zero presses that into the top fifth of the
+  // frame. Cropped axes are only honest when the reader can see they are
+  // cropped, so the ticks are drawn on real values rather than as a percentage
+  // of an implied zero.
+  let ylo, yhi, step;
+  if(opts.tightY){
+    const lo=Math.min(...vals), hi=Math.max(...vals);
+    // A flat series has no range of its own to scale by; give it a window
+    // around its value so the line lands mid-frame instead of on an edge.
+    const r=(hi-lo)||Math.abs(hi)*0.1||1;
+    // Headroom is deliberately small, and the step fine enough that rounding
+    // the bounds to it does not undo the crop: at 0.35 padding and four
+    // gridlines the decode series rounded out to 25-45, putting the data back
+    // into a third of the frame.
+    step=niceStep(r*1.3/5);
+    ylo=Math.floor((lo-r*0.15)/step)*step;
+    yhi=Math.ceil((hi+r*0.15)/step)*step;
+  }else{
+    // Zero-based, but on round steps: quartering an arbitrary maximum gave
+    // ticks like 11.1 and 22.2, and 174084 on the TTFT view.
+    ylo=0;
+    const top=Math.max(...vals)*1.12;
+    step=niceStep(top/5);
+    yhi=Math.ceil(top/step)*step;
+  }
+  const dec=step<1?2:Math.abs(step-Math.round(step))>1e-9?1:0;
   const X=n=>xs.length<2?padL:padL+xi.get(n)/(xs.length-1)*(W-padL-padR);
-  const Y=v=>padT+(H-padT-padB)-(v/vmax)*(H-padT-padB);
+  const Y=v=>padT+(H-padT-padB)-((v-ylo)/(yhi-ylo))*(H-padT-padB);
   let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}">`;
-  for(let f=0;f<=1.0001;f+=0.25){const v=vmax*f,y=Y(v);
+  for(let v=ylo; v<=yhi+step*1e-6; v+=step){
+    const y=Y(v);
     s+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--line)"/>`;
-    const tick=v>=10000?(v/1000).toFixed(0)+"k":v.toFixed(0);
+    const tick=v>=10000?(v/1000).toFixed(0)+"k":v.toFixed(dec);
     s+=`<text x="${padL-6}" y="${y+4}" text-anchor="end" font-size="10.5" fill="var(--muted)">${tick}</text>`;}
   // A centred label at either end hangs outside the canvas and gets clipped, so
   // the first and last anchor inward. And once ticks are closer together than
@@ -366,7 +401,7 @@ function render(){
   document.getElementById("h-chart").innerHTML=hpts.length>1
     ?lineChart([{name:S.hist==="decode"?"decode median":"prefill peak",
                  colour:"var(--accent)",pts:hpts}],"tokens / second",
-               {xFmt:i=>hids[i], xTitle:"release", annotate:true, height:230})
+               {xFmt:i=>hids[i], xTitle:"release", annotate:true, height:230, tightY:true})
     :hpts.length===1
       ?`<p class="note">${hids[0]} at ${fmt(hpts[0][1])} tok/s. Select a second release to see the trend.</p>`
       :`<p class="note">Select at least one release.</p>`;
