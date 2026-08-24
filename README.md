@@ -113,19 +113,20 @@ container or Kubernetes gateway must reach the API.
 
 One Ryzen AI Max 395+ (`gfx1151`, 128 GB), DeepSeek-V4-Flash-0731 at
 ROCMFPX 2.5 bpw, 85.3 GiB resident. Each row is one request: a prompt of the
-given depth, 256 tokens generated, greedy. `tok/s total` counts prompt plus
-generated tokens over the whole request, so it folds prefill and decode
-together.
+given depth, 256 tokens generated, greedy. Depth is the prompt size asked
+for; prompt tokens is what it actually tokenised to, and every rate is
+computed from that. `tok/s total` counts prompt plus generated tokens over
+the whole request, so it folds prefill and decode together.
 
-| Depth | tok/s out | Prefill tok/s | tok/s total | TTFT ms |
-| ---: | ---: | ---: | ---: | ---: |
-| 43 | 39.24 | 72.6 | 42.0 | 592 |
-| 862 | 39.47 | 280.3 | 116.9 | 3,075 |
-| 3,925 | 37.98 | 343.3 | 230.1 | 11,433 |
-| 18,553 | 32.22 | 300.6 | 270.0 | 61,720 |
-| 38,059 | 24.94 | 272.3 | 255.4 | 139,769 |
-| 77,068 | 18.25 | 226.2 | 218.0 | 340,707 |
-| 116,077 | 14.63 | 186.7 | 182.0 | 621,730 |
+| Depth | Prompt tokens | tok/s out | Prefill tok/s | tok/s total | TTFT ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 43 | 39.24 | 72.6 | 42.0 | 592 |
+| 1k | 862 | 39.47 | 280.3 | 116.9 | 3,075 |
+| 4k | 3,925 | 37.98 | 343.3 | 230.1 | 11,433 |
+| 16k | 18,553 | 32.22 | 300.6 | 270.0 | 61,720 |
+| 32k | 38,059 | 24.94 | 272.3 | 255.4 | 139,769 |
+| 64k | 77,068 | 18.25 | 226.2 | 218.0 | 340,707 |
+| 96k | 116,077 | 14.63 | 186.7 | 182.0 | 621,730 |
 
 Decode depends on how predictable the output is, because speculative decoding
 pays in proportion to how well the drafter guesses the continuation:
