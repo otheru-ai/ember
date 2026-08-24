@@ -185,7 +185,7 @@ jobs:
             echo 'code=true' >>"$GITHUB_OUTPUT"; exit 0
           fi
           changed="$(git diff --name-only "$BEFORE" "$GITHUB_SHA")"
-          echo "changed files:"; echo "$changed" | sed 's/^/  /'
+          printf 'changed files:\n%s\n' "$changed"
           if printf '%s\n' "$changed" | grep -qvE '^(docs/|README\.md$|AGENTS\.md$|ARCHITECTURE\.md$|CLAUDE\.md$|CHANGELOG\.md$|LICENSE$)'; then
             echo 'code=true' >>"$GITHUB_OUTPUT"
           else

@@ -201,8 +201,17 @@ class ReleaseScriptTests(unittest.TestCase):
             certify,
         )
         self.assertIn("org.opencontainers.image.revision", certify)
+        # Certification validates the published image and nothing else: no
+        # working tree is checked out onto the machine that holds production
+        # and the GPU. Benchmarking lives in its own job after promotion,
+        # where a checkout is fine and a failure cannot cost a release.
         certify_job = certify.split("\n  promote:", 1)[0]
         self.assertNotIn("actions/checkout", certify_job)
+        self.assertNotIn("benchmark_bundle.sh", certify_job)
+        self.assertIn("  benchmark:", certify)
+        self.assertIn("needs: [certify, promote]", certify)
+        self.assertIn("benchmark_bundle.sh", certify)
+        self.assertIn("build_perf_site_data.py", certify)
         self.assertIn("Promote certified candidate", certify)
         self.assertIn("ci/release_changelog.py prepare", certify)
         self.assertIn("git push --atomic", certify)

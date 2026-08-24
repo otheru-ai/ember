@@ -380,6 +380,8 @@ jobs:
     needs: certify
     runs-on: [self-hosted, ember-builder]
     timeout-minutes: 15
+    outputs:
+      version: ${{ steps.promote.outputs.version }}
     steps:
       - name: Quiet expected exact-SHA checkout advice
         run: |
@@ -393,6 +395,7 @@ jobs:
           persist-credentials: false
 
       - name: Generate release metadata and publish the source-of-truth tag
+        id: promote
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           REQUESTED_VERSION: ${{ inputs.release_version }}
@@ -472,3 +475,94 @@ jobs:
             echo "Release commit: \`$release_sha\`"
             echo "Tag: \`$tag\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  benchmark:
+    name: Benchmark the released image
+    # After promotion, deliberately. This measures a release rather than gating
+    # one: the tag already exists by the time it starts, so a benchmark that
+    # fails or times out cannot cost a release that certification passed.
+    #
+    # It also keeps the certify job hermetic. Certification runs nothing from
+    # the repository -- it validates the published image and only the published
+    # image -- and running the harness there would have meant checking out a
+    # working tree onto the machine that holds production and the GPU.
+    needs: [certify, promote]
+    if: ${{ needs.promote.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 180
+    env:
+      MODEL_PATH: ${{ vars.EMBER_CERT_MODEL_PATH }}
+      DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
+      RELEASE_VERSION: ${{ needs.promote.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Run the performance bundle
+        env:
+          BENCH_TIMEOUT_MIN: '150'
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/bench-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$out"
+          # The promoted tag, so the bundle describes what people can pull.
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$RELEASE_VERSION"
+          # Unlike certification this job owns nothing yet, so the script takes
+          # the GPU lock and manages production itself, restoring it on exit.
+          # Digests are the constants certification already verified.
+          export MODEL_DIR TARGET DRAFT PORT TARGET_SHA DRAFT_SHA
+          MODEL_DIR="$(dirname "$MODEL_PATH")"
+          TARGET="$MODEL_PATH"
+          DRAFT="$DRAFT_PATH"
+          PORT=18086
+          TARGET_SHA=a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
+          DRAFT_SHA=1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
+          timeout "${BENCH_TIMEOUT_MIN}m" "$GITHUB_WORKSPACE/scripts/benchmark_bundle.sh" \
+            --out "$out" --release "$RELEASE_VERSION" \
+            --image "$image" --binary /usr/local/bin/ember-dflash \
+            --no-repo-mount
+          bundle="$(find "$out" -maxdepth 1 -type d -name 'ember-*' | head -1)"
+          test -n "$bundle"
+          test -s "$bundle/summary.json"
+          echo "BENCH_BUNDLE=$bundle" >>"$GITHUB_ENV"
+          python3 "$GITHUB_WORKSPACE/scripts/bench/build_perf_site_data.py" \
+            --bundle "$bundle" --certified \
+            --out "$bundle/perf-site-data.json"
+          python3 - "$bundle/summary.json" "$bundle/perf-site-data.json" \
+            >>"$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          s = json.load(open(sys.argv[1]))
+          r = json.load(open(sys.argv[2]))['releases'][0]
+          print('## Performance bundle\n')
+          d = s.get('decode') or {}
+          if d:
+              print(f"Decode, throughput group: **{d['median_tps']} tok/s** median "
+                    f"of {d['samples']} ({d['min_tps']}-{d['max_tps']}).\n")
+          w = s.get('by_workload') or {}
+          if w:
+              lo = min(w.values(), key=lambda v: v['tok_s'])['tok_s']
+              hi = max(w.values(), key=lambda v: v['tok_s'])['tok_s']
+              print(f"Across {len(w)} workloads decode spans **{lo}-{hi} tok/s**.\n")
+              print('| Workload | tok/s | vs AR |')
+              print('| --- | ---: | ---: |')
+              for k, v in sorted(w.items(), key=lambda kv: -kv[1]['tok_s']):
+                  sp = f"{v['speedup']}x" if v.get('speedup') else '-'
+                  print(f"| {k} | {v['tok_s']} | {sp} |")
+              print()
+          n = len(r['depths'])
+          print(f"Page data: {len(r['workloads'])} workloads, {n} context depths.\n")
+          if not n:
+              print('> No context sweep in this bundle, so the depth chart would be '
+                    'empty. Check the sweep was not skipped before publishing.\n')
+          PY
+
+      - name: Upload the performance bundle
+        if: ${{ always() && env.BENCH_BUNDLE != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-bundle-${{ inputs.commit_sha }}
+          path: ${{ env.BENCH_BUNDLE }}
+          retention-days: 90
