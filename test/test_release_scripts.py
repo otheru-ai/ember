@@ -183,8 +183,11 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("ember-cert-production mask", certify)
         self.assertIn("ember-cert-production unmask", certify)
         self.assertIn("production was restarted during certification", certify)
-        self.assertIn("/root/gpu.lock", certify)
-        self.assertIn("GPU_LOCK_SENTINEL", certify)
+        # Through the wrapper: /root is dr-xr-x--- and the runner cannot open
+        # the lock file, so a direct flock here fails with EACCES and the wait
+        # that follows it spins instead of holding anything.
+        self.assertIn("ember-gpu-lock acquire", certify)
+        self.assertIn("ember-gpu-lock release", certify)
         self.assertIn("restore=service", certify)
         self.assertIn("iommu|amd_iommu", certify)
         self.assertIn("iflag=direct", certify)
