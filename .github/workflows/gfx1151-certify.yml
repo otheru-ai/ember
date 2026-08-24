@@ -338,6 +338,16 @@ jobs:
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
 
+      - name: Check out the harness for the commit being certified
+        # This job had no checkout: every step before this one is self-contained
+        # shell. The benchmark runs scripts/ from the repository, and it must be
+        # the harness belonging to the commit under test rather than whatever
+        # happened to be left in the workspace.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
       - name: Benchmark the certified image
         env:
           BENCH_TIMEOUT_MIN: '110'
