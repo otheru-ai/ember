@@ -73,6 +73,10 @@ tbody tr:hover{background:var(--card-hover)}
 td.num{font-family:var(--mono)}
 .gain{color:var(--ok)} .loss{color:var(--bad)}
 .note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
+.stat{margin:10px 0 4px;display:flex;align-items:baseline;gap:10px}
+.stat-value{font-family:var(--mono);font-size:52px;font-weight:800;color:var(--accent);
+  letter-spacing:-.03em;line-height:1}
+.stat-unit{font-size:16px;color:var(--muted);font-weight:600}
 footer{border-top:1px solid var(--line);padding:20px 0 40px;color:var(--micro);font-size:12.5px}
 code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
 
@@ -90,6 +94,8 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
   table{font-size:12px}
   th,td{padding:7px 8px}
   footer{padding:16px 0 32px;font-size:12px}
+  .stat-value{font-size:38px}
+  .stat-unit{font-size:14px}
 }
 </style>
 </head>
@@ -466,7 +472,11 @@ function render(){
                  colour:"var(--accent)",pts:hpts}],"tokens / second",
                {xFmt:i=>hids[i], xTitle:"release", annotate:true, height:230, tightY:true})
     :hpts.length===1
-      ?`<p class="note">${hids[0]} at ${fmt(hpts[0][1])} tok/s. Select a second release to see the trend.</p>`
+      // One release is a value, not a trend. Show the number itself rather than
+      // a sentence explaining why there is no line.
+      // Two decimals suit a decode figure and are noise on a prefill one.
+      ?`<p class="stat"><span class="stat-value">${fmt(hpts[0][1],hpts[0][1]>=100?1:2)}</span>`+
+       `<span class="stat-unit">tok/s</span></p>`
       :`<p class="note">Select at least one release.</p>`;
 
   // Colour ramp shared by both charts, so a release keeps one colour across the

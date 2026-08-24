@@ -60,31 +60,57 @@ const cards = ['wl-chart', 'd-chart', 'h-chart', 'table'];
 let failures = 0;
 let checked = 0;
 
-for (const view of ['absolute', 'vs-ar', 'vs-baseline']) {
-  for (const metric of ['decode', 'prefill', 'ttft']) {
-    for (const hist of ['decode', 'prefill']) {
-      api.S.view = view; api.S.metric = metric; api.S.hist = hist;
-      const where = `view=${view} metric=${metric} hist=${hist}`;
-      checked++;
-      try {
-        api.render();
-      } catch (e) {
-        console.log(`  THREW  ${where}: ${e.message}`);
-        failures++;
-        continue;
-      }
-      // A card that renders nothing at all is the visible symptom of render()
-      // dying partway, so treat empty as a failure rather than as a blank state.
-      const empty = cards.filter((c) => !byId(c).innerHTML);
-      if (empty.length) {
-        console.log(`  EMPTY  ${where} -> ${empty.join(', ')}`);
-        failures++;
+function sweep(label, requiredCards) {
+  for (const view of ['absolute', 'vs-ar', 'vs-baseline']) {
+    for (const metric of ['decode', 'prefill', 'ttft']) {
+      for (const hist of ['decode', 'prefill']) {
+        api.S.view = view; api.S.metric = metric; api.S.hist = hist;
+        const where = `${label} view=${view} metric=${metric} hist=${hist}`;
+        checked++;
+        cards.forEach((c) => { byId(c).innerHTML = ''; });
+        try {
+          api.render();
+        } catch (e) {
+          console.log(`  THREW  ${where}: ${e.message}`);
+          failures++;
+          continue;
+        }
+        // A card that renders nothing at all is the visible symptom of render()
+        // dying partway, so treat empty as a failure rather than a blank state.
+        const empty = requiredCards.filter((c) => !byId(c).innerHTML);
+        if (empty.length) {
+          console.log(`  EMPTY  ${where} -> ${empty.join(', ')}`);
+          failures++;
+        }
       }
     }
   }
 }
 
+sweep('all-releases', cards);
+
+// One release selected exercises paths the full selection never reaches: the
+// history card shows a single value instead of a line, and the depth chart
+// gains its autoregressive baseline.
+const newest = data.releases[data.releases.length - 1];
+api.S.r.clear();
+api.S.r.add(newest.id);
+api.S.baseline = null;
+sweep('one-release', ['wl-chart', 'h-chart']);
+
+api.S.hist = 'decode';
+api.render();
+const hist = byId('h-chart').innerHTML;
+if (!/stat-value/.test(hist)) {
+  console.log('  MISSING  single release should render a stat value, got: '
+    + hist.slice(0, 80));
+  failures++;
+} else if (/Select a second release/.test(hist)) {
+  console.log('  STALE    single release still renders the explanatory sentence');
+  failures++;
+}
+
 console.log(failures
   ? `  ${failures} of ${checked} combinations failed`
-  : `  all ${checked} view/metric combinations rendered`);
+  : `  all ${checked} combinations rendered`);
 process.exit(failures ? 1 : 0);
