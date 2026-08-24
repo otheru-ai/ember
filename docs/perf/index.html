@@ -42,7 +42,8 @@ main{padding:24px 0 60px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
   padding:20px 22px;margin:0 0 18px;transition:border-color .15s}
 .card:hover{border-color:var(--line-hover)}
-.section-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:14px}
+.section-heading{display:flex;justify-content:space-between;align-items:flex-end;
+  gap:12px;margin-bottom:14px;flex-wrap:wrap}
 .eyebrow{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--micro)}
 .section-heading h2{margin:3px 0 0;font-size:18px;font-weight:600;letter-spacing:-.01em}
 .result-count{color:var(--muted);font-size:13px;font-family:var(--mono)}
@@ -63,7 +64,8 @@ main{padding:24px 0 60px}
 .tab[aria-selected="true"]{background:var(--accent2);border-color:var(--accent2);color:#0a0a0f;font-weight:600}
 .chart{width:100%;overflow-x:auto}
 svg{display:block}
-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+#table{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;min-width:520px}
 th,td{text-align:right;padding:8px 10px;border-bottom:1px solid var(--line)}
 th:first-child,td:first-child{text-align:left}
 th{color:var(--micro);font-weight:600;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase}
@@ -73,6 +75,21 @@ td.num{font-family:var(--mono)}
 .note{color:var(--muted);font-size:12.5px;margin:12px 0 0;max-width:78ch}
 footer{border-top:1px solid var(--line);padding:20px 0 40px;color:var(--micro);font-size:12.5px}
 code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+
+@media (max-width:640px){
+  .layout{padding:0 14px}
+  .page-header{padding:22px 0 16px}
+  .page-header h1{font-size:26px;margin:6px 0 8px}
+  .card{padding:15px 14px;margin-bottom:14px;border-radius:12px}
+  .section-heading h2{font-size:16px}
+  .result-count{font-size:11.5px}
+  .selector-heading{margin:12px 0 7px}
+  .chip{padding:5px 11px;font-size:12px}
+  .tab{padding:6px 11px;font-size:12px}
+  table{font-size:12px}
+  th,td{padding:7px 8px}
+  footer{padding:16px 0 32px;font-size:12px}
+}
 </style>
 </head>
 <body>
@@ -186,8 +203,19 @@ function tabs(el,items,cur,onpick){
 
 /* Horizontal bars: workloads differ by ~1.8x, and a bar chart reads that
    ordering far better than a line. */
+// Charts are SVG with a viewBox, so a fixed 1080-unit canvas scaled into a
+// phone shrinks every label with it: 12.5px type lands at about 4px on a 390px
+// screen. Match the viewBox to the pixels actually available, so one unit is
+// one CSS pixel and text is the size it claims to be at any width.
+function chartWidth(){
+  const el=document.querySelector("main .card");
+  const w=el?el.clientWidth-44:1080;
+  return Math.max(300,Math.min(1080,Math.round(w)));
+}
+
 function barChart(rows,unit,relative){
-  const W=1080,rowH=30,padL=150,padR=90,padT=8;
+  const W=chartWidth(), narrow=W<620;
+  const rowH=narrow?42:30, padL=narrow?0:150, padR=narrow?0:90, padT=8;
   const H=padT+rows.length*rowH+10;
   const max=Math.max(...rows.map(r=>Math.abs(r.v)),relative?0.25:1);
   const zero=relative?padL+(W-padL-padR)/2:padL;
@@ -197,17 +225,32 @@ function barChart(rows,unit,relative){
     const y=padT+i*rowH, w=Math.abs(r.v)/max*span;
     const x=relative&&r.v<0?zero-w:zero;
     const col=relative?(r.v>=0?"var(--ok)":"var(--bad)"):(r.colour||"var(--accent)");
-    s+=`<text x="${padL-12}" y="${y+19}" text-anchor="end" font-size="12.5" fill="var(--muted)">${r.label}</text>`;
-    s+=`<rect x="${x}" y="${y+6}" width="${Math.max(w,1)}" height="16" rx="3" fill="${col}"/>`;
-    const tx=relative&&r.v<0?x-8:x+w+8, ta=relative&&r.v<0?"end":"start";
-    s+=`<text x="${tx}" y="${y+19}" text-anchor="${ta}" font-size="12.5" font-family="var(--mono)" fill="var(--ink)">${r.text}</text>`;
+    if(narrow){
+      // No room for a label column beside the bar, so the label takes its own
+      // line with the value opposite it, and the bar spans the full width
+      // underneath. Nothing is squeezed and nothing overflows.
+      s+=`<text x="0" y="${y+12}" font-size="12" fill="var(--muted)">${r.label}</text>`;
+      s+=`<text x="${W}" y="${y+12}" text-anchor="end" font-size="12" `+
+         `font-family="var(--mono)" fill="var(--ink)">${r.text}</text>`;
+      s+=`<rect x="${x}" y="${y+19}" width="${Math.max(w,1)}" height="12" rx="3" fill="${col}"/>`;
+    }else{
+      s+=`<text x="${padL-12}" y="${y+19}" text-anchor="end" font-size="12.5" fill="var(--muted)">${r.label}</text>`;
+      s+=`<rect x="${x}" y="${y+6}" width="${Math.max(w,1)}" height="16" rx="3" fill="${col}"/>`;
+      const tx=relative&&r.v<0?x-8:x+w+8, ta=relative&&r.v<0?"end":"start";
+      s+=`<text x="${tx}" y="${y+19}" text-anchor="${ta}" font-size="12.5" font-family="var(--mono)" fill="var(--ink)">${r.text}</text>`;
+    }
   });
   if(relative)s+=`<line x1="${zero}" y1="${padT}" x2="${zero}" y2="${H-10}" stroke="var(--line)"/>`;
   return s+`</svg>`;
 }
 
 function lineChart(series,yLabel,logx,markPeak){
-  const W=1080,H=300,padL=64,padR=120,padT=16,padB=44;
+  const W=chartWidth(), narrow=W<620;
+  // Narrow: series names move to a legend above the plot, because the
+  // right-hand gutter they normally sit in would eat a third of a phone screen.
+  const H=narrow?250:300;
+  const padL=narrow?38:64, padR=narrow?10:120;
+  const padT=narrow?34:16, padB=44;
   // The depth ladder is a fixed set of requested sizes, one of which is 0 (no
   // filler at all), so a log axis is out -- log10(0) is -Infinity and collapses
   // every point onto the left edge. Space the rungs evenly instead: it reads as
@@ -222,10 +265,18 @@ function lineChart(series,yLabel,logx,markPeak){
   for(let f=0;f<=1.0001;f+=0.25){const v=vmax*f,y=Y(v);
     s+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="var(--line)"/>`;
     const tick=v>=10000?(v/1000).toFixed(0)+"k":v.toFixed(0);
-    s+=`<text x="${padL-10}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--muted)">${tick}</text>`;}
-  xs.forEach(n=>s+=`<text x="${X(n)}" y="${H-22}" text-anchor="middle" font-size="11" fill="var(--muted)">${depthLabel(n)}</text>`);
-  s+=`<text x="${(padL+W-padR)/2}" y="${H-5}" text-anchor="middle" font-size="11" fill="var(--muted)">prompt depth (tokens)</text>`;
-  s+=`<text x="${padL}" y="${padT-4}" font-size="11" fill="var(--muted)">${yLabel}</text>`;
+    s+=`<text x="${padL-6}" y="${y+4}" text-anchor="end" font-size="10.5" fill="var(--muted)">${tick}</text>`;}
+  xs.forEach(n=>s+=`<text x="${X(n)}" y="${H-22}" text-anchor="middle" font-size="10.5" fill="var(--muted)">${depthLabel(n)}</text>`);
+  s+=`<text x="${(padL+W-padR)/2}" y="${H-5}" text-anchor="middle" font-size="10.5" fill="var(--muted)">prompt depth (tokens)</text>`;
+  s+=`<text x="${padL}" y="${padT-(narrow?20:4)}" font-size="10.5" fill="var(--muted)">${yLabel}</text>`;
+  if(narrow){
+    let lx=padL;
+    series.forEach(se=>{
+      s+=`<rect x="${lx}" y="${padT-13}" width="9" height="9" rx="2" fill="${se.colour}"/>`;
+      s+=`<text x="${lx+13}" y="${padT-5}" font-size="11" fill="${se.colour}" font-weight="600">${se.name}</text>`;
+      lx+=18+se.name.length*6.2;
+    });
+  }
   // Peaks are annotated on the curve; the series names sit at the right-hand end.
   // Both lines converge at deep context, so the end labels are de-overlapped
   // rather than drawn at whatever y the last point happens to land on.
@@ -233,18 +284,20 @@ function lineChart(series,yLabel,logx,markPeak){
   series.forEach(se=>{
     const d=se.pts.map((p,i)=>`${i?"L":"M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
     s+=`<path d="${d}" fill="none" stroke="${se.colour}" stroke-width="2.2" stroke-linejoin="round"/>`;
-    se.pts.forEach(p=>s+=`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="3.2" fill="var(--card)" stroke="${se.colour}" stroke-width="1.8"/>`);
+    se.pts.forEach(p=>s+=`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="${narrow?2.6:3.2}" fill="var(--card)" stroke="${se.colour}" stroke-width="1.8"/>`);
     if(markPeak){
       const pk=se.pts.reduce((a,b)=>b[1]>a[1]?b:a);
       const px=X(pk[0]), py=Y(pk[1]);
       s+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4.6" fill="${se.colour}"/>`;
       const near=px>W-padR-70, ta=near?"end":"middle";
       s+=`<text x="${(px+(near?6:0)).toFixed(1)}" y="${(py-12).toFixed(1)}" text-anchor="${ta}" `+
-         `font-size="11" font-family="var(--mono)" font-weight="700" fill="${se.colour}">`+
-         `peak ${fmt(pk[1],1)} @ ${depthLabel(pk[0])}</text>`;
+         `font-size="${narrow?10:11}" font-family="var(--mono)" font-weight="700" fill="${se.colour}">`+
+         `peak ${fmt(pk[1],1)}${narrow?"":" @ "+depthLabel(pk[0])}</text>`;
     }
-    const last=se.pts[se.pts.length-1];
-    labels.push({name:se.name,colour:se.colour,x:X(last[0])+9,y:Y(last[1])+4});
+    if(!narrow){
+      const last=se.pts[se.pts.length-1];
+      labels.push({name:se.name,colour:se.colour,x:X(last[0])+9,y:Y(last[1])+4});
+    }
   });
   const GAP=15, top=padT+10, bot=H-padB-6;
   labels.sort((a,b)=>a.y-b.y);
@@ -356,6 +409,15 @@ function render(){
   }
   writeHash();
 }
+
+let resizeTimer=null, lastW=0;
+addEventListener("resize",()=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    const w=chartWidth();
+    if(DATA&&w!==lastW){lastW=w;render();}
+  },150);
+});
 
 fetch("data.json").then(r=>r.json()).then(d=>{
   DATA=d;
