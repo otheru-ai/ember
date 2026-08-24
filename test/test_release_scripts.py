@@ -180,6 +180,7 @@ class ReleaseScriptTests(unittest.TestCase):
         # One gfx1151 and 125 GiB: a second model-loading process does not
         # fail, it silently degrades to hybrid expert placement. Certification
         # must hold the documented lock, not merely quiesce production.
+        self.assertIn("production was restarted during certification", certify)
         self.assertIn("/root/gpu.lock", certify)
         self.assertIn("GPU_LOCK_SENTINEL", certify)
         self.assertIn("restore=service", certify)

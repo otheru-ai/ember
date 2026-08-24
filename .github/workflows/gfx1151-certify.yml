@@ -278,6 +278,19 @@ jobs:
             -e DFLASH_DS4_SPEC=1
             -e "DFLASH_DS4_DRAFT=/cert-draft/$draft_file"
           )
+          # Quiescing happens once, at the top of the job, and nothing stops
+          # production being started again while certification runs -- the other
+          # agent on this box did exactly that through the same wrapper, and the
+          # resulting two model loaders degraded the candidate to hybrid expert
+          # placement: speculation off, generated tokens changed, throughput at a
+          # sixth. That surfaced as an inscrutable spec_ran assertion failure.
+          # Check immediately before loading, and name the cause.
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'production was restarted during certification; two model loaders'
+            echo 'cannot share this GPU and the second falls back to hybrid expert'
+            echo 'placement. See docs/ci.md and /root/GPU-LOCK.md.'
+            exit 1
+          fi
           # docker rm returning does not mean the previous container's 85 GiB
           # mlock'd buffer is back. Loading the next model into that pressure
           # produced a server that ran at 4.78 tok/s and never speculated, which
@@ -330,6 +343,19 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
+          # Quiescing happens once, at the top of the job, and nothing stops
+          # production being started again while certification runs -- the other
+          # agent on this box did exactly that through the same wrapper, and the
+          # resulting two model loaders degraded the candidate to hybrid expert
+          # placement: speculation off, generated tokens changed, throughput at a
+          # sixth. That surfaced as an inscrutable spec_ran assertion failure.
+          # Check immediately before loading, and name the cause.
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'production was restarted during certification; two model loaders'
+            echo 'cannot share this GPU and the second falls back to hybrid expert'
+            echo 'placement. See docs/ci.md and /root/GPU-LOCK.md.'
+            exit 1
+          fi
           # docker rm returning does not mean the previous container's 85 GiB
           # mlock'd buffer is back. Loading the next model into that pressure
           # produced a server that ran at 4.78 tok/s and never speculated, which
