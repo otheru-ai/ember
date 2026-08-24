@@ -325,6 +325,7 @@ function lineChart(series,yLabel,opts){
       lx+=18+se.name.length*6.2;
     });
   }
+  const peaks=[];
   // Peaks are annotated on the curve; the series names sit at the right-hand end.
   // Both lines converge at deep context, so the end labels are de-overlapped
   // rather than drawn at whatever y the last point happens to land on.
@@ -346,16 +347,45 @@ function lineChart(series,yLabel,opts){
       const pk=se.pts.reduce((a,b)=>b[1]>a[1]?b:a);
       const px=X(pk[0]), py=Y(pk[1]);
       s+=`<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4.6" fill="${se.colour}"/>`;
-      const near=px>W-padR-70, ta=near?"end":"middle";
-      s+=`<text x="${(px+(near?6:0)).toFixed(1)}" y="${(py-12).toFixed(1)}" text-anchor="${ta}" `+
-         `font-size="${narrow?10:11}" font-family="var(--mono)" font-weight="700" fill="${se.colour}">`+
-         `peak ${fmt(pk[1],1)}${narrow?"":" @ "+depthLabel(pk[0])}</text>`;
+      peaks.push({x:px, y:py, v:pk[1], colour:se.colour,
+                  text:`peak ${fmt(pk[1],1)}${narrow?"":" @ "+depthLabel(pk[0])}`});
     }
     if(!narrow&&!annotate){
       const last=se.pts[se.pts.length-1];
       labels.push({name:se.name,colour:se.colour,x:X(last[0])+9,y:Y(last[1])+4});
     }
   });
+  // Releases tend to peak at the same depth -- on this data all of them peak at
+  // 0 -- so a label placed 12px above each peak lands on the neighbouring
+  // label and on the lines between them. Cluster peaks whose text would
+  // overlap horizontally, then stack the whole cluster above its highest
+  // point, so no label sits on a curve and none sits on another.
+  if(peaks.length){
+    const fs=narrow?10:11, LH=fs+3;
+    const wOf=q=>q.text.length*fs*0.58;
+    const sorted=[...peaks].sort((a,b)=>a.x-b.x);
+    const clusters=[];
+    sorted.forEach(q=>{
+      const c=clusters[clusters.length-1];
+      if(c && q.x-wOf(q)/2 < c.right+6) { c.items.push(q); c.right=Math.max(c.right,q.x+wOf(q)/2); }
+      else clusters.push({items:[q], right:q.x+wOf(q)/2});
+    });
+    clusters.forEach(c=>{
+      const topY=Math.min(...c.items.map(q=>q.y));
+      // Highest value nearest its own curve, so colour order matches the lines.
+      c.items.sort((a,b)=>b.v-a.v).forEach((q,i)=>{
+        let y=topY-12-i*LH;
+        if(y<padT+fs) y=padT+fs+i*LH;          // no room above: stack downward
+        const near=q.x>W-padR-wOf(q)/2, far=q.x-wOf(q)/2<padL;
+        const ta=near?"end":far?"start":"middle";
+        const x=near?Math.min(q.x+6,W-2):far?Math.max(q.x-6,0):q.x;
+        s+=`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="${ta}" `+
+           `font-size="${fs}" font-family="var(--mono)" font-weight="700" `+
+           `fill="${q.colour}">${q.text}</text>`;
+      });
+    });
+  }
+
   const GAP=15, top=padT+10, bot=H-padB-6;
   labels.sort((a,b)=>a.y-b.y);
   for(let i=0;i<labels.length;i++) labels[i].y=Math.max(labels[i].y, top+i*GAP);
