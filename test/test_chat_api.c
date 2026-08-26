@@ -635,6 +635,36 @@ static void test_reasoning_budget_alias(void) {
     ember_json_free(v);
 }
 
+static void test_reasonix_thinking_object(void) {
+    ember_json *v = ember_json_parse(
+        "{\"model\":\"deepseek-v4-flash\",\"messages\":[],"
+        "\"reasoning_effort\":\"max\","
+        "\"thinking\":{\"type\":\"enabled\"}}");
+    ember_chat_request req;
+    CHECK(v && ember_chat_request_parse(v, &req),
+          "Reasonix DeepSeek thinking object parses");
+    CHECK(req.thinking_enabled && req.think_mode == EMBER_THINK_MAX,
+          "thinking.type enabled preserves the requested effort tier");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    v = ember_json_parse(
+        "{\"messages\":[],\"reasoning_effort\":\"high\","
+        "\"thinking\":{\"type\":\"disabled\"}}");
+    CHECK(v && ember_chat_request_parse(v, &req),
+          "Reasonix disabled thinking object parses");
+    CHECK(!req.thinking_enabled && req.think_mode == EMBER_THINK_NONE,
+          "thinking.type disabled overrides reasoning effort");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    v = ember_json_parse(
+        "{\"messages\":[],\"thinking\":{\"type\":\"adaptive\"}}");
+    CHECK(v && !ember_chat_request_parse(v, &req),
+          "unknown thinking.type is rejected");
+    ember_json_free(v);
+}
+
 static void test_tool_choice_constraints(void) {
     const char *tools =
         "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"a\"}},"
@@ -698,6 +728,7 @@ int main(void) {
     test_explicit_zero_penalty_overrides();
     test_large_seed_is_exact();
     test_reasoning_budget_alias();
+    test_reasonix_thinking_object();
     test_tool_choice_constraints();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);

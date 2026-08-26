@@ -13,7 +13,10 @@ Release validation on 2026-08-08 completed real, isolated CLI turns with Claude
 Code 2.1.224, Codex CLI 0.147.0, OpenCode 1.18.15, pi 0.84.1, and OMP 17.2.11.
 Each client received a visible streamed answer from Ember's GPU-free backend.
 The automated suite separately exercises tool-bearing request shapes and event
-ordering without requiring those clients to be installed in CI.
+ordering without requiring those clients to be installed in CI. It also pins
+the native DeepSeek Chat Completions request used by Reasonix 1.31.3 and
+DeepSeek Harness `llm-deepseek` 0.1.1-rc.2, including
+`thinking.type=enabled|disabled`.
 
 ## Claude Code
 
@@ -53,6 +56,54 @@ Disabling web search is required. Codex's `web_search` is a hosted Responses
 tool executed by OpenAI, not a function that a local inference server or the
 Codex shell can execute. Codex's local shell, patch, and other client-executed
 tools remain available.
+
+## Reasonix
+
+Install Reasonix and add Ember as its default provider:
+
+```bash
+npm install -g reasonix@1.31.3
+mkdir -p ~/.reasonix
+touch ~/.reasonix/.env
+grep -qxF 'EMBER_API_KEY=sk-ember-local' ~/.reasonix/.env || \
+  printf 'EMBER_API_KEY=sk-ember-local\n' >> ~/.reasonix/.env
+```
+
+```toml
+# ~/.reasonix/config.toml
+default_model = "ember"
+
+[[providers]]
+name = "ember"
+kind = "openai"
+base_url = "http://127.0.0.1:8080/v1"
+model = "deepseek-v4-flash"
+api_key_env = "EMBER_API_KEY"
+context_window = 131072
+reasoning_protocol = "deepseek"
+supported_efforts = ["low", "high", "max"]
+default_effort = "high"
+```
+
+`sk-ember-local` is a placeholder for the loopback-only Ember endpoint.
+Reasonix's native DeepSeek mode sends the official `thinking` object together
+with `reasoning_effort`; Ember accepts both fields directly.
+
+## DeepSeek Harness
+
+DeepSeek Harness's official adapter appends `/chat/completions` to its base URL,
+so point its environment at Ember's `/v1` root:
+
+```bash
+DEEPSEEK_BASE_URL=http://127.0.0.1:8080/v1 \
+DEEPSEEK_API_KEY=sk-ember-local \
+npx @deepseek-ai/dsh web
+```
+
+Select `deepseek-v4-flash` in the harness. The placeholder key satisfies the
+harness's client-side credential requirement; Ember does not authenticate it
+on loopback. The adapter's streaming usage, `reasoning_content` replay, tools,
+and `thinking.type` request fields are covered by Ember's compatibility suite.
 
 ## OpenCode
 
@@ -155,4 +206,5 @@ tool-result replay, stop sequences, and usage reporting across these adapters.
 It is text-only: image, audio, computer-use, and provider-hosted tools are not
 implemented. Client releases can change their wire behavior, so the
 `client_compatibility_server` test keeps representative Anthropic Messages,
-Responses, and Chat Completions requests in the release test suite.
+Responses, and Chat Completions requests in the release test suite, including
+the native DeepSeek request shared by Reasonix and DeepSeek Harness.

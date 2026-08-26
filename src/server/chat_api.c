@@ -437,12 +437,28 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
         out->reasoning_budget_tokens = v;
         out->reasoning_budget_tokens_set = true;
     }
-    // Explicit boolean overrides (enable_thinking / thinking).
-    const ember_json *et = ember_json_get(root, "enable_thinking");
-    if (!et) et = ember_json_get(root, "thinking");
+    // Explicit overrides. Keep the historical boolean spellings and accept
+    // DeepSeek's current OpenAI-compatible object shape, emitted by Reasonix
+    // v1.31.3 and deepseek-harness
+    // packages/llm/llm-deepseek/src/serialize.ts:343-367
+    // (`thinking.type=enabled|disabled`). `enable_thinking` retains precedence
+    // when a client supplies both fields.
+    const ember_json *enable_thinking =
+        ember_json_get(root, "enable_thinking");
+    const ember_json *thinking = ember_json_get(root, "thinking");
+    const ember_json *et = enable_thinking ? enable_thinking : thinking;
     if (et) {
-        if (et->type != EMBER_JSON_BOOL) goto invalid;
-        out->thinking_enabled = et->u.b;
+        if (et->type == EMBER_JSON_BOOL) {
+            out->thinking_enabled = et->u.b;
+        } else if (!enable_thinking && et->type == EMBER_JSON_OBJECT) {
+            const char *type = ember_json_str(
+                ember_json_get(et, "type"), NULL);
+            if (!type || (strcmp(type, "enabled") && strcmp(type, "disabled")))
+                goto invalid;
+            out->thinking_enabled = strcmp(type, "disabled") != 0;
+        } else {
+            goto invalid;
+        }
         if (!out->thinking_enabled) out->think_mode = EMBER_THINK_NONE;
     }
 

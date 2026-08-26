@@ -157,9 +157,56 @@ def main() -> int:
         require_events(stream, '"role":"assistant"', '"content":"H"',
                        '"usage":{', "data: [DONE]")
 
+        # Reasonix v1.31.3 and DeepSeek Harness's llm-deepseek 0.1.1-rc.2
+        # both use the official DeepSeek Chat Completions thinking object.
+        # The latter's source of record is
+        # packages/llm/llm-deepseek/src/serialize.ts:343-367.
+        deepseek_harness = {
+            "model": "deepseek-v4-flash",
+            "messages": [
+                {"role": "system", "content": "You are a coding agent."},
+                {"role": "user", "content": "Say hello."},
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            }],
+            "temperature": 0.2,
+            "max_tokens": 256_000,
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        code, stream = request(
+            base + "/v1/chat/completions", deepseek_harness)
+        assert code == 200, stream
+        assert isinstance(stream, str), stream
+        require_events(stream, '"role":"assistant"', '"usage":{',
+                       "data: [DONE]")
+
+        invalid_thinking = dict(deepseek_harness)
+        invalid_thinking["stream"] = False
+        invalid_thinking["thinking"] = {"type": "adaptive"}
+        code, body = request(
+            base + "/v1/chat/completions", invalid_thinking)
+        assert code == 400, body
+
         code, models = request(base + "/v1/models")
         assert code == 200, models
         assert models["data"][0]["id"] == "deepseek-v4-flash", models
+
+        code, model = request(base + "/v1/models/deepseek-v4-flash")
+        assert code == 200, model
+        assert "thinking" in model["supported_parameters"], model
 
         print("coding-client compatibility: PASS")
         return 0

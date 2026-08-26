@@ -3714,7 +3714,7 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 "\"tools\",\"tool_choice\",\"max_tokens\",\"temperature\","
                 "\"top_p\",\"top_k\",\"min_p\",\"stop\",\"seed\","
                 "\"stream\",\"parallel_tool_calls\",\"reasoning_effort\","
-                "\"reasoning_budget_tokens\"]}",
+                "\"reasoning_budget_tokens\",\"thinking\"]}",
                 ember_backend_n_ctx(be));
             respond(fd, 200, "application/json", b.ptr);
             ember_buf_free(&b);
