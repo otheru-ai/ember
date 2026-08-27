@@ -188,6 +188,12 @@ def assess(row: dict[str, Any], gates: dict[str, Any], corpus_sha: str) -> dict[
     host_memtotal = row.get("runner_memtotal_bytes")
     if host_memtotal != gates["certification_host_memtotal_bytes"]:
         raise BakeoffError("measurement did not use the pinned OtherU MemTotal")
+    host_gtt_pages = row.get("runner_gtt_pages_limit")
+    if host_gtt_pages != gates["certification_host_gtt_pages_limit"]:
+        raise BakeoffError("measurement did not use the pinned OtherU TTM pages_limit")
+    host_gtt_cap = gates["certification_host_gtt_cap_bytes"]
+    if host_gtt_cap != host_gtt_pages * 4096:
+        raise BakeoffError("pinned OtherU GTT byte cap is inconsistent")
     if row.get("peak_memory_measurement_method") != gates["peak_memory_measurement_method"]:
         raise BakeoffError("measurement lacks the pinned RSS/GTT sampling method")
     peak_rss = row.get("measured_peak_rss_bytes")
@@ -200,7 +206,8 @@ def assess(row: dict[str, Any], gates: dict[str, Any], corpus_sha: str) -> dict[
         raise BakeoffError("accounted UMA peak cannot be smaller than RSS or GTT peak")
     static_total = artifact_bytes + gates["runtime_reserve_bytes"] + enabled_companion_bytes
     fits = (static_total <= gates["device_budget_bytes"]
-            and static_total <= host_memtotal and peak_uma <= host_memtotal)
+            and static_total <= host_memtotal and peak_uma <= host_memtotal
+            and peak_gtt <= host_gtt_cap)
     passes = (fits and prefill_median >= gates["minimum_prefill_median_tps"]
               and decode_median >= gates["minimum_decode_median_tps"])
     result = {"passes": passes, "quality_score": quality,
@@ -210,6 +217,8 @@ def assess(row: dict[str, Any], gates: dict[str, Any], corpus_sha: str) -> dict[
               "enabled_companion_bytes": enabled_companion_bytes,
               "static_accounted_bytes": static_total,
               "runner_memtotal_bytes": host_memtotal,
+              "runner_gtt_pages_limit": host_gtt_pages,
+              "runner_gtt_cap_bytes": host_gtt_cap,
               "measured_peak_rss_bytes": peak_rss,
               "measured_peak_gtt_bytes": peak_gtt,
               "measured_peak_uma_bytes": peak_uma}

@@ -563,10 +563,12 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         or memory_gate.get("device_budget_bytes") != 137438953472
         or memory_gate.get("runtime_reserve_bytes") != 34359738368
         or memory_gate.get("certification_host_memtotal_bytes") != 134297894912
+        or memory_gate.get("certification_host_gtt_pages_limit") != 32505856
+        or memory_gate.get("certification_host_gtt_cap_bytes") != 133143986176
         or memory_gate.get("certification_host_rule")
         != "artifact_bytes + runtime_reserve_bytes + enabled_companion_artifact_bytes <= certification_host_memtotal_bytes"
         or memory_gate.get("companion_artifact_gate_status")
-        != "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt"
+        != "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt_against_124gib_cap"
         or memory_gate.get("rule") != "artifact_bytes + runtime_reserve_bytes <= device_budget_bytes"
         or memory_gate.get("yarn_1m_math_oracle_passed") is not True
         or memory_gate.get("yarn_1m_runtime_certified") is not False
@@ -1115,6 +1117,8 @@ def validate_memory_preflight(value: Any, profile: dict[str, Any]) -> dict[str, 
         )
     result = dict(value)
     result["certification_host_memtotal_bytes"] = certification_memtotal
+    result["certification_host_gtt_pages_limit"] = gate["certification_host_gtt_pages_limit"]
+    result["certification_host_gtt_cap_bytes"] = gate["certification_host_gtt_cap_bytes"]
     result["certification_main_only_total_bytes"] = certification_main_only_total
     result["certification_main_only_headroom_bytes"] = (
         certification_memtotal - certification_main_only_total

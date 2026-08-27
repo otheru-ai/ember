@@ -13,6 +13,12 @@ TiB free; `/srv/models` has only about 295.4 GiB free. The pinned source weight
 inventory is 360,000,192,888 bytes, so both the snapshot and conversion
 workspace belong on the root filesystem.
 
+The live gfx1151 mapping ceiling is slightly smaller than physical memory:
+`/sys/module/ttm/parameters/pages_limit` is 32,505,856 pages, exactly
+133,143,986,176 bytes (124.0 GiB), and `rocminfo` reports the same 124.0 GiB
+global pool. Certification therefore rejects a measured GTT peak above that
+cap even when total UMA remains below `MemTotal`.
+
 Ordinary conversion is not viable on this host: its approximately 204 GB
 intermediate representation exceeds RAM. The bounded path uses the pinned
 llama.cpp converter's `--use-temp-file` mode. That mode cannot split while
@@ -116,7 +122,8 @@ Every row must include at least three prefill and decode samples, audited
 quality and differential results, the exact main/MTP/mmproj artifact byte
 inventory, enabled companions, the exact 134,297,894,912-byte host MemTotal,
 and measured peak RSS, GTT, and deduplicated accounted UMA bytes from the
-runner sampler. The hard medians are 412 tok/s prefill and 39.49 tok/s decode.
+runner sampler, including the exact live TTM `pages_limit`. The hard medians
+are 412 tok/s prefill and 39.49 tok/s decode.
 Both the static artifact-plus-reserve-plus-companion sum and measured UMA peak
 must fit real host MemTotal, which is stricter than the nominal 128 GiB
 architectural budget. The decision remains non-publishing; release packaging

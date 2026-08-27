@@ -50,6 +50,7 @@ class BakeoffTest(unittest.TestCase):
             "companion_artifact_bytes": {"mtp": 2_000_000_000, "vision_mmproj": 901_943_132},
             "enabled_companions": ["mtp", "vision_mmproj"],
             "runner_memtotal_bytes": 134_297_894_912,
+            "runner_gtt_pages_limit": 32_505_856,
             "peak_memory_measurement_method": "runner_rss_gtt_sampler_v1",
             "measured_peak_rss_bytes": 120_000_000_000,
             "measured_peak_gtt_bytes": 100_000_000_000,
@@ -120,6 +121,10 @@ class BakeoffTest(unittest.TestCase):
             recipe["hard_gates"]["device_budget_bytes"]
             - recipe["hard_gates"]["runtime_reserve_bytes"] + 1
         )
+        self.assertFalse(qb.assess(row, recipe["hard_gates"], "a" * 64)["passes"])
+        row = self.measured("x", "sweep", "a" * 64)
+        row["measured_peak_gtt_bytes"] = recipe["hard_gates"]["certification_host_gtt_cap_bytes"] + 1
+        row["measured_peak_uma_bytes"] = row["measured_peak_gtt_bytes"]
         self.assertFalse(qb.assess(row, recipe["hard_gates"], "a" * 64)["passes"])
 
 

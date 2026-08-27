@@ -610,6 +610,10 @@ class QwenQuantizeTests(unittest.TestCase):
                 134297894912,
             )
             self.assertEqual(
+                record["memory_preflight"]["certification_host_gtt_cap_bytes"],
+                133143986176,
+            )
+            self.assertEqual(
                 record["memory_preflight"]["companion_artifact_fit_status"],
                 "pending_mtp_mmproj_inventory",
             )
