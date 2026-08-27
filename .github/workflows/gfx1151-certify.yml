@@ -38,6 +38,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qwen-inspect-control-residue:
+    # Read-only forensic mode for a failed bounded conversion.  It reports
+    # inode metadata and relative names only; it never opens, removes, or
+    # follows a transaction entry.  This lets cleanup policy be derived from
+    # the actual pinned converter rather than widened speculatively.
+    if: startsWith(inputs.release_version, 'qwen-inspect-control-residue')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 10
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+    steps:
+      - name: Inspect exact failed converter TMPDIR metadata without mutation
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          python3 - "$TARGET_SHA" <<'PY'
+          import os, pathlib, stat, sys
+
+          revision = sys.argv[1]
+          root = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next/artifacts")
+          prefix = f".stock-rocmi4-{revision[:12]}.transaction-"
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit("Qwen artifact root is absent or unsafe")
+          transactions = []
+          for child in root.iterdir():
+              if not child.name.startswith(prefix):
+                  continue
+              metadata = child.lstat()
+              if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                  raise SystemExit(f"matching transaction is not a real directory: {child.name}")
+              transactions.append(child)
+          if len(transactions) != 1:
+              raise SystemExit(f"expected one failed transaction, found {len(transactions)}")
+          transaction = transactions[0]
+          private_tmp = transaction / ".converter-tmp"
+          if not private_tmp.is_dir() or private_tmp.is_symlink():
+              raise SystemExit("failed transaction has no safe converter TMPDIR")
+          rows = []
+          for current, directories, files in os.walk(private_tmp, topdown=True, followlinks=False):
+              base = pathlib.Path(current)
+              for name in sorted([*directories, *files]):
+                  path = base / name
+                  metadata = path.lstat()
+                  relative = path.relative_to(private_tmp)
+                  kind = ("symlink" if stat.S_ISLNK(metadata.st_mode) else
+                          "directory" if stat.S_ISDIR(metadata.st_mode) else
+                          "regular" if stat.S_ISREG(metadata.st_mode) else "other")
+                  rows.append((str(relative), kind, stat.S_IMODE(metadata.st_mode),
+                               metadata.st_uid, metadata.st_gid, metadata.st_nlink,
+                               metadata.st_size))
+              if len(rows) > 4096:
+                  raise SystemExit("converter TMPDIR exceeds the bounded diagnostic inventory")
+          print(f"transaction={transaction.name} entries={len(rows)}")
+          for relative, kind, mode, uid, gid, links, size in sorted(rows):
+              print(f"{kind} mode={mode:04o} uid={uid} gid={gid} "
+                    f"nlink={links} size={size} path={relative}")
+          PY
+
   qwen-preflight:
     # Feature-branch research uses the existing release_version input so this
     # branch can be dispatched before a new workflow interface reaches main.
