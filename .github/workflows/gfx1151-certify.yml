@@ -932,3 +932,242 @@ jobs:
             echo
             echo 'This artifact is final-ineligible and exists only for activation capture and bakeoff.'
           } >>"$GITHUB_STEP_SUMMARY"
+
+  qwen-capture-control:
+    # Capture the 48x2560 stock-runtime activation directions from the pinned
+    # OtherU 32+32 extraction corpus.  This consumes the persistent, exact-SHA
+    # control pair built above and emits evidence plus the fixed 4x4 manifest
+    # grid only: it does not quantize, select a winner, upload, or publish.
+    if: startsWith(inputs.release_version, 'qwen-capture-control')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 360
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      QWEN_REVISION: f5d08274bafd880402bd16f5e3e6c514136ec06c
+      OTHERU_REVISION: a3c6a728510f91394e991504951ac316cd3a89af
+      CORPUS_CONTRACT_SHA256: 19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d
+      GOOD_CORPUS_SHA256: a41997529ad28af7234e036f05bd9bca39c504f8ec118568b73699e9b314d140
+      BAD_CORPUS_SHA256: a3bededd14b030fdf06562f6739f879838902f6f4691817573a98bbe9ac6cf7c
+      CAPTURE_RECIPE_SHA256: d0c15c650e1e18ff06069a7db3db843fc7b91b9ea7c730e5794f45a3f529567e
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Pull and bind the exact ROCm 10 development image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          docker_config="$RUNNER_TEMP/qwen-capture-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$docker_config"
+          export DOCKER_CONFIG="$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${TARGET_SHA:0:12}"
+          docker pull "$image"
+          inspect="$RUNNER_TEMP/qwen-capture-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker image inspect "$image" >"$inspect"
+          embedded="$(docker run --rm --entrypoint /bin/sh "$image" -c \
+            'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
+          test "$embedded" = "$TARGET_SHA"
+          docker run --rm --entrypoint /bin/sh "$image" -c \
+            'test -x /usr/local/bin/ember-dflash && test -f /ember/scripts/qwen_capture_control.py'
+          python3 - "$inspect" "$image" "$TARGET_SHA" "$GITHUB_ENV" <<'PY'
+          import json, re, sys
+          inspect_path, image, revision, env_path = sys.argv[1:]
+          rows = json.load(open(inspect_path, encoding="utf-8"))
+          assert isinstance(rows, list) and len(rows) == 1, rows
+          repository = image.rsplit(":", 1)[0]
+          digests = sorted({item.split("@", 1)[1]
+                            for item in rows[0].get("RepoDigests") or []
+                            if item.startswith(repository + "@")})
+          assert len(digests) == 1 and re.fullmatch(r"sha256:[0-9a-f]{64}", digests[0]), digests
+          label = ((rows[0].get("Config") or {}).get("Labels") or {}).get(
+              "org.opencontainers.image.revision")
+          assert label in (None, "", revision), label
+          with open(env_path, "a", encoding="utf-8") as stream:
+              stream.write(f"QWEN_DEV_IMAGE={image}\n")
+              stream.write(f"QWEN_DEV_IMAGE_DIGEST={digests[0]}\n")
+          PY
+
+      - name: Bind the persistent stock control and pinned corpus
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          control_dir="$workspace/artifacts/stock-rocmi4-${TARGET_SHA:0:12}"
+          mtp_dir="$workspace/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}"
+          corpus_dir="/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}"
+          control_record="$control_dir/qwen-quant-build-record.json"
+          mtp_manifest="$mtp_dir/export.json"
+          contract="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-otheru-corpus-contract.json"
+          recipe="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-flash-next-bakeoff.json"
+          for directory in "$workspace" "$control_dir" "$mtp_dir" "$corpus_dir"; do
+            test -d "$directory" && test ! -L "$directory"
+          done
+          for file in "$control_record" "$mtp_manifest" "$contract" "$recipe" \
+              "$corpus_dir/extraction-good.jsonl" "$corpus_dir/extraction-bad.jsonl"; do
+            test -f "$file" && test ! -L "$file"
+          done
+          test "$(sha256sum "$contract" | awk '{print $1}')" = "$CORPUS_CONTRACT_SHA256"
+          test "$(sha256sum "$recipe" | awk '{print $1}')" = "$CAPTURE_RECIPE_SHA256"
+          test "$(sha256sum "$corpus_dir/extraction-good.jsonl" | awk '{print $1}')" = "$GOOD_CORPUS_SHA256"
+          test "$(sha256sum "$corpus_dir/extraction-bad.jsonl" | awk '{print $1}')" = "$BAD_CORPUS_SHA256"
+          artifact_env="$RUNNER_TEMP/qwen-capture-artifacts-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.env"
+          python3 - "$control_record" "$control_dir" "$mtp_manifest" "$mtp_dir" \
+              "$TARGET_SHA" "$artifact_env" <<'PY'
+          import hashlib, json, os, pathlib, re, sys
+          record_path = pathlib.Path(sys.argv[1])
+          control_dir = pathlib.Path(sys.argv[2])
+          mtp_manifest_path = pathlib.Path(sys.argv[3])
+          mtp_dir = pathlib.Path(sys.argv[4])
+          revision, env_path = sys.argv[5:]
+          record = json.loads(record_path.read_text(encoding="utf-8"))
+          experiment = record.get("experiment") or {}
+          build = ((record.get("tools") or {}).get("quantizer_build_info") or {})
+          assert record.get("status") == "complete" and record.get("mode") == "execute", record
+          assert experiment.get("kind") == "stock_control", experiment
+          assert experiment.get("stock_weights_unchanged") is True, experiment
+          assert experiment.get("final_release_eligible") is False, experiment
+          assert build.get("format") == "Q4_0_ROCMI4" and build.get("ggml_tensor_type") == 108, build
+          assert build.get("ember_revision") == revision, build
+          rows = (record.get("output") or {}).get("shards")
+          assert isinstance(rows, list) and rows, rows
+          names = []
+          recorded_parent = None
+          for index, row in enumerate(rows):
+              recorded = pathlib.PurePosixPath(row.get("path", ""))
+              assert recorded.is_absolute() and recorded.name == os.path.basename(str(recorded)), row
+              assert re.fullmatch(r"[A-Za-z0-9._-]+", recorded.name), row
+              assert isinstance(row.get("size_bytes"), int) and row["size_bytes"] > 0, row
+              assert re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", "")), row
+              assert recorded.parent == recorded_parent or recorded_parent is None, row
+              recorded_parent = recorded.parent
+              local = control_dir / recorded.name
+              assert local.is_file() and not local.is_symlink(), local
+              assert local.stat().st_size == row["size_bytes"], (local, row)
+              assert recorded.name not in names, row
+              names.append(recorded.name)
+          first = control_dir / names[0]
+          mtp = json.loads(mtp_manifest_path.read_text(encoding="utf-8"))
+          assert mtp.get("source_revision") == "f5d08274bafd880402bd16f5e3e6c514136ec06c", mtp
+          assert mtp.get("matrix_quant_contract") == "Q4_0_ROCMI4", mtp
+          assert mtp.get("runtime_status") == "loadable quantized companion", mtp
+          mtp_name = pathlib.PurePosixPath(mtp.get("quantized_output", "")).name
+          assert mtp_name == "Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf", mtp
+          mtp_path = mtp_dir / mtp_name
+          assert mtp_path.is_file() and not mtp_path.is_symlink(), mtp_path
+          assert mtp_path.stat().st_size == mtp.get("quantized_bytes"), mtp
+          assert re.fullmatch(r"[0-9a-f]{64}", mtp.get("quantized_sha256", "")), mtp
+          record_sha = hashlib.sha256(record_path.read_bytes()).hexdigest()
+          with open(env_path, "a", encoding="utf-8") as stream:
+              stream.write(f"QWEN_CONTROL_MODEL={first}\n")
+              stream.write(f"QWEN_CONTROL_MODEL_EXPECTED_SHA256={rows[0]['sha256']}\n")
+              stream.write(f"QWEN_CONTROL_RECORD={record_path}\n")
+              stream.write(f"QWEN_CONTROL_RECORD_SHA256={record_sha}\n")
+              stream.write(f"QWEN_MTP_MODEL={mtp_path}\n")
+              stream.write(f"QWEN_MTP_EXPECTED_SHA256={mtp['quantized_sha256']}\n")
+          PY
+          source "$artifact_env"
+          cat "$artifact_env" >>"$GITHUB_ENV"
+          direct_sha256() {
+            dd if="$1" iflag=direct bs=8M status=none | sha256sum | awk '{print $1}'
+          }
+          model_sha="$(direct_sha256 "$QWEN_CONTROL_MODEL")"
+          mtp_sha="$(direct_sha256 "$QWEN_MTP_MODEL")"
+          test "$model_sha" = "$QWEN_CONTROL_MODEL_EXPECTED_SHA256"
+          test "$mtp_sha" = "$QWEN_MTP_EXPECTED_SHA256"
+          output="$workspace/evidence/qwen-capture-control-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$output" && test ! -L "$output"
+          printf 'QWEN_CONTROL_MODEL_SHA256=%s\n' "$model_sha" >>"$GITHUB_ENV"
+          printf 'QWEN_MTP_SHA256=%s\n' "$mtp_sha" >>"$GITHUB_ENV"
+          printf 'QWEN_CAPTURE_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
+          printf 'QWEN_CORPUS_DIR=%s\n' "$corpus_dir" >>"$GITHUB_ENV"
+
+      - name: Record production recovery intent
+        id: qwen-capture-safety
+        run: |
+          set -euo pipefail
+          echo 'restore=no' >>"$GITHUB_OUTPUT"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'restore=yes' >>"$GITHUB_OUTPUT"
+          fi
+          echo 'armed=yes' >>"$GITHUB_OUTPUT"
+
+      - name: Capture stock activations and deterministic intervention manifests
+        run: |
+          set -euo pipefail
+          python3 scripts/qwen_capture_control.py \
+            --image "$QWEN_DEV_IMAGE" \
+            --image-digest "$QWEN_DEV_IMAGE_DIGEST" \
+            --binary /usr/local/bin/ember-dflash \
+            --model "$QWEN_CONTROL_MODEL" \
+            --model-sha256 "$QWEN_CONTROL_MODEL_SHA256" \
+            --control-record "$QWEN_CONTROL_RECORD" \
+            --control-record-sha256 "$QWEN_CONTROL_RECORD_SHA256" \
+            --mtp "$QWEN_MTP_MODEL" \
+            --mtp-sha256 "$QWEN_MTP_SHA256" \
+            --corpus-dir "$QWEN_CORPUS_DIR" \
+            --corpus-contract-sha256 "$CORPUS_CONTRACT_SHA256" \
+            --good-corpus-sha256 "$GOOD_CORPUS_SHA256" \
+            --bad-corpus-sha256 "$BAD_CORPUS_SHA256" \
+            --recipe-sha256 "$CAPTURE_RECIPE_SHA256" \
+            --output-dir "$QWEN_CAPTURE_OUTPUT"
+          python3 - "$QWEN_CAPTURE_OUTPUT/capture-manifest.json" "$TARGET_SHA" \
+              "$QWEN_DEV_IMAGE_DIGEST" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["status"] == "complete", manifest
+          assert manifest["publishes"] is False and manifest["stock_rocmi4_only"] is True, manifest
+          assert manifest["image"]["ember_revision"] == sys.argv[2], manifest
+          assert manifest["image"]["digest"] == sys.argv[3], manifest
+          assert manifest["mtp"]["verified"] is True, manifest
+          assert manifest["mtp"]["loaded_during_capture"] is False, manifest
+          assert manifest["corpus"]["rows"] == {"good": 32, "bad": 32}, manifest
+          assert len(manifest["interventions"]) == 16, manifest
+          PY
+
+      - name: Recover production and release the GPU lock
+        if: ${{ always() && steps.qwen-capture-safety.outputs.armed == 'yes' }}
+        run: |
+          state="$QWEN_CAPTURE_OUTPUT"
+          if [[ -e "$state/.gpu-lock-held" || -e "$state/.production-masked" ]]; then
+            while IFS= read -r container; do
+              name="$(docker inspect --format '{{.Name}}' "$container" 2>/dev/null || true)"
+              if [[ "$name" =~ ^/qwen-capture-control-[0-9]+$ ]]; then
+                docker rm -f "$container" >/dev/null 2>&1 || true
+              fi
+            done < <(docker ps -aq --filter name=qwen-capture-control- 2>/dev/null || true)
+          fi
+          if [[ -e "$state/.production-masked" ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production unmask || true
+          fi
+          if [[ -e "$state/.production-was-active" ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production start || true
+          fi
+          if [[ -e "$state/.gpu-lock-held" ]]; then
+            sudo -n /usr/local/sbin/ember-gpu-lock release || true
+          fi
+
+      - name: Remove temporary registry credentials
+        if: ${{ always() && env.DOCKER_CONFIG != '' }}
+        run: |
+          rm -f -- "$DOCKER_CONFIG/config.json"
+          rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+
+      - name: Record the stock activation-capture result
+        if: ${{ success() }}
+        run: |
+          {
+            echo '## Qwen stock activation capture passed'
+            echo
+            echo "Ember SHA: \`$TARGET_SHA\`"
+            echo "Image digest: \`$QWEN_DEV_IMAGE_DIGEST\`"
+            echo "Evidence: \`$QWEN_CAPTURE_OUTPUT\`"
+            echo
+            echo 'Generated 16 unselected intervention manifests. No artifact was quantized or published.'
+          } >>"$GITHUB_STEP_SUMMARY"

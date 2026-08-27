@@ -303,6 +303,54 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn(command, control)
         self.assertGreaterEqual(control.count("if: ${{ always()"), 4)
 
+    def test_qwen_stock_capture_is_digest_bound_no_clobber_and_nonpublishing(self) -> None:
+        certify = GITHUB_CERTIFY.read_text()
+        self.assertIn("qwen-capture-control:", certify)
+        capture = certify.split("\n  qwen-capture-control:", 1)[1]
+        self.assertIn("startsWith(inputs.release_version, 'qwen-capture-control')", capture)
+        self.assertIn(":dev-sha-${TARGET_SHA:0:12}", capture)
+        self.assertIn("QWEN_DEV_IMAGE_DIGEST", capture)
+        self.assertIn("EMBER_CONFIGURED_GIT_HEAD:STRING", capture)
+        self.assertIn("test \"$(git rev-parse HEAD)\" = \"$TARGET_SHA\"", capture)
+        self.assertIn(
+            "/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}", capture,
+        )
+        for digest in (
+            "19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d",
+            "a41997529ad28af7234e036f05bd9bca39c504f8ec118568b73699e9b314d140",
+            "a3bededd14b030fdf06562f6739f879838902f6f4691817573a98bbe9ac6cf7c",
+            "d0c15c650e1e18ff06069a7db3db843fc7b91b9ea7c730e5794f45a3f529567e",
+        ):
+            self.assertIn(digest, capture)
+        self.assertIn("qwen-quant-build-record.json", capture)
+        self.assertIn("(record.get(\"output\") or {}).get(\"shards\")", capture)
+        self.assertIn("names[0]", capture)
+        self.assertIn("quantized_sha256", capture)
+        self.assertIn("dd if=\"$1\" iflag=direct", capture)
+        self.assertIn("scripts/qwen_capture_control.py", capture)
+        self.assertIn("--image-digest \"$QWEN_DEV_IMAGE_DIGEST\"", capture)
+        self.assertIn("--mtp-sha256 \"$QWEN_MTP_SHA256\"", capture)
+        self.assertIn("test ! -e \"$output\" && test ! -L \"$output\"", capture)
+        self.assertIn("$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", capture)
+        self.assertIn("publishes", capture)
+        self.assertIn("len(manifest[\"interventions\"]) == 16", capture)
+        for command in (
+            "ember-gpu-lock release", "ember-cert-production unmask",
+            "ember-cert-production start",
+        ):
+            self.assertIn(command, capture)
+        self.assertIn("if: ${{ always() && steps.qwen-capture-safety", capture)
+        self.assertIn("^/qwen-capture-control-[0-9]+$", capture)
+        self.assertIn(".gpu-lock-held", capture)
+        self.assertIn(".production-masked", capture)
+        self.assertIn(".production-was-active", capture)
+        self.assertIn("Remove temporary registry credentials", capture)
+        for forbidden in (
+            "qwen_quantize.py", "docker push", "gh release", "huggingface-cli",
+            "actions/upload-artifact", "--execute",
+        ):
+            self.assertNotIn(forbidden, capture)
+
     def test_release_build_caches_are_persistent_and_bounded(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         forgejo_ci = FORGEJO_CI.read_text()

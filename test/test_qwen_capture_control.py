@@ -213,6 +213,23 @@ class QwenCaptureControlTest(unittest.TestCase):
         ])
         self.assertFalse(exclusive.masked or exclusive.restore_service or exclusive.locked)
 
+    def test_durable_recovery_markers_track_only_owned_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            exclusive = capture.ExclusiveGPU(directory)
+
+            def fake_sudo(_wrapper: Path, _action: str, *, check: bool = True):
+                del check
+                return subprocess.CompletedProcess([], 0)
+
+            with mock.patch.object(capture.ExclusiveGPU, "sudo", side_effect=fake_sudo):
+                exclusive.acquire()
+                self.assertTrue((directory / ".gpu-lock-held").is_file())
+                self.assertTrue((directory / ".production-was-active").is_file())
+                self.assertTrue((directory / ".production-masked").is_file())
+                exclusive.restore()
+            self.assertFalse(any(directory.iterdir()))
+
     def test_source_keeps_mtp_off_and_sweep_final_unopened(self) -> None:
         body = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('"-e", "DFLASH_QWEN_MTP="', body)

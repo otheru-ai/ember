@@ -266,10 +266,32 @@ def request_capture(port: int, body: dict[str, Any]) -> None:
 
 
 class ExclusiveGPU:
-    def __init__(self) -> None:
+    def __init__(self, state_dir: Path | None = None) -> None:
         self.locked = False
         self.masked = False
         self.restore_service = False
+        self.state_dir = state_dir
+
+    def marker(self, name: str) -> Path | None:
+        return self.state_dir / name if self.state_dir is not None else None
+
+    def mark(self, name: str) -> None:
+        path = self.marker(name)
+        if path is None:
+            return
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        qwen_quantize.fsync_directory(path.parent)
+
+    def clear_mark(self, name: str) -> None:
+        path = self.marker(name)
+        if path is None:
+            return
+        path.unlink(missing_ok=True)
+        qwen_quantize.fsync_directory(path.parent)
 
     @staticmethod
     def sudo(wrapper: Path, action: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -281,11 +303,14 @@ class ExclusiveGPU:
     def acquire(self) -> None:
         self.sudo(GPU_LOCK, "acquire")
         self.locked = True
+        self.mark(".gpu-lock-held")
         if self.sudo(PRODUCTION, "is-active", check=False).returncode == 0:
             self.restore_service = True
+            self.mark(".production-was-active")
             self.sudo(PRODUCTION, "stop")
         self.sudo(PRODUCTION, "mask")
         self.masked = True
+        self.mark(".production-masked")
 
     @staticmethod
     def retry(wrapper: Path, action: str) -> bool:
@@ -300,16 +325,19 @@ class ExclusiveGPU:
         if self.masked:
             if self.retry(PRODUCTION, "unmask"):
                 self.masked = False
+                self.clear_mark(".production-masked")
             else:
                 failures.append("unmask production")
         if self.restore_service:
             if not self.masked and self.retry(PRODUCTION, "start"):
                 self.restore_service = False
+                self.clear_mark(".production-was-active")
             else:
                 failures.append("restart production")
         if self.locked:
             if self.retry(GPU_LOCK, "release"):
                 self.locked = False
+                self.clear_mark(".gpu-lock-held")
             else:
                 failures.append("release GPU lock")
         if failures:
@@ -604,7 +632,10 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     )
     combined = args.output_dir / "activations-64x48x2560.f32"
     container = f"qwen-capture-control-{os.getpid()}"
-    exclusive = ExclusiveGPU()
+    # Durable ownership markers let the outer certification workflow recover
+    # after a runner-level kill, while successful in-process cleanup removes
+    # every marker.  Recovery therefore never releases another job's lock.
+    exclusive = ExclusiveGPU(args.output_dir)
     capture_error: BaseException | None = None
 
     def interrupted(signum: int, _frame: Any) -> None:
