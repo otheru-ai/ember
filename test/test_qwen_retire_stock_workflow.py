@@ -115,9 +115,11 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         )
         self.assertIn("stock directory does not match the independent artifact revision", body)
         self.assertIn(
-            'capture_value.get("image", {}).get("ember_revision") != stock_artifact_revision',
-            body,
+            'model.get("quantizer_ember_revision") != stock_artifact_revision', body,
         )
+        self.assertIn('runtime_revision != capture_tool_revision', body)
+        self.assertIn('"artifact-to-capture-runtime"', body)
+        self.assertIn('"capture-runtime-to-retirement"', body)
         self.assertIn('"stock_artifact": {"revision": stock_artifact_revision}', body)
         self.assertIn('"stock_artifact_revision": stock_artifact_revision', body)
 

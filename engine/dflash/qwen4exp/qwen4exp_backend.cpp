@@ -124,6 +124,10 @@ Qwen4ExpBackend::Qwen4ExpBackend(const Qwen4ExpBackendConfig & config)
 Qwen4ExpBackend::~Qwen4ExpBackend() { shutdown(); }
 
 bool Qwen4ExpBackend::init() {
+    // Backend construction is retried in some embedding processes. Clear a
+    // prior architecture's diagnostic so every false return below owns the
+    // message observed by the factory and C ABI bridge.
+    set_last_error("");
     if (!config_.model_path || !config_.model_path[0]) {
         set_last_error("Qwen4Exp model path is empty");
         return false;
@@ -148,7 +152,9 @@ bool Qwen4ExpBackend::init() {
     if (!load_qwen4exp_gguf(config_.model_path, backend_, max_ctx,
                             config_.enable_yarn,
                             weights_, error)) {
-        set_last_error(error);
+        set_last_error("Qwen4Exp model load failed: " +
+                       (error.empty() ? std::string("no loader diagnostic")
+                                      : error));
         return false;
     }
     state_budget_bytes_ = weights_.state_budget_bytes;
@@ -164,7 +170,9 @@ bool Qwen4ExpBackend::init() {
             return false;
         }
         if (!load_qwen4exp_mtp_gguf(mtp_path, backend_, mtp_weights_, error)) {
-            set_last_error(error);
+            set_last_error("Qwen4Exp MTP load failed: " +
+                           (error.empty() ? std::string("no loader diagnostic")
+                                          : error));
             return false;
         }
         const Qwen4ExpMemoryPlan target_plan = qwen4exp_memory_plan(
@@ -182,7 +190,9 @@ bool Qwen4ExpBackend::init() {
         }
         state_budget_bytes_ -= mtp_weights_.resident_weight_bytes;
         if (!qwen4exp_frontier_mtp_create(mtp_weights_, error)) {
-            set_last_error(error);
+            set_last_error("Qwen4Exp MTP frontier initialization failed: " +
+                           (error.empty() ? std::string("no frontier diagnostic")
+                                          : error));
             return false;
         }
     }

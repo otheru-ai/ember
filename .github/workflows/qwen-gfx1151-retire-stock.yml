@@ -106,7 +106,7 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Bind exact source, image, paths, capture, and deletion scope
         env:
@@ -191,7 +191,7 @@ jobs:
               "$QWEN_CAPTURE_MANIFEST" "$QWEN_CAPTURE_MANIFEST_SHA256" \
               "$QWEN_RETIRE_AUTHORIZATION" "$workflow_authorization" \
               "$GITHUB_ACTOR" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
-          import hashlib, json, os, pathlib, re, stat, sys
+          import hashlib, json, os, pathlib, re, stat, subprocess, sys
 
           (revision, stock_artifact_revision, image, image_digest, workset_raw,
            stock_raw, record_digest,
@@ -257,15 +257,29 @@ jobs:
                   or experiment.get("kind") != "stock_control"
                   or experiment.get("stock_weights_unchanged") is not True):
               raise SystemExit("retirement target is not one completed unchanged stock control")
+          capture_tool_revision = capture_value.get("capture_tool", {}).get("ember_revision")
+          runtime_revision = capture_value.get("image", {}).get("ember_revision")
           if (capture_value.get("schema") != "ember.qwen3.8.stock-control-activation-capture.v1"
                   or capture_value.get("status") != "complete"
                   or capture_value.get("stock_rocmi4_only") is not True
                   or capture_value.get("publishes") is not False
-                  or capture_value.get("image", {}).get("ember_revision") != stock_artifact_revision):
+                  or not re.fullmatch(r"[0-9a-f]{40}", str(capture_tool_revision))
+                  or runtime_revision != capture_tool_revision):
               raise SystemExit("capture is not a completed non-publishing stock-only capture")
           model = capture_value.get("model")
-          if not isinstance(model, dict) or model.get("build_record_sha256") != record_digest:
+          if (not isinstance(model, dict)
+                  or model.get("build_record_sha256") != record_digest
+                  or model.get("quantizer_ember_revision") != stock_artifact_revision):
               raise SystemExit("capture does not bind the exact stock build record")
+          for ancestor, descendant, label in (
+              (stock_artifact_revision, runtime_revision, "artifact-to-capture-runtime"),
+              (runtime_revision, revision, "capture-runtime-to-retirement"),
+          ):
+              check = subprocess.run(
+                  ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              if check.returncode != 0:
+                  raise SystemExit(f"invalid Ember revision ancestry: {label}")
           rows = (record.get("output") or {}).get("shards")
           captured_rows = model.get("shards")
           if not isinstance(rows, list) or not rows or not isinstance(captured_rows, list):

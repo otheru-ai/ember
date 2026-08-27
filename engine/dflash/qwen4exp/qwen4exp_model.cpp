@@ -299,27 +299,24 @@ bool metadata_value_equal(const gguf_context * left, int64_t left_id,
     return bytes != 0 && a && b && std::memcmp(a, b, bytes) == 0;
 }
 
-bool invariant_metadata_equal(const gguf_context * reference,
-                              const gguf_context * candidate,
-                              std::string & error) {
-    size_t reference_count = 0;
-    size_t candidate_count = 0;
-    for (int64_t i = 0; i < gguf_get_n_kv(reference); ++i) {
-        if (!is_split_key(gguf_get_key(reference, i))) ++reference_count;
-    }
+bool continuation_metadata_matches_reference(
+        const gguf_context * reference, const gguf_context * candidate,
+        std::string & error) {
+    // Pinned llama.cpp writes the complete model metadata only to shard zero.
+    // Ember's streaming quantizer copies each input shard, so continuations
+    // retain only the split locators plus quantization/mode evidence. Treat
+    // shard zero as authoritative while requiring every repeated continuation
+    // key to exist there with a byte-exact value. This accepts both canonical
+    // first-only metadata and older fully replicated sets, but never an
+    // injected or contradictory continuation value.
     for (int64_t i = 0; i < gguf_get_n_kv(candidate); ++i) {
-        if (!is_split_key(gguf_get_key(candidate, i))) ++candidate_count;
-    }
-    if (reference_count != candidate_count) {
-        error = "inconsistent invariant GGUF metadata key inventory across shards";
-        return false;
-    }
-    for (int64_t i = 0; i < gguf_get_n_kv(reference); ++i) {
-        const char * key = gguf_get_key(reference, i);
+        const char * key = gguf_get_key(candidate, i);
         if (is_split_key(key)) continue;
-        const int64_t other = key ? gguf_find_key(candidate, key) : -1;
-        if (other < 0 || !metadata_value_equal(reference, i, candidate, other)) {
-            error = "inconsistent invariant GGUF metadata across shards: " +
+        const int64_t authoritative = key ? gguf_find_key(reference, key) : -1;
+        if (authoritative < 0 ||
+            !metadata_value_equal(reference, authoritative, candidate, i)) {
+            error = "Qwen4Exp continuation metadata differs from "
+                    "authoritative shard: " +
                     std::string(key ? key : "(null)");
             return false;
         }
@@ -419,7 +416,8 @@ bool load_metadata_set(const std::vector<std::string> & paths,
             declared_tensors = split.tensors;
         }
         if (shard_index != 0 &&
-            !invariant_metadata_equal(shards.front()->gguf, shard->gguf, error)) {
+            !continuation_metadata_matches_reference(
+                shards.front()->gguf, shard->gguf, error)) {
             return false;
         }
 

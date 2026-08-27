@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "common/backend_factory.h"
+#include "common/errors.h"
 #include "common/model_backend.h"
 #include "common/resident_batch_coordinator.h"
 #include "common/sampler.h"
@@ -488,7 +489,10 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
 
     b->be = dflash::common::create_backend(args);
     if (!b->be) {
-        if (err) *err = c_err("create_backend failed");
+        const char *detail = dflash::common::last_error();
+        if (err) *err = c_err(detail && detail[0]
+                                 ? detail
+                                 : "create_backend failed without diagnostic");
         return nullptr;
     }
 

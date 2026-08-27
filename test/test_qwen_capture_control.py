@@ -33,6 +33,7 @@ def file_sha(path: Path) -> str:
 def dry_args(output: str = "/tmp/qwen-capture-control-never-created") -> list[str]:
     return [
         "--dry-run", "--tool-revision", "0" * 40,
+        "--artifact-revision", "2" * 40,
         "--image", "ember:exact",
         "--image-digest", f"sha256:{HEX}",
         "--model", "/models/control-00001-of-00002.gguf", "--model-sha256", HEX,
@@ -72,6 +73,12 @@ class QwenCaptureControlTest(unittest.TestCase):
         self.assertIn('log="$QWEN_CAPTURE_OUTPUT/activation-container.log"', body)
         self.assertIn('[[ -f "$log" && ! -L "$log" ]]', body)
         self.assertIn('tail -c 1048576 -- "$log"', body)
+        self.assertIn('dev-sha-${CAPTURE_TOOL_SHA:0:12}', body)
+        self.assertIn('--artifact-revision "$TARGET_SHA"', body)
+        self.assertIn('manifest["model"]["quantizer_ember_revision"]', body)
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("image_revision != args.tool_revision", script)
+        self.assertIn("record_revision != args.artifact_revision", script)
 
     def test_gpu_groups_are_numeric_device_gids_not_image_names(self) -> None:
         body = SCRIPT.read_text(encoding="utf-8")
@@ -97,6 +104,7 @@ class QwenCaptureControlTest(unittest.TestCase):
     def test_invalid_identity_or_path_fails_before_side_effects(self) -> None:
         cases = [
             ["bad" if item == f"sha256:{HEX}" else item for item in dry_args()],
+            ["bad" if item == "2" * 40 else item for item in dry_args()],
             ["relative.gguf" if item == "/models/mtp.gguf" else item for item in dry_args()],
             [*dry_args(), "--port", "80"],
         ]

@@ -32,7 +32,10 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
         config.enable_yarn = args.qwen_yarn;
         auto backend = std::make_unique<Qwen4ExpBackend>(config);
         if (!backend->init()) {
-            std::fprintf(stderr, "[ember] Qwen4ExpBackend init failed\n");
+            const char * diagnostic = last_error();
+            std::fprintf(stderr, "[ember] Qwen4ExpBackend init failed: %s\n",
+                         diagnostic && diagnostic[0]
+                             ? diagnostic : "no backend diagnostic");
             return nullptr;
         }
         return backend;
@@ -56,7 +59,10 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
 
     auto backend = std::make_unique<DeepSeek4Backend>(cfg);
     if (!backend->init()) {
-        std::fprintf(stderr, "[ember] DeepSeek4Backend init failed\n");
+        const char * diagnostic = last_error();
+        std::fprintf(stderr, "[ember] DeepSeek4Backend init failed: %s\n",
+                     diagnostic && diagnostic[0]
+                         ? diagnostic : "no backend diagnostic");
         return nullptr;
     }
     return backend;

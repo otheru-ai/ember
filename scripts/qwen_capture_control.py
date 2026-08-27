@@ -622,6 +622,7 @@ def generate_manifests(
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tool-revision", required=True)
+    parser.add_argument("--artifact-revision", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--binary", default="/usr/local/bin/ember-dflash")
@@ -648,6 +649,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def validate_syntax(args: argparse.Namespace) -> None:
     if re.fullmatch(r"[0-9a-f]{40}", args.tool_revision) is None:
         raise CaptureError("--tool-revision must be a full lowercase Ember commit")
+    if re.fullmatch(r"[0-9a-f]{40}", args.artifact_revision) is None:
+        raise CaptureError("--artifact-revision must be a full lowercase Ember commit")
     require_digest(args.image_digest, "--image-digest", prefixed=True)
     for name in (
         "model_sha256", "control_record_sha256", "mtp_sha256",
@@ -669,6 +672,7 @@ def validate_syntax(args: argparse.Namespace) -> None:
 def print_plan(args: argparse.Namespace) -> None:
     print("plan:")
     print(f"  capture tooling   {args.tool_revision}")
+    print(f"  artifact tooling  {args.artifact_revision}")
     print(f"  Ember image       {args.image}")
     print(f"  image digest      {args.image_digest}")
     print(f"  stock model       {args.model}")
@@ -711,6 +715,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     image_revision = image_identity(
         args.image, args.image_digest, args.output_dir / "image-inspect.json"
     )
+    if image_revision != args.tool_revision:
+        raise CaptureError("capture tool and runtime image revisions differ")
     run_checked([
         "docker", "run", "--rm", "--entrypoint", "/bin/sh", args.image,
         "-c", 'test -x "$1"', "qwen-capture-control-preflight", args.binary,
@@ -721,8 +727,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     record_revision = ((record.get("tools") or {}).get("quantizer_build_info") or {}).get(
         "ember_revision"
     )
-    if record_revision != image_revision:
-        raise CaptureError("stock-control model and Ember image revisions differ")
+    if record_revision != args.artifact_revision:
+        raise CaptureError("stock-control model revision does not match --artifact-revision")
     for row in shards:
         if direct_sha256(row["path"]) != row["sha256"]:
             raise CaptureError(f"stock-control shard digest mismatch: {row['path']}")
@@ -819,6 +825,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "model": {
             "primary_path": args.model.name, "primary_sha256": args.model_sha256,
             "build_record_sha256": args.control_record_sha256,
+            "quantizer_ember_revision": record_revision,
             "shards": [{"filename": row["path"].name, "sha256": row["sha256"],
                         "size_bytes": row["size_bytes"]} for row in shards],
         },

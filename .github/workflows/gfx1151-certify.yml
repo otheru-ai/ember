@@ -1320,7 +1320,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Pull and bind the exact ROCm 10 development image
+      - name: Pull and bind the capture-runtime ROCm 10 development image
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -1334,16 +1334,16 @@ jobs:
           export DOCKER_CONFIG="$docker_config"
           printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${TARGET_SHA:0:12}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${CAPTURE_TOOL_SHA:0:12}"
           docker pull "$image"
           inspect="$RUNNER_TEMP/qwen-capture-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           docker image inspect "$image" >"$inspect"
           embedded="$(docker run --rm --entrypoint /bin/sh "$image" -c \
             'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
-          test "$embedded" = "$TARGET_SHA"
+          test "$embedded" = "$CAPTURE_TOOL_SHA"
           docker run --rm --entrypoint /bin/sh "$image" -c \
             'test -x /usr/local/bin/ember-dflash && test -f /ember/scripts/qwen_capture_control.py'
-          python3 - "$inspect" "$image" "$TARGET_SHA" "$GITHUB_ENV" <<'PY'
+          python3 - "$inspect" "$image" "$CAPTURE_TOOL_SHA" "$GITHUB_ENV" <<'PY'
           import json, re, sys
           inspect_path, image, revision, env_path = sys.argv[1:]
           rows = json.load(open(inspect_path, encoding="utf-8"))
@@ -1515,6 +1515,7 @@ jobs:
           set -euo pipefail
           python3 scripts/qwen_capture_control.py \
             --tool-revision "$CAPTURE_TOOL_SHA" \
+            --artifact-revision "$TARGET_SHA" \
             --image "$QWEN_DEV_IMAGE" \
             --image-digest "$QWEN_DEV_IMAGE_DIGEST" \
             --binary /usr/local/bin/ember-dflash \
@@ -1531,14 +1532,15 @@ jobs:
             --recipe-sha256 "$CAPTURE_RECIPE_SHA256" \
             --output-dir "$QWEN_CAPTURE_OUTPUT"
           python3 - "$QWEN_CAPTURE_OUTPUT/capture-manifest.json" "$TARGET_SHA" \
-              "$QWEN_DEV_IMAGE_DIGEST" <<'PY'
+              "$CAPTURE_TOOL_SHA" "$QWEN_DEV_IMAGE_DIGEST" <<'PY'
           import json, os, sys
           manifest = json.load(open(sys.argv[1], encoding="utf-8"))
           assert manifest["status"] == "complete", manifest
           assert manifest["publishes"] is False and manifest["stock_rocmi4_only"] is True, manifest
           assert manifest["capture_tool"]["ember_revision"] == os.environ["CAPTURE_TOOL_SHA"], manifest
-          assert manifest["image"]["ember_revision"] == sys.argv[2], manifest
-          assert manifest["image"]["digest"] == sys.argv[3], manifest
+          assert manifest["model"]["quantizer_ember_revision"] == sys.argv[2], manifest
+          assert manifest["image"]["ember_revision"] == sys.argv[3], manifest
+          assert manifest["image"]["digest"] == sys.argv[4], manifest
           assert manifest["mtp"]["verified"] is True, manifest
           assert manifest["mtp"]["loaded_during_capture"] is False, manifest
           assert manifest["corpus"]["rows"] == {"good": 32, "bad": 32}, manifest

@@ -58,7 +58,10 @@ void write_byte(const std::filesystem::path & path) {
 void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
                      uint16_t split_count, int32_t tensor_count,
                      const char * tensor_name, const char * invariant,
-                     bool include_tensor_data = true) {
+                     bool include_tensor_data = true,
+                     bool full_metadata = true,
+                     bool stock_metadata = false,
+                     bool injected_metadata = false) {
     ggml_init_params model_params{
         /*.mem_size=*/1024 * 1024,
         /*.mem_buffer=*/nullptr,
@@ -67,8 +70,21 @@ void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
     ggml_context * model = ggml_init(model_params);
     gguf_context * gguf = gguf_init_empty();
     if (!model || !gguf) std::abort();
-    gguf_set_val_str(gguf, "general.architecture", "qwen4exp");
-    gguf_set_val_str(gguf, "test.invariant", invariant);
+    if (full_metadata) {
+        gguf_set_val_str(gguf, "general.architecture", "qwen4exp");
+        gguf_set_val_str(gguf, "test.invariant", invariant);
+    }
+    if (stock_metadata) {
+        gguf_set_val_u32(gguf, "general.quantization_version", 2);
+        gguf_set_val_u32(gguf, "general.file_type", 118);
+        gguf_set_val_str(gguf, "ember.intervention.kind", "none_control");
+        gguf_set_val_str(
+            gguf, "ember.intervention.release_eligibility",
+            "control_only_requires_manifest_for_release");
+    }
+    if (injected_metadata) {
+        gguf_set_val_str(gguf, "test.injected", "not-authoritative");
+    }
     gguf_set_val_u16(gguf, "split.no", split_no);
     gguf_set_val_u16(gguf, "split.count", split_count);
     gguf_set_val_i32(gguf, "split.tensors.count", tensor_count);
@@ -190,7 +206,38 @@ int main() {
         std::string error;
         CHECK(!validate_qwen4exp_gguf(first.c_str(), error) &&
                   error.find("test.invariant") != std::string::npos,
-              "invariant metadata must match exactly across shards");
+              "repeated invariant metadata must match exactly across shards");
+    }
+    {
+        TempDir dir;
+        const auto first = shard(dir, 1, 8);
+        write_tiny_gguf(first, 0, 8, 8, "one.weight", "authoritative",
+                        true, true, true);
+        for (int number = 2; number <= 8; ++number) {
+            const std::string tensor = "tensor." + std::to_string(number);
+            write_tiny_gguf(shard(dir, number, 8),
+                            static_cast<uint16_t>(number - 1), 8, 8,
+                            tensor.c_str(), "unused", true, false, true);
+        }
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(first.c_str(), error) &&
+                  error.find("continuation metadata differs") ==
+                      std::string::npos &&
+                  error.find("qwen4exp.context_length") != std::string::npos,
+              "canonical eight-shard stock metadata reaches model validation");
+    }
+    {
+        TempDir dir;
+        const auto first = shard(dir, 1, 2);
+        const auto second = shard(dir, 2, 2);
+        write_tiny_gguf(first, 0, 2, 2, "one.weight", "authoritative",
+                        true, true, true);
+        write_tiny_gguf(second, 1, 2, 2, "two.weight", "unused", true,
+                        false, true, true);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(first.c_str(), error) &&
+                  error.find("test.injected") != std::string::npos,
+              "continuation metadata absent from shard one fails closed");
     }
     {
         TempDir dir;
