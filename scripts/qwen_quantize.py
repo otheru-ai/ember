@@ -2420,9 +2420,12 @@ def planned_commands(
     if convert is not None and unsplit is not None:
         convert.append("--use-temp-file")
         assert args.gguf_splitter is not None
+        # llama_split_path() appends -NNNNN-of-NNNNN.gguf to the literal
+        # output prefix.  Passing our discovery base's .gguf suffix would
+        # therefore create *.gguf-00001-of-NNNNN.gguf, which is undiscoverable.
         split = [
             str(args.gguf_splitter.resolve()), "--split-max-size",
-            args.split_max_size, str(unsplit), str(intermediate),
+            args.split_max_size, str(unsplit), str(intermediate.with_suffix("")),
         ]
     elif convert is not None and args.split_max_size != "0":
         convert.extend(["--split-max-size", args.split_max_size])

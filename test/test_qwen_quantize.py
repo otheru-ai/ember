@@ -274,7 +274,9 @@ class Fixture:
             f"else:\n sources={[str(path) for path in self.intermediate_split]!r}\n"
             " out=pathlib.Path(sys.argv[-1])\n"
             " for index,source in enumerate(sources,1):\n"
-            "  shutil.copyfile(source,out.with_name(f'{out.stem}-{index:05d}-of-00002.gguf'))\n",
+            # Pinned llama.cpp's llama_split_path appends the shard suffix to
+            # the complete output prefix; it does not strip a .gguf suffix.
+            "  shutil.copyfile(source,out.with_name(f'{out.name}-{index:05d}-of-00002.gguf'))\n",
             encoding="utf-8",
         )
         self.gguf_splitter.chmod(self.gguf_splitter.stat().st_mode | stat.S_IXUSR)
@@ -868,6 +870,11 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertEqual(
                 record["commands"]["split"][1:3], ["--split-max-size", "48G"]
             )
+            self.assertEqual(
+                record["commands"]["split"][-1],
+                str((fixture.root / "work" / "Qwen3.8-Flash-Next-BF16").resolve()),
+            )
+            self.assertFalse(record["commands"]["split"][-1].endswith(".gguf"))
             self.assertFalse(record["conversion_memory"]["full_in_memory_tensor_registry"])
             self.assertEqual(
                 record["conversion_memory"]["target_measurement_status"],
