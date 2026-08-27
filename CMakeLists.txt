@@ -611,6 +611,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_intervention.py)
   set_tests_properties(qwen_intervention PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_capture_control
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_capture_control.py)
+  set_tests_properties(qwen_capture_control PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_mtp_export
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_mtp_export.py)
