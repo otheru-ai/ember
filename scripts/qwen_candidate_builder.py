@@ -277,7 +277,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                         "ple_ggml_tensor_type": 0,
                         "mmproj": {"outtype": "bf16", "converter_option": "--mmproj"},
                         "gguf_writer_temp_cleanup": {
-                            "policy": "exact_converter_private_tmp_residue_v2",
+                            "policy": "exact_converter_private_tmp_residue_v3",
                             "main_removed": main_temp_cleanup,
                             "mmproj_removed": mmproj_temp_cleanup,
                         },
@@ -323,9 +323,8 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
         arm = quant.validated_quantization_arms(profile).get(args.quantization_arm)
     if arm is None:
         raise BuilderError("--quantization-arm must name the default or a declared bakeoff arm")
-    matrix = quant.expected_mtp_matrix_contract(arm)
-    if matrix != args.mtp_matrix_quant_contract:
-        raise BuilderError("MTP matrix contract differs from the selected quantization arm")
+    matrix = quant.selected_mtp_matrix_contract(
+        profile, arm, args.mtp_matrix_quant_contract)
     # Cache validation itself needs full tool provenance and is performed by the
     # build command.  Here the out-of-band manifest digest binds the exact cache
     # and the companion files are independently hashed and structurally checked.
@@ -445,6 +444,7 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             "--bf16-cache-manifest-sha256", args.bf16_cache_manifest_sha256,
             "--companion-inventory", str(args.companion_inventory),
             "--companion-inventory-sha256", args.companion_inventory_sha256,
+            "--mtp-matrix-quant-contract", args.mtp_matrix_quant_contract,
             "--ttm-pages-limit-path", str(args.ttm_pages_limit_path),
             "--quantization-arm", args.quantization_arm,
             "--threads", str(args.threads), "--min-free-gib", str(args.min_free_gib),
@@ -785,6 +785,8 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--bf16-cache-manifest-sha256", required=True)
     build.add_argument("--companion-inventory", type=Path, required=True)
     build.add_argument("--companion-inventory-sha256", required=True)
+    build.add_argument("--mtp-matrix-quant-contract", required=True,
+                       choices=("Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"))
     build.add_argument("--ttm-pages-limit-path", type=Path,
                        default=Path("/sys/module/ttm/parameters/pages_limit"))
     build.add_argument("--quantization-arm", required=True)

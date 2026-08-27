@@ -460,7 +460,7 @@ def validate_bf16_cache_manifest(
         raise PipelineError("BF16 cache conversion recipe is not canonical")
     if (not isinstance(cleanup, dict)
             or set(cleanup) != {"policy", "main_removed", "mmproj_removed"}
-            or cleanup.get("policy") != "exact_converter_private_tmp_residue_v2"):
+            or cleanup.get("policy") != "exact_converter_private_tmp_residue_v3"):
         raise PipelineError("BF16 cache lacks its exact GGUFWriter temp cleanup evidence")
     for label in ("main_removed", "mmproj_removed"):
         rows = cleanup.get(label)
@@ -601,12 +601,27 @@ def expected_mtp_matrix_contract(quantization_arm: dict[str, Any]) -> str:
     return contract
 
 
+def selected_mtp_matrix_contract(
+    profile: dict[str, Any], quantization_arm: dict[str, Any], requested: str | None,
+) -> str:
+    contract = requested or expected_mtp_matrix_contract(quantization_arm)
+    bakeoff = profile.get("quantization", {}).get("performance_bakeoff", {})
+    supported = bakeoff.get("supported_mtp_matrix_contracts")
+    if (bakeoff.get("mtp_pairing_policy") !=
+            "arm mtp_matrix_quant_contract is the build default only; the release bakeoff independently cross-pairs exact ROCMI4 and ROCmFP4 FAST companions"
+            or supported != ["Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"]
+            or contract not in supported):
+        raise PipelineError("requested MTP matrix contract is not supported by the cross-pair policy")
+    return contract
+
+
 def validate_companion_inventory(
     path: Path | None,
     expected_inventory_sha256: str | None,
     pages_limit_path: Path,
     profile: dict[str, Any],
     quantization_arm: dict[str, Any],
+    requested_mtp_matrix_contract: str | None = None,
 ) -> dict[str, Any]:
     """Bind exact enabled companion bytes; absence is explicitly non-final."""
     if path is None and expected_inventory_sha256 is None:
@@ -666,7 +681,8 @@ def validate_companion_inventory(
     )
     if mtp.get("enabled") is not True:
         raise PipelineError("matching MTP companion must be enabled")
-    expected_matrix = expected_mtp_matrix_contract(quantization_arm)
+    expected_matrix = selected_mtp_matrix_contract(
+        profile, quantization_arm, requested_mtp_matrix_contract)
     if mtp.get("matrix_quant_contract") != expected_matrix:
         raise PipelineError(
             f"MTP matrix quant contract must match the selected arm ({expected_matrix})")
@@ -811,7 +827,11 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
     if (bakeoff.get("status") != "experimental_unpromoted" or
             bakeoff.get("control_unchanged") is not True or
             bakeoff.get("override_precedence") !=
-            "exactly_one_matching_regex; overlap_is_an_error"):
+            "exactly_one_matching_regex; overlap_is_an_error" or
+            bakeoff.get("mtp_pairing_policy") !=
+            "arm mtp_matrix_quant_contract is the build default only; the release bakeoff independently cross-pairs exact ROCMI4 and ROCmFP4 FAST companions" or
+            bakeoff.get("supported_mtp_matrix_contracts") !=
+            ["Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"]):
         raise PipelineError("performance bakeoff lacks the pinned override contract")
     runtime_support = bakeoff.get("runtime_support")
     if (not isinstance(runtime_support, dict) or
@@ -1247,6 +1267,123 @@ def path_entry_exists(path: Path) -> bool:
     return True
 
 
+def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
+    """Remove one bounded, owner-controlled TorchInductor cache tree.
+
+    The pinned converter has exited and its TMPDIR is a fresh transaction-owned
+    directory.  Torch 2.11 can nevertheless populate ``torchinductor_root``
+    while importing the conversion stack.  Walk that one exact name through
+    no-follow dirfds, reject links/special files/writable peers, hash every
+    regular file, and enforce hard count/depth/byte ceilings before removing
+    entries bottom-up.  This is deliberately not a general recursive delete.
+    """
+    directory_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                       | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0))
+    file_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                  | getattr(os, "O_NOFOLLOW", 0))
+    owner = os.geteuid()
+    rows: list[dict[str, Any]] = []
+    total_bytes = 0
+    max_entries = 4096
+    max_depth = 8
+    max_bytes = 512 * 1024 * 1024
+
+    def safe_mode(metadata: os.stat_result, *, directory: bool) -> None:
+        mode = stat.S_IMODE(metadata.st_mode)
+        expected_kind = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(
+            metadata.st_mode)
+        if (not expected_kind or metadata.st_uid != owner
+                or metadata.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+                or mode & 0o022 or (not directory and metadata.st_nlink != 1)):
+            raise PipelineError(
+                "converter torchinductor cache contains an unsafe entry")
+
+    def visit(parent: int, entry: str, relative: str, depth: int) -> None:
+        nonlocal total_bytes
+        if depth > max_depth:
+            raise PipelineError("converter torchinductor cache exceeds the depth limit")
+        before = os.stat(entry, dir_fd=parent, follow_symlinks=False)
+        if stat.S_ISDIR(before.st_mode):
+            safe_mode(before, directory=True)
+            try:
+                descriptor = os.open(entry, directory_flags, dir_fd=parent)
+            except OSError as exc:
+                raise PipelineError(
+                    f"cannot identity-bind converter torchinductor directory: {exc}") from exc
+            try:
+                opened = os.fstat(descriptor)
+                if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid)
+                        != (before.st_dev, before.st_ino, before.st_mode, before.st_uid)):
+                    raise PipelineError(
+                        "converter torchinductor directory changed during validation")
+                rows.append({"path": relative, "kind": "directory",
+                             "mode": stat.S_IMODE(opened.st_mode)})
+                if len(rows) > max_entries:
+                    raise PipelineError(
+                        "converter torchinductor cache exceeds the entry limit")
+                for child in sorted(os.listdir(descriptor)):
+                    visit(descriptor, child, f"{relative}/{child}", depth + 1)
+                if os.listdir(descriptor):
+                    raise PipelineError(
+                        "converter torchinductor directory changed before removal")
+                current = os.stat(entry, dir_fd=parent, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise PipelineError(
+                        "converter torchinductor directory pathname changed before removal")
+                os.rmdir(entry, dir_fd=parent)
+            finally:
+                os.close(descriptor)
+            return
+        safe_mode(before, directory=False)
+        if total_bytes + before.st_size > max_bytes:
+            raise PipelineError("converter torchinductor cache exceeds the byte limit")
+        try:
+            descriptor = os.open(entry, file_flags, dir_fd=parent)
+        except OSError as exc:
+            raise PipelineError(
+                f"cannot identity-bind converter torchinductor file: {exc}") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
+                 opened.st_nlink, opened.st_size)
+                    != (before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+                        before.st_nlink, before.st_size)):
+                raise PipelineError(
+                    "converter torchinductor file changed during validation")
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                block = os.read(descriptor, 1024 * 1024)
+                if not block:
+                    break
+                size += len(block)
+                digest.update(block)
+            if size != opened.st_size:
+                raise PipelineError("converter torchinductor file changed while hashing")
+            current = os.stat(entry, dir_fd=parent, follow_symlinks=False)
+            if ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                    != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)):
+                raise PipelineError(
+                    "converter torchinductor file pathname changed before removal")
+            rows.append({"path": relative, "kind": "regular",
+                         "mode": stat.S_IMODE(opened.st_mode), "size_bytes": size,
+                         "sha256": digest.hexdigest()})
+            total_bytes += size
+            if len(rows) > max_entries:
+                raise PipelineError("converter torchinductor cache exceeds the entry limit")
+            os.unlink(entry, dir_fd=parent)
+        finally:
+            os.close(descriptor)
+
+    visit(parent_fd, name, name, 1)
+    serialized = json.dumps(rows, sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=True).encode("utf-8")
+    return {"name": name, "kind": "bounded_torchinductor_cache_tree",
+            "entries": len(rows), "size_bytes": total_bytes,
+            "inventory_sha256": hashlib.sha256(serialized).hexdigest()}
+
+
 def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
     """Remove only regular Python/GGUFWriter spool residues from a private TMPDIR.
 
@@ -1254,19 +1391,20 @@ def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
     256 MiB threshold is crossed, Python creates a mode-0600 ``tmpXXXXXXXX``
     file in TMPDIR.  A successful converter can leave that already-consumed
     spool inode behind at process teardown.  Importing the pinned converter's
-    torch stack can also create one empty ``torchinductor_root`` cache directory
-    even though conversion never compiles an Inductor kernel.  Treating every
-    nonempty TMPDIR as a conversion failure discarded completed control
-    conversions.
+    torch stack can also create one bounded ``torchinductor_root`` cache tree
+    even though the converter does not explicitly compile an Inductor kernel.
+    Treating every nonempty TMPDIR as a conversion failure discarded completed
+    control conversions.
 
     The directory is private and the converter process has exited, but deletion
     still fails closed: names must match Python's exact eight-character random
     tempfile convention, entries must be owner-only regular single-link files,
-    and lstat/fstat identities must agree.  The one allowed directory must have
-    the exact torch name, be empty, owner-controlled, and identity-bound through
-    a no-follow directory descriptor before a non-recursive ``rmdir``.  No
-    symlink, hardlink, nonempty directory, or conveniently named foreign
-    artifact is removed.
+    and lstat/fstat identities must agree.  The one allowed tree must have the
+    exact torch name; every descendant is no-follow identity-bound, owned by the
+    converter uid, non-peer-writable, nonspecial, single-link when regular, and
+    covered by strict count/depth/byte ceilings plus a hashed inventory.  No
+    symlink, hardlink, special file, or conveniently named foreign directory is
+    removed.
     """
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1278,40 +1416,7 @@ def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
         names = sorted(os.listdir(directory_fd))
         for name in names:
             if name == "torchinductor_root":
-                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                if (not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid()
-                        or before.st_nlink != 2
-                        or stat.S_IMODE(before.st_mode) not in {0o700, 0o755}):
-                    raise PipelineError(
-                        "converter torchinductor cache is not an empty owner-controlled directory")
-                cache_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-                               | getattr(os, "O_DIRECTORY", 0)
-                               | getattr(os, "O_NOFOLLOW", 0))
-                try:
-                    cache_fd = os.open(name, cache_flags, dir_fd=directory_fd)
-                except OSError as exc:
-                    raise PipelineError(
-                        f"cannot identity-bind converter torchinductor cache: {exc}") from exc
-                try:
-                    opened = os.fstat(cache_fd)
-                    if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
-                         opened.st_nlink) !=
-                            (before.st_dev, before.st_ino, before.st_mode, before.st_uid,
-                             before.st_nlink)):
-                        raise PipelineError(
-                            "converter torchinductor cache changed during cleanup validation")
-                    if os.listdir(cache_fd):
-                        raise PipelineError("converter torchinductor cache is not empty")
-                    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
-                        raise PipelineError(
-                            "converter torchinductor cache pathname changed before removal")
-                    os.rmdir(name, dir_fd=directory_fd)
-                    removed.append({"name": name,
-                                    "kind": "empty_torchinductor_cache_directory",
-                                    "mode": stat.S_IMODE(opened.st_mode)})
-                finally:
-                    os.close(cache_fd)
+                removed.append(remove_private_torch_cache(directory_fd, name))
                 continue
             if GGUF_WRITER_TEMP_NAME_RE.fullmatch(name) is None:
                 raise PipelineError(
@@ -2514,12 +2619,15 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         raise PipelineError(
             f"--quantization-arm must name one of "
             f"{[DEFAULT_QUANTIZATION_ARM, *quantization_arms]}")
+    mtp_matrix_quant_contract = selected_mtp_matrix_contract(
+        profile, quantization_arm, args.mtp_matrix_quant_contract)
     companion_inventory = validate_companion_inventory(
         args.companion_inventory,
         args.companion_inventory_sha256,
         args.ttm_pages_limit_path,
         profile,
         quantization_arm,
+        mtp_matrix_quant_contract,
     )
     stock_control = bool(args.stock_control)
     if stock_control and args.quantization_arm not in {
@@ -2682,6 +2790,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         "w4a4_enabled": False,
         "quantization_recipe": {
             **quantization_arm,
+            "selected_mtp_matrix_quant_contract": mtp_matrix_quant_contract,
             "selection": quantization_arm.get("selection", "validated_profile_arm"),
             "ple_tensor_override": profile["quantization"]["ple_tensor_override"],
             "ple_override_preserved": True,
@@ -2773,7 +2882,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 write_json_atomic(record_path, record, create=False)
             record["conversion_memory"]["gguf_writer_temp_cleanup"] = {
-                "policy": "exact_converter_private_tmp_residue_v2",
+                "policy": "exact_converter_private_tmp_residue_v3",
                 "removed": cleanup_gguf_writer_temp(converter_temp),
             }
             write_json_atomic(record_path, record, create=False)
@@ -2811,6 +2920,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             args.ttm_pages_limit_path,
             profile,
             quantization_arm,
+            args.mtp_matrix_quant_contract,
         )
         if current_companion_inventory != record["companion_inventory"]:
             raise PipelineError("companion inventory evidence changed during conversion")
@@ -2947,6 +3057,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--companion-inventory-sha256",
         help="required out-of-band SHA-256 binding for --companion-inventory",
+    )
+    parser.add_argument(
+        "--mtp-matrix-quant-contract",
+        choices=("Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"),
+        help="exact companion matrix contract; defaults to the main arm's build default",
     )
     parser.add_argument(
         "--ttm-pages-limit-path", type=Path,

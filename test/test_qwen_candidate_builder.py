@@ -237,7 +237,7 @@ class CandidateBuilderTests(unittest.TestCase):
                                "mmproj": {"outtype": "bf16",
                                           "converter_option": "--mmproj"},
                                "gguf_writer_temp_cleanup": {
-                                   "policy": "exact_converter_private_tmp_residue_v2",
+                                   "policy": "exact_converter_private_tmp_residue_v3",
                                    "main_removed": [], "mmproj_removed": []}},
                 "resources": {"free_bytes": 1152 * quant.GIB,
                               "physical_ram_bytes": 120 * quant.GIB},

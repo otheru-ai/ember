@@ -858,7 +858,7 @@ class QwenQuantizeTests(unittest.TestCase):
             )
             self.assertEqual(record["conversion_memory"]["mode"], "bounded_temp_file_then_split")
             self.assertEqual(record["conversion_memory"]["gguf_writer_temp_cleanup"], {
-                "policy": "exact_converter_private_tmp_residue_v2",
+                "policy": "exact_converter_private_tmp_residue_v3",
                 "removed": [],
             })
             self.assertEqual(len(record["intermediate"]["shards"]), 2)
@@ -876,18 +876,18 @@ class QwenQuantizeTests(unittest.TestCase):
             }])
             self.assertFalse(directory.exists())
 
-    def test_cleanup_accepts_only_empty_owner_torchinductor_cache(self) -> None:
+    def test_cleanup_accepts_bounded_owner_torchinductor_cache(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw) / "private-tmp"
             directory.mkdir(mode=0o700)
             cache = directory / "torchinductor_root"
             cache.mkdir(mode=0o700)
             rows = qwen_quantize.cleanup_gguf_writer_temp(directory)
-            self.assertEqual(rows, [{
-                "name": "torchinductor_root",
-                "kind": "empty_torchinductor_cache_directory",
-                "mode": stat.S_IMODE(cache.stat().st_mode) if cache.exists() else 0o700,
-            }])
+            self.assertEqual(rows[0]["name"], "torchinductor_root")
+            self.assertEqual(rows[0]["kind"], "bounded_torchinductor_cache_tree")
+            self.assertEqual(rows[0]["entries"], 1)
+            self.assertEqual(rows[0]["size_bytes"], 0)
+            self.assertRegex(rows[0]["inventory_sha256"], r"^[0-9a-f]{64}$")
             self.assertFalse(directory.exists())
 
         with tempfile.TemporaryDirectory() as raw:
@@ -895,10 +895,39 @@ class QwenQuantizeTests(unittest.TestCase):
             directory.mkdir(mode=0o700)
             cache = directory / "torchinductor_root"
             cache.mkdir(mode=0o700)
-            (cache / "foreign.bin").write_bytes(b"must survive rejection")
-            with self.assertRaisesRegex(qwen_quantize.PipelineError, "not empty"):
-                qwen_quantize.cleanup_gguf_writer_temp(directory)
-            self.assertTrue((cache / "foreign.bin").is_file())
+            nested = cache / "fxgraph" / "ab"
+            nested.mkdir(parents=True, mode=0o700)
+            artifact = nested / "compiled.so"
+            artifact.write_bytes(b"pinned torch cache artifact")
+            artifact.chmod(0o755)
+            rows = qwen_quantize.cleanup_gguf_writer_temp(directory)
+            self.assertEqual(rows[0]["entries"], 4)
+            self.assertEqual(rows[0]["size_bytes"], 27)
+            self.assertFalse(directory.exists())
+
+    def test_cleanup_rejects_unsafe_torchinductor_descendants(self) -> None:
+        for case in ("symlink", "hardlink", "peer-writable", "special"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                directory = root / "private-tmp"
+                directory.mkdir(mode=0o700)
+                cache = directory / "torchinductor_root"
+                cache.mkdir(mode=0o700)
+                entry = cache / "artifact"
+                if case == "symlink":
+                    entry.symlink_to(root / "outside")
+                elif case == "special":
+                    os.mkfifo(entry)
+                else:
+                    entry.write_bytes(b"cache")
+                    entry.chmod(0o600)
+                    if case == "hardlink":
+                        os.link(entry, root / "second-link")
+                    else:
+                        entry.chmod(0o622)
+                with self.assertRaisesRegex(qwen_quantize.PipelineError, "unsafe entry"):
+                    qwen_quantize.cleanup_gguf_writer_temp(directory)
+                self.assertTrue(directory.exists())
 
     def test_cleanup_rejects_unexpected_or_unsafe_temp_entries(self) -> None:
         cases = ("unexpected-name", "symlink", "directory", "hardlink", "mode")
@@ -1238,6 +1267,26 @@ class QwenQuantizeTests(unittest.TestCase):
                 "pending_canonical_live_gtt_evidence_and_measured_bakeoff_and_hardware_certification",
             )
             self.assertFalse(companion["live_gtt_evidence"]["authoritative_sysfs"])
+
+    def test_main_quant_arm_and_mtp_matrix_contract_can_be_cross_paired(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            result = subprocess.run(
+                [*fixture.command(), *fixture.companion_args(
+                    mtp_matrix="Q4_0_ROCMFP4_FAST"),
+                 "--mtp-matrix-quant-contract", "Q4_0_ROCMFP4_FAST"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            self.assertEqual(record["quantization_recipe"]["id"],
+                             qwen_quantize.DEFAULT_QUANTIZATION_ARM)
+            self.assertEqual(
+                record["quantization_recipe"]["selected_mtp_matrix_quant_contract"],
+                "Q4_0_ROCMFP4_FAST",
+            )
+            self.assertEqual(record["companion_inventory"]["roles"][0][
+                "matrix_quant_contract"], "Q4_0_ROCMFP4_FAST")
 
     def test_exact_inventory_explicitly_disables_absent_mmproj(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
