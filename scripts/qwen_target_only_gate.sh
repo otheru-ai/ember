@@ -205,7 +205,7 @@ exact_file(plan_desc["path"], plan_desc["sha256"], label="bakeoff plan")
 plan = json.load(open(plan_desc["path"], encoding="utf-8"))
 sweep_config = {item.get("id"): item for item in plan.get("sweep_configurations", [])}.get(row["id"])
 is_stock = (row["id"] == "stock-rocmi4-exact" and row["stage"] == "stock"
-            and row["quantization_arm"] in {"profile-default", "rocmi4-control"}
+            and row["quantization_arm"] in {"profile-default-rocmi4", "rocmi4-control"}
             and row["runtime_mode"] == "exact_dequant"
             and row["final_release_eligible"] is False)
 is_w4a4_control = (row["stage"] == "format" and row["arm_id"] == "rocmi4-w4a4"
@@ -217,8 +217,8 @@ is_sweep_candidate = (row["stage"] == "sweep" and isinstance(sweep_config, dict)
                       and row["override_sha256"] == sweep_config.get("quantization_overrides_sha256")
                       and row["runtime_mode"] == sweep_config.get("runtime_mode")
                       and row["final_release_eligible"] is sweep_config.get("final_release_eligible") is False)
-is_release_candidate = (row["stage"] in {"format", "final"}
-                        and row["quantization_arm"] not in {"profile-default", "rocmi4-control"}
+is_release_candidate = (row["stage"] in {"format", "mtp-depth", "final"}
+                        and row["quantization_arm"] not in {"profile-default-rocmi4", "rocmi4-control"}
                         and row["runtime_mode"] == "exact_dequant"
                         and row["final_release_eligible"] is True)
 if not (is_stock or is_sweep_candidate or is_w4a4_control or is_release_candidate):

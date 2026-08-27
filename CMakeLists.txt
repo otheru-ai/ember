@@ -231,6 +231,12 @@ target_include_directories(test_rocmi4 PRIVATE engine/ggml/include engine/ggml/r
 target_link_libraries(test_rocmi4 PRIVATE m)
 add_test(NAME rocmi4 COMMAND test_rocmi4)
 
+# Pure host oracle for the exact mixed-signedness I4 identity proposed for the
+# gfx1151 ROCMI4 path. It does not compile or enable a GPU kernel.
+add_executable(test_rocmi4_q8_i4_exact test/test_rocmi4_q8_i4_exact.cpp)
+target_include_directories(test_rocmi4_q8_i4_exact PRIVATE engine/ggml/rocmfpx)
+add_test(NAME rocmi4_q8_i4_exact COMMAND test_rocmi4_q8_i4_exact)
+
 add_executable(test_dspark_scheduler test/test_dspark_scheduler.cpp)
 target_include_directories(test_dspark_scheduler PRIVATE
   engine/dflash/deepseek4)
@@ -474,7 +480,7 @@ set(EMBER_C_TESTS
   continuation dsml_decode json
   chat_api prefill_policy api_adapters http background_gate chat_template
   chat_template_qwen4
-  compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 dspark_scheduler thinking_budget
+  compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
   qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
@@ -646,6 +652,21 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_bakeoff_workflow.py)
   set_tests_properties(qwen_bakeoff_workflow PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_construct_workflow
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_construct_workflow.py)
+  set_tests_properties(qwen_construct_workflow PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_candidate_manifest
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_candidate_manifest.py)
+  set_tests_properties(qwen_candidate_manifest PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_retire_stock_workflow
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_retire_stock_workflow.py)
+  set_tests_properties(qwen_retire_stock_workflow PROPERTIES TIMEOUT 20)
 
   add_test(
     NAME qwen_quality_judge

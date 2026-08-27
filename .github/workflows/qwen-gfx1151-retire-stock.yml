@@ -1,0 +1,492 @@
+name: Qwen gfx1151 captured-stock retirement
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character Ember revision containing the retirement implementation
+        required: true
+        type: string
+      builder_image:
+        description: Exact GHCR development-image tag (the digest is supplied separately)
+        required: true
+        type: string
+      builder_image_digest:
+        description: Exact sha256 OCI digest for the development image
+        required: true
+        type: string
+      workset_root:
+        description: Exact persistent Qwen candidate-workset root on the gfx1151 runner
+        required: true
+        type: string
+      stock_artifact_revision:
+        description: Exact 40-character revision that produced the captured stock artifact
+        required: true
+        type: string
+      stock_build_record_sha256:
+        description: SHA-256 of stock_dir/qwen-quant-build-record.json
+        required: true
+        type: string
+      capture_manifest:
+        description: Exact persistent activation-capture manifest
+        required: true
+        type: string
+      capture_manifest_sha256:
+        description: SHA-256 of the activation-capture manifest
+        required: true
+        type: string
+      authorization_output:
+        description: Exact new runner-local path for the builder authorization record
+        required: true
+        type: string
+      authorize:
+        description: Destructive acknowledgement; enter RETIRE_CAPTURED_STOCK_SHARDS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: gfx1151-certification
+  cancel-in-progress: false
+
+jobs:
+  retire:
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 240
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      BUILDER_IMAGE_REF: ${{ inputs.builder_image }}
+      BUILDER_IMAGE_DIGEST: ${{ inputs.builder_image_digest }}
+      QWEN_WORKSET_ROOT: ${{ inputs.workset_root }}
+      QWEN_STOCK_ARTIFACT_REVISION: ${{ inputs.stock_artifact_revision }}
+      QWEN_STOCK_BUILD_RECORD_SHA256: ${{ inputs.stock_build_record_sha256 }}
+      QWEN_CAPTURE_MANIFEST: ${{ inputs.capture_manifest }}
+      QWEN_CAPTURE_MANIFEST_SHA256: ${{ inputs.capture_manifest_sha256 }}
+      QWEN_RETIRE_AUTHORIZATION: ${{ inputs.authorization_output }}
+      RETIRE_CONFIRMATION: ${{ inputs.authorize }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Bind exact source, image, paths, capture, and deletion scope
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$QWEN_STOCK_ARTIFACT_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILDER_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$QWEN_STOCK_BUILD_RECORD_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$QWEN_CAPTURE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$BUILDER_IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+$ ]]
+          test "$RETIRE_CONFIRMATION" = RETIRE_CAPTURED_STOCK_SHARDS
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --quiet --exit-code
+          test -r /dev/kfd && test -d /dev/dri
+          test -x /usr/local/sbin/ember-gpu-lock
+          test -x /usr/local/sbin/ember-cert-production
+          command -v docker >/dev/null
+          command -v curl >/dev/null
+
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          expected_workset="$workspace/artifacts/qwen-workset"
+          expected_stock="$workspace/artifacts/stock-rocmi4-${QWEN_STOCK_ARTIFACT_REVISION:0:12}"
+          QWEN_STOCK_DIR="$expected_stock"
+          export QWEN_STOCK_DIR
+          test "$QWEN_WORKSET_ROOT" = "$expected_workset"
+          test -d "$workspace" && test ! -L "$workspace"
+          test -d "$workspace/artifacts" && test ! -L "$workspace/artifacts"
+          test -d "$QWEN_STOCK_DIR" && test ! -L "$QWEN_STOCK_DIR"
+          if [[ ! -e "$QWEN_WORKSET_ROOT" && ! -L "$QWEN_WORKSET_ROOT" ]]; then
+            mkdir -m 700 "$QWEN_WORKSET_ROOT"
+          fi
+          test -d "$QWEN_WORKSET_ROOT" && test ! -L "$QWEN_WORKSET_ROOT"
+          for path in "$QWEN_WORKSET_ROOT/evidence" \
+              "$QWEN_WORKSET_ROOT/evidence/stock-retirement"; do
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              mkdir -m 700 "$path"
+            fi
+            test -d "$path" && test ! -L "$path"
+          done
+          printf 'QWEN_STOCK_DIR=%s\n' "$QWEN_STOCK_DIR" >>"$GITHUB_ENV"
+          for path in "$QWEN_RETIRE_AUTHORIZATION" \
+              "$QWEN_RETIRE_AUTHORIZATION.complete.json" \
+              "$QWEN_RETIRE_AUTHORIZATION.workflow.json" \
+              "$QWEN_RETIRE_AUTHORIZATION.workflow.complete.json"; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+
+          docker_config="$RUNNER_TEMP/qwen-retire-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$docker_config"
+          export DOCKER_CONFIG="$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          pinned_image="$BUILDER_IMAGE_REF@$BUILDER_IMAGE_DIGEST"
+          docker pull "$pinned_image"
+          image_inspect="$RUNNER_TEMP/qwen-retire-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker image inspect "$pinned_image" >"$image_inspect"
+          python3 - "$image_inspect" "$BUILDER_IMAGE_REF" "$BUILDER_IMAGE_DIGEST" "$TARGET_SHA" <<'PY'
+          import json, pathlib, sys
+          inspect_path, image_ref, digest, revision = sys.argv[1:]
+          rows = json.loads(pathlib.Path(inspect_path).read_text(encoding="utf-8"))
+          if not isinstance(rows, list) or len(rows) != 1:
+              raise SystemExit("pinned image did not resolve exactly once")
+          repository = image_ref.rsplit(":", 1)[0]
+          repo_digests = rows[0].get("RepoDigests") or []
+          if f"{repository}@{digest}" not in repo_digests:
+              raise SystemExit("pulled image does not expose the requested repository digest")
+          labels = ((rows[0].get("Config") or {}).get("Labels") or {})
+          if labels.get("org.opencontainers.image.revision") != revision:
+              raise SystemExit("builder image revision differs from the exact source revision")
+          PY
+          embedded="$(docker run --rm --network none --entrypoint /bin/sh "$pinned_image" -c \
+            'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
+          test "$embedded" = "$TARGET_SHA"
+          printf 'PINNED_BUILDER_IMAGE=%s\n' "$pinned_image" >>"$GITHUB_ENV"
+
+          workflow_authorization="$QWEN_RETIRE_AUTHORIZATION.workflow.json"
+          python3 - "$TARGET_SHA" "$QWEN_STOCK_ARTIFACT_REVISION" \
+              "$pinned_image" "$BUILDER_IMAGE_DIGEST" \
+              "$QWEN_WORKSET_ROOT" "$QWEN_STOCK_DIR" "$QWEN_STOCK_BUILD_RECORD_SHA256" \
+              "$QWEN_CAPTURE_MANIFEST" "$QWEN_CAPTURE_MANIFEST_SHA256" \
+              "$QWEN_RETIRE_AUTHORIZATION" "$workflow_authorization" \
+              "$GITHUB_ACTOR" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import hashlib, json, os, pathlib, re, stat, sys
+
+          (revision, stock_artifact_revision, image, image_digest, workset_raw,
+           stock_raw, record_digest,
+           capture_raw, capture_digest, builder_authorization_raw,
+           workflow_authorization_raw, actor, repository, run_id, attempt) = sys.argv[1:]
+          workspace = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next")
+
+          def exact_path(raw, label, *, exists=True, kind=None):
+              raw = os.fspath(raw)
+              path = pathlib.Path(raw)
+              if not path.is_absolute() or os.path.normpath(raw) != raw:
+                  raise SystemExit(f"{label} is not one normalized absolute path")
+              current = pathlib.Path(path.anchor)
+              parts = path.parts[1:] if path.anchor else path.parts
+              for index, part in enumerate(parts):
+                  current /= part
+                  if current.is_symlink():
+                      raise SystemExit(f"{label} traverses a symlink: {current}")
+                  if index < len(parts) - 1 and not current.is_dir():
+                      raise SystemExit(f"{label} parent is not a directory: {current}")
+              if exists and not path.exists():
+                  raise SystemExit(f"{label} does not exist")
+              if kind == "file" and (not path.is_file() or path.is_symlink()):
+                  raise SystemExit(f"{label} is not one regular non-symlink file")
+              if kind == "dir" and (not path.is_dir() or path.is_symlink()):
+                  raise SystemExit(f"{label} is not one non-symlink directory")
+              return path
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                      digest.update(block)
+              return digest.hexdigest()
+
+          workset = exact_path(workset_raw, "workset", kind="dir")
+          stock = exact_path(stock_raw, "stock directory", kind="dir")
+          expected_stock = workspace / "artifacts" / f"stock-rocmi4-{stock_artifact_revision[:12]}"
+          if stock != expected_stock:
+              raise SystemExit("stock directory does not match the independent artifact revision")
+          capture = exact_path(capture_raw, "capture manifest", kind="file")
+          builder_authorization = exact_path(
+              builder_authorization_raw, "builder authorization", exists=False)
+          workflow_authorization = exact_path(
+              workflow_authorization_raw, "workflow authorization", exists=False)
+          if not capture.is_relative_to(workspace / "evidence") or capture.name != "capture-manifest.json":
+              raise SystemExit("capture manifest must be a persistent capture-manifest.json under workspace/evidence")
+          if builder_authorization.parent != workset / "evidence" / "stock-retirement":
+              raise SystemExit("builder authorization escapes the fixed retirement evidence directory")
+          if re.fullmatch(r"stock-[A-Za-z0-9._-]{1,80}-authorization\.json",
+                          builder_authorization.name) is None:
+              raise SystemExit("builder authorization filename is not one safe stock retirement id")
+          record_path = exact_path(stock / "qwen-quant-build-record.json",
+                                   "stock build record", kind="file")
+          if sha256(record_path) != record_digest:
+              raise SystemExit("stock build-record digest differs")
+          if sha256(capture) != capture_digest:
+              raise SystemExit("capture-manifest digest differs")
+          record = json.loads(record_path.read_text(encoding="utf-8"))
+          capture_value = json.loads(capture.read_text(encoding="utf-8"))
+          experiment = record.get("experiment")
+          if (record.get("status") != "complete" or not isinstance(experiment, dict)
+                  or experiment.get("kind") != "stock_control"
+                  or experiment.get("stock_weights_unchanged") is not True):
+              raise SystemExit("retirement target is not one completed unchanged stock control")
+          if (capture_value.get("schema") != "ember.qwen3.8.stock-control-activation-capture.v1"
+                  or capture_value.get("status") != "complete"
+                  or capture_value.get("stock_rocmi4_only") is not True
+                  or capture_value.get("publishes") is not False
+                  or capture_value.get("image", {}).get("ember_revision") != stock_artifact_revision):
+              raise SystemExit("capture is not a completed non-publishing stock-only capture")
+          model = capture_value.get("model")
+          if not isinstance(model, dict) or model.get("build_record_sha256") != record_digest:
+              raise SystemExit("capture does not bind the exact stock build record")
+          rows = (record.get("output") or {}).get("shards")
+          captured_rows = model.get("shards")
+          if not isinstance(rows, list) or not rows or not isinstance(captured_rows, list):
+              raise SystemExit("stock/capture shard inventory is absent")
+          deletion_scope = []
+          names = set()
+          for index, row in enumerate(rows):
+              if not isinstance(row, dict):
+                  raise SystemExit("stock shard row is malformed")
+              path = exact_path(str(row.get("path", "")), f"stock shard {index}", kind="file")
+              if path.parent != stock or path.name in names:
+                  raise SystemExit("stock shard is duplicated or escapes the exact stock directory")
+              if path.stat().st_size != row.get("size_bytes"):
+                  raise SystemExit("stock shard size differs before retirement")
+              names.add(path.name)
+              deletion_scope.append({"path": str(path), "size_bytes": row.get("size_bytes"),
+                                     "sha256": row.get("sha256")})
+          expected_capture = [(row.get("filename"), row.get("size_bytes"), row.get("sha256"))
+                              for row in captured_rows if isinstance(row, dict)]
+          actual_capture = [(pathlib.Path(row["path"]).name, row["size_bytes"], row["sha256"])
+                            for row in deletion_scope]
+          if len(expected_capture) != len(captured_rows) or actual_capture != expected_capture:
+              raise SystemExit("capture shard inventory differs from the exact deletion scope")
+          retained = []
+          for path in sorted(stock.iterdir()):
+              if path.name in names:
+                  continue
+              if not path.is_file() or path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
+                  raise SystemExit(f"unsupported retained stock entry: {path}")
+              retained.append({"path": str(path), "size_bytes": path.stat().st_size,
+                               "sha256": sha256(path)})
+          if str(record_path) not in {row["path"] for row in retained}:
+              raise SystemExit("stock build record is not in the retained-file inventory")
+          value = {
+              "schema": "ember.qwen3.8.stock-retirement-workflow-authorization.v1",
+              "status": "authorized_before_quiesce",
+              "authorization_phrase": "RETIRE_CAPTURED_STOCK_SHARDS",
+              "workflow": {"actor": actor, "repository": repository,
+                           "run_id": run_id, "run_attempt": attempt},
+              "source": {"revision": revision},
+              "stock_artifact": {"revision": stock_artifact_revision},
+              "image": {"reference": image, "digest": image_digest},
+              "workset_root": str(workset), "stock_dir": str(stock),
+              "build_record": {"path": str(record_path), "sha256": record_digest},
+              "stock_capture": {"path": str(capture), "sha256": capture_digest},
+              "builder_authorization": str(builder_authorization),
+              "deletion_scope": deletion_scope, "retained_files": retained,
+              "recovery": {"recoverable": True, "mode": "reconstructive_not_undelete",
+                           "statement": "Deleted shard inodes are not recoverable in place; recreate the byte-identical stock control from the pinned source snapshot through the content-addressed BF16 cache and audited quantizer."},
+              "publishes": False,
+          }
+          workflow_authorization.parent.mkdir(mode=0o700, parents=False, exist_ok=True)
+          descriptor = os.open(workflow_authorization, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+              json.dump(value, stream, indent=2, sort_keys=True)
+              stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+          directory = os.open(workflow_authorization.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+          try: os.fsync(directory)
+          finally: os.close(directory)
+          PY
+          printf 'QWEN_WORKFLOW_AUTHORIZATION=%s\n' "$workflow_authorization" >>"$GITHUB_ENV"
+
+      - name: Acquire exclusive gfx1151 ownership and quiesce production
+        id: exclusive
+        run: |
+          set -euo pipefail
+          echo 'armed=no' >>"$GITHUB_OUTPUT"
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
+          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          echo 'armed=yes' >>"$GITHUB_OUTPUT"
+          sudo -n /usr/local/sbin/ember-cert-production stop
+          sudo -n /usr/local/sbin/ember-cert-production mask
+
+      - name: Retire only the activation-captured stock shard inventory
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          PYTHONDONTWRITEBYTECODE=1 docker run --rm --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 \
+            --user "$uid:$gid" --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            -v "$QWEN_STOCK_DIR:$QWEN_STOCK_DIR" \
+            -v "$QWEN_WORKSET_ROOT:$QWEN_WORKSET_ROOT" \
+            -v "$QWEN_CAPTURE_MANIFEST:$QWEN_CAPTURE_MANIFEST:ro" \
+            --entrypoint python3 "$PINNED_BUILDER_IMAGE" \
+            "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" retire-captured-stock \
+              --stock-dir "$QWEN_STOCK_DIR" \
+              --build-record-sha256 "$QWEN_STOCK_BUILD_RECORD_SHA256" \
+              --stock-capture-manifest "$QWEN_CAPTURE_MANIFEST" \
+              --stock-capture-manifest-sha256 "$QWEN_CAPTURE_MANIFEST_SHA256" \
+              --workset-root "$QWEN_WORKSET_ROOT" \
+              --output "$QWEN_RETIRE_AUTHORIZATION"
+
+      - name: Verify exact deletion and fsync durable completion envelope
+        run: |
+          set -euo pipefail
+          workflow_completion="$QWEN_RETIRE_AUTHORIZATION.workflow.complete.json"
+          python3 - "$TARGET_SHA" "$QWEN_STOCK_ARTIFACT_REVISION" \
+              "$BUILDER_IMAGE_DIGEST" "$QWEN_WORKFLOW_AUTHORIZATION" \
+              "$QWEN_RETIRE_AUTHORIZATION" "$QWEN_RETIRE_AUTHORIZATION.complete.json" \
+              "$workflow_completion" <<'PY'
+          import hashlib, json, os, pathlib, sys
+          (revision, stock_artifact_revision, image_digest, workflow_auth_raw,
+           builder_auth_raw, builder_complete_raw, output_raw) = sys.argv[1:]
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                      digest.update(block)
+              return digest.hexdigest()
+
+          def regular(raw, label):
+              path = pathlib.Path(raw)
+              if not path.is_file() or path.is_symlink():
+                  raise SystemExit(f"{label} is not one regular non-symlink file")
+              return path
+
+          workflow_auth_path = regular(workflow_auth_raw, "workflow authorization")
+          builder_auth_path = regular(builder_auth_raw, "builder authorization")
+          builder_complete_path = regular(builder_complete_raw, "builder completion")
+          output = pathlib.Path(output_raw)
+          if output.exists() or output.is_symlink():
+              raise SystemExit("workflow completion path already exists")
+          workflow_auth = json.loads(workflow_auth_path.read_text(encoding="utf-8"))
+          builder_auth = json.loads(builder_auth_path.read_text(encoding="utf-8"))
+          builder_complete = json.loads(builder_complete_path.read_text(encoding="utf-8"))
+          if (workflow_auth.get("schema") != "ember.qwen3.8.stock-retirement-workflow-authorization.v1"
+                  or workflow_auth.get("status") != "authorized_before_quiesce"
+                  or workflow_auth.get("publishes") is not False
+                  or workflow_auth.get("source", {}).get("revision") != revision
+                  or workflow_auth.get("stock_artifact", {}).get("revision") != stock_artifact_revision
+                  or workflow_auth.get("image", {}).get("digest") != image_digest):
+              raise SystemExit("workflow authorization identity is invalid")
+          if (builder_auth.get("schema") != "ember.qwen3.8.stock-retirement-authorization.v1"
+                  or builder_auth.get("status") != "authorized_before_deletion"
+                  or builder_auth.get("publishes") is not False
+                  or builder_auth.get("recovery") != "pinned_snapshot_then_content_addressed_bf16_cache"):
+              raise SystemExit("builder authorization is invalid")
+          builder_record = builder_auth.get("build_record", {})
+          workflow_record = workflow_auth.get("build_record", {})
+          if (builder_auth.get("stock_dir") != workflow_auth.get("stock_dir")
+                  or builder_auth.get("workset_root") != workflow_auth.get("workset_root")
+                  or builder_record.get("path") != workflow_record.get("path")
+                  or builder_record.get("sha256") != workflow_record.get("sha256")
+                  or builder_auth.get("stock_capture", {}).get("path") != workflow_auth.get("stock_capture", {}).get("path")
+                  or builder_auth.get("stock_capture", {}).get("sha256") != workflow_auth.get("stock_capture", {}).get("sha256")):
+              raise SystemExit("builder authorization differs from exact workflow inputs")
+          if (builder_complete.get("schema") != "ember.qwen3.8.stock-retirement-complete.v1"
+                  or builder_complete.get("status") != "complete"
+                  or builder_complete.get("recoverable") is not True
+                  or builder_complete.get("authorization", {}).get("path") != str(builder_auth_path)
+                  or builder_complete.get("authorization", {}).get("sha256") != sha256(builder_auth_path)):
+              raise SystemExit("builder completion does not bind the exact authorization")
+          if (builder_complete.get("build_record_retained") != builder_auth.get("build_record")
+                  or builder_complete.get("stock_capture") != builder_auth.get("stock_capture")):
+              raise SystemExit("builder completion changed retained provenance")
+          expected_scope = workflow_auth.get("deletion_scope")
+          if not isinstance(expected_scope, list) or not expected_scope:
+              raise SystemExit("workflow authorization has no deletion scope")
+          if builder_auth.get("shards") != expected_scope or builder_complete.get("deleted_shards") != expected_scope:
+              raise SystemExit("builder records differ from the authorized deletion scope")
+          expected_bytes = sum(row["size_bytes"] for row in expected_scope)
+          if (builder_auth.get("total_bytes") != expected_bytes
+                  or builder_complete.get("deleted_bytes") != expected_bytes):
+              raise SystemExit("builder completion deleted-byte count differs")
+          stock = pathlib.Path(workflow_auth["stock_dir"])
+          if not stock.is_dir() or stock.is_symlink():
+              raise SystemExit("stock directory itself was removed or replaced")
+          for row in expected_scope:
+              path = pathlib.Path(row["path"])
+              if path.exists() or path.is_symlink():
+                  raise SystemExit(f"authorized shard remains or was replaced: {path}")
+          for row in workflow_auth.get("retained_files", []):
+              path = regular(row["path"], "retained stock file")
+              if path.stat().st_size != row["size_bytes"] or sha256(path) != row["sha256"]:
+                  raise SystemExit(f"retained stock file changed: {path}")
+          record = workflow_auth["build_record"]
+          capture = workflow_auth["stock_capture"]
+          if sha256(regular(record["path"], "retained build record")) != record["sha256"]:
+              raise SystemExit("retained stock build record changed")
+          if sha256(regular(capture["path"], "retained capture manifest")) != capture["sha256"]:
+              raise SystemExit("activation capture manifest changed")
+          value = {
+              "schema": "ember.qwen3.8.stock-retirement-workflow-complete.v1",
+              "status": "complete", "source_revision": revision,
+              "stock_artifact_revision": stock_artifact_revision,
+              "builder_image_digest": image_digest,
+              "workflow_authorization": {"path": str(workflow_auth_path),
+                                         "sha256": sha256(workflow_auth_path)},
+              "builder_authorization": {"path": str(builder_auth_path),
+                                        "sha256": sha256(builder_auth_path)},
+              "builder_completion": {"path": str(builder_complete_path),
+                                     "sha256": sha256(builder_complete_path)},
+              "deleted_shards": expected_scope,
+              "deleted_bytes": builder_complete["deleted_bytes"],
+              "retained_files_verified": workflow_auth["retained_files"],
+              "recoverable": True,
+              "recovery_mode": "reconstructive_not_undelete",
+              "recovery_statement": workflow_auth["recovery"]["statement"],
+              "publishes": False,
+          }
+          descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+              json.dump(value, stream, indent=2, sort_keys=True)
+              stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+          directory = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+          try: os.fsync(directory)
+          finally: os.close(directory)
+          PY
+          printf 'QWEN_WORKFLOW_COMPLETION=%s\nQWEN_WORKFLOW_COMPLETION_SHA256=%s\n' \
+            "$workflow_completion" "$(sha256sum "$workflow_completion" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Restore production, release gfx1151 ownership, and prove health
+        if: always() && steps.exclusive.outputs.armed == 'yes'
+        run: |
+          set +e
+          cleanup_failed=0
+          sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null || cleanup_failed=1
+          healthy=0
+          for _ in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          (( healthy == 1 )) || cleanup_failed=1
+          exit "$cleanup_failed"
+
+      - name: Remove temporary registry credentials
+        if: always() && env.DOCKER_CONFIG != ''
+        run: |
+          rm -f -- "$DOCKER_CONFIG/config.json"
+          rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+
+      - name: Record non-publishing retirement handoff
+        if: success()
+        run: |
+          {
+            echo '## Captured stock control retired'
+            echo
+            echo "Source revision: \`$TARGET_SHA\`"
+            echo "Stock artifact revision: \`$QWEN_STOCK_ARTIFACT_REVISION\`"
+            echo "Builder image digest: \`$BUILDER_IMAGE_DIGEST\`"
+            echo "Builder authorization: \`$QWEN_RETIRE_AUTHORIZATION\`"
+            echo "Builder completion: \`$QWEN_RETIRE_AUTHORIZATION.complete.json\`"
+            echo "Workflow completion: \`$QWEN_WORKFLOW_COMPLETION\`"
+            echo "Workflow completion SHA-256: \`$QWEN_WORKFLOW_COMPLETION_SHA256\`"
+            echo
+            echo 'No model, evidence, container, or package was published.'
+            echo 'Recovery is reconstructive, not an in-place undelete: recreate the byte-identical stock control from the pinned source snapshot through the content-addressed BF16 cache and audited quantizer.'
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,673 @@
+name: Qwen gfx1151 candidate construction
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character Ember artifact-builder revision
+        required: true
+        type: string
+      mode:
+        description: One serial construction operation
+        required: true
+        type: choice
+        options: [prepare-cache, prepare-companions, build-candidate, normalize-candidate]
+      operation_request:
+        description: Exact mode-specific construction request manifest
+        required: true
+        type: string
+      operation_request_sha256:
+        description: SHA-256 of the construction request manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: gfx1151-certification
+  cancel-in-progress: false
+
+jobs:
+  construct:
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 1440
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      CONSTRUCTION_MODE: ${{ inputs.mode }}
+      QWEN_OPERATION_REQUEST: ${{ inputs.operation_request }}
+      QWEN_OPERATION_REQUEST_SHA256: ${{ inputs.operation_request_sha256 }}
+      QWEN_REVISION: f5d08274bafd880402bd16f5e3e6c514136ec06c
+      LLAMA_REVISION: abdc7a0bf815d3b83e26dd523c6960e4dd597e82
+      ROCMFPX_REVISION: c49ebdbd5c9f01ec242369f9e7f7967855f80cba
+      PLE_PATCH_SHA256: 606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Bind exact source, images, paths, and mode inputs
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --quiet --exit-code
+          [[ "$CONSTRUCTION_MODE" =~ ^(prepare-cache|prepare-companions|build-candidate|normalize-candidate)$ ]]
+          test -r /dev/kfd && test -d /dev/dri
+          test -x /usr/local/sbin/ember-gpu-lock
+          test -x /usr/local/sbin/ember-cert-production
+          command -v docker >/dev/null
+          command -v curl >/dev/null
+          command -v dd >/dev/null
+          uid="$(id -u)"; gid="$(id -g)"
+
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          snapshot="$workspace/snapshots/$QWEN_REVISION"
+          workset="$workspace/artifacts/qwen-workset"
+          cache_root="$workset/bf16-cache"
+          evidence="$workset/evidence"
+          tooling="$workspace/tooling-candidate-$TARGET_SHA"
+          corpus=/srv/ember/qwen3.8-otheru-corpus-a3c6a728
+          profile="$GITHUB_WORKSPACE/share/release_profiles/qwen3.8-flash-next-rocmi4-strix-halo.json"
+          recipe="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-flash-next-bakeoff.json"
+          for path in "$workspace" "$snapshot" "$corpus"; do
+            test -d "$path" && test ! -L "$path"
+          done
+          test -d "$workspace/artifacts" && test ! -L "$workspace/artifacts"
+          for path in "$snapshot/model.safetensors.index.json" "$profile" "$recipe" \
+              "$corpus/qwen-selection-corpora-manifest.json"; do
+            test -f "$path" && test ! -L "$path"
+          done
+          for path in "$workset" "$cache_root" "$evidence" "$workset/companions" \
+              "$workset/candidates"; do
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              mkdir "$path"
+            fi
+            test -d "$path" && test ! -L "$path"
+          done
+
+          docker_config="$RUNNER_TEMP/qwen-construct-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$docker_config"
+          export DOCKER_CONFIG="$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          builder_tag="$repository:dev-sha-${TARGET_SHA:0:12}"
+          runtime_tag="$repository:sha-${TARGET_SHA:0:12}"
+          docker pull "$builder_tag"
+          docker pull "$runtime_tag"
+          builder_inspect="$RUNNER_TEMP/qwen-builder-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          runtime_inspect="$RUNNER_TEMP/qwen-runtime-image-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker image inspect "$builder_tag" >"$builder_inspect"
+          docker image inspect "$runtime_tag" >"$runtime_inspect"
+          mapfile -t image_identity < <(python3 - "$builder_inspect" "$runtime_inspect" \
+              "$builder_tag" "$runtime_tag" "$TARGET_SHA" <<'PY'
+          import json, pathlib, re, sys
+          builder_path, runtime_path, builder_ref, runtime_ref, revision = sys.argv[1:]
+          def one(path, ref):
+              rows=json.loads(pathlib.Path(path).read_text())
+              if not isinstance(rows,list) or len(rows)!=1: raise SystemExit("image did not resolve once")
+              repo=ref.rsplit(":",1)[0]
+              values=sorted({x.split("@",1)[1] for x in rows[0].get("RepoDigests") or []
+                             if x.startswith(repo+"@")})
+              if len(values)!=1 or re.fullmatch(r"sha256:[0-9a-f]{64}",values[0]) is None:
+                  raise SystemExit("image lacks one exact repository digest")
+              return rows[0],values[0]
+          builder,builder_sha=one(builder_path,builder_ref)
+          runtime,runtime_sha=one(runtime_path,runtime_ref)
+          label=((runtime.get("Config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision")
+          if label != revision: raise SystemExit("runtime image revision differs")
+          print(builder_sha); print(runtime_sha)
+          PY
+          )
+          (( ${#image_identity[@]} == 2 ))
+          builder_digest="${image_identity[0]}"
+          runtime_digest="${image_identity[1]}"
+          builder="$repository@$builder_digest"
+          runtime="$repository@$runtime_digest"
+          embedded="$(docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --entrypoint /bin/sh "$builder" -c \
+            'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
+          test "$embedded" = "$TARGET_SHA"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$builder")" = "$TARGET_SHA"
+          docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --entrypoint /bin/sh "$builder" -c \
+            'test -x /ember/build-rocm/ember-gguf-quantize'
+          docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --entrypoint /bin/sh "$runtime" -c \
+            'test -x /usr/local/bin/ember-dflash'
+
+          exact_pair() {
+            local path="$1" digest="$2" label="$3"
+            [[ "$path" = /* && -f "$path" && ! -L "$path" ]] || {
+              echo "$label must be an absolute regular file" >&2; return 1;
+            }
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "$label digest is malformed" >&2; return 1;
+            }
+            test "$(sha256sum "$path" | awk '{print $1}')" = "$digest"
+          }
+          exact_pair "$QWEN_OPERATION_REQUEST" "$QWEN_OPERATION_REQUEST_SHA256" \
+            "construction operation request"
+          mapfile -t request_values < <(python3 - "$QWEN_OPERATION_REQUEST" \
+              "$CONSTRUCTION_MODE" <<'PY'
+          import json,pathlib,re,sys
+          path,mode=sys.argv[1:]
+          value=json.loads(pathlib.Path(path).read_text())
+          if (not isinstance(value,dict) or set(value)!={"schema","mode","parameters","publishes","deletes"}
+                  or value.get("schema")!="ember.qwen3.8.candidate-construction-request.v1"
+                  or value.get("mode")!=mode or value.get("publishes") is not False
+                  or value.get("deletes") is not False or not isinstance(value.get("parameters"),dict)):
+              raise SystemExit("construction operation request schema/mode/lifecycle differs")
+          parameters=value["parameters"]
+          expected={
+              "prepare-cache":set(),
+              "prepare-companions":{"cache_manifest"},
+              "build-candidate":{"capture_manifest","cache_manifest","companion_rocmi4",
+                  "companion_fast","selection_plan","candidate_kind","candidate_stage","row_id",
+                  "candidate_id","intervention_configuration_id","intervention_manifest",
+                  "quantization_arm","mtp_matrix_quant_contract"},
+              "normalize-candidate":{"normalization_request"},
+          }
+          if set(parameters)!=expected[mode]:
+              raise SystemExit("construction operation request parameters differ for mode")
+          def pair(name,nullable=True):
+              item=parameters.get(name)
+              if item is None:
+                  if nullable:return "",""
+                  raise SystemExit(f"{name} is required")
+              if (not isinstance(item,dict) or set(item)!={"path","sha256"}
+                      or not isinstance(item["path"],str) or not item["path"].startswith("/")
+                      or "\n" in item["path"] or "\0" in item["path"]
+                      or re.fullmatch(r"[0-9a-f]{64}",str(item["sha256"])) is None):
+                  raise SystemExit(f"{name} descriptor is malformed")
+              return item["path"],item["sha256"]
+          def scalar(name,nullable=False):
+              item=parameters.get(name)
+              if item is None and nullable:return ""
+              if not isinstance(item,str) or "\n" in item or "\0" in item:
+                  raise SystemExit(f"{name} is malformed")
+              return item
+          capture=pair("capture_manifest")
+          cache=pair("cache_manifest",mode=="prepare-cache" or mode=="normalize-candidate")
+          rocmi4=pair("companion_rocmi4")
+          fast=pair("companion_fast")
+          plan=pair("selection_plan")
+          intervention=pair("intervention_manifest")
+          normalization=pair("normalization_request")
+          strings=(scalar("candidate_kind",True),scalar("candidate_stage",True),
+                   scalar("row_id",True),scalar("candidate_id",True),
+                   scalar("intervention_configuration_id",True),
+                   scalar("quantization_arm",True),scalar("mtp_matrix_quant_contract",True))
+          for item in (*capture,*cache,*rocmi4,*fast,*plan,*strings[:5],*intervention,*strings[5:],
+                       *normalization):
+              print(item)
+          PY
+          )
+          (( ${#request_values[@]} == 21 ))
+          request_names=(
+            QWEN_CAPTURE_MANIFEST QWEN_CAPTURE_MANIFEST_SHA256
+            QWEN_CACHE_MANIFEST QWEN_CACHE_MANIFEST_SHA256
+            QWEN_COMPANION_ROCMI4 QWEN_COMPANION_ROCMI4_SHA256
+            QWEN_COMPANION_FAST QWEN_COMPANION_FAST_SHA256
+            QWEN_SELECTION_PLAN QWEN_SELECTION_PLAN_SHA256
+            QWEN_CANDIDATE_KIND QWEN_CANDIDATE_STAGE QWEN_ROW_ID QWEN_CANDIDATE_ID
+            QWEN_INTERVENTION_ID QWEN_INTERVENTION_MANIFEST QWEN_INTERVENTION_MANIFEST_SHA256
+            QWEN_QUANTIZATION_ARM QWEN_MTP_MATRIX_QUANT_CONTRACT
+            QWEN_NORMALIZATION_REQUEST QWEN_NORMALIZATION_REQUEST_SHA256
+          )
+          for index in "${!request_names[@]}"; do
+            printf -v "${request_names[$index]}" '%s' "${request_values[$index]}"
+            export "${request_names[$index]}"
+            printf '%s=%s\n' "${request_names[$index]}" "${request_values[$index]}" >>"$GITHUB_ENV"
+          done
+          if [[ "$CONSTRUCTION_MODE" = prepare-companions || "$CONSTRUCTION_MODE" = build-candidate ]]; then
+            exact_pair "$QWEN_CACHE_MANIFEST" "$QWEN_CACHE_MANIFEST_SHA256" "BF16 cache manifest"
+            test "$(dirname "$(dirname "$QWEN_CACHE_MANIFEST")")" = "$cache_root"
+          fi
+          if [[ "$CONSTRUCTION_MODE" = build-candidate ]]; then
+            exact_pair "$QWEN_CAPTURE_MANIFEST" "$QWEN_CAPTURE_MANIFEST_SHA256" "capture manifest"
+            exact_pair "$QWEN_COMPANION_ROCMI4" "$QWEN_COMPANION_ROCMI4_SHA256" "ROCMI4 companion inventory"
+            exact_pair "$QWEN_COMPANION_FAST" "$QWEN_COMPANION_FAST_SHA256" "FAST companion inventory"
+            exact_pair "$QWEN_SELECTION_PLAN" "$QWEN_SELECTION_PLAN_SHA256" "selection plan"
+            [[ "$QWEN_CANDIDATE_ID" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+            [[ "$QWEN_ROW_ID" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+            test ! -e "$workset/candidates/$QWEN_CANDIDATE_ID"
+            plan_check="$RUNNER_TEMP/qwen-selection-plan-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+            python3 scripts/qwen_bakeoff.py --plan "$QWEN_SELECTION_PLAN" --stage verify \
+              --output "$plan_check"
+            if [[ "$QWEN_CANDIDATE_KIND" = stock ]]; then
+              test "$QWEN_CANDIDATE_STAGE" = stock
+              test "$QWEN_ROW_ID" = stock-rocmi4-exact
+              test "$QWEN_QUANTIZATION_ARM" = rocmi4-control
+              test "$QWEN_MTP_MATRIX_QUANT_CONTRACT" = Q4_0_ROCMI4
+              test -z "$QWEN_INTERVENTION_MANIFEST$QWEN_INTERVENTION_MANIFEST_SHA256$QWEN_INTERVENTION_ID"
+            else
+              [[ "$QWEN_CANDIDATE_STAGE" =~ ^(sweep|format)$ ]]
+              [[ "$QWEN_INTERVENTION_ID" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+              exact_pair "$QWEN_INTERVENTION_MANIFEST" "$QWEN_INTERVENTION_MANIFEST_SHA256" "intervention manifest"
+              python3 - "$QWEN_CAPTURE_MANIFEST" "$QWEN_INTERVENTION_ID" \
+                "$QWEN_INTERVENTION_MANIFEST" "$QWEN_INTERVENTION_MANIFEST_SHA256" <<'PY'
+          import json, pathlib, sys
+          capture_path, identifier, supplied_path, supplied_sha = sys.argv[1:]
+          capture=json.loads(pathlib.Path(capture_path).read_text())
+          if capture.get("status")!="complete" or capture.get("stock_rocmi4_only") is not True:
+              raise SystemExit("capture manifest is not complete stock ROCMI4 evidence")
+          rows=[x for x in capture.get("interventions",[]) if x.get("id")==identifier]
+          if len(rows)!=1: raise SystemExit("intervention id does not occur exactly once in capture")
+          expected=(pathlib.Path(capture_path).parent/rows[0]["filename"]).resolve()
+          if expected!=pathlib.Path(supplied_path).resolve() or rows[0]["sha256"]!=supplied_sha:
+              raise SystemExit("intervention manifest differs from capture inventory")
+          PY
+            fi
+          fi
+          if [[ "$CONSTRUCTION_MODE" = normalize-candidate ]]; then
+            exact_pair "$QWEN_NORMALIZATION_REQUEST" "$QWEN_NORMALIZATION_REQUEST_SHA256" \
+              "candidate normalization request"
+          else
+            test -z "$QWEN_NORMALIZATION_REQUEST$QWEN_NORMALIZATION_REQUEST_SHA256"
+          fi
+
+          for pair in \
+            "QWEN_WORKSPACE=$workspace" "QWEN_SNAPSHOT=$snapshot" "QWEN_WORKSET=$workset" \
+            "QWEN_CACHE_ROOT=$cache_root" "QWEN_EVIDENCE=$evidence" "QWEN_TOOLING=$tooling" \
+            "QWEN_CORPUS_DIR=$corpus" "QWEN_PROFILE=$profile" "QWEN_RECIPE=$recipe" \
+            "QWEN_BUILDER_IMAGE=$builder" "QWEN_BUILDER_IMAGE_DIGEST=$builder_digest" \
+            "QWEN_RUNTIME_IMAGE=$runtime" "QWEN_RUNTIME_IMAGE_DIGEST=$runtime_digest" \
+            "DOCKER_CONFIG=$docker_config"; do
+            printf '%s\n' "$pair" >>"$GITHUB_ENV"
+          done
+
+      - name: Prepare exact pinned conversion tools while production remains online
+        if: inputs.mode != 'normalize-candidate'
+        run: |
+          set -euo pipefail
+          if [[ ! -e "$QWEN_TOOLING" && ! -L "$QWEN_TOOLING" ]]; then
+            mkdir "$QWEN_TOOLING"
+          fi
+          test -d "$QWEN_TOOLING" && test ! -L "$QWEN_TOOLING"
+          ensure_checkout() {
+            local url="$1" revision="$2" destination="$3"
+            if [[ ! -d "$destination/.git" ]]; then
+              test ! -e "$destination"
+              git clone --filter=blob:none "$url" "$destination"
+            fi
+            test -d "$destination" && test ! -L "$destination"
+            git -C "$destination" fetch --filter=blob:none origin "$revision"
+            git -C "$destination" restore --source="$revision" --staged --worktree -- .
+            git -C "$destination" checkout --detach "$revision"
+            test "$(git -C "$destination" rev-parse HEAD)" = "$revision"
+            test -z "$(git -C "$destination" status --porcelain --untracked-files=no)"
+          }
+          ensure_checkout https://github.com/ggml-org/llama.cpp.git \
+            "$LLAMA_REVISION" "$QWEN_TOOLING/llama.cpp"
+          ensure_checkout https://github.com/charlie12345/ROCmFPX.git \
+            "$ROCMFPX_REVISION" "$QWEN_TOOLING/ROCmFPX"
+          patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
+          echo "$PLE_PATCH_SHA256  $patch" | sha256sum -c -
+          git -C "$QWEN_TOOLING/llama.cpp" apply --check "$patch"
+          git -C "$QWEN_TOOLING/llama.cpp" apply "$patch"
+          echo "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee  $QWEN_TOOLING/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
+          uid="$(id -u)"; gid="$(id -g)"
+          docker run --rm --network host --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+            --entrypoint /bin/bash "$QWEN_BUILDER_IMAGE" -c '
+              set -euo pipefail
+              cmake -S "$1/llama.cpp" -B "$1/llama.cpp/build" \
+                -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
+                -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF
+              cmake --build "$1/llama.cpp/build" --target llama-gguf-split -j"$(nproc)"
+              lock="$1/converter-requirements.freeze.txt"
+              if [[ ! -d "$1/converter-venv" ]]; then
+                test ! -e "$1/converter-venv" && test ! -e "$lock"
+                python3 -m venv "$1/converter-venv"
+                "$1/converter-venv/bin/pip" install --no-cache-dir \
+                  -r "$1/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt"
+                umask 077
+                set -C
+                "$1/converter-venv/bin/python" -m pip freeze >"$lock"
+              else
+                test -s "$lock" && test ! -L "$lock"
+                test ! -L "$1/converter-venv"
+                "$1/converter-venv/bin/python" -m pip freeze | cmp - "$lock"
+              fi
+            ' qwen-tooling "$QWEN_TOOLING" "$QWEN_EVIDENCE"
+          lock="$QWEN_TOOLING/converter-requirements.freeze.txt"
+          test -s "$lock" && test ! -L "$lock"
+          printf 'QWEN_CONVERTER_LOCK=%s\nQWEN_CONVERTER_LOCK_SHA256=%s\n' \
+            "$lock" "$(sha256sum "$lock" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Acquire exclusive UMA ownership and quiesce production
+        if: inputs.mode != 'normalize-candidate'
+        id: exclusive
+        run: |
+          set -euo pipefail
+          echo 'armed=no' >>"$GITHUB_OUTPUT"
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
+          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          echo 'armed=yes' >>"$GITHUB_OUTPUT"
+          sudo -n /usr/local/sbin/ember-cert-production stop
+          sudo -n /usr/local/sbin/ember-cert-production mask
+
+      - name: Prepare one immutable content-addressed BF16 cache
+        if: inputs.mode == 'prepare-cache'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-cache"
+          docker run --name "$name" --network none --ipc host \
+            --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
+            "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" prepare-cache \
+              --profile "$QWEN_PROFILE" \
+              --builder-container-digest "$QWEN_BUILDER_IMAGE_DIGEST" \
+              --converter-environment-lock "$QWEN_CONVERTER_LOCK" \
+              --converter-environment-lock-sha256 "$QWEN_CONVERTER_LOCK_SHA256" \
+              --snapshot-dir "$QWEN_SNAPSHOT" --snapshot-revision "$QWEN_REVISION" \
+              --llama-cpp-dir "$QWEN_TOOLING/llama.cpp" \
+              --rocmfpx-dir "$QWEN_TOOLING/ROCmFPX" \
+              --ember-dir "$GITHUB_WORKSPACE" --ember-revision "$TARGET_SHA" \
+              --quantizer /ember/build-rocm/ember-gguf-quantize \
+              --gguf-splitter "$QWEN_TOOLING/llama.cpp/build/bin/llama-gguf-split" \
+              --cache-root "$QWEN_CACHE_ROOT" --memory-limit-bytes 134217728000 \
+            | tee "$QWEN_EVIDENCE/prepare-cache-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker rm "$name" >/dev/null
+
+      - name: Export both exact MTP formats in fresh bounded containers
+        if: inputs.mode == 'prepare-companions'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          for spec in 'ROCMI4 Q4_0_ROCMI4' 'ROCMFP4-FAST Q4_0_ROCMFP4_FAST'; do
+            read -r label matrix <<<"$spec"
+            directory="$QWEN_WORKSET/companions/$label"
+            if [[ ! -e "$directory" && ! -L "$directory" ]]; then
+              mkdir "$directory"
+            fi
+            test -d "$directory" && test ! -L "$directory"
+            name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-mtp-${label,,}"
+            docker run --name "$name" --network none --ipc host \
+              --memory 125g --memory-swap 125g --user "$uid:$gid" \
+              -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+              --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
+            "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_mtp_export.py" \
+                --source-dir "$QWEN_SNAPSHOT" --format gguf --matrix-quant "$matrix" \
+                --output "$directory/Qwen3.8-Flash-Next-MTP-BF16-$label.gguf" \
+                --quantizer /ember/build-rocm/ember-gguf-quantize \
+                --quantized-output "$directory/Qwen3.8-Flash-Next-MTP-$label.gguf" \
+                --manifest-out "$directory/export.json"
+            docker rm "$name" >/dev/null
+          done
+
+      - name: Bind both MTP formats to the shared BF16 mmproj
+        if: inputs.mode == 'prepare-companions'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          for spec in \
+              'ROCMI4 Q4_0_ROCMI4 rocmi4-control' \
+              'ROCMFP4-FAST Q4_0_ROCMFP4_FAST rocmfp4-fast-routed-experts-q6k-embedding-head'; do
+            read -r label matrix arm <<<"$spec"
+            directory="$QWEN_WORKSET/companions/$label"
+            mtp="$directory/Qwen3.8-Flash-Next-MTP-$label.gguf"
+            export_manifest="$directory/export.json"
+            output="$QWEN_WORKSET/companions/$label.json"
+            name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-inventory-${label,,}"
+            docker run --name "$name" --network none --ipc host \
+              --memory 125g --memory-swap 125g --user "$uid:$gid" \
+              -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+              --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
+              "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" make-companion-inventory \
+                --profile "$QWEN_PROFILE" --quantization-arm "$arm" \
+                --bf16-cache-manifest "$QWEN_CACHE_MANIFEST" \
+                --bf16-cache-manifest-sha256 "$QWEN_CACHE_MANIFEST_SHA256" \
+                --mtp "$mtp" --mtp-bytes "$(stat -c %s "$mtp")" \
+                --mtp-sha256 "$(sha256sum "$mtp" | awk '{print $1}')" \
+                --mtp-matrix-quant-contract "$matrix" \
+                --mtp-export-manifest "$export_manifest" \
+                --mtp-export-manifest-sha256 "$(sha256sum "$export_manifest" | awk '{print $1}')" \
+                --output "$output"
+            docker rm "$name" >/dev/null
+          done
+          plan="$QWEN_WORKSET/selection-plan.json"
+          test ! -e "$plan"
+          python3 scripts/qwen_bakeoff.py --corpus-dir "$QWEN_CORPUS_DIR" --output "$plan"
+          python3 scripts/qwen_bakeoff.py --plan "$plan" --stage verify \
+            --output "$QWEN_EVIDENCE/selection-plan-verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          python3 - "$QWEN_EVIDENCE/companions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \
+            "$QWEN_CACHE_MANIFEST" "$QWEN_CACHE_MANIFEST_SHA256" "$plan" \
+            "$QWEN_WORKSET/companions/ROCMI4.json" "$QWEN_WORKSET/companions/ROCMFP4-FAST.json" <<'PY'
+          import hashlib,json,os,pathlib,sys
+          output=pathlib.Path(sys.argv[1]);cache=pathlib.Path(sys.argv[2]);cache_sha=sys.argv[3]
+          plan=pathlib.Path(sys.argv[4]);inventories=list(map(pathlib.Path,sys.argv[5:]))
+          def item(path): return {"path":str(path.resolve()),"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
+          value={"schema":"ember.qwen3.8.companion-construction.v1","status":"complete",
+                 "publishes":False,"cache":{"path":str(cache.resolve()),"sha256":cache_sha},
+                 "selection_plan":item(plan),"inventories":{
+                   "ROCMI4":item(inventories[0]),"ROCMFP4-FAST":item(inventories[1])}}
+          fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+          with os.fdopen(fd,"w") as stream:
+              json.dump(value,stream,indent=2,sort_keys=True);stream.write("\n");stream.flush();os.fsync(stream.fileno())
+          PY
+
+      - name: Build one intervention candidate from the immutable cache
+        if: inputs.mode == 'build-candidate' && inputs.candidate_kind == 'intervention'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          if [[ "$QWEN_MTP_MATRIX_QUANT_CONTRACT" = Q4_0_ROCMFP4_FAST ]]; then
+            companion="$QWEN_COMPANION_FAST"; companion_sha="$QWEN_COMPANION_FAST_SHA256"
+          else
+            companion="$QWEN_COMPANION_ROCMI4"; companion_sha="$QWEN_COMPANION_ROCMI4_SHA256"
+          fi
+          output="$QWEN_WORKSET/candidates/$QWEN_CANDIDATE_ID"
+          name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-candidate"
+          args=()
+          if [[ "$QWEN_QUANTIZATION_ARM" = rocmi4-control ]]; then
+            args+=(--bakeoff-plan "$QWEN_SELECTION_PLAN" \
+                   --bakeoff-plan-sha256 "$QWEN_SELECTION_PLAN_SHA256")
+          fi
+          docker run --name "$name" --network none --ipc host \
+            --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
+            "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" build-candidate \
+              --candidate-id "$QWEN_CANDIDATE_ID" \
+              --builder-container-digest "$QWEN_BUILDER_IMAGE_DIGEST" \
+              --profile "$QWEN_PROFILE" --snapshot-dir "$QWEN_SNAPSHOT" \
+              --snapshot-revision "$QWEN_REVISION" \
+              --intervention-manifest "$QWEN_INTERVENTION_MANIFEST" \
+              --llama-cpp-dir "$QWEN_TOOLING/llama.cpp" \
+              --rocmfpx-dir "$QWEN_TOOLING/ROCmFPX" \
+              --ember-dir "$GITHUB_WORKSPACE" --ember-revision "$TARGET_SHA" \
+              --quantizer /ember/build-rocm/ember-gguf-quantize \
+              --gguf-splitter "$QWEN_TOOLING/llama.cpp/build/bin/llama-gguf-split" \
+              --bf16-cache-manifest "$QWEN_CACHE_MANIFEST" \
+              --bf16-cache-manifest-sha256 "$QWEN_CACHE_MANIFEST_SHA256" \
+              --companion-inventory "$companion" \
+              --companion-inventory-sha256 "$companion_sha" \
+              --mtp-matrix-quant-contract "$QWEN_MTP_MATRIX_QUANT_CONTRACT" \
+              --quantization-arm "$QWEN_QUANTIZATION_ARM" --output "$output" \
+              --workset-root "$QWEN_CACHE_ROOT" --memory-limit-bytes 134217728000 \
+              "${args[@]}" \
+            | tee "$QWEN_EVIDENCE/build-$QWEN_CANDIDATE_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker rm "$name" >/dev/null
+
+      - name: Rebuild the stock control from the immutable cache
+        if: inputs.mode == 'build-candidate' && inputs.candidate_kind == 'stock'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          output="$QWEN_WORKSET/candidates/$QWEN_CANDIDATE_ID"
+          name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-stock"
+          docker run --name "$name" --network none --ipc host \
+            --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
+            "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" build-candidate \
+              --candidate-id "$QWEN_CANDIDATE_ID" \
+              --builder-container-digest "$QWEN_BUILDER_IMAGE_DIGEST" \
+              --profile "$QWEN_PROFILE" --snapshot-dir "$QWEN_SNAPSHOT" \
+              --snapshot-revision "$QWEN_REVISION" --stock-control \
+              --stock-capture-manifest "$QWEN_CAPTURE_MANIFEST" \
+              --stock-capture-manifest-sha256 "$QWEN_CAPTURE_MANIFEST_SHA256" \
+              --llama-cpp-dir "$QWEN_TOOLING/llama.cpp" \
+              --rocmfpx-dir "$QWEN_TOOLING/ROCmFPX" \
+              --ember-dir "$GITHUB_WORKSPACE" --ember-revision "$TARGET_SHA" \
+              --quantizer /ember/build-rocm/ember-gguf-quantize \
+              --gguf-splitter "$QWEN_TOOLING/llama.cpp/build/bin/llama-gguf-split" \
+              --bf16-cache-manifest "$QWEN_CACHE_MANIFEST" \
+              --bf16-cache-manifest-sha256 "$QWEN_CACHE_MANIFEST_SHA256" \
+              --companion-inventory "$QWEN_COMPANION_ROCMI4" \
+              --companion-inventory-sha256 "$QWEN_COMPANION_ROCMI4_SHA256" \
+              --mtp-matrix-quant-contract Q4_0_ROCMI4 \
+              --quantization-arm rocmi4-control --output "$output" \
+              --workset-root "$QWEN_CACHE_ROOT" --memory-limit-bytes 134217728000 \
+            | tee "$QWEN_EVIDENCE/build-$QWEN_CANDIDATE_ID-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          docker rm "$name" >/dev/null
+          test -s "$output/qwen-quant-build-record.json"
+          test -s "$output/qwen-candidate-workset-attestation.json"
+
+      - name: Emit a durable non-publishing construction descriptor
+        if: inputs.mode == 'build-candidate'
+        run: |
+          set -euo pipefail
+          output="$QWEN_WORKSET/candidates/$QWEN_CANDIDATE_ID"
+          record="$output/qwen-quant-build-record.json"
+          descriptor="$QWEN_EVIDENCE/construction-$QWEN_CANDIDATE_ID.json"
+          test ! -e "$descriptor"
+          python3 - "$descriptor" "$record" "$QWEN_CAPTURE_MANIFEST" \
+            "$QWEN_CACHE_MANIFEST" "$QWEN_COMPANION_ROCMI4" "$QWEN_COMPANION_FAST" \
+            "$QWEN_SELECTION_PLAN" "$QWEN_CANDIDATE_KIND" "$QWEN_CANDIDATE_STAGE" \
+            "$QWEN_ROW_ID" "$QWEN_CANDIDATE_ID" "$QWEN_INTERVENTION_ID" \
+            "$QWEN_INTERVENTION_MANIFEST" "$QWEN_QUANTIZATION_ARM" \
+            "$QWEN_MTP_MATRIX_QUANT_CONTRACT" "$TARGET_SHA" \
+            "$QWEN_BUILDER_IMAGE" "$QWEN_BUILDER_IMAGE_DIGEST" \
+            "$QWEN_RUNTIME_IMAGE" "$QWEN_RUNTIME_IMAGE_DIGEST" <<'PY'
+          import hashlib,json,os,pathlib,sys
+          (destination,record_path,capture_path,cache_path,rocmi4_path,fast_path,plan_path,
+           kind,stage,row_id,candidate_id,configuration,intervention_path,arm,mtp_contract,revision,
+           builder_ref,builder_digest,runtime_ref,runtime_digest)=sys.argv[1:]
+          def item(path):
+              p=pathlib.Path(path)
+              return {"path":str(p.resolve()),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()}
+          record=json.loads(pathlib.Path(record_path).read_text())
+          shards=[{"path":x["path"],"size_bytes":x["size_bytes"],"sha256":x["sha256"]}
+                  for x in record["output"]["shards"]]
+          attestation=pathlib.Path(record_path).parent/"qwen-candidate-workset-attestation.json"
+          attested=json.loads(attestation.read_text())
+          format_contract=attested["tensor_format_compatibility_sha256"]
+          value={
+            "schema":"ember.qwen3.8.candidate-construction.v1","status":"complete",
+            "publishes":False,"deletes":False,"candidate_id":candidate_id,"kind":kind,
+            "intended_stage":stage,"row_id":row_id,"intervention_configuration_id":configuration or None,
+            "quantization_arm":arm,"mtp_matrix_quant_contract":mtp_contract,
+            "runtime_mode":"exact_dequant","builder_revision":revision,
+            "runtime_revision":revision,
+            "images":{"builder":{"ref":builder_ref,"digest":builder_digest},
+                      "runtime":{"release_ref":runtime_ref,"release_digest":runtime_digest,
+                                 "dev_ref":builder_ref,"dev_digest":builder_digest,
+                                 "tensor_format_contract_sha256":format_contract}},
+            "capture":item(capture_path),"stock_capture":item(capture_path) if kind=="stock" else None,
+            "bf16_cache":item(cache_path),
+            "shared_companions":{"Q4_0_ROCMI4":item(rocmi4_path),
+                                 "Q4_0_ROCMFP4_FAST":item(fast_path)},
+            "selection_plan":item(plan_path),"build_record":item(record_path),
+            "builder_attestation":item(attestation),
+            "intervention_manifest":item(intervention_path) if intervention_path else None,
+            "artifacts":{"shards":shards,"total_bytes":sum(x["size_bytes"] for x in shards)},
+            "v3_candidate_manifest":{"ready":False,
+                "blocked_on":["audited_quality_contract","phase_accumulator_state",
+                              "normalization_request"]}}
+          fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+          with os.fdopen(fd,"w") as stream:
+              json.dump(value,stream,indent=2,sort_keys=True);stream.write("\n");stream.flush();os.fsync(stream.fileno())
+          directory=os.open(str(pathlib.Path(destination).parent),os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
+          try: os.fsync(directory)
+          finally: os.close(directory)
+          PY
+          printf 'QWEN_CONSTRUCTION_DESCRIPTOR=%s\nQWEN_CONSTRUCTION_DESCRIPTOR_SHA256=%s\n' \
+            "$descriptor" "$(sha256sum "$descriptor" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Normalize one audited construction receipt into bakeoff manifest v3
+        if: inputs.mode == 'normalize-candidate'
+        run: |
+          set -euo pipefail
+          result="$RUNNER_TEMP/qwen-normalized-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          python3 scripts/qwen_candidate_manifest.py from-request \
+            --request "$QWEN_NORMALIZATION_REQUEST" \
+            --request-sha256 "$QWEN_NORMALIZATION_REQUEST_SHA256" | tee "$result"
+          mapfile -t normalized < <(python3 - "$result" <<'PY'
+          import json,pathlib,sys
+          value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if value.get("status")!="complete" or value.get("publishes") is not False or value.get("deletes") is not False:
+              raise SystemExit("normalizer did not return a completed non-mutating result")
+          print(value["manifest"]);print(value["manifest_sha256"])
+          PY
+          )
+          (( ${#normalized[@]} == 2 ))
+          printf 'QWEN_V3_MANIFEST=%s\nQWEN_V3_MANIFEST_SHA256=%s\n' \
+            "${normalized[0]}" "${normalized[1]}" >>"$GITHUB_ENV"
+
+      - name: Restore production, release ownership, and prove health
+        if: always() && steps.exclusive.outputs.armed == 'yes'
+        run: |
+          set +e
+          cleanup_failed=0
+          for suffix in cache mtp-rocmi4 mtp-rocmfp4-fast inventory-rocmi4 \
+              inventory-rocmfp4-fast candidate stock; do
+            docker rm -f "qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$suffix" \
+              >/dev/null 2>&1 || true
+          done
+          sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null || cleanup_failed=1
+          healthy=0
+          for _ in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
+              healthy=1; break
+            fi
+            sleep 2
+          done
+          (( healthy == 1 )) || cleanup_failed=1
+          exit "$cleanup_failed"
+
+      - name: Remove temporary registry credentials
+        if: always() && env.DOCKER_CONFIG != ''
+        run: |
+          rm -f -- "$DOCKER_CONFIG/config.json"
+          rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+
+      - name: Record construction handoff
+        if: success()
+        run: |
+          {
+            echo '## Qwen candidate construction operation passed'
+            echo
+            echo "Mode: \`$CONSTRUCTION_MODE\`"
+            echo "Builder SHA: \`$TARGET_SHA\`"
+            echo "Builder image: \`$QWEN_BUILDER_IMAGE_DIGEST\`"
+            if [[ -n "${QWEN_CONSTRUCTION_DESCRIPTOR:-}" ]]; then
+              echo "Descriptor: \`$QWEN_CONSTRUCTION_DESCRIPTOR\`"
+              echo "Descriptor SHA-256: \`$QWEN_CONSTRUCTION_DESCRIPTOR_SHA256\`"
+            fi
+            if [[ -n "${QWEN_V3_MANIFEST:-}" ]]; then
+              echo "Bakeoff manifest v3: \`$QWEN_V3_MANIFEST\`"
+              echo "Bakeoff manifest SHA-256: \`$QWEN_V3_MANIFEST_SHA256\`"
+            fi
+            echo
+            echo 'No model, package, or measurement was published or deleted.'
+          } >>"$GITHUB_STEP_SUMMARY"

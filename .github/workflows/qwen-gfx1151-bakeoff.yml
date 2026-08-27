@@ -19,38 +19,14 @@ on:
         description: Canonical sequential phase
         required: true
         type: choice
-        options: [sweep, format, final]
-      results_accumulator:
-        description: Prior compact externally-attested accumulator (empty only for first sweep row)
-        required: false
+        options: [sweep, format, mtp-depth, final]
+      phase_request:
+        description: Exact accumulator/prior-ledger attestation request manifest
+        required: true
         type: string
-      results_accumulator_sha256:
-        description: SHA-256 of the prior accumulator
-        required: false
-        type: string
-      results_accumulator_bundle:
-        description: GitHub attestation bundle for the prior accumulator
-        required: false
-        type: string
-      results_accumulator_bundle_sha256:
-        description: SHA-256 of the prior accumulator attestation bundle
-        required: false
-        type: string
-      prior_ledger:
-        description: Attested sweep ledger for format, or format ledger for final
-        required: false
-        type: string
-      prior_ledger_sha256:
-        description: SHA-256 of the prior phase ledger
-        required: false
-        type: string
-      prior_ledger_bundle:
-        description: GitHub attestation bundle for the prior phase ledger
-        required: false
-        type: string
-      prior_ledger_bundle_sha256:
-        description: SHA-256 of the prior phase ledger attestation bundle
-        required: false
+      phase_request_sha256:
+        description: SHA-256 of the phase request manifest
+        required: true
         type: string
 
 permissions:
@@ -73,14 +49,8 @@ jobs:
       CANDIDATE_MANIFEST: ${{ inputs.candidate_manifest }}
       CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
       QWEN_BAKEOFF_PHASE: ${{ inputs.phase }}
-      QWEN_RESULTS_ACCUMULATOR: ${{ inputs.results_accumulator }}
-      QWEN_RESULTS_ACCUMULATOR_SHA256: ${{ inputs.results_accumulator_sha256 }}
-      QWEN_RESULTS_ACCUMULATOR_BUNDLE: ${{ inputs.results_accumulator_bundle }}
-      QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256: ${{ inputs.results_accumulator_bundle_sha256 }}
-      QWEN_PRIOR_LEDGER: ${{ inputs.prior_ledger }}
-      QWEN_PRIOR_LEDGER_SHA256: ${{ inputs.prior_ledger_sha256 }}
-      QWEN_PRIOR_LEDGER_BUNDLE: ${{ inputs.prior_ledger_bundle }}
-      QWEN_PRIOR_LEDGER_BUNDLE_SHA256: ${{ inputs.prior_ledger_bundle_sha256 }}
+      QWEN_PHASE_REQUEST: ${{ inputs.phase_request }}
+      QWEN_PHASE_REQUEST_SHA256: ${{ inputs.phase_request_sha256 }}
       ATTEST_REPOSITORY: OtherU-AI/ember
       ATTEST_WORKFLOW: .github/workflows/qwen-gfx1151-bakeoff.yml
     steps:
@@ -102,9 +72,68 @@ jobs:
           [[ "$CANDIDATE_MANIFEST" = /* && -f "$CANDIDATE_MANIFEST" && ! -L "$CANDIDATE_MANIFEST" ]]
           [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
           test "$(sha256sum "$CANDIDATE_MANIFEST" | awk '{print $1}')" = "$CANDIDATE_MANIFEST_SHA256"
-          [[ "$QWEN_BAKEOFF_PHASE" =~ ^(sweep|format|final)$ ]]
+          [[ "$QWEN_BAKEOFF_PHASE" =~ ^(sweep|format|mtp-depth|final)$ ]]
+          [[ "$QWEN_PHASE_REQUEST" = /* && -f "$QWEN_PHASE_REQUEST" && ! -L "$QWEN_PHASE_REQUEST" ]]
+          [[ "$QWEN_PHASE_REQUEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "$QWEN_PHASE_REQUEST" | awk '{print $1}')" = "$QWEN_PHASE_REQUEST_SHA256"
           test -x /usr/local/sbin/ember-gpu-lock
           test -x /usr/local/sbin/ember-cert-production
+
+          mapfile -t phase_request < <(python3 - "$QWEN_PHASE_REQUEST" \
+              "$QWEN_BAKEOFF_PHASE" <<'PY'
+          import json,pathlib,re,sys
+          path,phase=sys.argv[1:]
+          value=json.loads(pathlib.Path(path).read_text())
+          if (not isinstance(value,dict) or set(value)!={"schema","phase","results_accumulator",
+                  "prior_ledger","publishes","deletes"}
+                  or value.get("schema")!="ember.qwen3.8.sequential-bakeoff-phase-request.v1"
+                  or value.get("phase")!=phase or value.get("publishes") is not False
+                  or value.get("deletes") is not False):
+              raise SystemExit("bakeoff phase request schema/phase/lifecycle differs")
+          def attested(name,schema,required):
+              item=value.get(name)
+              if item is None:
+                  if required: raise SystemExit(f"{name} is required for {phase}")
+                  return "","","",""
+              if not isinstance(item,dict) or set(item)!={"subject","bundle"}:
+                  raise SystemExit(f"{name} attestation descriptor is malformed")
+              subject=item.get("subject"); bundle=item.get("bundle")
+              if (not isinstance(subject,dict) or set(subject)!={"path","sha256","schema"}
+                      or subject.get("schema")!=schema or not isinstance(bundle,dict)
+                      or set(bundle)!={"path","sha256"}):
+                  raise SystemExit(f"{name} subject/bundle schema differs")
+              values=(subject["path"],subject["sha256"],bundle["path"],bundle["sha256"])
+              if (any(not isinstance(item,str) or "\n" in item or "\0" in item for item in values)
+                      or not subject["path"].startswith("/") or not bundle["path"].startswith("/")
+                      or any(re.fullmatch(r"[0-9a-f]{64}",digest) is None
+                             for digest in (subject["sha256"],bundle["sha256"]))):
+                  raise SystemExit(f"{name} path/digest is malformed")
+              return values
+          accumulator=attested("results_accumulator",
+              "ember.qwen3.8.sequential-bakeoff-accumulator.v2",False)
+          ledger=attested("prior_ledger","ember.qwen3.8.sequential-bakeoff-ledger.v3",
+                          phase!="sweep")
+          if phase=="sweep" and value.get("prior_ledger") is not None:
+              raise SystemExit("sweep phase forbids a prior ledger")
+          print("\n".join((*accumulator,*ledger)))
+          PY
+          )
+          (( ${#phase_request[@]} == 8 ))
+          QWEN_RESULTS_ACCUMULATOR="${phase_request[0]}"
+          QWEN_RESULTS_ACCUMULATOR_SHA256="${phase_request[1]}"
+          QWEN_RESULTS_ACCUMULATOR_BUNDLE="${phase_request[2]}"
+          QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256="${phase_request[3]}"
+          QWEN_PRIOR_LEDGER="${phase_request[4]}"
+          QWEN_PRIOR_LEDGER_SHA256="${phase_request[5]}"
+          QWEN_PRIOR_LEDGER_BUNDLE="${phase_request[6]}"
+          QWEN_PRIOR_LEDGER_BUNDLE_SHA256="${phase_request[7]}"
+          for name in QWEN_RESULTS_ACCUMULATOR QWEN_RESULTS_ACCUMULATOR_SHA256 \
+              QWEN_RESULTS_ACCUMULATOR_BUNDLE QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256 \
+              QWEN_PRIOR_LEDGER QWEN_PRIOR_LEDGER_SHA256 QWEN_PRIOR_LEDGER_BUNDLE \
+              QWEN_PRIOR_LEDGER_BUNDLE_SHA256; do
+            export "$name"
+            printf '%s=%s\n' "$name" "${!name}" >>"$GITHUB_ENV"
+          done
 
           attest_verify() {
             local subject="$1" subject_sha="$2" bundle="$3" bundle_sha="$4"
@@ -171,7 +200,8 @@ jobs:
           if workset not in cache_path.parents or "bf16-cache" not in cache_path.parts:
               raise SystemExit("BF16 cache is not content-addressed beneath the workset")
           companions = m.get("shared_companions")
-          if not isinstance(companions, dict) or not {"ROCMI4", "ROCMFP4-FAST"}.issubset(companions):
+          if not isinstance(companions, dict) or set(companions) != {
+                  "Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"}:
               raise SystemExit("shared MTP/mmproj companion inventories are incomplete")
           companion = companions.get(c.get("mtp_matrix_quant_contract"))
           if not isinstance(companion, dict) or set(companion) != {"path", "sha256"}:
@@ -228,6 +258,7 @@ jobs:
           if phase == "sweep":
               expected=[plan["stock_control"]["id"],*[x["id"] for x in plan["sweep_configurations"]]]
           elif phase == "format": expected=[x["id"] for x in plan["format_arms"]]
+          elif phase == "mtp-depth": expected=[x["id"] for x in plan["mtp_depth_configurations"]]
           else: expected=["final-confirmation"]
           if count >= len(expected) or row_id != expected[count]:
               raise SystemExit("candidate is not the next row in the canonical serial phase order")
@@ -275,6 +306,19 @@ jobs:
               raise SystemExit("builder workset attestation schema differs")
           if a.get("candidate_id") != c["candidate_id"]:
               raise SystemExit("builder attestation candidate differs")
+          stock_capture = a.get("stock_capture")
+          if c.get("stage") == "stock":
+              declared_capture = c.get("stock_capture")
+              if (not isinstance(stock_capture, dict) or not isinstance(declared_capture, dict)
+                      or stock_capture.get("byte_identical") is not True
+                      or {key:stock_capture.get(key) for key in ("path","sha256")} != declared_capture
+                      or a.get("intervention_manifest_sha256") != declared_capture.get("sha256")
+                      or c.get("intervention_manifest") is not None
+                      or c.get("intervention_manifest_sha256") != "0"*64):
+                  raise SystemExit("cache-built stock is not byte-identical to activation capture")
+          elif (stock_capture is not None or c.get("stock_capture") is not None
+                or a.get("intervention_manifest_sha256") != c.get("intervention_manifest_sha256")):
+              raise SystemExit("directional candidate weight-source provenance differs")
           builder = a.get("builder_identity") or {}
           if set(builder) != {"ember_revision", "quantizer_tool_sha256", "container_digest",
                              "tensor_format_contract_sha256"} or builder["ember_revision"] != builder_sha:
@@ -300,14 +344,26 @@ jobs:
               raise SystemExit("candidate was not built from the declared immutable BF16 cache")
           if c.get("tensor_format_compatibility_sha256") != a.get("tensor_format_compatibility_sha256"):
               raise SystemExit("candidate tensor-format compatibility differs")
-          if inv.get("status") != "complete" or inv.get("mtp_matrix_quant_contract") != c.get("mtp_matrix_quant_contract"):
+          if (set(inv) != {"schema", "source", "companions"}
+                  or inv.get("schema") != "ember.qwen3.8-flash-next.companion-inventory.v1"):
+              raise SystemExit("canonical companion inventory contract differs")
+          rows = inv.get("companions")
+          if not isinstance(rows, list) or len(rows) != 2:
+              raise SystemExit("canonical companion inventory must contain MTP and vision_mmproj")
+          by_role = {row.get("role"): row for row in rows if isinstance(row, dict)}
+          if set(by_role) != {"mtp", "vision_mmproj"}:
+              raise SystemExit("canonical companion inventory roles differ")
+          mtp = by_role["mtp"]
+          if (mtp.get("enabled") is not True
+                  or mtp.get("matrix_quant_contract") != c.get("mtp_matrix_quant_contract")):
               raise SystemExit("MTP companion inventory contract differs")
           if (c.get("companion_inventory") != companions
                   or c.get("companion_inventory_sha256") != m["shared_companions"][
                       c["mtp_matrix_quant_contract"]]["sha256"]):
               raise SystemExit("candidate does not bind its selected shared companion inventory")
-          mmproj = inv.get("mmproj") or {}
-          if (mmproj.get("format") != c.get("vision_mmproj_format")
+          mmproj = by_role["vision_mmproj"]
+          if (mmproj.get("enabled") is not True
+                  or mmproj.get("format") != c.get("vision_mmproj_format")
                   or c.get("vision_mmproj_format") != "BF16"):
               raise SystemExit("shared BF16 mmproj inventory differs")
           if corpus_sha != c.get("corpus_sha256") and phase != "final":
@@ -315,7 +371,7 @@ jobs:
           if phase == "final":
               prior = json.loads(pathlib.Path(prior_path).read_text())
               selected = prior.get("selected_artifact_identity")
-              if not isinstance(selected, dict): raise SystemExit("format ledger has no selected artifact identity")
+              if not isinstance(selected, dict): raise SystemExit("MTP-depth ledger has no selected artifact identity")
               identity = {
                   "candidate_id": c.get("candidate_id"),
                   "build_record_sha256": m["build_record"]["sha256"],
@@ -324,6 +380,8 @@ jobs:
                   "quantization_overrides_sha256": c.get("override_sha256"),
                   "model_inventory_sha256": c.get("model_inventory_sha256"),
                   "companion_inventory_sha256": c.get("companion_inventory_sha256"),
+                  "mtp_matrix_quant_contract": c.get("mtp_matrix_quant_contract"),
+                  "mtp_depth": c.get("mtp_depth"),
                   "artifact_bytes": c.get("artifact_bytes"),
                   "companion_artifact_bytes": {"mtp": c.get("mtp_bytes"),
                                                    "vision_mmproj": c.get("vision_mmproj_bytes")},
@@ -334,7 +392,7 @@ jobs:
                       "tensor_format_compatibility_sha256"),
               }
               if identity != selected:
-                  raise SystemExit("final-confirmation is not the exact attested format winner")
+                  raise SystemExit("final-confirmation is not the exact attested MTP-depth winner")
               if c.get("id") != "final-confirmation":
                   raise SystemExit("final row id must be final-confirmation")
           PY
@@ -436,6 +494,11 @@ jobs:
           }
           if not keys.issubset(c): raise SystemExit(f"candidate lacks legacy gate fields: {sorted(keys-set(c))}")
           row={key:c[key] for key in keys}
+          if c["stage"] == "stock":
+              # v3 binds byte-identical activation capture separately; the
+              # legacy target gate correctly keeps intervention provenance null.
+              row["intervention_manifest"] = None
+              row["intervention_manifest_sha256"] = "0" * 64
           row.update(image=image, image_digest=image_sha, profile_image=dev, profile_image_digest=dev_sha)
           if c["stage"] == "final": row["corpus_sha256"] = None
           # The final corpus becomes available only after unlock-final; it is
@@ -507,9 +570,10 @@ jobs:
              "intervention_manifest_sha256":c["intervention_manifest_sha256"],
              "build_record_sha256":c["build_record_sha256"],
              "companion_inventory_sha256":c["companion_inventory_sha256"],
+             "mtp_matrix_quant_contract":c["mtp_matrix_quant_contract"],"mtp_depth":c["mtp_depth"],
              "profile_sha256":c["profile_sha256"],"builder_identity":builder,
              "runtime_identity":runtime,"tensor_format_compatibility_sha256":format_sha}
-          evidence={"schema":"ember.qwen3.8.sequential-bakeoff-result.v3",
+          evidence={"schema":"ember.qwen3.8.sequential-bakeoff-result.v4",
              "candidate_id":c["candidate_id"],"status":"complete","publishes":False,
              "provenance":provenance,
              "artifacts":{"combined_fits":True,"model_artifact_bytes":artifact_bytes,
@@ -521,13 +585,15 @@ jobs:
                          "matching_mtp_timing":desc(timing),"quality_contract":quality},
              "measurement_contract":{"prefill_statistic":"peak","decode_statistic":"median",
                "evaluated_prefill_tokens":facts["evaluated_prefill_tokens"],
-               "completion_tokens":facts["completion_tokens"],"mtp_spec_ran":facts["mtp_spec_ran"]}}
+               "completion_tokens":facts["completion_tokens"],"mtp_spec_ran":facts["mtp_spec_ran"],
+               "mtp_depth":c["mtp_depth"]}}
           ep=pathlib.Path(output).with_suffix(".evidence.json")
           ep.write_text(json.dumps(evidence,indent=2,sort_keys=True)+"\n")
           row={"id":c["id"],"candidate_id":c["candidate_id"],"stage":c["stage"],
              "configuration_id":c["configuration_id"],"arm_id":c["arm_id"],
              "final_release_eligible":c["final_release_eligible"],"runtime_mode":c["runtime_mode"],
-             "mtp_matrix_quant_contract":c["mtp_matrix_quant_contract"],"corpus_sha256":corpus_sha,
+             "mtp_matrix_quant_contract":c["mtp_matrix_quant_contract"],"mtp_depth":c["mtp_depth"],
+             "corpus_sha256":corpus_sha,
              "measurement_kind":"measured","status":"complete","quantization_arm":c["quantization_arm"],
              "quantization_overrides_sha256":c["override_sha256"],"profile_sha256":c["profile_sha256"],
              "build_record_sha256":c["build_record_sha256"],"intervention_configuration_id":c["intervention_configuration_id"],
@@ -617,7 +683,7 @@ jobs:
               old=json.loads(pathlib.Path(prior).read_text())
               rows=old["assessments"]
           descriptor={"subject":{"path":str(pathlib.Path(subject).resolve()),"sha256":subject_sha,
-                                 "schema":"ember.qwen3.8.candidate-assessment.v1"},
+                                 "schema":"ember.qwen3.8.candidate-assessment.v2"},
                       "bundle":{"path":str(pathlib.Path(bundle).resolve()),"sha256":bundle_sha},
                       "repository":"OtherU-AI/ember",
                       "signer_workflow":".github/workflows/qwen-gfx1151-bakeoff.yml"}
@@ -650,7 +716,8 @@ jobs:
           plan=json.loads(pathlib.Path(sys.argv[1]).read_text()); phase=sys.argv[2]
           acc=json.loads(pathlib.Path(sys.argv[3]).read_text())
           expected=(1+len(plan["sweep_configurations"]) if phase=="sweep"
-                    else len(plan["format_arms"]) if phase=="format" else 1)
+                    else len(plan["format_arms"]) if phase=="format"
+                    else len(plan["mtp_depth_configurations"]) if phase=="mtp-depth" else 1)
           print(len(acc["assessments"])); print(expected)
           PY
           )
@@ -692,7 +759,7 @@ jobs:
           import json, pathlib, sys
           print(json.loads(pathlib.Path(sys.argv[1]).read_text()).get("schema"))
           PY
-          )" = ember.qwen3.8.sequential-bakeoff-ledger.v2
+          )" = ember.qwen3.8.sequential-bakeoff-ledger.v3
           bundle="$QWEN_LEDGER.sigstore.json"
           install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
           gh attestation verify "$QWEN_LEDGER" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
@@ -724,7 +791,7 @@ jobs:
           value={"schema":"ember.qwen3.8.externally-attested-candidate-assessment.v1",
                  "candidate_id":candidate,"disposition":disposition,
                  "assessment":{"subject":{"path":str(pathlib.Path(subject).resolve()),"sha256":subject_sha,
-                                            "schema":"ember.qwen3.8.candidate-assessment.v1"},
+                                            "schema":"ember.qwen3.8.candidate-assessment.v2"},
                                "bundle":{"path":str(pathlib.Path(bundle).resolve()),"sha256":bundle_sha},
                                "repository":"OtherU-AI/ember",
                                "signer_workflow":".github/workflows/qwen-gfx1151-bakeoff.yml"}}
@@ -768,6 +835,6 @@ jobs:
             echo "Candidate artifact: \`$CANDIDATE_ARTIFACT_ID\`"
             echo "Attested compact accumulator: \`$QWEN_CURRENT_ACCUMULATOR\`"
             echo 'Prefill is the exact-2074 three-sample peak; decode is the three-sample median.'
-            echo 'The final-heldout corpus is inaccessible until unlock-final verifies the attested format ledger.'
+            echo 'The final-heldout corpus is inaccessible until unlock-final verifies the attested MTP-depth ledger.'
             echo 'No model or evidence artifact was published.'
           } >>"$GITHUB_STEP_SUMMARY"
