@@ -21,6 +21,7 @@ from pathlib import Path
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,33 @@ def direct_sha256(path: Path) -> str:
     if process.wait() != 0:
         raise CaptureError(f"O_DIRECT integrity read failed: {path}")
     return digest.hexdigest()
+
+
+def device_group_args() -> list[str]:
+    """Return numeric supplemental groups for the exact mounted GPU nodes.
+
+    ROCm development images do not necessarily define host group names such as
+    ``render``. Docker accepts numeric GIDs, which preserve device access
+    without depending on the container's ``/etc/group``.
+    """
+    nodes = [Path("/dev/kfd")]
+    dri = Path("/dev/dri")
+    if dri.is_dir():
+        nodes.extend(sorted(dri.iterdir()))
+    gids: set[int] = set()
+    for node in nodes:
+        try:
+            info = node.stat()
+        except OSError as exc:
+            raise CaptureError(f"cannot inspect GPU device group: {node}: {exc}") from exc
+        if stat.S_ISCHR(info.st_mode):
+            gids.add(info.st_gid)
+    if not gids:
+        raise CaptureError("no character-device GIDs found for /dev/kfd or /dev/dri")
+    result: list[str] = []
+    for gid in sorted(gids):
+        result.extend(("--group-add", str(gid)))
+    return result
 
 
 def require_digest(value: str, option: str, *, prefixed: bool = False) -> str:
@@ -650,7 +678,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         run_checked([
             "docker", "run", "-d", "--name", container, "--network", "host",
             "--device", "/dev/kfd", "--device", "/dev/dri",
-            "--group-add", "video", "--group-add", "render", "--ipc", "host",
+            *device_group_args(), "--ipc", "host",
             "--security-opt", "seccomp=unconfined", "--ulimit", "memlock=-1:-1",
             "--user", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{args.model.parent}:/control:ro",

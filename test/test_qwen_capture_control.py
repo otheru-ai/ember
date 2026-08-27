@@ -64,6 +64,13 @@ class QwenCaptureControlTest(unittest.TestCase):
     def test_script_compiles(self) -> None:
         subprocess.run([sys.executable, "-m", "py_compile", str(SCRIPT)], check=True)
 
+    def test_gpu_groups_are_numeric_device_gids_not_image_names(self) -> None:
+        body = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("*device_group_args()", body)
+        self.assertIn('result.extend(("--group-add", str(gid)))', body)
+        self.assertNotIn('"--group-add", "render"', body)
+        self.assertNotIn('"--group-add", "video"', body)
+
     def test_dry_run_touches_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = str(Path(temporary) / "capture")
