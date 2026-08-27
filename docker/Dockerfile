@@ -53,7 +53,15 @@ RUN --mount=type=cache,id=ember-qwen-vision-ccache,target=/root/.cache/ccache,sh
 
 FROM toolchain AS dev
 
+ARG EMBER_VERSION
 ARG EMBER_VCS_REF
+LABEL org.opencontainers.image.title="Ember development toolchain" \
+      org.opencontainers.image.description="ROCm development and profiling image for Ember on AMD Strix Halo" \
+      org.opencontainers.image.version="${EMBER_VERSION}" \
+      org.opencontainers.image.revision="${EMBER_VCS_REF}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="OtherU" \
+      org.opencontainers.image.source="https://github.com/otheru-ai/ember"
 
 # Kernel profiling is a first-class dev-image capability (scripts/profile_gpu.sh,
 # and the rocprofv3 traces cited in quantize.cu and tools/bench_decode_attn.hip).

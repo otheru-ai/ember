@@ -281,6 +281,17 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn('tag "$image:dev-sha-$short_sha"', container)
         self.assertIn("--target dev", container)
         self.assertIn("dev-image-metadata.json", container)
+        dev_stage = dockerfile.split("FROM toolchain AS dev", 1)[1].split(
+            "FROM ${RUNTIME_IMAGE} AS release", 1
+        )[0]
+        self.assertIn("ARG EMBER_VERSION", dev_stage)
+        self.assertIn("ARG EMBER_VCS_REF", dev_stage)
+        self.assertIn(
+            'org.opencontainers.image.revision="${EMBER_VCS_REF}"', dev_stage
+        )
+        self.assertIn(
+            'org.opencontainers.image.version="${EMBER_VERSION}"', dev_stage
+        )
         self.assertIn("ember-gguf-quantize ember-token-dump", dockerfile)
         self.assertIn("python3-venv git time", dockerfile)
         self.assertIn("qwen-convert-control:", certify)
