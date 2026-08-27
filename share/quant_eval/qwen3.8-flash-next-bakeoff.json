@@ -31,7 +31,7 @@
       "artifact_format": "Q4_0_ROCMFP4_FAST",
       "runtime_mode": "exact_dequant",
       "final_release_eligible": true,
-      "current_blocker": "quantizer intervention audit decodes stored output unconditionally as ROCMI4; fix and GPU-free differential are required before execution"
+      "intervention_audit_status": "passed_cross_decoder_gpu_free_regression; pending_real_weight_gfx1151_bakeoff"
     },
     {
       "id": "rocmi4-w4a4",
