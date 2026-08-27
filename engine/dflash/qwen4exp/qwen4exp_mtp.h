@@ -31,6 +31,7 @@
 namespace dflash::common {
 
 struct Qwen4ExpFrontierMoeGraph;
+struct Qwen4ExpFrontierDenseCache;
 
 struct Qwen4ExpMtpInput {
     const float * target_hc = nullptr;       // h_p, exactly 10240 values
@@ -117,6 +118,9 @@ struct Qwen4ExpMtpWeights {
     // One persistent q=1 graph owns only its compute arena. All weights are
     // borrowed from `buf`, so the trained expert payload has one resident copy.
     Qwen4ExpFrontierMoeGraph * frontier_moe = nullptr;
+    // Dense graphs and immutable host tensor copies are companion-owned and
+    // destroyed before the companion backend buffer.
+    Qwen4ExpFrontierDenseCache * dense_cache = nullptr;
 };
 
 struct Qwen4ExpMtpStats {

@@ -24,6 +24,7 @@
 namespace dflash::common {
 
 struct Qwen4ExpFrontierRuntime;
+struct Qwen4ExpFrontierDenseCache;
 
 struct Qwen4ExpMappedTensor {
     const uint8_t * data = nullptr;
@@ -137,6 +138,9 @@ struct Qwen4ExpWeights {
     uint64_t resident_weight_bytes = 0;
     uint64_t state_budget_bytes = 0;
     Qwen4ExpFrontierRuntime * frontier = nullptr;
+    // Persistent dense projection graphs and host copies of immutable small
+    // tensors. Both borrow this weight set and are freed before `buf`.
+    Qwen4ExpFrontierDenseCache * dense_cache = nullptr;
 };
 
 struct Qwen4ExpLayerState {

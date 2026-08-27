@@ -58,126 +58,29 @@ void l2_norm(float * values, int count) {
     for (int i = 0; i < count; ++i) values[i] *= scale;
 }
 
-bool tensor_f32(ggml_tensor * tensor, std::vector<float> & out,
-                std::string & error) {
-    if (!tensor || !tensor->buffer) {
-        error = "Qwen4Exp runtime received an unbound tensor";
-        return false;
-    }
-    const int64_t elements = ggml_nelements(tensor);
-    if (elements < 0 || static_cast<uint64_t>(elements) >
-                            std::numeric_limits<size_t>::max()) {
-        error = "Qwen4Exp tensor element count overflow";
-        return false;
-    }
-    std::vector<uint8_t> raw(ggml_nbytes(tensor));
-    ggml_backend_tensor_get(tensor, raw.data(), 0, raw.size());
-    const ggml_type_traits * traits = ggml_get_type_traits(tensor->type);
-    if (!traits || !traits->to_float) {
-        error = "Qwen4Exp runtime cannot decode tensor type";
-        return false;
-    }
-    out.resize(static_cast<size_t>(elements));
-    const int64_t row = tensor->ne[0];
-    const size_t row_bytes = ggml_row_size(tensor->type, row);
-    const int64_t rows = elements / row;
-    for (int64_t i = 0; i < rows; ++i) {
-        traits->to_float(raw.data() + static_cast<size_t>(i) * row_bytes,
-                         out.data() + static_cast<size_t>(i * row), row);
-    }
-    return true;
+bool tensor_f32(Qwen4ExpFrontierDenseCache * cache, ggml_tensor * tensor,
+                std::vector<float> & out, std::string & error) {
+    return qwen4exp_frontier_static_f32(cache, tensor, out, error);
 }
 
-bool matvec(ggml_backend_t backend, ggml_tensor * weight,
+bool matvec(Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+            ggml_tensor * weight,
             const float * input, int input_count,
             std::vector<float> & output, std::string & error) {
-    if (!backend || !weight || !input || weight->ne[0] != input_count ||
-        ggml_n_dims(weight) != 2) {
-        error = "invalid Qwen4Exp matvec shape";
-        return false;
-    }
-    ggml_init_params params{};
-    params.mem_size = 1024 * 1024;
-    params.no_alloc = true;
-    ggml_context * ctx = ggml_init(params);
-    if (!ctx) { error = "Qwen4Exp matvec context allocation failed"; return false; }
-    ggml_tensor * in = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, input_count);
-    ggml_set_input(in);
-    ggml_tensor * out = ggml_mul_mat(ctx, weight, in);
-    ggml_set_output(out);
-    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 16, false);
-    ggml_build_forward_expand(graph, out);
-    ggml_gallocr_t allocator =
-        ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!allocator || !ggml_gallocr_alloc_graph(allocator, graph)) {
-        if (allocator) ggml_gallocr_free(allocator);
-        ggml_free(ctx); error = "Qwen4Exp matvec graph allocation failed"; return false;
-    }
-    ggml_backend_tensor_set(in, input, 0,
-                            sizeof(float) * static_cast<size_t>(input_count));
-    const bool ok = ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
-    if (ok) {
-        output.resize(static_cast<size_t>(weight->ne[1]));
-        ggml_backend_tensor_get(out, output.data(), 0,
-                                output.size() * sizeof(float));
-    } else {
-        error = "Qwen4Exp matvec graph execution failed";
-    }
-    ggml_gallocr_free(allocator);
-    ggml_free(ctx);
-    return ok;
+    return qwen4exp_frontier_dense_eval(cache, backend, weight, input,
+                                        input_count, 1, output, error);
 }
 
-bool matmul_rows(ggml_backend_t backend, ggml_tensor * weight,
+bool matmul_rows(Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+                 ggml_tensor * weight,
                  const float * input, int input_count, int rows,
                  std::vector<float> & output, std::string & error) {
-    if (!backend || !weight || !input || input_count <= 0 || rows <= 0 ||
-        weight->ne[0] != input_count || ggml_n_dims(weight) != 2) {
-        error = "invalid Qwen4Exp batched matrix shape";
-        return false;
-    }
-    ggml_init_params params{};
-    params.mem_size = 1024 * 1024;
-    params.no_alloc = true;
-    ggml_context * ctx = ggml_init(params);
-    if (!ctx) {
-        error = "Qwen4Exp batched matrix context allocation failed";
-        return false;
-    }
-    ggml_tensor * in = ggml_new_tensor_2d(
-        ctx, GGML_TYPE_F32, input_count, rows);
-    ggml_set_input(in);
-    ggml_tensor * out = ggml_mul_mat(ctx, weight, in);
-    ggml_set_output(out);
-    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 16, false);
-    ggml_build_forward_expand(graph, out);
-    ggml_gallocr_t allocator =
-        ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
-    if (!allocator || !ggml_gallocr_alloc_graph(allocator, graph)) {
-        if (allocator) ggml_gallocr_free(allocator);
-        ggml_free(ctx);
-        error = "Qwen4Exp batched matrix graph allocation failed";
-        return false;
-    }
-    const size_t input_values = static_cast<size_t>(input_count) *
-                                static_cast<size_t>(rows);
-    ggml_backend_tensor_set(in, input, 0, input_values * sizeof(float));
-    const bool ok =
-        ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
-    if (ok) {
-        output.resize(static_cast<size_t>(weight->ne[1]) *
-                      static_cast<size_t>(rows));
-        ggml_backend_tensor_get(out, output.data(), 0,
-                                output.size() * sizeof(float));
-    } else {
-        error = "Qwen4Exp batched matrix graph execution failed";
-    }
-    ggml_gallocr_free(allocator);
-    ggml_free(ctx);
-    return ok;
+    return qwen4exp_frontier_dense_eval(cache, backend, weight, input,
+                                        input_count, rows, output, error);
 }
 
-bool rotate_optional(ggml_backend_t backend, ggml_tensor * rotation,
+bool rotate_optional(Qwen4ExpFrontierDenseCache * cache,
+                     ggml_backend_t backend, ggml_tensor * rotation,
                      std::vector<float> & values, std::string & error) {
     if (!rotation) return true;
     if (ggml_n_dims(rotation) != 2 || rotation->ne[0] != rotation->ne[1] ||
@@ -188,7 +91,7 @@ bool rotate_optional(ggml_backend_t backend, ggml_tensor * rotation,
     const int width = static_cast<int>(rotation->ne[0]);
     std::vector<float> rotated;
     for (size_t offset = 0; offset < values.size(); offset += static_cast<size_t>(width)) {
-        if (!matvec(backend, rotation, values.data() + offset, width,
+        if (!matvec(cache, backend, rotation, values.data() + offset, width,
                     rotated, error)) return false;
         std::copy(rotated.begin(), rotated.end(), values.begin() +
                   static_cast<std::ptrdiff_t>(offset));
@@ -199,10 +102,14 @@ bool rotate_optional(ggml_backend_t backend, ggml_tensor * rotation,
 bool hc_mix(const Qwen4ExpWeights & weights, const std::vector<float> & hc,
             ggml_tensor * norm, ggml_tensor * down, ggml_tensor * up,
             ggml_tensor * inject_weight, std::vector<float> & mixed,
-            std::array<float, kHc> * inject, std::string & error) {
+            std::array<float, kHc> * inject, std::string & error,
+            Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
+    Qwen4ExpFrontierDenseCache * cache =
+        cache_override ? cache_override : weights.dense_cache;
     if (hc.size() != kHcDim) { error = "invalid Qwen4Exp HC state"; return false; }
     std::vector<float> norm_weight;
-    if (!tensor_f32(norm, norm_weight, error) || norm_weight.size() != kHcDim)
+    if (!tensor_f32(cache, norm, norm_weight, error) ||
+        norm_weight.size() != kHcDim)
         return false;
     std::vector<float> xn = hc;
     for (int stream = 0; stream < kHc; ++stream)
@@ -210,11 +117,13 @@ bool hc_mix(const Qwen4ExpWeights & weights, const std::vector<float> & hc,
     for (int i = 0; i < kHcDim; ++i) xn[i] *= norm_weight[i];
 
     std::vector<float> low;
-    if (!matvec(weights.backend, down, xn.data(), kHcDim, low, error)) return false;
+    if (!matvec(cache, weights.backend, down, xn.data(), kHcDim, low, error))
+        return false;
     for (float & value : low) value = silu(value / static_cast<float>(kHc));
     std::vector<float> gate;
-    if (!matvec(weights.backend, up, low.data(), static_cast<int>(low.size()),
-                gate, error) || gate.size() != kHcDim) return false;
+    if (!matvec(cache, weights.backend, up, low.data(),
+                static_cast<int>(low.size()), gate, error) ||
+        gate.size() != kHcDim) return false;
     for (float & value : gate) value = sigmoid(value);
     mixed.assign(kEmbedding, 0.0f);
     for (int stream = 0; stream < kHc; ++stream)
@@ -223,8 +132,9 @@ bool hc_mix(const Qwen4ExpWeights & weights, const std::vector<float> & hc,
                         gate[stream * kEmbedding + i] / static_cast<float>(kHc);
     if (inject) {
         std::vector<float> raw;
-        if (!matvec(weights.backend, inject_weight, xn.data(), kHcDim,
-                    raw, error) || raw.size() != kHc) return false;
+        if (!matvec(cache, weights.backend, inject_weight, xn.data(), kHcDim,
+                    raw, error) || raw.size() != kHc)
+            return false;
         std::copy(raw.begin(), raw.end(), inject->begin());
     }
     return true;
@@ -290,15 +200,18 @@ bool run_ple(const Qwen4ExpWeights & weights, Qwen4ExpState & state,
         std::copy(one.begin(), one.end(), embedded.begin() + head * 160);
     }
     std::vector<float> key, value;
-    if (!matvec(weights.backend, layer.ple_key, embedded.data(), kEmbedding,
-                key, error) ||
-        !matvec(weights.backend, layer.ple_value, embedded.data(), kEmbedding,
-                value, error)) return false;
+    if (!matvec(weights.dense_cache, weights.backend, layer.ple_key,
+                embedded.data(), kEmbedding, key, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.ple_value,
+                embedded.data(), kEmbedding, value, error)) return false;
     std::vector<float> key_norm, query_norm, conv_norm, conv_weight;
-    if (!tensor_f32(layer.ple_norm_key, key_norm, error) ||
-        !tensor_f32(layer.ple_norm_query, query_norm, error) ||
-        !tensor_f32(layer.ple_norm_conv, conv_norm, error) ||
-        !tensor_f32(layer.ple_conv, conv_weight, error)) return false;
+    if (!tensor_f32(weights.dense_cache, layer.ple_norm_key, key_norm, error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_norm_query, query_norm,
+                    error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_norm_conv, conv_norm,
+                    error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_conv, conv_weight, error))
+        return false;
     std::vector<float> gated(kHcDim), normalized(kHcDim);
     for (int stream = 0; stream < kHc; ++stream) {
         float * kp = key.data() + stream * kEmbedding;
@@ -340,19 +253,26 @@ bool run_ple(const Qwen4ExpWeights & weights, Qwen4ExpState & state,
     return true;
 }
 
-bool run_gdn(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
-             const Qwen4ExpLayer & layer, const std::vector<float> & input,
-             std::vector<float> & output, std::string & error) {
+bool run_gdn_scalar(const Qwen4ExpWeights & weights,
+                    Qwen4ExpLayerState & state,
+                    const Qwen4ExpLayer & layer,
+                    const std::vector<float> & input,
+                    std::vector<float> & output, std::string & error) {
     std::vector<float> qkv, z, alpha, beta;
-    if (!matvec(weights.backend, layer.attn_qkv, input.data(), kEmbedding, qkv, error) ||
-        !matvec(weights.backend, layer.attn_gate, input.data(), kEmbedding, z, error) ||
-        !matvec(weights.backend, layer.ssm_alpha, input.data(), kEmbedding, alpha, error) ||
-        !matvec(weights.backend, layer.ssm_beta, input.data(), kEmbedding, beta, error)) return false;
+    if (!matvec(weights.dense_cache, weights.backend, layer.attn_qkv,
+                input.data(), kEmbedding, qkv, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.attn_gate,
+                input.data(), kEmbedding, z, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.ssm_alpha,
+                input.data(), kEmbedding, alpha, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.ssm_beta,
+                input.data(), kEmbedding, beta, error)) return false;
     std::vector<float> conv_weight, a, dt, norm;
-    if (!tensor_f32(layer.ssm_conv, conv_weight, error) ||
-        !tensor_f32(layer.ssm_a, a, error) ||
-        !tensor_f32(layer.ssm_dt, dt, error) ||
-        !tensor_f32(layer.ssm_norm, norm, error)) return false;
+    if (!tensor_f32(weights.dense_cache, layer.ssm_conv, conv_weight, error) ||
+        !tensor_f32(weights.dense_cache, layer.ssm_a, a, error) ||
+        !tensor_f32(weights.dense_cache, layer.ssm_dt, dt, error) ||
+        !tensor_f32(weights.dense_cache, layer.ssm_norm, norm, error))
+        return false;
     const size_t conv_size = 3U * 10240U;
     const size_t recurrent_size =
         static_cast<size_t>(kGdnHeads) * kGdnDim * kGdnDim;
@@ -413,7 +333,41 @@ bool run_gdn(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         for (int j = 0; j < kGdnDim; ++j)
             core[head * kGdnDim + j] *= sigmoid(z[head * kGdnDim + j]);
     }
-    return matvec(weights.backend, layer.ssm_out, core.data(), 6144, output, error);
+    return matvec(weights.dense_cache, weights.backend, layer.ssm_out,
+                  core.data(), 6144, output, error);
+}
+
+bool run_gdn(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+             const Qwen4ExpLayer & layer, int layer_index,
+             const std::vector<float> & input,
+             std::vector<float> & output, std::string & error) {
+    if (!qwen4exp_frontier_gdn_available(weights, layer_index)) {
+        return run_gdn_scalar(weights, state, layer, input, output, error);
+    }
+    constexpr size_t kConvValues = 3U * 10240U;
+    constexpr size_t kRecurrentValues =
+        static_cast<size_t>(kGdnHeads) * kGdnDim * kGdnDim;
+    const std::vector<float> zero_conv(
+        state.conv ? 0U : kConvValues, 0.0f);
+    const std::vector<float> zero_recurrent(
+        state.recurrent ? 0U : kRecurrentValues, 0.0f);
+    const std::vector<float> & conv = state.conv ? *state.conv : zero_conv;
+    const std::vector<float> & recurrent =
+        state.recurrent ? *state.recurrent : zero_recurrent;
+    std::vector<float> next_conv, next_recurrent;
+    if (!qwen4exp_frontier_gdn_q1(
+            weights, layer_index, input.data(), input.size(), conv.data(),
+            conv.size(), recurrent.data(), recurrent.size(), output, next_conv,
+            next_recurrent, error)) {
+        return false;
+    }
+    // Commit only after graph compute and every synchronized state download
+    // succeeded. Snapshot-shared vectors remain untouched, so speculative
+    // rejection can restore the exact host frontier.
+    state.conv = std::make_shared<std::vector<float>>(std::move(next_conv));
+    state.recurrent =
+        std::make_shared<std::vector<float>>(std::move(next_recurrent));
+    return true;
 }
 
 bool append_qsa_cache(const Qwen4ExpWeights & weights,
@@ -421,16 +375,19 @@ bool append_qsa_cache(const Qwen4ExpWeights & weights,
                       const Qwen4ExpLayer & layer,
                       const std::vector<float> & input,
                       const std::array<int32_t, 3> & position,
-                      std::string & error) {
+                      std::string & error,
+                      Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
+    Qwen4ExpFrontierDenseCache * cache =
+        cache_override ? cache_override : weights.dense_cache;
     std::vector<float> k, v, ik;
-    if (!matvec(weights.backend, layer.attn_k, input.data(), kEmbedding, k,
-                error) ||
-        !matvec(weights.backend, layer.attn_v, input.data(), kEmbedding, v,
-                error) ||
-        !matvec(weights.backend, layer.index_k, input.data(), kEmbedding, ik,
-                error)) return false;
+    if (!matvec(cache, weights.backend, layer.attn_k, input.data(), kEmbedding,
+                k, error) ||
+        !matvec(cache, weights.backend, layer.attn_v, input.data(), kEmbedding,
+                v, error) ||
+        !matvec(cache, weights.backend, layer.index_k, input.data(),
+                kEmbedding, ik, error)) return false;
     std::vector<float> knorm;
-    if (!tensor_f32(layer.attn_k_norm, knorm, error)) return false;
+    if (!tensor_f32(cache, layer.attn_k_norm, knorm, error)) return false;
     for (int head = 0; head < kQsaKvHeads; ++head) {
         rms_norm(k.data() + head * kQsaDim, kQsaDim, knorm.data());
         if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
@@ -438,8 +395,8 @@ bool append_qsa_cache(const Qwen4ExpWeights & weights,
     }
     // PR #27774 (abdc7a0b over #27742 035e2273): cache-side Hadamard
     // transforms are part of the stored representation, not query output.
-    if (!rotate_optional(weights.backend, layer.self_k_rot, k, error) ||
-        !rotate_optional(weights.backend, layer.self_v_rot, v, error))
+    if (!rotate_optional(cache, weights.backend, layer.self_k_rot, k, error) ||
+        !rotate_optional(cache, weights.backend, layer.self_v_rot, v, error))
         return false;
     state.key.append(k.data(), k.size());
     state.value.append(v.data(), v.size());
@@ -447,27 +404,31 @@ bool append_qsa_cache(const Qwen4ExpWeights & weights,
     return true;
 }
 
-bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+bool run_qsa_scalar(
+             const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
              const Qwen4ExpLayer & layer, const std::vector<float> & input,
              const std::array<int32_t, 3> & position,
              const std::array<std::vector<int32_t>, 3> & position_history,
-             std::vector<float> & output, std::string & error) {
+             std::vector<float> & output, std::string & error,
+             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
+    Qwen4ExpFrontierDenseCache * cache =
+        cache_override ? cache_override : weights.dense_cache;
     std::vector<float> qfull, iq;
     const int tokens = static_cast<int>(state.index_key.size() / kIndexerDim) + 1;
     std::vector<int32_t> selected;
     const bool dense_selection =
         qwen4exp_qsa_dense_selection(tokens, selected);
-    if (!matvec(weights.backend, layer.attn_q, input.data(), kEmbedding, qfull,
-                error)) return false;
+    if (!matvec(cache, weights.backend, layer.attn_q, input.data(), kEmbedding,
+                qfull, error)) return false;
     if (!dense_selection &&
-        !matvec(weights.backend, layer.index_q, input.data(), kEmbedding,
+        !matvec(cache, weights.backend, layer.index_q, input.data(), kEmbedding,
                 iq, error)) return false;
     std::vector<float> qnorm;
-    if (!tensor_f32(layer.attn_q_norm, qnorm, error)) return false;
+    if (!tensor_f32(cache, layer.attn_q_norm, qnorm, error)) return false;
     std::vector<float> iqnorm, iknorm;
     if (!dense_selection &&
-        (!tensor_f32(layer.index_q_norm, iqnorm, error) ||
-         !tensor_f32(layer.index_k_norm, iknorm, error))) return false;
+        (!tensor_f32(cache, layer.index_q_norm, iqnorm, error) ||
+         !tensor_f32(cache, layer.index_k_norm, iknorm, error))) return false;
     std::vector<float> q(kQsaHeads * kQsaDim), gate(kQsaHeads * kQsaDim);
     for (int head = 0; head < kQsaHeads; ++head) {
         std::copy_n(qfull.data() + head * 2 * kQsaDim, kQsaDim,
@@ -487,8 +448,9 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         }
     }
     // Q uses the same self-inverse K transform as the stored K cache.
-    if (!rotate_optional(weights.backend, layer.self_k_rot, q, error) ||
-        !append_qsa_cache(weights, state, layer, input, position, error))
+    if (!rotate_optional(cache, weights.backend, layer.self_k_rot, q, error) ||
+        !append_qsa_cache(weights, state, layer, input, position, error,
+                          cache))
         return false;
     // Score complete four-token blocks from the raw index-K cache. Pooling is
     // deliberately before learned RMSNorm and RoPE, matching #27742/HF. The
@@ -570,11 +532,185 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         }
     }
     // The same V rotation is self-inverse and applies again after attention.
-    if (!rotate_optional(weights.backend, layer.self_v_rot, attended, error)) return false;
+    if (!rotate_optional(cache, weights.backend, layer.self_v_rot, attended,
+                         error)) return false;
     for (size_t i = 0; i < attended.size(); ++i)
         attended[i] *= sigmoid(gate[i]);
-    return matvec(weights.backend, layer.attn_output, attended.data(),
+    return matvec(cache, weights.backend, layer.attn_output, attended.data(),
                   static_cast<int>(attended.size()), output, error);
+}
+
+bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+             const Qwen4ExpLayer & layer, int layer_index,
+             const std::vector<float> & input,
+             const std::array<int32_t, 3> & position,
+             const std::array<std::vector<int32_t>, 3> & position_history,
+             std::vector<float> & output, std::string & error,
+             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
+    Qwen4ExpFrontierQsaGraph * graph =
+        cache_override ? nullptr : qwen4exp_frontier_qsa_q1(weights,
+                                                             layer_index);
+    if (!graph) {
+        return run_qsa_scalar(weights, state, layer, input, position,
+                              position_history, output, error,
+                              cache_override);
+    }
+
+    const int prior_tokens = static_cast<int>(
+        state.index_key.size() / static_cast<size_t>(kIndexerDim));
+    const int tokens = prior_tokens + 1;
+    std::vector<int32_t> selected;
+    const bool dense_selection =
+        qwen4exp_qsa_dense_selection(tokens, selected);
+    std::vector<float> qfull, k, v, iq, ik;
+    if (!qwen4exp_frontier_qsa_project_q1(
+            graph, input.data(), input.size(), qfull, k, v, iq, ik,
+            error)) return false;
+
+    std::vector<float> qnorm, knorm;
+    if (!tensor_f32(weights.dense_cache, layer.attn_q_norm, qnorm, error) ||
+        !tensor_f32(weights.dense_cache, layer.attn_k_norm, knorm, error))
+        return false;
+    std::vector<float> iqnorm, iknorm;
+    if (!dense_selection &&
+        (!tensor_f32(weights.dense_cache, layer.index_q_norm, iqnorm, error) ||
+         !tensor_f32(weights.dense_cache, layer.index_k_norm, iknorm, error)))
+        return false;
+
+    std::vector<float> q(static_cast<size_t>(kQsaHeads * kQsaDim));
+    std::vector<float> gate(q.size());
+    for (int head = 0; head < kQsaHeads; ++head) {
+        std::copy_n(qfull.data() + head * 2 * kQsaDim, kQsaDim,
+                    q.data() + head * kQsaDim);
+        std::copy_n(qfull.data() + head * 2 * kQsaDim + kQsaDim, kQsaDim,
+                    gate.data() + head * kQsaDim);
+        rms_norm(q.data() + head * kQsaDim, kQsaDim, qnorm.data());
+        if (!rope(weights, q.data() + head * kQsaDim, kQsaDim,
+                  position.data(), error)) return false;
+    }
+    for (int head = 0; head < kQsaKvHeads; ++head) {
+        rms_norm(k.data() + head * kQsaDim, kQsaDim, knorm.data());
+        if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
+                  position.data(), error)) return false;
+    }
+    if (!dense_selection) {
+        for (int head = 0; head < kIndexerHeads; ++head) {
+            rms_norm(iq.data() + head * kIndexerDim, kIndexerDim,
+                     iqnorm.data());
+            if (!rope(weights, iq.data() + head * kIndexerDim, kIndexerDim,
+                      position.data(), error)) return false;
+        }
+    }
+    // #27774 rotations are executed as one persistent graph for all Q/K/V
+    // heads. The rotated current K/V are not published until attention and
+    // output projection have both completed successfully.
+    if (!qwen4exp_frontier_qsa_rotate_q1(graph, q, k, v, error)) return false;
+
+    if (!dense_selection) {
+        const int complete = tokens / 4;
+        const int keep = std::min(complete, 512);
+        std::vector<std::pair<float, int32_t>> scored;
+        scored.reserve(static_cast<size_t>(complete));
+        const auto raw_index = [&](int token, int dimension) {
+            return token == prior_tokens
+                ? ik[static_cast<size_t>(dimension)]
+                : state.index_key.at(static_cast<size_t>(
+                    token * kIndexerDim + dimension));
+        };
+        for (int block_index = 0; block_index < complete; ++block_index) {
+            std::array<float, kIndexerDim> pooled{};
+            for (int member = 0; member < 4; ++member)
+                for (int d = 0; d < kIndexerDim; ++d)
+                    pooled[static_cast<size_t>(d)] +=
+                        raw_index(block_index * 4 + member, d) * 0.25f;
+            rms_norm(pooled.data(), kIndexerDim, iknorm.data());
+            const size_t group_start = static_cast<size_t>(block_index * 4);
+            if (group_start >= position_history[0].size() ||
+                position_history[1].size() != position_history[0].size() ||
+                position_history[2].size() != position_history[0].size()) {
+                error = "Qwen4Exp M-RoPE history does not cover QSA block";
+                return false;
+            }
+            const int32_t group_position[3] = {
+                position_history[0][group_start],
+                position_history[1][group_start],
+                position_history[2][group_start],
+            };
+            if (!rope(weights, pooled.data(), kIndexerDim, group_position,
+                      error)) return false;
+            float score = 0.0f;
+            for (int head = 0; head < kIndexerHeads; ++head) {
+                float dot = 0.0f;
+                for (int d = 0; d < kIndexerDim; ++d)
+                    dot += iq[static_cast<size_t>(head * kIndexerDim + d)] *
+                           pooled[static_cast<size_t>(d)];
+                score += std::max(dot, 0.0f);
+            }
+            scored.emplace_back(
+                score / std::sqrt(static_cast<float>(kIndexerDim)),
+                block_index);
+        }
+        if (keep < complete) {
+            std::partial_sort(
+                scored.begin(), scored.begin() + keep, scored.end(),
+                [](const auto & a, const auto & b) {
+                    return a.first != b.first ? a.first > b.first
+                                              : a.second < b.second;
+                });
+        }
+        selected.reserve(static_cast<size_t>(keep * 4 + tokens % 4));
+        for (int index = 0; index < keep; ++index)
+            for (int member = 0; member < 4; ++member)
+                selected.push_back(scored[static_cast<size_t>(index)].second *
+                                   4 + member);
+        for (int tail = complete * 4; tail < tokens; ++tail)
+            selected.push_back(tail);
+    }
+
+    // Pack the exact selected rows in the graph's [kv_head, token, dim]
+    // layout. Prior cache slabs remain immutable; the prospective current row
+    // is sourced from local projection output.
+    const size_t selected_count = selected.size();
+    std::vector<float> selected_key(
+        static_cast<size_t>(kQsaKvHeads * kQsaDim) * selected_count);
+    std::vector<float> selected_value(selected_key.size());
+    for (int head = 0; head < kQsaKvHeads; ++head) {
+        for (size_t slot = 0; slot < selected_count; ++slot) {
+            const int token = selected[slot];
+            const size_t destination =
+                (static_cast<size_t>(head) * selected_count + slot) * kQsaDim;
+            if (token == prior_tokens) {
+                std::copy_n(k.data() + head * kQsaDim, kQsaDim,
+                            selected_key.data() + destination);
+                std::copy_n(v.data() + head * kQsaDim, kQsaDim,
+                            selected_value.data() + destination);
+            } else {
+                const size_t source =
+                    (static_cast<size_t>(token) * kQsaKvHeads +
+                     static_cast<size_t>(head)) * kQsaDim;
+                for (int dimension = 0; dimension < kQsaDim; ++dimension) {
+                    selected_key[destination +
+                                 static_cast<size_t>(dimension)] =
+                        state.key.at(source + static_cast<size_t>(dimension));
+                    selected_value[destination +
+                                   static_cast<size_t>(dimension)] =
+                        state.value.at(source +
+                                       static_cast<size_t>(dimension));
+                }
+            }
+        }
+    }
+    if (!qwen4exp_frontier_qsa_attend_q1(
+            graph, q.data(), q.size(), gate.data(), gate.size(),
+            selected_key.data(), selected_value.data(),
+            static_cast<int>(selected_count), output, error)) return false;
+
+    // Transactional publication: compute/download failures above leave the
+    // snapshot-shared append-only cache at its original exact frontier.
+    state.key.append(k.data(), k.size());
+    state.value.append(v.data(), v.size());
+    state.index_key.append(ik.data(), ik.size());
+    return true;
 }
 
 bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
@@ -585,13 +721,14 @@ bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
         error = "Qwen4Exp target MoE layer index is out of range";
         return false;
     }
-    if (weights.frontier) {
+    if (qwen4exp_frontier_moe_available(weights, layer_index)) {
         return qwen4exp_frontier_moe_q1(weights, layer_index, input.data(),
                                         input.size(), output, error);
     }
     std::vector<float> router;
-    if (!matvec(weights.backend, layer.router, input.data(), kEmbedding,
-                router, error) || router.size() != kExpertCount) return false;
+    if (!matvec(weights.dense_cache, weights.backend, layer.router,
+                input.data(), kEmbedding, router, error) ||
+        router.size() != kExpertCount) return false;
     std::array<int32_t, kExpertCount> ids{};
     std::iota(ids.begin(), ids.end(), 0);
     std::partial_sort(ids.begin(), ids.begin() + kExpertUsed, ids.end(),
@@ -624,16 +761,18 @@ bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
             output[j] += selected_weight[i] * down[j];
     }
     std::vector<float> shared_gate, shared_up, shared_down, shared_scale;
-    if (!matvec(weights.backend, layer.shared_gate, input.data(), kEmbedding,
-                shared_gate, error) ||
-        !matvec(weights.backend, layer.shared_up, input.data(), kEmbedding,
-                shared_up, error) || shared_gate.size() != kExpertFf ||
+    if (!matvec(weights.dense_cache, weights.backend, layer.shared_gate,
+                input.data(), kEmbedding, shared_gate, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.shared_up,
+                input.data(), kEmbedding, shared_up, error) ||
+        shared_gate.size() != kExpertFf ||
         shared_up.size() != kExpertFf) return false;
     for (int i = 0; i < kExpertFf; ++i) shared_gate[i] = silu(shared_gate[i]) * shared_up[i];
-    if (!matvec(weights.backend, layer.shared_down, shared_gate.data(),
-                kExpertFf, shared_down, error) ||
-        !matvec(weights.backend, layer.shared_gate_input, input.data(),
-                kEmbedding, shared_scale, error) || shared_scale.size() != 1)
+    if (!matvec(weights.dense_cache, weights.backend, layer.shared_down,
+                shared_gate.data(), kExpertFf, shared_down, error) ||
+        !matvec(weights.dense_cache, weights.backend, layer.shared_gate_input,
+                input.data(), kEmbedding, shared_scale, error) ||
+        shared_scale.size() != 1)
         return false;
     const float scale = sigmoid(shared_scale[0]);
     for (int i = 0; i < kEmbedding; ++i) output[i] += scale * shared_down[i];
@@ -691,10 +830,13 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
         const bool qsa = (layer_index + 1) % 4 == 0;
         if (qsa) {
             if (!run_qsa(weights, state.layers[static_cast<size_t>(layer_index)],
-                          layer, mixed, position, state.mrope_positions,
+                          layer, layer_index, mixed, position,
+                          state.mrope_positions,
                           block, error)) return false;
-        } else if (!run_gdn(weights, state.layers[static_cast<size_t>(layer_index)],
-                            layer, mixed, block, error)) return false;
+        } else if (!run_gdn(
+                       weights,
+                       state.layers[static_cast<size_t>(layer_index)], layer,
+                       layer_index, mixed, block, error)) return false;
         hc_combine(state.hc, block, inject);
         if (!hc_mix(weights, state.hc, layer.hc_ffn_norm, layer.hc_ffn_down,
                     layer.hc_ffn_up, layer.hc_ffn_inject, mixed, &inject,
@@ -706,8 +848,8 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
     if (!hc_mix(weights, state.hc, weights.output_hc_norm,
                 weights.output_hc_down, weights.output_hc_up, nullptr,
                 final, nullptr, error) ||
-        !matvec(weights.backend, weights.output, final.data(), kEmbedding,
-                logits, error)) return false;
+        !matvec(weights.dense_cache, weights.backend, weights.output,
+                final.data(), kEmbedding, logits, error)) return false;
     ++state.cur_pos;
     state.last_token = token;
     return true;
@@ -777,15 +919,16 @@ bool prepare_mtp_hc(const Qwen4ExpWeights & target,
         return false;
     }
     std::vector<float> embedding_norm, hc_norm;
-    if (!tensor_f32(mtp.pre_embedding_norm, embedding_norm, error) ||
+    if (!tensor_f32(mtp.dense_cache, mtp.pre_embedding_norm, embedding_norm,
+                    error) ||
         embedding_norm.size() != static_cast<size_t>(kEmbedding) ||
-        !tensor_f32(mtp.pre_hc_norm, hc_norm, error) ||
+        !tensor_f32(mtp.dense_cache, mtp.pre_hc_norm, hc_norm, error) ||
         hc_norm.size() != static_cast<size_t>(kHcDim)) return false;
 
     rms_norm(embedding.data(), kEmbedding, embedding_norm.data());
     std::vector<float> projected_embedding;
-    if (!matvec(target.backend, mtp.fc_embedding, embedding.data(), kEmbedding,
-                projected_embedding, error) ||
+    if (!matvec(mtp.dense_cache, target.backend, mtp.fc_embedding,
+                embedding.data(), kEmbedding, projected_embedding, error) ||
         projected_embedding.size() != static_cast<size_t>(kEmbedding))
         return false;
 
@@ -797,7 +940,7 @@ bool prepare_mtp_hc(const Qwen4ExpWeights & target,
     hc.resize(kHcDim);
     for (int stream = 0; stream < kHc; ++stream) {
         std::vector<float> projected_hidden;
-        if (!matvec(target.backend, mtp.fc_hc,
+        if (!matvec(mtp.dense_cache, target.backend, mtp.fc_hc,
                     normalized_hc.data() + stream * kEmbedding, kEmbedding,
                     projected_hidden, error) ||
             projected_hidden.size() != static_cast<size_t>(kEmbedding))
@@ -838,17 +981,19 @@ bool prepare_mtp_hc_batch(
         return false;
     }
     std::vector<float> embedding_norm, hc_norm;
-    if (!tensor_f32(mtp.pre_embedding_norm, embedding_norm, error) ||
+    if (!tensor_f32(mtp.dense_cache, mtp.pre_embedding_norm, embedding_norm,
+                    error) ||
         embedding_norm.size() != 2560U ||
-        !tensor_f32(mtp.pre_hc_norm, hc_norm, error) ||
+        !tensor_f32(mtp.dense_cache, mtp.pre_hc_norm, hc_norm, error) ||
         hc_norm.size() != 10240U) return false;
     for (size_t row = 0; row < shape.rows; ++row) {
         rms_norm(embeddings.data() + row * 2560U, kEmbedding,
                  embedding_norm.data());
     }
     std::vector<float> projected_embeddings;
-    if (!matmul_rows(target.backend, mtp.fc_embedding, embeddings.data(),
-                     kEmbedding, static_cast<int>(shape.rows),
+    if (!matmul_rows(mtp.dense_cache, target.backend, mtp.fc_embedding,
+                     embeddings.data(), kEmbedding,
+                     static_cast<int>(shape.rows),
                      projected_embeddings, error) ||
         projected_embeddings.size() != shape.embedding_values) return false;
 
@@ -860,8 +1005,9 @@ bool prepare_mtp_hc_batch(
         rms_norm(destination, kHcDim, hc_norm.data());
     }
     std::vector<float> projected_hidden;
-    if (!matmul_rows(target.backend, mtp.fc_hc, normalized_hc.data(),
-                     kEmbedding, static_cast<int>(shape.hc_projection_rows),
+    if (!matmul_rows(mtp.dense_cache, target.backend, mtp.fc_hc,
+                     normalized_hc.data(), kEmbedding,
+                     static_cast<int>(shape.hc_projection_rows),
                      projected_hidden, error) ||
         projected_hidden.size() != shape.target_hc_values) return false;
 
@@ -879,6 +1025,7 @@ bool prepare_mtp_hc_batch(
 }
 
 bool hc_mix_batch(const Qwen4ExpWeights & target,
+                  Qwen4ExpFrontierDenseCache * cache,
                   const Qwen4ExpLayer & layer, size_t rows,
                   const std::vector<float> & hc_rows,
                   std::vector<float> & mixed_rows, std::string & error) {
@@ -891,7 +1038,7 @@ bool hc_mix_batch(const Qwen4ExpWeights & target,
         return false;
     }
     std::vector<float> norm_weight;
-    if (!tensor_f32(layer.hc_attn_norm, norm_weight, error) ||
+    if (!tensor_f32(cache, layer.hc_attn_norm, norm_weight, error) ||
         norm_weight.size() != 10240U) return false;
     std::vector<float> normalized = hc_rows;
     for (size_t row = 0; row < rows; ++row) {
@@ -903,14 +1050,15 @@ bool hc_mix_batch(const Qwen4ExpWeights & target,
     }
     const int low_width = static_cast<int>(layer.hc_attn_down->ne[1]);
     std::vector<float> low;
-    if (!matmul_rows(target.backend, layer.hc_attn_down, normalized.data(),
-                     kHcDim, static_cast<int>(rows), low, error) ||
+    if (!matmul_rows(cache, target.backend, layer.hc_attn_down,
+                     normalized.data(), kHcDim, static_cast<int>(rows), low,
+                     error) ||
         low.size() != rows * static_cast<size_t>(low_width)) return false;
     for (float & value : low)
         value = silu(value / static_cast<float>(kHc));
     std::vector<float> gate;
-    if (!matmul_rows(target.backend, layer.hc_attn_up, low.data(), low_width,
-                     static_cast<int>(rows), gate, error) ||
+    if (!matmul_rows(cache, target.backend, layer.hc_attn_up, low.data(),
+                     low_width, static_cast<int>(rows), gate, error) ||
         gate.size() != rows * 10240U) return false;
     for (float & value : gate) value = sigmoid(value);
 
@@ -929,7 +1077,8 @@ bool hc_mix_batch(const Qwen4ExpWeights & target,
     return true;
 }
 
-bool rotate_optional_batch(ggml_backend_t backend, ggml_tensor * rotation,
+bool rotate_optional_batch(Qwen4ExpFrontierDenseCache * cache,
+                           ggml_backend_t backend, ggml_tensor * rotation,
                            std::vector<float> & values,
                            std::string & error) {
     if (!rotation) return true;
@@ -948,7 +1097,7 @@ bool rotate_optional_batch(ggml_backend_t backend, ggml_tensor * rotation,
         return false;
     }
     std::vector<float> rotated;
-    if (!matmul_rows(backend, rotation, values.data(), width,
+    if (!matmul_rows(cache, backend, rotation, values.data(), width,
                      static_cast<int>(row_count), rotated, error)) return false;
     values = std::move(rotated);
     return true;
@@ -956,6 +1105,7 @@ bool rotate_optional_batch(ggml_backend_t backend, ggml_tensor * rotation,
 
 bool append_qsa_cache_batch(
         const Qwen4ExpWeights & target, Qwen4ExpMtpState & state,
+        Qwen4ExpFrontierDenseCache * cache,
         const Qwen4ExpLayer & layer, const std::vector<float> & mixed_rows,
         const std::vector<std::array<int32_t, 3>> & positions,
         std::string & error) {
@@ -965,16 +1115,16 @@ bool append_qsa_cache_batch(
         return false;
     }
     std::vector<float> key, value, index_key;
-    if (!matmul_rows(target.backend, layer.attn_k, mixed_rows.data(),
+    if (!matmul_rows(cache, target.backend, layer.attn_k, mixed_rows.data(),
                      kEmbedding, static_cast<int>(rows), key, error) ||
-        !matmul_rows(target.backend, layer.attn_v, mixed_rows.data(),
+        !matmul_rows(cache, target.backend, layer.attn_v, mixed_rows.data(),
                      kEmbedding, static_cast<int>(rows), value, error) ||
-        !matmul_rows(target.backend, layer.index_k, mixed_rows.data(),
+        !matmul_rows(cache, target.backend, layer.index_k, mixed_rows.data(),
                      kEmbedding, static_cast<int>(rows), index_key, error) ||
         key.size() != rows * 512U || value.size() != rows * 512U ||
         index_key.size() != rows * 128U) return false;
     std::vector<float> key_norm;
-    if (!tensor_f32(layer.attn_k_norm, key_norm, error) ||
+    if (!tensor_f32(cache, layer.attn_k_norm, key_norm, error) ||
         key_norm.size() != 256U) return false;
     for (size_t row = 0; row < rows; ++row) {
         for (size_t head = 0; head < 2U; ++head) {
@@ -984,8 +1134,10 @@ bool append_qsa_cache_batch(
                       error)) return false;
         }
     }
-    if (!rotate_optional_batch(target.backend, layer.self_k_rot, key, error) ||
-        !rotate_optional_batch(target.backend, layer.self_v_rot, value, error))
+    if (!rotate_optional_batch(cache, target.backend, layer.self_k_rot, key,
+                               error) ||
+        !rotate_optional_batch(cache, target.backend, layer.self_v_rot, value,
+                               error))
         return false;
 
     // Commit only after every stateless batch operation succeeded. The
@@ -1028,13 +1180,16 @@ bool qwen4exp_mtp_step_q1(
     std::array<float, kHc> inject{};
     if (!hc_mix(target, state.hc, mtp.layer.hc_attn_norm,
                 mtp.layer.hc_attn_down, mtp.layer.hc_attn_up,
-                mtp.layer.hc_attn_inject, mixed, &inject, error) ||
-        !run_qsa(target, state.qsa, mtp.layer, mixed, mrope_position,
-                 state.mrope_positions, block, error)) return false;
+                mtp.layer.hc_attn_inject, mixed, &inject, error,
+                mtp.dense_cache) ||
+        !run_qsa(target, state.qsa, mtp.layer, -1, mixed, mrope_position,
+                 state.mrope_positions, block, error, mtp.dense_cache))
+        return false;
     hc_combine(state.hc, block, inject);
     if (!hc_mix(target, state.hc, mtp.layer.hc_ffn_norm,
                 mtp.layer.hc_ffn_down, mtp.layer.hc_ffn_up,
-                mtp.layer.hc_ffn_inject, mixed, &inject, error) ||
+                mtp.layer.hc_ffn_inject, mixed, &inject, error,
+                mtp.dense_cache) ||
         !qwen4exp_frontier_mtp_moe_q1(mtp, mixed.data(), mixed.size(),
                                       block, error)) return false;
     hc_combine(state.hc, block, inject);
@@ -1042,9 +1197,10 @@ bool qwen4exp_mtp_step_q1(
     draft_hc = state.hc;
     std::vector<float> final;
     if (!hc_mix(target, state.hc, mtp.output_hc_norm, mtp.output_hc_down,
-                mtp.output_hc_up, nullptr, final, nullptr, error) ||
-        !matvec(target.backend, target.output, final.data(), kEmbedding,
-                logits, error)) return false;
+                mtp.output_hc_up, nullptr, final, nullptr, error,
+                mtp.dense_cache) ||
+        !matvec(target.dense_cache, target.backend, target.output,
+                final.data(), kEmbedding, logits, error)) return false;
     ++state.cur_pos;
     return true;
 }
@@ -1067,9 +1223,9 @@ bool qwen4exp_mtp_sync_cache_q1(
     std::vector<float> mixed;
     if (!hc_mix(target, hc, mtp.layer.hc_attn_norm,
                 mtp.layer.hc_attn_down, mtp.layer.hc_attn_up, nullptr, mixed,
-                nullptr, error)) return false;
+                nullptr, error, mtp.dense_cache)) return false;
     if (!append_qsa_cache(target, state.qsa, mtp.layer, mixed,
-                          mrope_position, error)) return false;
+                          mrope_position, error, mtp.dense_cache)) return false;
     for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
         state.mrope_positions[axis].push_back(mrope_position[axis]);
     ++state.cur_pos;
@@ -1095,10 +1251,11 @@ bool qwen4exp_mtp_sync_cache_batch(
     std::vector<float> hc_rows, mixed_rows;
     if (!prepare_mtp_hc_batch(target, mtp, tokens, target_hc_rows, hc_rows,
                               error) ||
-        !hc_mix_batch(target, mtp.layer, shape.rows, hc_rows, mixed_rows,
-                      error) ||
-        !append_qsa_cache_batch(target, state, mtp.layer, mixed_rows,
-                                mrope_positions, error)) return false;
+        !hc_mix_batch(target, mtp.dense_cache, mtp.layer, shape.rows, hc_rows,
+                      mixed_rows, error) ||
+        !append_qsa_cache_batch(target, state, mtp.dense_cache, mtp.layer,
+                                mixed_rows, mrope_positions, error))
+        return false;
     return true;
 }
 
@@ -1129,11 +1286,12 @@ bool qwen4exp_batch_layer(
         if (qsa) {
             if (!run_qsa(weights,
                          state.layers[static_cast<size_t>(layer_index)], layer,
-                         mixed, positions[row], state.mrope_positions,
+                         layer_index, mixed, positions[row],
+                         state.mrope_positions,
                          block, error)) return false;
         } else if (!run_gdn(weights,
                             state.layers[static_cast<size_t>(layer_index)],
-                            layer, mixed, block, error)) {
+                            layer, layer_index, mixed, block, error)) {
             return false;
         }
         hc_combine(state.hc, block, inject);
@@ -1148,7 +1306,7 @@ bool qwen4exp_batch_layer(
     }
 
     std::vector<float> ffn_outputs;
-    if (weights.frontier) {
+    if (qwen4exp_frontier_moe_available(weights, layer_index)) {
         if (!qwen4exp_frontier_moe_batch(
                 weights, layer_index, ffn_inputs.data(), ffn_inputs.size(),
                 static_cast<int>(rows), ffn_outputs, error)) return false;
@@ -1248,8 +1406,8 @@ bool qwen4exp_step_batch_mrope_impl(
             if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
                         weights.output_hc_down, weights.output_hc_up, nullptr,
                         final, nullptr, error) ||
-                !matvec(weights.backend, weights.output, final.data(),
-                        kEmbedding, logits, error)) return false;
+                !matvec(weights.dense_cache, weights.backend, weights.output,
+                        final.data(), kEmbedding, logits, error)) return false;
             row_logits->push_back(std::move(logits));
         }
     } else if (final_logits) {
@@ -1257,8 +1415,8 @@ bool qwen4exp_step_batch_mrope_impl(
         if (!hc_mix(weights, hc_rows.back(), weights.output_hc_norm,
                     weights.output_hc_down, weights.output_hc_up, nullptr,
                     final, nullptr, error) ||
-            !matvec(weights.backend, weights.output, final.data(), kEmbedding,
-                    logits, error)) return false;
+            !matvec(weights.dense_cache, weights.backend, weights.output,
+                    final.data(), kEmbedding, logits, error)) return false;
         *final_logits = std::move(logits);
     }
     state.hc = hc_rows.back();
