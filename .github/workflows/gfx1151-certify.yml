@@ -76,7 +76,7 @@ jobs:
     # candidate image passes every hosted and container gate. It is never
     # referenced by pull_request jobs: the runner has direct GPU and production
     # Docker access.
-    if: ${{ !startsWith(inputs.release_version, 'qwen-preflight') }}
+    if: ${{ !startsWith(inputs.release_version, 'qwen-') }}
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 180
     env:
@@ -694,3 +694,33 @@ jobs:
           name: performance-bundle-${{ inputs.commit_sha }}
           path: ${{ env.BENCH_BUNDLE }}
           retention-days: 90
+
+  qwen-download:
+    # Resumable, content-addressed source acquisition for feature-branch model
+    # research.  Downloading does not need exclusive GPU access and therefore
+    # deliberately leaves production running.  Conversion and measurement use
+    # separate modes that take the host lock and fixed-purpose wrapper.
+    if: startsWith(inputs.release_version, 'qwen-download')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+      - name: Fetch and verify the pinned public snapshot
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          snapshot="$workspace/snapshots/f5d08274bafd880402bd16f5e3e6c514136ec06c"
+          mkdir -p "$workspace"
+          available="$(df -B1 --output=avail "$workspace" | tail -1)"
+          required=$((400 * 1024 * 1024 * 1024))
+          (( available >= required )) || {
+            echo "Qwen download requires 400 GiB free; found $available bytes"
+            exit 1
+          }
+          python3 scripts/qwen_snapshot_fetch.py \
+            --inventory share/release_profiles/qwen3.8-flash-next-snapshot.json \
+            --output "$snapshot" --workers 4
+          printf 'snapshot=%s\n' "$snapshot" >>"$GITHUB_STEP_SUMMARY"

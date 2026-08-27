@@ -616,6 +616,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_builder_preflight.py)
   set_tests_properties(qwen_builder_preflight PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_snapshot_fetch
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_snapshot_fetch.py)
+  set_tests_properties(qwen_snapshot_fetch PROPERTIES TIMEOUT 20)
+  add_test(
     NAME benchmark_gate
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_gate.py)
