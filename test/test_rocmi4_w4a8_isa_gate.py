@@ -18,6 +18,7 @@ def kernel(
     modifier_low: str = "neg_lo:[1,0,0]",
     scratch: int = 0,
     shift_before_high: bool = False,
+    pairs: int = 8,
 ) -> str:
     symbol = (
         "_ZL9mul_mat_qIL9ggml_type108ELi32ELb"
@@ -28,9 +29,11 @@ def kernel(
     if shift_before_high:
         high_then_shift = """\tv_lshlrev_b32_e32 v0, 4, v0
 \tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] neg_lo:[1,1,0]"""
+    pair = f"""{high_then_shift}
+\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}"""
+    body = "\n".join(pair for _ in range(pairs))
     return f"""{symbol}:
-{high_then_shift}
-\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}
+{body}
 .Lfunc_end{checked}:
 \t.amdhsa_kernel {symbol}
 \t\t.amdhsa_private_segment_fixed_size {scratch}
@@ -58,6 +61,8 @@ def main() -> int:
     assert run_gate(kernel(0, modifier_low="neg_lo:[1,1,0]") + kernel(1)).returncode != 0
     assert run_gate(kernel(0, shift_before_high=True) + kernel(1)).returncode != 0
     assert run_gate(kernel(0, scratch=4) + kernel(1)).returncode != 0
+    assert run_gate(kernel(0, pairs=7) + kernel(1)).returncode != 0
+    assert run_gate(kernel(0) + kernel(0) + kernel(1)).returncode != 0
     print("PASS: rocmi4 W4A8 ISA gate accepts native exact code and rejects drift")
     return 0
 

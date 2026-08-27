@@ -68,10 +68,14 @@ def inspect(path: pathlib.Path) -> list[str]:
         widths.add(width)
         checked_seen.add(checked)
         body = function_body(lines, index)
+        all_wmma = [i for i, text in enumerate(body) if WMMA in text]
         signed = [i for i, text in enumerate(body) if WMMA in text and "neg_lo:[1,1,0]" in text]
         unsigned = [i for i, text in enumerate(body) if WMMA in text and "neg_lo:[1,0,0]" in text]
-        if not signed or len(signed) != len(unsigned):
-            fail(f"{symbol}: signed/unsigned IU4 WMMA counts differ")
+        if len(signed) != 8 or len(unsigned) != 8 or len(all_wmma) != 16:
+            fail(
+                f"{symbol}: expected exactly 8 signed-high and 8 unsigned-low "
+                f"IU4 WMMAs, found {len(signed)}, {len(unsigned)}, total {len(all_wmma)}"
+            )
 
         # LLVM may interleave independent accumulator groups.  Track WMMA
         # credits rather than requiring all high products before all low
@@ -120,6 +124,8 @@ def inspect(path: pathlib.Path) -> list[str]:
         fail(f"candidate widths are {sorted(widths)}, expected only [32]")
     if checked_seen != {0, 1}:
         fail(f"candidate checked variants are {sorted(checked_seen)}, expected [0, 1]")
+    if len(candidates) != 2:
+        fail(f"found {len(candidates)} candidate functions, expected exactly 2")
 
     reports = []
     for _symbol, checked, vgpr, sgpr in sorted(candidates, key=lambda item: item[1]):
