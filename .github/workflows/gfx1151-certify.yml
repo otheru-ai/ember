@@ -775,9 +775,11 @@ jobs:
           snapshot="$workspace/snapshots/$QWEN_REVISION"
           test -f "$snapshot/model.safetensors.index.json"
           if [[ -e "$snapshot/.ember-fetch.lock" ]] && \
-              ! flock -n "$snapshot/.ember-fetch.lock" -c true; then
-              echo 'the resumable source download still owns the snapshot'
-              exit 1
+              ! docker run --rm --network none \
+                -v "$snapshot:/qwen-snapshot:ro" "$QWEN_DEV_IMAGE" \
+                python3 -c 'import fcntl, os; fd=os.open("/qwen-snapshot/.ember-fetch.lock", os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)' ; then
+            echo 'the resumable source download still owns the snapshot'
+            exit 1
           fi
           mkdir -p "$workspace/tooling" "$workspace/evidence"
           ple_patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
