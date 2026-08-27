@@ -488,3 +488,59 @@ The generated plan is safe to inspect or archive because it contains no
 credential value. A future publisher should reject an unprotected branch, an
 unexpected repository ID, a destination outside the plan, or any hash change
 instead of trying to repair the candidate implicitly.
+
+### Protected publication envelope
+
+`qwen_release_package.py` remains offline and non-publishing. After the final
+held-out confirmation, create a separate fail-closed handoff with
+`scripts/qwen_publication_envelope.py build`. It requires explicit paths and
+SHA-256 values for `upload-plan.json`, the final ledger and its GitHub artifact
+attestation bundle, the complete measurement manifest, the audited quality
+contract, the matching-MTP real-weight hardware record, and the immutable
+runtime image. The tool replays the final 2,074-token prefill and 256-token
+decode decision from the pinned evidence, checks the exact three-sample
+performance/memory gates, binds the selected model inventory to every planned
+package byte, and records the runtime image, Ember revision, engine-binary
+digest, and tensor-format contract. It uses only the Python standard library,
+does not read credentials, and does not contact the Hub.
+
+The resulting `ember.qwen3.8.hf-publication-envelope.v1` authorizes only its
+generated `candidate/...` revision. It explicitly denies promotion. Verify it
+again immediately before publication:
+
+```bash
+python3 scripts/qwen_publication_envelope.py verify \
+  --envelope /protected/qwen/publication-envelope.json \
+  --envelope-sha256 <sha256> \
+  --expected-engine-revision <40-hex-ember-commit>
+```
+
+`.github/workflows/qwen-hf-candidate.yml` is the only provided Hub mutation
+path. It is manual, runs only from `main`, uses the protected
+`qwen-hf-candidate` GitHub environment, verifies the final-ledger GitHub
+attestation before requesting OIDC, refuses an existing candidate branch,
+uploads only the envelope's exact plan entries, resolves the branch to an
+immutable Hub commit, downloads every planned file by that commit, rehashes
+every byte, and attests the verification receipt. It contains no promotion job
+or event. The certified engine revision must already be an ancestor of the
+protected `main` workflow revision, so policy-only commits do not invalidate a
+completed hardware record and an unmerged research revision cannot publish.
+
+Before the workflow can run, an organization administrator must complete these
+one-time controls:
+
+- create the target model repository without populating the candidate branch;
+- configure a Hugging Face repo Trusted Publisher for resource
+  `otheru/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-GGUF`, pinning repository
+  `OtherU-AI/ember`, branch `main`, and workflow `qwen-hf-candidate.yml`;
+- create the GitHub `qwen-hf-candidate` environment with required reviewers;
+- install exactly `huggingface_hub==1.19.0` on the protected `qwen-quant`
+  runner. The workflow deliberately does not download executable tooling after
+  obtaining publication authority.
+
+Hugging Face Trusted Publisher tokens are short-lived and repository-scoped.
+The workflow exposes neither an `HF_TOKEN` secret nor a fallback credential.
+If any one-time control is absent, OIDC exchange or the runner-version check
+fails closed. Promotion must be implemented and approved separately, must name
+the verified immutable candidate commit, and must rehash the resulting `main`
+commit; this repository intentionally provides no automatic promotion path.

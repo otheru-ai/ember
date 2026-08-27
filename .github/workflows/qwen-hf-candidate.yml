@@ -1,0 +1,209 @@
+name: Qwen Hugging Face candidate publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      envelope_path:
+        description: Absolute protected-runner path to the completed publication envelope
+        required: true
+        type: string
+      envelope_sha256:
+        description: Exact lowercase SHA-256 of the publication envelope
+        required: true
+        type: string
+
+# Candidate upload is the only mutation authorized here. There is deliberately
+# no promotion event or job. The `qwen-hf-candidate` environment must require
+# reviewers, and the Hub Trusted Publisher must pin OtherU-AI/ember, branch
+# main, this workflow filename, and the exact target model repository.
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: qwen-hf-candidate-publication
+  cancel-in-progress: false
+
+jobs:
+  publish-candidate:
+    if: github.repository == 'OtherU-AI/ember' && github.ref == 'refs/heads/main'
+    environment: qwen-hf-candidate
+    runs-on: [self-hosted, linux, x64, qwen-quant]
+    timeout-minutes: 1440
+    env:
+      ENVELOPE_PATH: ${{ inputs.envelope_path }}
+      ENVELOPE_SHA256: ${{ inputs.envelope_sha256 }}
+      # The protected runner owns this exact installation. The workflow never
+      # downloads executable code immediately before obtaining write access.
+      REQUIRED_HF_HUB_VERSION: "1.19.0"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          # The certified engine revision may precede the publication-policy
+          # commit, but it must already be part of protected main history.
+          fetch-depth: 0
+
+      - name: Reproduce the protected certification envelope
+        id: envelope
+        run: |
+          set -euo pipefail
+          set +x
+          [[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]
+          [[ "$GITHUB_REF" = refs/heads/main ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet --exit-code
+          [[ "$ENVELOPE_PATH" = /* && -f "$ENVELOPE_PATH" && ! -L "$ENVELOPE_PATH" ]]
+          [[ "$ENVELOPE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "$ENVELOPE_PATH" | awk '{print $1}')" = "$ENVELOPE_SHA256"
+          python3 scripts/qwen_publication_envelope.py verify \
+            --envelope "$ENVELOPE_PATH" --envelope-sha256 "$ENVELOPE_SHA256"
+          python3 - "$ENVELOPE_PATH" "$GITHUB_OUTPUT" <<'PY'
+          import json, pathlib, re, sys
+          value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          fields={
+              "repo_id": value["candidate"]["repo_id"],
+              "revision": value["candidate"]["revision"],
+              "ledger_path": value["evidence"]["final_ledger"]["path"],
+              "ledger_attestation": value["evidence"]["final_ledger_attestation"]["path"],
+              "attestation_repo": value["attestation_policy"]["repository"],
+              "attestation_workflow": value["attestation_policy"]["signer_workflow"],
+              "engine_revision": value["runtime"]["ember_revision"],
+          }
+          if fields["repo_id"] != "otheru/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-GGUF":
+              raise SystemExit("unexpected Hugging Face repository")
+          if re.fullmatch(r"candidate/[A-Za-z0-9._-]+", fields["revision"]) is None:
+              raise SystemExit("unsafe candidate revision")
+          if any("\n" in item or "\0" in item for item in fields.values()):
+              raise SystemExit("unsafe workflow field")
+          with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as stream:
+              for key, item in fields.items(): stream.write(f"{key}={item}\n")
+          PY
+          engine_revision="$(python3 - "$ENVELOPE_PATH" <<'PY'
+          import json, pathlib, sys
+          print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+                ["runtime"]["ember_revision"])
+          PY
+          )"
+          [[ "$engine_revision" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$engine_revision^{commit}"
+          git merge-base --is-ancestor "$engine_revision" "$GITHUB_SHA"
+
+      - name: Verify the externally authenticated final ledger
+        env:
+          LEDGER_PATH: ${{ steps.envelope.outputs.ledger_path }}
+          LEDGER_ATTESTATION: ${{ steps.envelope.outputs.ledger_attestation }}
+          ATTESTATION_REPO: ${{ steps.envelope.outputs.attestation_repo }}
+          ATTESTATION_WORKFLOW: ${{ steps.envelope.outputs.attestation_workflow }}
+        run: |
+          set -euo pipefail
+          set +x
+          gh attestation verify "$LEDGER_PATH" --bundle "$LEDGER_ATTESTATION" \
+            --repo "$ATTESTATION_REPO" --signer-workflow "$ATTESTATION_WORKFLOW"
+
+      - name: Require the pinned OIDC-capable Hugging Face client
+        run: |
+          set -euo pipefail
+          set +x
+          command -v hf >/dev/null
+          python3 - "$REQUIRED_HF_HUB_VERSION" <<'PY'
+          import importlib.metadata, sys
+          actual=importlib.metadata.version("huggingface_hub")
+          if actual != sys.argv[1]:
+              raise SystemExit(f"protected runner huggingface_hub is {actual}, expected {sys.argv[1]}")
+          PY
+
+      - name: Create a new candidate branch through Trusted Publisher OIDC
+        env:
+          HF_OIDC_RESOURCE: ${{ steps.envelope.outputs.repo_id }}
+          HF_REPO_ID: ${{ steps.envelope.outputs.repo_id }}
+          HF_CANDIDATE_REVISION: ${{ steps.envelope.outputs.revision }}
+        run: |
+          set -euo pipefail
+          set +x
+          hf repo branch create "$HF_REPO_ID" "$HF_CANDIDATE_REVISION" --revision main \
+            --repo-type model --no-exist-ok
+
+      - name: Upload only the envelope-authorized files
+        env:
+          HF_OIDC_RESOURCE: ${{ steps.envelope.outputs.repo_id }}
+          HF_REPO_ID: ${{ steps.envelope.outputs.repo_id }}
+          HF_CANDIDATE_REVISION: ${{ steps.envelope.outputs.revision }}
+          ENGINE_REVISION: ${{ steps.envelope.outputs.engine_revision }}
+        run: |
+          set -euo pipefail
+          set +x
+          while IFS= read -r -d '' local_path && IFS= read -r -d '' path_in_repo; do
+            hf upload "$HF_REPO_ID" "$local_path" "$path_in_repo" \
+              --repo-type model --revision "$HF_CANDIDATE_REVISION" \
+              --commit-message "Qwen certified candidate engine ${ENGINE_REVISION}"
+          done < <(python3 scripts/qwen_publication_envelope.py emit-upload-files \
+            --envelope "$ENVELOPE_PATH" --envelope-sha256 "$ENVELOPE_SHA256")
+
+      - name: Resolve the candidate to an immutable Hub commit
+        id: remote
+        env:
+          HF_OIDC_RESOURCE: ${{ steps.envelope.outputs.repo_id }}
+          HF_REPO_ID: ${{ steps.envelope.outputs.repo_id }}
+          HF_CANDIDATE_REVISION: ${{ steps.envelope.outputs.revision }}
+        run: |
+          set -euo pipefail
+          set +x
+          token="$(hf auth token)"
+          echo "::add-mask::$token"
+          candidate_commit="$(HF_TOKEN="$token" python3 - <<'PY'
+          import os, re
+          from huggingface_hub import HfApi
+          value=HfApi().model_info(os.environ["HF_REPO_ID"],
+                                   revision=os.environ["HF_CANDIDATE_REVISION"]).sha
+          if re.fullmatch(r"[0-9a-f]{40}", str(value)) is None:
+              raise SystemExit("Hub did not return an immutable candidate commit")
+          print(value)
+          PY
+          )"
+          unset token
+          echo "candidate_commit=$candidate_commit" >>"$GITHUB_OUTPUT"
+
+      - name: Download and rehash every file by immutable candidate commit
+        env:
+          HF_OIDC_RESOURCE: ${{ steps.envelope.outputs.repo_id }}
+          HF_REPO_ID: ${{ steps.envelope.outputs.repo_id }}
+          CANDIDATE_COMMIT: ${{ steps.remote.outputs.candidate_commit }}
+        run: |
+          set -euo pipefail
+          set +x
+          remote_root="$RUNNER_TEMP/qwen-hf-remote-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          receipt="$RUNNER_TEMP/qwen-hf-candidate-receipt-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          test ! -e "$remote_root"
+          mkdir -m 700 "$remote_root"
+          while IFS= read -r -d '' _local_path && IFS= read -r -d '' path_in_repo; do
+            hf download "$HF_REPO_ID" "$path_in_repo" \
+              --repo-type model --revision "$CANDIDATE_COMMIT" --local-dir "$remote_root" --quiet
+          done < <(python3 scripts/qwen_publication_envelope.py emit-upload-files \
+            --envelope "$ENVELOPE_PATH" --envelope-sha256 "$ENVELOPE_SHA256")
+          python3 scripts/qwen_publication_envelope.py verify-remote \
+            --envelope "$ENVELOPE_PATH" --envelope-sha256 "$ENVELOPE_SHA256" \
+            --root "$remote_root" --candidate-commit "$CANDIDATE_COMMIT" \
+            --output "$receipt"
+          echo "RECEIPT=$receipt" >>"$GITHUB_ENV"
+
+      - name: Attest the immutable-candidate verification receipt
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
+        with:
+          subject-path: ${{ env.RECEIPT }}
+
+      - name: Candidate-only summary
+        run: |
+          {
+            echo '### Qwen Hugging Face candidate verified'
+            echo
+            echo 'Repository: `${{ steps.envelope.outputs.repo_id }}`'
+            echo 'Candidate revision: `${{ steps.envelope.outputs.revision }}`'
+            echo 'Immutable candidate commit: `${{ steps.remote.outputs.candidate_commit }}`'
+            echo
+            echo 'Promotion was not requested or performed. A separately approved process must promote this exact commit.'
+          } >>"$GITHUB_STEP_SUMMARY"

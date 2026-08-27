@@ -598,6 +598,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_release_package.py)
   set_tests_properties(qwen_release_package PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_publication_envelope
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_publication_envelope.py)
+  set_tests_properties(qwen_publication_envelope PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_vision_provider_scripts
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_provider_scripts.py)
