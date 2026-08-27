@@ -82,6 +82,8 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         blocks = workflow_run_blocks(body)
         self.assertGreaterEqual(len(blocks), 10)
         for index, block in enumerate(blocks):
+            self.assertLessEqual(len(block.encode("utf-8")), 21_000,
+                                 f"run block {index} exceeds GitHub's expression limit")
             neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
             result = subprocess.run(["bash", "-n"], input=neutral, text=True,
                                     capture_output=True)

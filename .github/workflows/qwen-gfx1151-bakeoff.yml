@@ -61,10 +61,8 @@ jobs:
           fetch-depth: 1
 
       - name: Bind one workset, immutable cache, companions, identities, and sealed phase
-        id: preflight
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -294,6 +292,34 @@ jobs:
             )"
           fi
 
+          for pair in \
+            "SELECTION_PLAN=$SELECTION_PLAN" "SELECTION_PLAN_SHA256=$SELECTION_PLAN_SHA256" \
+            "EFFECTIVE_PLAN=$EFFECTIVE_PLAN" "EFFECTIVE_PLAN_SHA256=$EFFECTIVE_PLAN_SHA256" \
+            "QWEN_BAKEOFF_EVIDENCE_ROOT=$QWEN_BAKEOFF_EVIDENCE_ROOT" \
+            "QWEN_WORKSET_ROOT=$QWEN_WORKSET_ROOT" "CANDIDATE_ROW_ID=$CANDIDATE_ROW_ID" \
+            "CANDIDATE_ARTIFACT_ID=$CANDIDATE_ARTIFACT_ID" "CORPUS_SHA256=$CORPUS_SHA256" \
+            "BUILDER_SHA=$BUILDER_SHA" "BUILDER_IMAGE=$BUILDER_IMAGE" \
+            "BUILDER_IMAGE_DIGEST=$BUILDER_IMAGE_DIGEST" \
+            "RUNTIME_IMAGE=$RUNTIME_IMAGE" "RUNTIME_IMAGE_DIGEST=$RUNTIME_IMAGE_DIGEST" \
+            "RUNTIME_DEV_IMAGE=$RUNTIME_DEV_IMAGE" \
+            "RUNTIME_DEV_IMAGE_DIGEST=$RUNTIME_DEV_IMAGE_DIGEST" \
+            "RUNTIME_FORMAT_SHA256=$RUNTIME_FORMAT_SHA256" \
+            "BUILDER_ATTESTATION=$BUILDER_ATTESTATION" \
+            "BUILDER_ATTESTATION_SHA256=$BUILDER_ATTESTATION_SHA256" \
+            "BUILD_RECORD=$BUILD_RECORD" "BUILD_RECORD_SHA256=$BUILD_RECORD_SHA256" \
+            "COMPANION_INVENTORY=$COMPANION_INVENTORY" \
+            "COMPANION_INVENTORY_SHA256=$COMPANION_INVENTORY_SHA256" \
+            "QWEN_PRIOR_COUNT=$prior_count"; do
+            printf '%s\n' "$pair" >>"$GITHUB_ENV"
+          done
+
+      - name: Bind candidate provenance and exact runtime identity
+        id: preflight
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
           python3 - "$CANDIDATE_MANIFEST" "$BUILDER_ATTESTATION" "$BUILDER_SHA" \
             "$BUILD_RECORD" "$COMPANION_INVENTORY" "$CORPUS_SHA256" "$QWEN_BAKEOFF_PHASE" \
             "$QWEN_PRIOR_LEDGER" <<'PY'
@@ -463,7 +489,7 @@ jobs:
             "RUNTIME_ENGINE_SHA256=$RUNTIME_ENGINE_SHA256" "RUNTIME_FORMAT_SHA256=$RUNTIME_FORMAT_SHA256" \
             "BUILD_RECORD=$BUILD_RECORD" "BUILD_RECORD_SHA256=$BUILD_RECORD_SHA256" \
             "COMPANION_INVENTORY=$COMPANION_INVENTORY" "COMPANION_INVENTORY_SHA256=$COMPANION_INVENTORY_SHA256" \
-            "QWEN_PRIOR_COUNT=$prior_count"; do
+            "QWEN_PRIOR_COUNT=$QWEN_PRIOR_COUNT"; do
             printf '%s\n' "$pair" >>"$GITHUB_ENV"
           done
           printf 'armed=yes\nproduction_was_active=yes\n' >>"$GITHUB_OUTPUT"
