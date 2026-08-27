@@ -3,6 +3,11 @@
 // explicit graph path.
 //
 // Layout facts used here are verified, not assumed:
+//   * Machine-readable source: AMD GPUOpen `machine-readable-isa/latest`,
+//     downloaded 2026-08-27, archive SHA-256
+//     82404f1126761b7877595b622afa7e1f311f2f41e89a3abe9aaf8ad045c082e2,
+//     `amdgpu_isa_rdna3_5.xml` dated 2026-08-04. Its WMMA AB format requires
+//     two replicated 16x16 matrices in wave32; the RDNA4 layout is not used.
 //   * A frag: lane L holds ROW L%16, all 16 K values (ISA 7.9 VGPR-view figure;
 //     AMD Matrix Instruction Calculator -a gfx1151; CK wmma_gemm.hpp).
 //   * B frag: lane L holds COLUMN L%16.

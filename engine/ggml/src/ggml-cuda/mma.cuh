@@ -1337,8 +1337,18 @@ namespace ggml_cuda_mma {
     static __device__ __forceinline__ void mma_iu4(
             tile<16, 16, int, dl_d> & D, const tile<16, 4, int, dl_ab> & A, const tile<16, 4, int, dl_ab> & B) {
 #if defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
+        // AMD machine-readable ISA, amdgpu_isa_rdna3_5.xml (2026-08-04):
+        // V_WMMA_I32_16X16X16_IU4 consumes one 64-bit A and B fragment per
+        // lane, produces one 256-bit I32 accumulator, and requires two A/B
+        // copies across a wave32.  DATA_LAYOUT_I_MAJOR_MIRRORED supplies the
+        // copies through lane%16; the two calls below cover the tile's two
+        // consecutive K=16 groups.  Do not use the gfx12 non-replicated map.
         using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
         using int32x2_t = __attribute__((__vector_size__(2 * sizeof(int)))) int;
+        static_assert(sizeof(int32x2_t) == 8, "gfx1151 IU4 WMMA operand must be 64 bits");
+        static_assert(sizeof(int32x8_t) == 32, "gfx1151 IU4 WMMA accumulator must be 256 bits");
+        static_assert(dl_ab == DATA_LAYOUT_I_MAJOR_MIRRORED,
+                      "gfx1151 IU4 WMMA inputs must use the RDNA3.5 replicated layout");
         int32x8_t * acc = (int32x8_t *) D.x;
         int32x2_t * av = (int32x2_t *) A.x;
         int32x2_t * bv = (int32x2_t *) B.x;
