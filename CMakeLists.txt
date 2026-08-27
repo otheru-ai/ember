@@ -576,6 +576,12 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_profile_scripts.py)
   set_tests_properties(profile_scripts PROPERTIES TIMEOUT 20)
+
+  add_test(
+    NAME rocmi4_w4a8_isa_gate
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_rocmi4_w4a8_isa_gate.py)
+  set_tests_properties(rocmi4_w4a8_isa_gate PROPERTIES TIMEOUT 20)
   add_test(
     NAME release_changelog
     COMMAND ${Python3_EXECUTABLE}

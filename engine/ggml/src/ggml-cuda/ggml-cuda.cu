@@ -388,6 +388,15 @@ static ggml_cuda_device_info ggml_cuda_init() {
             GGML_LOG_INFO("  ROCmI4 W4A4: unsupported on device %d; using exact int8 MMQ\n", id);
         }
 #endif
+#if defined(GGML_ROCMI4_W4A8_IU4) && GGML_ROCMI4_W4A8_IU4
+        const char * rocmi4_w4a8 = getenv("DFLASH_ROCMI4_W4A8_IU4");
+        const bool rocmi4_w4a8_enabled = rocmi4_w4a8_iu4_requested(rocmi4_w4a8);
+        if (rocmi4_w4a8_enabled && GGML_CUDA_CC_IS_GFX1151(info.devices[id].cc)) {
+            GGML_LOG_WARN("  ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device %d\n", id);
+        } else if (rocmi4_w4a8_enabled) {
+            GGML_LOG_INFO("  ROCmI4 W4A8 IU4: unsupported on device %d; using exact int8 MMQ\n", id);
+        }
+#endif
 #elif defined(GGML_USE_MUSA)
         // FIXME: Ensure compatibility with varying warp sizes across different MUSA archs.
         info.devices[id].warp_size = 32;

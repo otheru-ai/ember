@@ -162,6 +162,18 @@ if (GGML_HIP_ROCMI4_W4A4)
         "verified only on gfx1151. Exact MMQ is used on other architectures.")
 endif()
 
+if (GGML_HIP_ROCMI4_W4A8_IU4)
+    if (GGML_HIP_ROCMI4_W4A4)
+        message(FATAL_ERROR
+            "GGML_HIP_ROCMI4_W4A8_IU4 preserves q8 activations and cannot be "
+            "combined with the lossy GGML_HIP_ROCMI4_W4A4 quantizer")
+    endif()
+    add_compile_definitions(GGML_ROCMI4_W4A8_IU4=1)
+    message(STATUS
+        "Compiling exact gfx1151 ROCmI4 W4A8 IU4 MMQ experiment; runtime "
+        "selection additionally requires DFLASH_ROCMI4_W4A8_IU4=1")
+endif()
+
 if (GGML_HIP_ROCWMMA_FATTN)
     add_compile_definitions(GGML_HIP_ROCWMMA_FATTN)
 endif()

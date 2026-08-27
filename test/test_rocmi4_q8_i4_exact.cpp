@@ -173,6 +173,16 @@ void check_fragment_packing() {
     CHECK(ok, "q8 fragment packing preserves all low/high nibble bit patterns");
 }
 
+void check_runtime_opt_in() {
+    CHECK(!rocmi4_w4a8_iu4_requested(nullptr) &&
+              !rocmi4_w4a8_iu4_requested("") &&
+              !rocmi4_w4a8_iu4_requested("0") &&
+              !rocmi4_w4a8_iu4_requested("true") &&
+              !rocmi4_w4a8_iu4_requested("1 ") &&
+              rocmi4_w4a8_iu4_requested("1"),
+          "only the exact runtime value 1 requests the W4A8 IU4 experiment");
+}
+
 void check_exhaustive_scalar_products() {
     bool ok = true;
     for (int weight = -8; weight <= 7; ++weight) {
@@ -244,6 +254,7 @@ int main() {
     check_endpoints();
     check_all_q8_values();
     check_fragment_packing();
+    check_runtime_opt_in();
     check_exhaustive_scalar_products();
     check_adversarial_tiles();
     check_random_tiles();

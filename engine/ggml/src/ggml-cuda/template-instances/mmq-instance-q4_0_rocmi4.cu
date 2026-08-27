@@ -3,3 +3,7 @@
 #include "../mmq.cuh"
 
 DECL_MMQ_CASE(GGML_TYPE_Q4_0_ROCMI4);
+
+#if GGML_ROCMI4_W4A8_IU4
+DECL_MMQ_ROCMI4_W4A8_IU4_CASE;
+#endif

@@ -130,6 +130,7 @@ option(GGML_HIP                             "ggml: use HIP"                     
 option(GGML_HIP_GRAPHS                      "ggml: use HIP graph, experimental, slow"         OFF)
 option(GGML_HIP_NO_VMM                      "ggml: do not try to use HIP VMM"                 ON)
 option(GGML_HIP_ROCMI4_W4A4                 "ggml: enable lossy gfx1151 W4A4 MMQ for ROCmI4" OFF)
+option(GGML_HIP_ROCMI4_W4A8_IU4             "ggml: compile exact gfx1151 W4A8 IU4 MMQ experiment" OFF)
 option(GGML_HIP_ROCWMMA_FATTN               "ggml: enable rocWMMA for FlashAttention"         OFF)
 option(GGML_HIP_MMQ_MFMA                    "ggml: enable MFMA MMA for CDNA in MMQ"           ON)
 option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics output"         OFF)

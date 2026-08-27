@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "vecdotq.cuh"
 #include "mma.cuh"
+#include "../../rocmfpx/rocmi4_exact.h"
 
 #include <climits>
 #include <cstdint>
@@ -12,6 +13,9 @@ using namespace ggml_cuda_mma;
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
 #ifndef GGML_ROCMI4_W4A4
 #define GGML_ROCMI4_W4A4 0
+#endif
+#ifndef GGML_ROCMI4_W4A8_IU4
+#define GGML_ROCMI4_W4A8_IU4 0
 #endif
 #define MMQ_ITER_K 256
 #define MMQ_ITER_K_MXFP4_FP4    512
@@ -1083,14 +1087,14 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     }
 }
 
-#if GGML_ROCMI4_W4A4
+#if GGML_ROCMI4_W4A4 || GGML_ROCMI4_W4A8_IU4
 static __device__ __forceinline__ int rocmi4_pack_lo(const int a, const int b) {
     return (a & 0x0f0f0f0f) | ((b & 0x0f0f0f0f) << 4);
 }
 static __device__ __forceinline__ int rocmi4_pack_hi(const int a, const int b) {
     return ((a >> 4) & 0x0f0f0f0f) | (((b >> 4) & 0x0f0f0f0f) << 4);
 }
-template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_rocmi4_w4a4(
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_rocmi4_packed(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int nwarps = mmq_get_nwarps_device();
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
@@ -3758,11 +3762,17 @@ static __device__ __forceinline__ void vec_dot_rocmi4_w4a4_wmma(
     const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
 #endif
 
+#if GGML_ROCMI4_W4A8_IU4
+template <int mmq_x, int mmq_y>
+static __device__ __forceinline__ void vec_dot_rocmi4_w4a8_iu4_wmma(
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
+#endif
+
 template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_ROCMI4> {
     static constexpr int              vdr          = VDR_ROCMI4_Q8_1_MMQ;
 #if GGML_ROCMI4_W4A4 && defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
-    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4_w4a4<mmq_y, need_check>;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4_packed<mmq_y, need_check>;
     static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_rocmi4_w4a4_wmma<mmq_x, mmq_y>;
 #else
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4<mmq_y, need_check>;
@@ -3912,7 +3922,20 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ4_XS> {
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
-template <ggml_type type, int mmq_x, bool need_check, bool fixup>
+template <int mmq_x, int mmq_y, bool need_check, ggml_type type, bool rocmi4_w4a8_iu4>
+struct mmq_kernel_traits : mmq_type_traits<mmq_x, mmq_y, need_check, type> {};
+
+#if GGML_ROCMI4_W4A8_IU4
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_kernel_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_ROCMI4, true> {
+    static constexpr int              vdr          = VDR_ROCMI4_Q8_1_MMQ;
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4_packed<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_rocmi4_w4a8_iu4_wmma<mmq_x, mmq_y>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+#endif
+
+template <ggml_type type, int mmq_x, bool need_check, bool fixup, bool rocmi4_w4a8_iu4>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
         const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
         const int * __restrict__ ids_dst, float * __restrict__ dst, float * __restrict__ tmp_fixup,
@@ -3923,17 +3946,20 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     constexpr int              nwarps     = mmq_get_nwarps_device();
     constexpr int              qk         = ggml_cuda_type_traits<type>::qk;
     constexpr int              mmq_y      = get_mmq_y_device();
-    constexpr load_tiles_mmq_t load_tiles = mmq_type_traits<mmq_x, mmq_y, need_check, type>::load_tiles;
+    constexpr load_tiles_mmq_t load_tiles =
+        mmq_kernel_traits<mmq_x, mmq_y, need_check, type, rocmi4_w4a8_iu4>::load_tiles;
 
     extern __shared__ int data_mul_mat_q[];
     int * tile_y = data_mul_mat_q + mmq_x;
     int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-    constexpr vec_dot_mmq_t    vec_dot    = mmq_type_traits<mmq_x, mmq_y, need_check, type>::vec_dot_mma;
+    constexpr vec_dot_mmq_t    vec_dot    =
+        mmq_kernel_traits<mmq_x, mmq_y, need_check, type, rocmi4_w4a8_iu4>::vec_dot_mma;
     constexpr mmq_write_back_t write_back = mmq_write_back_mma<type, mmq_x, mmq_y, need_check>;
 #else
-    constexpr vec_dot_mmq_t    vec_dot    = mmq_type_traits<mmq_x, mmq_y, need_check, type>::vec_dot_dp4a;
+    constexpr vec_dot_mmq_t    vec_dot    =
+        mmq_kernel_traits<mmq_x, mmq_y, need_check, type, rocmi4_w4a8_iu4>::vec_dot_dp4a;
     constexpr mmq_write_back_t write_back = mmq_write_back_dp4a<mmq_x, mmq_y, need_check>;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
@@ -4014,7 +4040,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
 // The mul_mat_q kernel implements "stream-k" work partitioning as described in https://arxiv.org/abs/2301.03598
 
-template <ggml_type type, int mmq_x, bool need_check>
+template <ggml_type type, int mmq_x, bool need_check, bool rocmi4_w4a8_iu4>
 #if defined(GGML_USE_HIP)
 #if defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
     __launch_bounds__(ggml_cuda_get_physical_warp_size()*mmq_get_nwarps_device(), 2)
@@ -4115,7 +4141,7 @@ static __global__ void mul_mat_q(
         const int offset_x = (wt/sample_ratio)*stride_sample_x + (zt/channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
 
         constexpr bool fixup = false;
-        mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
+        mul_mat_q_process_tile<type, mmq_x, need_check, fixup, rocmi4_w4a8_iu4>
             (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, 0, ncols_x/qk);
         return;
@@ -4195,7 +4221,7 @@ static __global__ void mul_mat_q(
         const int offset_x = (wt/sample_ratio)*stride_sample_x + (zt/channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
 
         constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
-        mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
+        mul_mat_q_process_tile<type, mmq_x, need_check, fixup, rocmi4_w4a8_iu4>
             (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, stride_row_x, ncols_y, stride_col_dst,
              tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
 
@@ -4262,7 +4288,7 @@ static __global__ void mul_mat_q(
     const int offset_x = (wt/sample_ratio)*stride_sample_x + (zt/channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
 
     constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
-    mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
+    mul_mat_q_process_tile<type, mmq_x, need_check, fixup, rocmi4_w4a8_iu4>
         (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, stride_row_x, ncols_y, stride_col_dst,
          tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
 }
@@ -4437,17 +4463,17 @@ struct mmq_args {
     bool use_stream_k; int64_t ncols_max;
 };
 
-template<ggml_type type>
+template<ggml_type type, bool rocmi4_w4a8_iu4>
 static size_t mmq_get_nbytes_shared(const int mmq_x, const int mmq_y, const int cc, const int warp_size, const int nwarps) {
     const tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
-    const int mmq_tile_x_k = mmq_get_mma_tile_x_k(type, cc);
+    const int mmq_tile_x_k = rocmi4_w4a8_iu4 ? MMQ_MMA_TILE_X_K_ROCMI4 : mmq_get_mma_tile_x_k(type, cc);
     const size_t nbs_ids = mmq_x*sizeof(int);
     const size_t nbs_x = (turing_mma_available(cc) || amd_mfma_available(cc) || amd_wmma_available(cc)) ? mmq_y*mmq_tile_x_k*sizeof(int) : txs.qs*sizeof(int) + txs.dm*sizeof(half2) + txs.sc*sizeof(int);
     const size_t nbs_y = mmq_x * (sizeof(block_q8_1_mmq));
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 }
 
-template <ggml_type type, int mmq_x>
+template <ggml_type type, int mmq_x, bool rocmi4_w4a8_iu4>
 static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     const int id = ggml_cuda_get_device();
     const int cc = ggml_cuda_info().devices[id].cc;
@@ -4458,10 +4484,10 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
     const dim3 block_dims(warp_size, nwarps, 1);
 
-    const int nbytes_shared = mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps);
+    const int nbytes_shared = mmq_get_nbytes_shared<type, rocmi4_w4a8_iu4>(mmq_x, mmq_y, cc, warp_size, nwarps);
 
-    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, mmq_x, false>), nbytes_shared);
-    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, mmq_x,  true>), nbytes_shared);
+    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, mmq_x, false, rocmi4_w4a8_iu4>), nbytes_shared);
+    CUDA_SET_SHARED_MEMORY_LIMIT((mul_mat_q<type, mmq_x,  true, rocmi4_w4a8_iu4>), nbytes_shared);
 
     const int nty  = (args.nrows_x   + mmq_y - 1) / mmq_y;
     const int ntx  = (args.ncols_max + mmq_x - 1) / mmq_x;
@@ -4476,7 +4502,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     if (!args.use_stream_k) {
         if (args.nrows_x % mmq_y == 0) {
             constexpr bool need_check = false;
-            mul_mat_q<type, mmq_x, need_check><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
+            mul_mat_q<type, mmq_x, need_check, rocmi4_w4a8_iu4><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
                 (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, nullptr,
                  args.ncols_x, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
                  channel_ratio, args.nchannels_y, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -4484,7 +4510,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
                  args.ncols_max);
         } else {
             constexpr bool need_check = true;
-            mul_mat_q<type, mmq_x, need_check><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
+            mul_mat_q<type, mmq_x, need_check, rocmi4_w4a8_iu4><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
                 (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, nullptr,
                  args.ncols_x, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
                  channel_ratio, args.nchannels_y, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -4505,7 +4531,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
     if (args.nrows_x % mmq_y == 0) {
         constexpr bool need_check = false;
-        mul_mat_q<type, mmq_x, need_check><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
+        mul_mat_q<type, mmq_x, need_check, rocmi4_w4a8_iu4><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
             (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr,
              args.ncols_x, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio, args.nchannels_y, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -4522,7 +4548,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
              args.ncols_max);
     } else {
         constexpr bool need_check = true;
-        mul_mat_q<type, mmq_x, need_check><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
+        mul_mat_q<type, mmq_x, need_check, rocmi4_w4a8_iu4><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
             (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr,
              args.ncols_x, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio, args.nchannels_y, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
@@ -4540,10 +4566,21 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     }
 }
 
-template <ggml_type type>
+template <ggml_type type, bool rocmi4_w4a8_iu4 = false>
 void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     const int    id     = ggml_cuda_get_device();
     const int    cc     = ggml_cuda_info().devices[id].cc;
+
+    if constexpr (rocmi4_w4a8_iu4) {
+        static_assert(type == GGML_TYPE_Q4_0_ROCMI4,
+                      "the exact W4A8 IU4 experiment is ROCmI4-only");
+        GGML_ASSERT(GGML_CUDA_CC_IS_GFX1151(cc));
+        // Keep this experiment on the one candidate width that compiles
+        // without scratch in both checked variants under ROCm 10.0/gfx1151.
+        // Wider variants hit the 256-VGPR ceiling and are not safe A/B inputs.
+        launch_mul_mat_q<type, 32, true>(ctx, args, stream);
+        return;
+    } else {
     const size_t smpbo  = ggml_cuda_info().devices[id].smpbo;
     const int warp_size = ggml_cuda_info().devices[id].warp_size;
     const int nwarps    = mmq_get_nwarps_host(cc, warp_size);
@@ -4557,7 +4594,8 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     for (int mmq_x = 8; mmq_x <= mmq_x_max && ntiles_x_best > 1; mmq_x += 8) {
         const int granularity = mmq_get_granularity_host(mmq_x, cc);
 
-        if (mmq_x % granularity != 0 || mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
+        if (mmq_x % granularity != 0 ||
+            mmq_get_nbytes_shared<type, rocmi4_w4a8_iu4>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
             continue;
         }
 
@@ -4571,59 +4609,142 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
 
     switch (mmq_x_best) {
         case   8:
-            launch_mul_mat_q<type,   8>(ctx, args, stream);
+            launch_mul_mat_q<type,   8, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  16:
-            launch_mul_mat_q<type,  16>(ctx, args, stream);
+            launch_mul_mat_q<type,  16, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  24:
-            launch_mul_mat_q<type,  24>(ctx, args, stream);
+            launch_mul_mat_q<type,  24, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  32:
-            launch_mul_mat_q<type,  32>(ctx, args, stream);
+            launch_mul_mat_q<type,  32, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  40:
-            launch_mul_mat_q<type,  40>(ctx, args, stream);
+            launch_mul_mat_q<type,  40, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  48:
-            launch_mul_mat_q<type,  48>(ctx, args, stream);
+            launch_mul_mat_q<type,  48, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  56:
-            launch_mul_mat_q<type,  56>(ctx, args, stream);
+            launch_mul_mat_q<type,  56, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  64:
-            launch_mul_mat_q<type,  64>(ctx, args, stream);
+            launch_mul_mat_q<type,  64, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  72:
-            launch_mul_mat_q<type,  72>(ctx, args, stream);
+            launch_mul_mat_q<type,  72, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  80:
-            launch_mul_mat_q<type,  80>(ctx, args, stream);
+            launch_mul_mat_q<type,  80, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  88:
-            launch_mul_mat_q<type,  88>(ctx, args, stream);
+            launch_mul_mat_q<type,  88, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case  96:
-            launch_mul_mat_q<type,  96>(ctx, args, stream);
+            launch_mul_mat_q<type,  96, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case 104:
-            launch_mul_mat_q<type, 104>(ctx, args, stream);
+            launch_mul_mat_q<type, 104, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case 112:
-            launch_mul_mat_q<type, 112>(ctx, args, stream);
+            launch_mul_mat_q<type, 112, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case 120:
-            launch_mul_mat_q<type, 120>(ctx, args, stream);
+            launch_mul_mat_q<type, 120, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         case 128:
-            launch_mul_mat_q<type, 128>(ctx, args, stream);
+            launch_mul_mat_q<type, 128, rocmi4_w4a8_iu4>(ctx, args, stream);
             break;
         default:
             fprintf(stderr, "mmq_x_best=%d\n", mmq_x_best);
             GGML_ABORT("fatal error");
             break;
     }
+    }
 }
+
+#if GGML_ROCMI4_W4A8_IU4
+template <int mmq_x, int mmq_y>
+static __device__ __forceinline__ void vec_dot_rocmi4_w4a8_iu4_wmma(
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00) {
+#if defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
+    constexpr data_layout layout = get_input_data_layout();
+    typedef tile<16, 4, int, layout> tile_A;
+    typedef tile<16, 8, int, layout> tile_B_q8;
+    typedef tile<16, 4, int, layout> tile_B_i4;
+    typedef tile<16, 16, int, DATA_LAYOUT_J_MAJOR> tile_C;
+    static_assert(layout == DATA_LAYOUT_I_MAJOR_MIRRORED,
+                  "exact gfx1151 W4A8 IU4 requires the RDNA3.5 mirrored fragment layout");
+    static_assert(tile_B_q8::ne == 2 * tile_B_i4::ne,
+                  "two consecutive q8 fragment registers must pack one IU4 fragment");
+
+    constexpr int granularity = mmq_get_granularity_device(mmq_x);
+    constexpr int rows_per_warp = granularity;
+    constexpr int ntx = rows_per_warp/tile_C::I;
+    y += (threadIdx.y % ntx)*(tile_C::J*MMQ_TILE_Y_K);
+    const int * x_qs = x;
+    const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K;
+    const int * y_qs = y + 4;
+    const float * y_df = (const float *) y;
+    const int i0 = (threadIdx.y / ntx)*rows_per_warp;
+
+    // Keep the ordinary q8_1 activation tile and its D4 scale.  Each K32
+    // fragment is decomposed register-locally as q8 = low_u4 + 16*high_i4.
+    // The high signed-I4 product is formed first, multiplied by 16 in I32,
+    // then the low unsigned-I4 product accumulates into it.  This yields the
+    // same one-I32-per-K32 value and therefore the same float accumulation
+    // order as vec_dot_q8_0_q8_1_mma.
+    for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_0) {
+        const int k0 = k00 + k01;
+        const int kp = k0/2;
+        tile_A A[ntx];
+#pragma unroll
+        for (int n = 0; n < ntx; ++n) {
+            load_ldmatrix(A[n], x_qs + (i0 + n*tile_A::I)*MMQ_MMA_TILE_X_K_ROCMI4 + kp,
+                          MMQ_MMA_TILE_X_K_ROCMI4);
+        }
+#pragma unroll
+        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+            tile_B_q8 B_q8;
+            load_generic(B_q8, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
+            const int j = j0 + tile_C::get_j(0);
+            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
+#pragma unroll
+            for (int n = 0; n < ntx; ++n) {
+                tile_B_i4 B;
+#pragma unroll
+                for (int p = 0; p < tile_B_i4::ne; ++p) {
+                    B.x[p] = (int) rocmi4_pack_q8x8_high_i4(
+                        (uint32_t) B_q8.x[2*p], (uint32_t) B_q8.x[2*p + 1]);
+                }
+                tile_C C;
+                mma_iu4<true>(C, A[n], B);
+#pragma unroll
+                for (int l = 0; l < tile_C::ne; ++l) {
+                    C.x[l] *= 16;
+                }
+#pragma unroll
+                for (int p = 0; p < tile_B_i4::ne; ++p) {
+                    B.x[p] = (int) rocmi4_pack_q8x8_low_u4(
+                        (uint32_t) B_q8.x[2*p], (uint32_t) B_q8.x[2*p + 1]);
+                }
+                mma_iu4<false>(C, A[n], B);
+#pragma unroll
+                for (int l = 0; l < tile_C::ne; ++l) {
+                    const int i = i0 + n*tile_A::I + tile_C::get_i(l);
+                    const float dA = x_df[i*MMQ_MMA_TILE_X_K_ROCMI4 + k0/QI8_0];
+                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += C.x[l]*dA*dB;
+                }
+            }
+        }
+    }
+#else
+    GGML_UNUSED_VARS(x, y, sum, k00);
+    NO_DEVICE_CODE;
+#endif
+}
+#endif
 
 #if GGML_ROCMI4_W4A4
 template <int mmq_x, int mmq_y>
@@ -4681,6 +4802,12 @@ static __device__ __forceinline__ void vec_dot_rocmi4_w4a4_wmma(
 #define DECL_MMQ_CASE(type)                                                        \
     template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
 
+#if GGML_ROCMI4_W4A8_IU4
+#define DECL_MMQ_ROCMI4_W4A8_IU4_CASE                                              \
+    template void mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4, true>(                     \
+        ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream)
+#endif
+
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_0);
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_1);
 extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);
@@ -4705,6 +4832,10 @@ extern DECL_MMQ_CASE(GGML_TYPE_IQ3_S);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ1_S);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ4_NL);
 extern DECL_MMQ_CASE(GGML_TYPE_IQ4_XS);
+
+#if GGML_ROCMI4_W4A8_IU4
+extern DECL_MMQ_ROCMI4_W4A8_IU4_CASE;
+#endif
 
 // -------------------------------------------------------------------------------------------------------------------------
 

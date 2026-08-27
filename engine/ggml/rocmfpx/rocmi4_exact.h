@@ -75,4 +75,10 @@ rocmi4_pack_q8x8_high_i4(uint32_t first4, uint32_t next4) {
            (rocmi4_compact_q8_nibbles4(next4 >> 4) << 16);
 }
 
+/* The runtime experiment is selected only by the exact, documented value. */
+static ROCMI4_EXACT_HD inline int
+rocmi4_w4a8_iu4_requested(const char * value) {
+    return value != (const char *) 0 && value[0] == '1' && value[1] == '\0';
+}
+
 #undef ROCMI4_EXACT_HD

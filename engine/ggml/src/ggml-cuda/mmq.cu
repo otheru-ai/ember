@@ -3,6 +3,17 @@
 #include "quantize.cuh"
 #include "mmid.cuh"
 
+#if GGML_ROCMI4_W4A8_IU4
+static bool ggml_cuda_rocmi4_w4a8_iu4_enabled() {
+    const char * value = getenv("DFLASH_ROCMI4_W4A8_IU4");
+    if (!rocmi4_w4a8_iu4_requested(value)) {
+        return false;
+    }
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    return GGML_CUDA_CC_IS_GFX1151(cc);
+}
+#endif
+
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
         case GGML_TYPE_Q4_0:
@@ -24,6 +35,12 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             mul_mat_q_case<GGML_TYPE_Q4_0_ROCMFP4_FAST>(ctx, args, stream);
             break;
         case GGML_TYPE_Q4_0_ROCMI4:
+#if GGML_ROCMI4_W4A8_IU4
+            if (ggml_cuda_rocmi4_w4a8_iu4_enabled()) {
+                mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4, true>(ctx, args, stream);
+                break;
+            }
+#endif
             mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4>(ctx, args, stream);
             break;
         case GGML_TYPE_Q2_0_ROCMFP2:

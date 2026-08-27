@@ -1332,7 +1332,6 @@ namespace ggml_cuda_mma {
 #endif // AMD_WMMA_AVAILABLE
     }
 
-#if defined(GGML_ROCMI4_W4A4) && GGML_ROCMI4_W4A4
     template <bool b_signed = true, data_layout dl_d = DATA_LAYOUT_I_MAJOR, data_layout dl_ab = DATA_LAYOUT_I_MAJOR>
     static __device__ __forceinline__ void mma_iu4(
             tile<16, 16, int, dl_d> & D, const tile<16, 4, int, dl_ab> & A, const tile<16, 4, int, dl_ab> & B) {
@@ -1359,5 +1358,4 @@ namespace ggml_cuda_mma {
         NO_DEVICE_CODE;
 #endif
     }
-#endif
 }
