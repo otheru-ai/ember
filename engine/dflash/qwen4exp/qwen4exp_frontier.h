@@ -20,6 +20,7 @@
 namespace dflash::common {
 
 struct Qwen4ExpWeights;
+struct Qwen4ExpMtpWeights;
 
 struct Qwen4ExpFrontierMoeSpec {
     int n_embd = 0;
@@ -77,5 +78,16 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
                                  const float * input, size_t input_count,
                                  int n_tokens, std::vector<float> & output,
                                  std::string & error);
+
+// The separately loaded MTP companion owns one q=1 frontier graph. Its expert
+// tensors remain in the companion's existing backend buffer; the graph never
+// clones weight payloads and is destroyed before that buffer.
+bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
+                                  std::string & error);
+void qwen4exp_frontier_mtp_destroy(Qwen4ExpMtpWeights & weights);
+bool qwen4exp_frontier_mtp_moe_q1(const Qwen4ExpMtpWeights & weights,
+                                  const float * input, size_t input_count,
+                                  std::vector<float> & output,
+                                  std::string & error);
 
 } // namespace dflash::common

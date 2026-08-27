@@ -185,6 +185,22 @@ struct Qwen4ExpSnapshot {
     std::vector<float> logits;
 };
 
+// With at most the released 2048-token QSA budget visible, every complete
+// four-token block is selected and the causal tail follows it.  The general
+// scorer therefore cannot change the result: its insertion order already is
+// block order and no partial sort runs when every block is retained.  Keep the
+// boundary explicit so longer contexts continue through the scored path.
+inline bool qwen4exp_qsa_dense_selection(int n_tokens,
+                                         std::vector<int32_t> & selected) {
+    constexpr int kDenseTokenLimit = 2048;
+    if (n_tokens <= 0 || n_tokens > kDenseTokenLimit) return false;
+    selected.resize(static_cast<size_t>(n_tokens));
+    for (int token = 0; token < n_tokens; ++token) {
+        selected[static_cast<size_t>(token)] = token;
+    }
+    return true;
+}
+
 bool qwen4exp_weight_type_supported(ggml_type type, bool vector_or_norm);
 bool qwen4exp_mapped_row_f32(const Qwen4ExpMappedTensor & tensor,
                             int64_t row, float * out, size_t out_count,

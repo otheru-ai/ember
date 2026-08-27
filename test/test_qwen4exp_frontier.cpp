@@ -1,5 +1,6 @@
 #include "qwen4exp_frontier.h"
 #include "qwen4exp_internal.h"
+#include "qwen4exp_mtp.h"
 
 #include "ggml-cpu.h"
 
@@ -413,18 +414,20 @@ int main() {
     std::string error;
     Qwen4ExpFrontierMoeGraph * graph =
         dflash::common::qwen4exp_frontier_moe_create(
-            backend, spec, weights, -1, error);
+            backend, spec, weights, 48, error);
     if (!graph) std::fprintf(stderr, "frontier build error: %s\n", error.c_str());
     CHECK(graph != nullptr, "persistent frontier graph builds");
     if (graph) {
+        dflash::common::Qwen4ExpMtpWeights mtp;
+        mtp.frontier_moe = graph;
         const std::array<std::vector<float>, 2> inputs = {
             std::vector<float>{0.5f, -1.25f, 0.75f, 2.0f},
             std::vector<float>{-0.2f, 0.4f, 1.1f, -0.7f},
         };
         for (size_t sample = 0; sample < inputs.size(); ++sample) {
             std::vector<float> actual;
-            const bool ok = dflash::common::qwen4exp_frontier_moe_eval(
-                graph, inputs[sample].data(), inputs[sample].size(), actual,
+            const bool ok = dflash::common::qwen4exp_frontier_mtp_moe_q1(
+                mtp, inputs[sample].data(), inputs[sample].size(), actual,
                 error);
             CHECK(ok, sample == 0 ? "first frontier evaluation succeeds" :
                                    "cached frontier evaluation succeeds");
@@ -436,9 +439,16 @@ int main() {
                                 "reused graph matches scalar MoE reference");
         }
         std::vector<float> wrong;
-        CHECK(!dflash::common::qwen4exp_frontier_moe_eval(
-                  graph, inputs[0].data(), inputs[0].size() - 1, wrong, error),
-              "frontier evaluation rejects a wrong input width");
+        CHECK(!dflash::common::qwen4exp_frontier_mtp_moe_q1(
+                  mtp, inputs[0].data(), inputs[0].size() - 1, wrong, error),
+              "MTP frontier evaluation rejects a wrong input width");
+        dflash::common::qwen4exp_frontier_mtp_destroy(mtp);
+        graph = nullptr;
+        CHECK(mtp.frontier_moe == nullptr,
+              "MTP companion destroys its graph before weight storage");
+        CHECK(!dflash::common::qwen4exp_frontier_mtp_moe_q1(
+                  mtp, inputs[0].data(), inputs[0].size(), wrong, error),
+              "MTP execution fails closed without its GPU frontier graph");
     }
 
     dflash::common::qwen4exp_frontier_moe_destroy(graph);

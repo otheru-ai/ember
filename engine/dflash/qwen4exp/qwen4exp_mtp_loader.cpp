@@ -1,5 +1,7 @@
 #include "qwen4exp_mtp.h"
 
+#include "qwen4exp_frontier.h"
+
 #include "gguf.h"
 
 #include <cerrno>
@@ -141,35 +143,6 @@ bool validate_contract(gguf_context * gctx, ggml_context * meta,
     return true;
 }
 
-bool is_mapped(const char * name) {
-    return std::strcmp(name, "mtp.ffn_gate_up_exps.weight") == 0 ||
-           std::strcmp(name, "mtp.ffn_down_exps.weight") == 0;
-}
-
-Qwen4ExpMappedTensor mapped_tensor(const uint8_t * base, size_t file_size,
-                                   size_t data_offset, gguf_context * gctx,
-                                   ggml_context * meta, int64_t index,
-                                   std::string & error) {
-    Qwen4ExpMappedTensor result;
-    const size_t offset = gguf_get_tensor_offset(gctx, index);
-    const size_t bytes = gguf_get_tensor_size(gctx, index);
-    if (data_offset > file_size || offset > file_size - data_offset ||
-        bytes > file_size - data_offset - offset) {
-        error = "Qwen4Exp MTP mapped tensor exceeds companion file";
-        return {};
-    }
-    result.data = base + data_offset + offset;
-    result.bytes = bytes;
-    ggml_tensor * tensor =
-        ggml_get_tensor(meta, gguf_get_tensor_name(gctx, index));
-    if (!tensor) return {};
-    result.type = tensor->type;
-    result.n_dims = ggml_n_dims(tensor);
-    for (int i = 0; i < result.n_dims && i < 4; ++i)
-        result.ne[static_cast<size_t>(i)] = tensor->ne[i];
-    return result;
-}
-
 void bind_layer(Qwen4ExpLayer & layer, const char * name,
                 ggml_tensor * tensor) {
     if (std::strcmp(name, "mtp.hc_attn_norm.weight") == 0) layer.hc_attn_norm = tensor;
@@ -195,6 +168,8 @@ void bind_layer(Qwen4ExpLayer & layer, const char * name,
     else if (std::strcmp(name, "mtp.ffn_gate_shexp.weight") == 0) layer.shared_gate = tensor;
     else if (std::strcmp(name, "mtp.ffn_up_shexp.weight") == 0) layer.shared_up = tensor;
     else if (std::strcmp(name, "mtp.ffn_down_shexp.weight") == 0) layer.shared_down = tensor;
+    else if (std::strcmp(name, "mtp.ffn_gate_up_exps.weight") == 0) layer.experts_gate_up_tensor = tensor;
+    else if (std::strcmp(name, "mtp.ffn_down_exps.weight") == 0) layer.experts_down_tensor = tensor;
 }
 
 } // namespace
@@ -252,7 +227,6 @@ bool load_qwen4exp_mtp_gguf(const std::string & path,
     const size_t alignment = ggml_backend_buft_get_alignment(buft);
     const size_t data_offset = gguf_get_data_offset(gctx);
     size_t total = 0;
-    uint64_t mapped_bytes = 0;
     const int64_t count = gguf_get_n_tensors(gctx);
     for (int64_t index = 0; index < count; ++index) {
         const char * name = gguf_get_tensor_name(gctx, index);
@@ -264,14 +238,6 @@ bool load_qwen4exp_mtp_gguf(const std::string & path,
             bytes > file_size - data_offset - offset) {
             error = "Qwen4Exp MTP tensor exceeds companion file";
             return fail();
-        }
-        if (is_mapped(name)) {
-            if (bytes > UINT64_MAX - mapped_bytes) {
-                error = "Qwen4Exp MTP mapped size overflow";
-                return fail();
-            }
-            mapped_bytes += bytes;
-            continue;
         }
         total = align_up(total, alignment);
         const size_t allocated = ggml_backend_buft_get_alloc_size(buft, tensor);
@@ -300,7 +266,7 @@ bool load_qwen4exp_mtp_gguf(const std::string & path,
             static_cast<const uint8_t *>(mapping) + allocation.file_offset,
             0, allocation.bytes);
     }
-    out.resident_weight_bytes = static_cast<uint64_t>(total) + mapped_bytes;
+    out.resident_weight_bytes = static_cast<uint64_t>(total);
     out.pre_embedding_norm = ggml_get_tensor(meta, "mtp_pre_emb_norm.weight");
     out.pre_hc_norm = ggml_get_tensor(meta, "mtp_pre_hc_norm.weight");
     out.fc_embedding = ggml_get_tensor(meta, "mtp_fc_emb.weight");
@@ -310,27 +276,38 @@ bool load_qwen4exp_mtp_gguf(const std::string & path,
     out.output_hc_up = ggml_get_tensor(meta, "mtp_hc_up.weight");
     for (int64_t index = 0; index < count; ++index) {
         const char * name = gguf_get_tensor_name(gctx, index);
-        if (std::strcmp(name, "mtp.ffn_gate_up_exps.weight") == 0) {
-            out.layer.experts_gate_up = mapped_tensor(
-                static_cast<const uint8_t *>(mapping), file_size, data_offset,
-                gctx, meta, index, error);
-        } else if (std::strcmp(name, "mtp.ffn_down_exps.weight") == 0) {
-            out.layer.experts_down = mapped_tensor(
-                static_cast<const uint8_t *>(mapping), file_size, data_offset,
-                gctx, meta, index, error);
-        } else {
-            bind_layer(out.layer, name, ggml_get_tensor(meta, name));
-        }
+        bind_layer(out.layer, name, ggml_get_tensor(meta, name));
     }
-    if (!out.layer.experts_gate_up.valid() || !out.layer.experts_down.valid()) {
-        error = "Qwen4Exp MTP expert tensors were not bound";
+    if (!out.layer.experts_gate_up_tensor ||
+        !out.layer.experts_down_tensor) {
+        error = "Qwen4Exp MTP backend expert tensors were not bound";
         return fail();
     }
+    // Every companion tensor now lives in the backend buffer. Unlike the
+    // target GGUF, there is no borrowed embedding payload, so retain neither
+    // an mmap nor clean file-cache pages as a second expert-weight copy.
+    if (madvise(mapping, file_size, MADV_DONTNEED) != 0) {
+        error = "madvise(DONTNEED) failed after Qwen4Exp MTP upload: " +
+                std::string(std::strerror(errno));
+        return fail();
+    }
+    const int advice = posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    if (advice != 0) {
+        error = "posix_fadvise(DONTNEED) failed after Qwen4Exp MTP upload: " +
+                std::string(std::strerror(advice));
+        return fail();
+    }
+    munmap(mapping, file_size);
+    ::close(fd);
+    out.shards[0].mmap_addr = nullptr;
+    out.shards[0].mmap_size = 0;
+    out.shards[0].mmap_fd = -1;
     gguf_free(gctx);
     return true;
 }
 
 void free_qwen4exp_mtp_weights(Qwen4ExpMtpWeights & weights) {
+    qwen4exp_frontier_mtp_destroy(weights);
     if (weights.buf) ggml_backend_buffer_free(weights.buf);
     for (Qwen4ExpWeightShard & shard : weights.shards) {
         if (shard.ctx) ggml_free(shard.ctx);

@@ -1,6 +1,7 @@
 #include "qwen4exp_frontier.h"
 
 #include "qwen4exp_internal.h"
+#include "qwen4exp_mtp.h"
 
 #include "ggml-alloc.h"
 
@@ -109,6 +110,7 @@ struct Qwen4ExpFrontierMoeGraph {
     int layer = -1;
     uint64_t calls = 0;
     uint64_t compute_us = 0;
+    size_t arena_bytes = 0;
     char profile_label[64]{};
 };
 
@@ -256,6 +258,8 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
         qwen4exp_frontier_moe_destroy(result.release());
         return nullptr;
     }
+    result->arena_bytes =
+        ggml_gallocr_get_buffer_size(result->allocator, 0);
     return result.release();
 }
 
@@ -424,6 +428,51 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
             graph, padded.data(), padded.size(), output, error)) return false;
     output.resize(input_count);
     return true;
+}
+
+bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
+                                  std::string & error) {
+    qwen4exp_frontier_mtp_destroy(weights);
+    if (!env_enabled("EMBER_QWEN_FRONTIER_MOE", true)) {
+        error = "Qwen4Exp MTP requires the GPU frontier MoE graph";
+        return false;
+    }
+    if (!weights.backend) {
+        error = "invalid Qwen4Exp MTP weights for frontier initialization";
+        return false;
+    }
+    const Qwen4ExpLayer & layer = weights.layer;
+    const Qwen4ExpFrontierMoeSpec spec{2560, 512, 10, 640};
+    const Qwen4ExpFrontierMoeWeights graph_weights{
+        layer.router, layer.experts_gate_up_tensor,
+        layer.experts_down_tensor, layer.shared_gate_input,
+        layer.shared_gate, layer.shared_up, layer.shared_down};
+    weights.frontier_moe = qwen4exp_frontier_moe_create(
+        weights.backend, spec, graph_weights, 48, error);
+    if (!weights.frontier_moe) return false;
+    std::fprintf(stderr,
+                 "[qwen-frontier] event=ready component=mtp_moe graphs=1 "
+                 "tokens_per_graph=1 arena_bytes=%zu weight_copies=0 "
+                 "graph_replay=off\n",
+                 weights.frontier_moe->arena_bytes);
+    return true;
+}
+
+void qwen4exp_frontier_mtp_destroy(Qwen4ExpMtpWeights & weights) {
+    qwen4exp_frontier_moe_destroy(weights.frontier_moe);
+    weights.frontier_moe = nullptr;
+}
+
+bool qwen4exp_frontier_mtp_moe_q1(const Qwen4ExpMtpWeights & weights,
+                                  const float * input, size_t input_count,
+                                  std::vector<float> & output,
+                                  std::string & error) {
+    if (!weights.frontier_moe) {
+        error = "Qwen4Exp MTP frontier MoE graph is unavailable";
+        return false;
+    }
+    return qwen4exp_frontier_moe_eval(weights.frontier_moe, input,
+                                      input_count, output, error);
 }
 
 } // namespace dflash::common

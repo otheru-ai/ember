@@ -1,6 +1,7 @@
 #include "qwen4exp_backend.h"
 
 #include "qwen4exp_activation_dump.h"
+#include "qwen4exp_frontier.h"
 
 #include "common/errors.h"
 #include "common/sampler.h"
@@ -180,6 +181,10 @@ bool Qwen4ExpBackend::init() {
             return false;
         }
         state_budget_bytes_ -= mtp_weights_.resident_weight_bytes;
+        if (!qwen4exp_frontier_mtp_create(mtp_weights_, error)) {
+            set_last_error(error);
+            return false;
+        }
     }
     std::fprintf(stderr,
                  "[qwen4exp] text AR initialized: layers=48 ctx=%d yarn=%s; "

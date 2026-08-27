@@ -373,16 +373,24 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
              const std::array<std::vector<int32_t>, 3> & position_history,
              std::vector<float> & output, std::string & error) {
     std::vector<float> qfull, k, v, iq, ik;
+    const int tokens = static_cast<int>(state.index_key.size() / kIndexerDim) + 1;
+    std::vector<int32_t> selected;
+    const bool dense_selection =
+        qwen4exp_qsa_dense_selection(tokens, selected);
     if (!matvec(weights.backend, layer.attn_q, input.data(), kEmbedding, qfull, error) ||
         !matvec(weights.backend, layer.attn_k, input.data(), kEmbedding, k, error) ||
         !matvec(weights.backend, layer.attn_v, input.data(), kEmbedding, v, error) ||
-        !matvec(weights.backend, layer.index_q, input.data(), kEmbedding, iq, error) ||
         !matvec(weights.backend, layer.index_k, input.data(), kEmbedding, ik, error)) return false;
-    std::vector<float> qnorm, knorm, iqnorm, iknorm;
+    if (!dense_selection &&
+        !matvec(weights.backend, layer.index_q, input.data(), kEmbedding,
+                iq, error)) return false;
+    std::vector<float> qnorm, knorm;
     if (!tensor_f32(layer.attn_q_norm, qnorm, error) ||
-        !tensor_f32(layer.attn_k_norm, knorm, error) ||
-        !tensor_f32(layer.index_q_norm, iqnorm, error) ||
-        !tensor_f32(layer.index_k_norm, iknorm, error)) return false;
+        !tensor_f32(layer.attn_k_norm, knorm, error)) return false;
+    std::vector<float> iqnorm, iknorm;
+    if (!dense_selection &&
+        (!tensor_f32(layer.index_q_norm, iqnorm, error) ||
+         !tensor_f32(layer.index_k_norm, iknorm, error))) return false;
     std::vector<float> q(kQsaHeads * kQsaDim), gate(kQsaHeads * kQsaDim);
     for (int head = 0; head < kQsaHeads; ++head) {
         std::copy_n(qfull.data() + head * 2 * kQsaDim, kQsaDim,
@@ -398,10 +406,13 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
                   position.data(), error)) return false;
     }
-    for (int head = 0; head < kIndexerHeads; ++head) {
-        rms_norm(iq.data() + head * kIndexerDim, kIndexerDim, iqnorm.data());
-        if (!rope(weights, iq.data() + head * kIndexerDim, kIndexerDim,
-                  position.data(), error)) return false;
+    if (!dense_selection) {
+        for (int head = 0; head < kIndexerHeads; ++head) {
+            rms_norm(iq.data() + head * kIndexerDim, kIndexerDim,
+                     iqnorm.data());
+            if (!rope(weights, iq.data() + head * kIndexerDim, kIndexerDim,
+                      position.data(), error)) return false;
+        }
     }
     // PR #27774 (abdc7a0b over #27742 035e2273): K-cache Hadamard
     // applies to Q/K and V-cache Hadamard to V before sparse attention.
@@ -411,58 +422,60 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
     state.key.append(k.data(), k.size());
     state.value.append(v.data(), v.size());
     state.index_key.append(ik.data(), ik.size());
-    const int tokens = static_cast<int>(state.index_key.size() / kIndexerDim);
     // Score complete four-token blocks from the raw index-K cache. Pooling is
     // deliberately before learned RMSNorm and RoPE, matching #27742/HF. The
     // selection is host-side because the released 2048-token budget means
     // top-512 blocks and must not pass through a 1023-element-capped primitive.
-    const int complete = tokens / 4;
-    const int keep = std::min(complete, 512);
-    std::vector<std::pair<float, int32_t>> scored;
-    scored.reserve(static_cast<size_t>(complete));
-    for (int block_index = 0; block_index < complete; ++block_index) {
-        std::array<float, kIndexerDim> pooled{};
-        for (int member = 0; member < 4; ++member)
-            for (int d = 0; d < kIndexerDim; ++d)
-                pooled[d] += state.index_key.at(static_cast<size_t>(
-                    (block_index * 4 + member) * kIndexerDim + d)) * 0.25f;
-        rms_norm(pooled.data(), kIndexerDim, iknorm.data());
-        const size_t group_start = static_cast<size_t>(block_index * 4);
-        if (group_start >= position_history[0].size() ||
-            position_history[1].size() != position_history[0].size() ||
-            position_history[2].size() != position_history[0].size()) {
-            error = "Qwen4Exp M-RoPE history does not cover QSA block";
-            return false;
+    if (!dense_selection) {
+        const int complete = tokens / 4;
+        const int keep = std::min(complete, 512);
+        std::vector<std::pair<float, int32_t>> scored;
+        scored.reserve(static_cast<size_t>(complete));
+        for (int block_index = 0; block_index < complete; ++block_index) {
+            std::array<float, kIndexerDim> pooled{};
+            for (int member = 0; member < 4; ++member)
+                for (int d = 0; d < kIndexerDim; ++d)
+                    pooled[d] += state.index_key.at(static_cast<size_t>(
+                        (block_index * 4 + member) * kIndexerDim + d)) * 0.25f;
+            rms_norm(pooled.data(), kIndexerDim, iknorm.data());
+            const size_t group_start = static_cast<size_t>(block_index * 4);
+            if (group_start >= position_history[0].size() ||
+                position_history[1].size() != position_history[0].size() ||
+                position_history[2].size() != position_history[0].size()) {
+                error = "Qwen4Exp M-RoPE history does not cover QSA block";
+                return false;
+            }
+            const int32_t group_position[3] = {
+                position_history[0][group_start],
+                position_history[1][group_start],
+                position_history[2][group_start],
+            };
+            if (!rope(weights, pooled.data(), kIndexerDim, group_position,
+                      error)) return false;
+            float score = 0.0f;
+            for (int head = 0; head < kIndexerHeads; ++head) {
+                float dot = 0.0f;
+                for (int d = 0; d < kIndexerDim; ++d)
+                    dot += iq[head * kIndexerDim + d] * pooled[d];
+                score += std::max(dot, 0.0f);
+            }
+            scored.emplace_back(
+                score / std::sqrt(static_cast<float>(kIndexerDim)),
+                block_index);
         }
-        const int32_t group_position[3] = {
-            position_history[0][group_start],
-            position_history[1][group_start],
-            position_history[2][group_start],
-        };
-        if (!rope(weights, pooled.data(), kIndexerDim, group_position,
-                  error)) return false;
-        float score = 0.0f;
-        for (int head = 0; head < kIndexerHeads; ++head) {
-            float dot = 0.0f;
-            for (int d = 0; d < kIndexerDim; ++d)
-                dot += iq[head * kIndexerDim + d] * pooled[d];
-            score += std::max(dot, 0.0f);
-        }
-        scored.emplace_back(score / std::sqrt(static_cast<float>(kIndexerDim)),
-                            block_index);
+        if (keep < complete)
+            std::partial_sort(scored.begin(), scored.begin() + keep,
+                              scored.end(), [](const auto & a, const auto & b) {
+                                  return a.first != b.first
+                                      ? a.first > b.first : a.second < b.second;
+                              });
+        selected.reserve(static_cast<size_t>(keep * 4 + tokens % 4));
+        for (int i = 0; i < keep; ++i)
+            for (int member = 0; member < 4; ++member)
+                selected.push_back(scored[i].second * 4 + member);
+        for (int tail = complete * 4; tail < tokens; ++tail)
+            selected.push_back(tail);
     }
-    if (keep < complete)
-        std::partial_sort(scored.begin(), scored.begin() + keep, scored.end(),
-                          [](const auto & a, const auto & b) {
-                              return a.first != b.first ? a.first > b.first
-                                                        : a.second < b.second;
-                          });
-    std::vector<int32_t> selected;
-    selected.reserve(static_cast<size_t>(keep * 4 + tokens % 4));
-    for (int i = 0; i < keep; ++i)
-        for (int member = 0; member < 4; ++member)
-            selected.push_back(scored[i].second * 4 + member);
-    for (int tail = complete * 4; tail < tokens; ++tail) selected.push_back(tail);
     std::vector<float> attended(kQsaHeads * kQsaDim);
     for (int head = 0; head < kQsaHeads; ++head) {
         const int kv_head = head / 12;
@@ -500,7 +513,11 @@ bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
              const Qwen4ExpLayer & layer,
              const std::vector<float> & input, std::vector<float> & output,
              std::string & error) {
-    if (weights.frontier && layer_index >= 0 && layer_index < 48) {
+    if (layer_index < 0 || layer_index >= 48) {
+        error = "Qwen4Exp target MoE layer index is out of range";
+        return false;
+    }
+    if (weights.frontier) {
         return qwen4exp_frontier_moe_q1(weights, layer_index, input.data(),
                                         input.size(), output, error);
     }
@@ -743,7 +760,8 @@ bool qwen4exp_mtp_step_q1(
     if (!hc_mix(target, state.hc, mtp.layer.hc_ffn_norm,
                 mtp.layer.hc_ffn_down, mtp.layer.hc_ffn_up,
                 mtp.layer.hc_ffn_inject, mixed, &inject, error) ||
-        !run_moe(target, 48, mtp.layer, mixed, block, error)) return false;
+        !qwen4exp_frontier_mtp_moe_q1(mtp, mixed.data(), mixed.size(),
+                                      block, error)) return false;
     hc_combine(state.hc, block, inject);
 
     draft_hc = state.hc;

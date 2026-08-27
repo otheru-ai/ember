@@ -1,6 +1,7 @@
 #include "qwen4exp_internal.h"
 
 #include <cstdio>
+#include <numeric>
 #include <vector>
 
 using namespace dflash::common;
@@ -10,6 +11,35 @@ static int g_fail = 0;
 #define CHECK(c, m) do { if (c) ++g_pass; else { ++g_fail; std::fprintf(stderr, "FAIL: %s\n", m); } } while (0)
 
 int main() {
+    for (const int tokens : {1, 3, 4, 2047, 2048}) {
+        std::vector<int32_t> selected;
+        const bool dense = qwen4exp_qsa_dense_selection(tokens, selected);
+        std::vector<int32_t> expected(static_cast<size_t>(tokens));
+        std::iota(expected.begin(), expected.end(), int32_t{0});
+        CHECK(dense && selected == expected,
+              "QSA dense selection preserves sequential block-plus-tail order");
+        std::vector<float> raw(static_cast<size_t>(tokens) * 128, 0.0f);
+        std::vector<float> query(4 * 128, 1.0f);
+        for (int token = 0; token < tokens; ++token) {
+            raw[static_cast<size_t>(token) * 128] =
+                static_cast<float>(tokens - token);
+        }
+        CHECK(selected == qwen4exp_qsa_selected_tokens(
+                              raw, query.data(), tokens),
+              "QSA dense selection is exact against the scored path");
+    }
+    std::vector<int32_t> boundary_sentinel = {7, 11};
+    CHECK(!qwen4exp_qsa_dense_selection(2049, boundary_sentinel) &&
+              boundary_sentinel == std::vector<int32_t>({7, 11}),
+          "QSA dense selection leaves 2049-token contexts to scored selection");
+    std::vector<float> boundary_raw(static_cast<size_t>(2049) * 128, 0.0f);
+    std::vector<float> boundary_query(4 * 128, 1.0f);
+    const std::vector<int32_t> boundary_scored =
+        qwen4exp_qsa_selected_tokens(boundary_raw, boundary_query.data(), 2049);
+    CHECK(boundary_scored.size() == 2049 &&
+              boundary_scored.front() == 0 && boundary_scored.back() == 2048,
+          "QSA scored fallback preserves all blocks plus the 2049-token tail");
+
     CHECK(qwen4exp_weight_type_supported(GGML_TYPE_F32, true) &&
               qwen4exp_weight_type_supported(GGML_TYPE_F16, true) &&
               qwen4exp_weight_type_supported(GGML_TYPE_BF16, true),
