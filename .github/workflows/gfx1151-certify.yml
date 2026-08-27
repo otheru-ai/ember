@@ -1306,6 +1306,7 @@ jobs:
     timeout-minutes: 360
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
+      CAPTURE_TOOL_SHA: ${{ github.sha }}
       QWEN_REVISION: f5d08274bafd880402bd16f5e3e6c514136ec06c
       OTHERU_REVISION: a3c6a728510f91394e991504951ac316cd3a89af
       CORPUS_CONTRACT_SHA256: 19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d
@@ -1315,9 +1316,9 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Pull and bind the exact ROCm 10 development image
         env:
@@ -1325,7 +1326,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          [[ "$CAPTURE_TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CAPTURE_TOOL_SHA"
+          git merge-base --is-ancestor "$TARGET_SHA" "$CAPTURE_TOOL_SHA"
           docker_config="$RUNNER_TEMP/qwen-capture-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$docker_config"
           export DOCKER_CONFIG="$docker_config"
@@ -1511,6 +1514,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/qwen_capture_control.py \
+            --tool-revision "$CAPTURE_TOOL_SHA" \
             --image "$QWEN_DEV_IMAGE" \
             --image-digest "$QWEN_DEV_IMAGE_DIGEST" \
             --binary /usr/local/bin/ember-dflash \
@@ -1528,10 +1532,11 @@ jobs:
             --output-dir "$QWEN_CAPTURE_OUTPUT"
           python3 - "$QWEN_CAPTURE_OUTPUT/capture-manifest.json" "$TARGET_SHA" \
               "$QWEN_DEV_IMAGE_DIGEST" <<'PY'
-          import json, sys
+          import json, os, sys
           manifest = json.load(open(sys.argv[1], encoding="utf-8"))
           assert manifest["status"] == "complete", manifest
           assert manifest["publishes"] is False and manifest["stock_rocmi4_only"] is True, manifest
+          assert manifest["capture_tool"]["ember_revision"] == os.environ["CAPTURE_TOOL_SHA"], manifest
           assert manifest["image"]["ember_revision"] == sys.argv[2], manifest
           assert manifest["image"]["digest"] == sys.argv[3], manifest
           assert manifest["mtp"]["verified"] is True, manifest

@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -551,6 +552,7 @@ def generate_manifests(
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tool-revision", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--binary", default="/usr/local/bin/ember-dflash")
@@ -575,6 +577,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 
 def validate_syntax(args: argparse.Namespace) -> None:
+    if re.fullmatch(r"[0-9a-f]{40}", args.tool_revision) is None:
+        raise CaptureError("--tool-revision must be a full lowercase Ember commit")
     require_digest(args.image_digest, "--image-digest", prefixed=True)
     for name in (
         "model_sha256", "control_record_sha256", "mtp_sha256",
@@ -595,6 +599,7 @@ def validate_syntax(args: argparse.Namespace) -> None:
 
 def print_plan(args: argparse.Namespace) -> None:
     print("plan:")
+    print(f"  capture tooling   {args.tool_revision}")
     print(f"  Ember image       {args.image}")
     print(f"  image digest      {args.image_digest}")
     print(f"  stock model       {args.model}")
@@ -735,6 +740,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         "status": "complete",
         "publishes": False,
         "stock_rocmi4_only": True,
+        "capture_tool": {"ember_revision": args.tool_revision},
         "image": {"ref": args.image, "digest": args.image_digest,
                   "ember_revision": image_revision},
         "model": {

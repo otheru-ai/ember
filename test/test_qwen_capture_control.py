@@ -31,7 +31,8 @@ def file_sha(path: Path) -> str:
 
 def dry_args(output: str = "/tmp/qwen-capture-control-never-created") -> list[str]:
     return [
-        "--dry-run", "--image", "ember:exact",
+        "--dry-run", "--tool-revision", "0" * 40,
+        "--image", "ember:exact",
         "--image-digest", f"sha256:{HEX}",
         "--model", "/models/control-00001-of-00002.gguf", "--model-sha256", HEX,
         "--control-record", "/models/qwen-quant-build-record.json",

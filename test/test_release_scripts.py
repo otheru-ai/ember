@@ -322,7 +322,9 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn(":dev-sha-${TARGET_SHA:0:12}", capture)
         self.assertIn("QWEN_DEV_IMAGE_DIGEST", capture)
         self.assertIn("EMBER_CONFIGURED_GIT_HEAD:STRING", capture)
-        self.assertIn("test \"$(git rev-parse HEAD)\" = \"$TARGET_SHA\"", capture)
+        self.assertIn("test \"$(git rev-parse HEAD)\" = \"$CAPTURE_TOOL_SHA\"", capture)
+        self.assertIn("git merge-base --is-ancestor \"$TARGET_SHA\" \"$CAPTURE_TOOL_SHA\"", capture)
+        self.assertIn("--tool-revision \"$CAPTURE_TOOL_SHA\"", capture)
         self.assertIn(
             "/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}", capture,
         )
