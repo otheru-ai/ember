@@ -137,24 +137,7 @@ jobs:
           test -d "$workspace" && test ! -L "$workspace"
           test -d "$workspace/artifacts" && test ! -L "$workspace/artifacts"
           test -d "$QWEN_STOCK_DIR" && test ! -L "$QWEN_STOCK_DIR"
-          if [[ ! -e "$QWEN_WORKSET_ROOT" && ! -L "$QWEN_WORKSET_ROOT" ]]; then
-            mkdir -m 700 "$QWEN_WORKSET_ROOT"
-          fi
-          test -d "$QWEN_WORKSET_ROOT" && test ! -L "$QWEN_WORKSET_ROOT"
-          for path in "$QWEN_WORKSET_ROOT/evidence" \
-              "$QWEN_WORKSET_ROOT/evidence/stock-retirement"; do
-            if [[ ! -e "$path" && ! -L "$path" ]]; then
-              mkdir -m 700 "$path"
-            fi
-            test -d "$path" && test ! -L "$path"
-          done
           printf 'QWEN_STOCK_DIR=%s\n' "$QWEN_STOCK_DIR" >>"$GITHUB_ENV"
-          for path in "$QWEN_RETIRE_AUTHORIZATION" \
-              "$QWEN_RETIRE_AUTHORIZATION.complete.json" \
-              "$QWEN_RETIRE_AUTHORIZATION.workflow.json" \
-              "$QWEN_RETIRE_AUTHORIZATION.workflow.complete.json"; do
-            test ! -e "$path" && test ! -L "$path"
-          done
 
           docker_config="$RUNNER_TEMP/qwen-retire-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -m 700 "$docker_config"
@@ -183,6 +166,58 @@ jobs:
             'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
           test "$embedded" = "$TARGET_SHA"
           printf 'PINNED_BUILDER_IMAGE=%s\n' "$pinned_image" >>"$GITHUB_ENV"
+
+          # The persistent artifacts directory is builder-owned on the runner.
+          # After authenticating the exact image, give a root helper only the
+          # capabilities needed to initialize these three fixed directory
+          # entries.  Descriptor-relative no-follow operations prevent a
+          # pre-existing symlink from redirecting ownership or mode changes.
+          uid="$(id -u)"; gid="$(id -g)"
+          PYTHONDONTWRITEBYTECODE=1 docker run --rm -i --network none --read-only \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt no-new-privileges --pids-limit 16 --user 0:0 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            -e PYTHONDONTWRITEBYTECODE=1 -e RUNNER_UID="$uid" -e RUNNER_GID="$gid" \
+            -v "$workspace/artifacts:/qwen-artifacts" \
+            --entrypoint python3 "$pinned_image" - <<'PY'
+          import os, stat
+
+          uid = int(os.environ["RUNNER_UID"])
+          gid = int(os.environ["RUNNER_GID"])
+          if uid < 0 or gid < 0:
+              raise SystemExit("runner uid/gid must be non-negative")
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+          descriptors = [os.open("/qwen-artifacts", flags)]
+          try:
+              for component in ("qwen-workset", "evidence", "stock-retirement"):
+                  parent = descriptors[-1]
+                  try:
+                      os.mkdir(component, mode=0o700, dir_fd=parent)
+                  except FileExistsError:
+                      pass
+                  metadata = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                  if not stat.S_ISDIR(metadata.st_mode):
+                      raise SystemExit(f"workset component is not one real directory: {component}")
+                  child = os.open(component, flags, dir_fd=parent)
+                  descriptors.append(child)
+                  os.fchown(child, uid, gid)
+                  os.fchmod(child, 0o700)
+          finally:
+              for descriptor in reversed(descriptors):
+                  os.close(descriptor)
+          PY
+          for path in "$QWEN_WORKSET_ROOT" "$QWEN_WORKSET_ROOT/evidence" \
+              "$QWEN_WORKSET_ROOT/evidence/stock-retirement"; do
+            test -d "$path" && test ! -L "$path"
+            test "$(stat -c '%u:%g' "$path")" = "$uid:$gid"
+            test "$(stat -c '%a' "$path")" = 700
+          done
+          for path in "$QWEN_RETIRE_AUTHORIZATION" \
+              "$QWEN_RETIRE_AUTHORIZATION.complete.json" \
+              "$QWEN_RETIRE_AUTHORIZATION.workflow.json" \
+              "$QWEN_RETIRE_AUTHORIZATION.workflow.complete.json"; do
+            test ! -e "$path" && test ! -L "$path"
+          done
 
           workflow_authorization="$QWEN_RETIRE_AUTHORIZATION.workflow.json"
           python3 - "$TARGET_SHA" "$QWEN_STOCK_ARTIFACT_REVISION" \

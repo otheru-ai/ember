@@ -123,6 +123,34 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         self.assertIn('"stock_artifact": {"revision": stock_artifact_revision}', body)
         self.assertIn('"stock_artifact_revision": stock_artifact_revision', body)
 
+    def test_workset_ownership_handoff_is_exact_pinned_and_symlink_safe(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        image_verified = body.index('test "$embedded" = "$TARGET_SHA"')
+        ownership_handoff = body.index(
+            "The persistent artifacts directory is builder-owned on the runner"
+        )
+        authorization = body.index(
+            'workflow_authorization="$QWEN_RETIRE_AUTHORIZATION.workflow.json"'
+        )
+        self.assertLess(image_verified, ownership_handoff)
+        self.assertLess(ownership_handoff, authorization)
+        self.assertNotIn('mkdir -m 700 "$QWEN_WORKSET_ROOT"', body)
+        self.assertNotIn("chown -R", body)
+        self.assertNotIn("chmod -R", body)
+        self.assertNotIn("sudo -n chown", body)
+        self.assertIn('-v "$workspace/artifacts:/qwen-artifacts"', body)
+        self.assertIn("--cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER", body)
+        self.assertIn("--security-opt no-new-privileges --pids-limit 16 --user 0:0", body)
+        self.assertIn(
+            'for component in ("qwen-workset", "evidence", "stock-retirement"):', body,
+        )
+        self.assertIn("os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW", body)
+        self.assertIn("dir_fd=parent, follow_symlinks=False", body)
+        self.assertIn("os.fchown(child, uid, gid)", body)
+        self.assertIn("os.fchmod(child, 0o700)", body)
+        self.assertIn('test "$(stat -c \'%u:%g\' "$path")" = "$uid:$gid"', body)
+        self.assertIn('test "$(stat -c \'%a\' "$path")" = 700', body)
+
     def test_lock_quiesce_and_unconditional_restore_are_fail_closed(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         acquire = body.index("ember-gpu-lock acquire")
