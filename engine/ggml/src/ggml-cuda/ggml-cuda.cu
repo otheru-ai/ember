@@ -392,7 +392,11 @@ static ggml_cuda_device_info ggml_cuda_init() {
         const char * rocmi4_w4a8 = getenv("DFLASH_ROCMI4_W4A8_IU4");
         const bool rocmi4_w4a8_enabled = rocmi4_w4a8_iu4_requested(rocmi4_w4a8);
         if (rocmi4_w4a8_enabled && GGML_CUDA_CC_IS_GFX1151(info.devices[id].cc)) {
-            GGML_LOG_WARN("  ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device %d\n", id);
+#if defined(GGML_ROCMI4_W4A8_IU4_PREPACK) && GGML_ROCMI4_W4A8_IU4_PREPACK
+            GGML_LOG_WARN("  ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device %d; activation_prepack=on\n", id);
+#else
+            GGML_LOG_WARN("  ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device %d; activation_prepack=off\n", id);
+#endif
         } else if (rocmi4_w4a8_enabled) {
             GGML_LOG_INFO("  ROCmI4 W4A8 IU4: unsupported on device %d; using exact int8 MMQ\n", id);
         }

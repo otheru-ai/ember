@@ -72,6 +72,10 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn("decode median 39.49", result.stdout)
         self.assertIn('row["stage"] in {"format", "mtp-depth", "final"}',
                       TARGET_GATE.read_text(encoding="utf-8"))
+        gate = TARGET_GATE.read_text(encoding="utf-8")
+        self.assertIn('gid="$(stat -c %g -- "$node")"', gate)
+        self.assertNotIn("--group-add video", gate)
+        self.assertNotIn("--group-add render", gate)
 
     def test_workflow_yaml_shell_and_python_heredocs_parse(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

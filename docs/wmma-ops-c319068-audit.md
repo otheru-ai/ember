@@ -38,34 +38,40 @@ Two implementation facts changed after the original audit. Qwen now runs
 persistent fused MoE, QSA, and GDN graphs at the q=1, q=5, and q=16 frontiers;
 it is no longer accurately described as a tokenwise scalar-expert-only path.
 Ember also has an off-by-default, numerically exact W4-by-A8 IU4 MMQ experiment
-for ROCMI4 routed experts. The historical matrix and plan below remain useful
-as provenance for the 2026-08-26 decision, but these newer facts control current
+for ROCMI4. It reaches dense q=4/q=5 target verification and q=16 dense and
+routed-expert MMQ. Routed experts at q=4/q=5 remain on MMVQ, while q=1 remains
+outside MMQ entirely. The historical matrix and plan below remain useful as
+provenance for the 2026-08-26 decision, but these newer facts control current
 experiments.
 
 The closest reusable frontier idea is now the paired-K/publication schedule in
-`tools/bench_wmma_iu4_gemm.hip`, applied only to the exact W4A8 experiment. Do
-not spend the release bakeoff budget adapting it to lossy W4A4. Qualification
-order is strict:
+the pinned remote `bench_wmma_iu4_gemm.hip`, applied only to the exact W4A8
+experiment. That source is not a checked-in Ember device microtest. Do not
+spend the release bakeoff budget adapting it to lossy W4A4. Qualification order
+is strict:
 
 1. correct and device-differentiate the exact W4A8 fragment loader against the
    existing exact int8 path, including nonuniform K lanes and checked/ragged
    tiles;
 2. regenerate the ROCm 10 gfx1151 assembly and pass
    `scripts/check_rocmi4_w4a8_isa.py` with no scratch or spills;
-3. measure existing exact int8 versus exact W4A8 on real q=5/q=16 expert
-   shapes and the full 2,074-prompt/256-generation gate; and
+3. measure existing exact int8 versus exact W4A8 on real dense q=4/q=5 and
+   q=16 dense/routed-expert shapes, using q=5 routed experts as a negative
+   dispatch control, plus the full 2,074-prompt/256-generation gate; and
 4. only when counter profiling attributes time to LDS publication/barriers,
    screen two K16 slices before four, rejecting any occupancy loss or changed
    scale/float-accumulation contract.
 
 The source-reported four-slice IU4 result (94.044 TOPS versus its 84.560-TOPS
 one-slice control) is evidence for that schedule experiment, not an Ember speed
-claim. The current exact W4A8 compiler image is already near its register
-ceiling, so extra residency has a substantial spill/occupancy risk. The large
-prepacked `4096^3` FP16 kernels still do not match Qwen's quantized q=1/q=5/q=16
-text shapes. QSA bank interleaving/padding and physical VGPR phase placement
-remain separate, profile-led experiments; neither may copy constants or a code
-object from the laboratory kernel.
+claim. Saved ROCm 10 gfx1151 assembly shows that activation prepacking reduces
+the screened kernels' VGPR counts, but their 27,776-byte dynamic LDS allocation
+still limits residency to eight waves per SIMD; the compiler's higher
+register-only occupancy therefore does not establish extra resident workgroups.
+The large prepacked `4096^3` FP16 kernels still do not match Qwen's quantized
+q=1/q=5/q=16 text shapes. QSA bank interleaving/padding and physical VGPR phase
+placement remain separate, profile-led experiments; neither may copy constants
+or a code object from the laboratory kernel.
 
 ## Applicability matrix
 

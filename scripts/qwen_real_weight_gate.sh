@@ -134,6 +134,7 @@ command -v docker >/dev/null || die "docker is required"
 command -v curl >/dev/null || die "curl is required"
 command -v python3 >/dev/null || die "python3 is required"
 command -v dd >/dev/null || die "dd is required for O_DIRECT integrity reads"
+command -v stat >/dev/null || die "stat is required for numeric GPU device groups"
 [[ -x "$GPU_LOCK" ]] || die "missing fixed-purpose GPU lock wrapper: $GPU_LOCK"
 [[ -x "$PRODUCTION" ]] || die "missing production wrapper: $PRODUCTION"
 [[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" ]] || die "gate dependencies are missing"
@@ -240,10 +241,18 @@ PY
 
 GPU_ARGS=(
   --device /dev/kfd --device /dev/dri
-  --group-add video --group-add render
   --ipc host --security-opt seccomp=unconfined
   --ulimit memlock=-1:-1
 )
+declare -A GPU_GIDS=()
+for node in /dev/kfd /dev/dri/*; do
+  [[ -c "$node" ]] || continue
+  gid="$(stat -c %g -- "$node")"
+  [[ "$gid" =~ ^[0-9]+$ ]] || die "GPU device has a nonnumeric group: $node"
+  GPU_GIDS["$gid"]=1
+done
+((${#GPU_GIDS[@]} > 0)) || die "no GPU character-device groups found"
+for gid in "${!GPU_GIDS[@]}"; do GPU_ARGS+=(--group-add "$gid"); done
 
 remove_container() {
   if [[ -n "$CONTAINER" ]]; then
@@ -434,6 +443,39 @@ if ! python3 "$BENCHMARK" "${benchmark_args[@]}"; then
   docker logs --tail 80 "$CONTAINER" >"$OUT_DIR/timing-server-failure.log" 2>&1 || true
   die "timing, performance, or memory gate failed"
 fi
+docker logs "$CONTAINER" >"$OUT_DIR/timing-server.log" 2>&1 ||
+  die "could not capture the timing server log"
+python3 - "$OUT_DIR/timing-server.log" "$OUT_DIR/kernel-runtime-evidence.json" <<'PY'
+import json, re, sys
+
+log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+prepack_states = set(re.findall(
+    r"ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device [0-9]+; "
+    r"activation_prepack=(on|off)", log))
+if len(prepack_states) > 1:
+    raise SystemExit(
+        f"timing server logged conflicting W4A8 variants: {prepack_states}")
+state = next(iter(prepack_states), None)
+w4a4 = bool(re.search(r"ROCmI4 W4A4: enabled for device [0-9]+", log))
+if state is not None and w4a4:
+    raise SystemExit("timing server logged mutually exclusive W4A4 and W4A8 MMQ")
+configured = ({"on": "w4a8_iu4_prepack",
+               "off": "w4a8_iu4_register_pack"}.get(
+                 state, "lossy_w4a4_mmq" if w4a4 else
+                 "exact_int8_mmq_control"))
+with open(sys.argv[2], "x", encoding="utf-8") as stream:
+    json.dump({
+        "schema": "ember.qwen3.8.kernel-runtime-evidence.v1",
+        "configured_mmq_mode": configured,
+        "dispatch_confirmation": "startup_configuration_only",
+        "w4a8_iu4_runtime_enabled": state is not None,
+        "activation_prepack": (True if configured == "w4a8_iu4_prepack" else
+                               False if configured == "w4a8_iu4_register_pack" else
+                               None),
+        "source": "timing-server.log",
+    }, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
 python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" \
   "$MEASUREMENT_ONLY" <<'PY'
 import json, sys
@@ -500,6 +542,7 @@ def sha(path):
     return digest.hexdigest()
 inventory = json.load(open(os.path.join(out, "model-inventory.json"), encoding="utf-8"))
 memory = json.load(open(os.path.join(out, "memory-evidence.json"), encoding="utf-8"))
+kernel_runtime = json.load(open(os.path.join(out, "kernel-runtime-evidence.json"), encoding="utf-8"))
 passed = bool(memory["performance"].get("passed") and memory["hard_fit"].get("passed"))
 record = {
     "schema": "ember.qwen3.8.real-weight-gate.v2",
@@ -522,6 +565,7 @@ record = {
                    "performance": memory["performance"],
                    "memory": memory["hard_fit"]},
     "resources": memory["resources"],
+    "kernel_runtime": kernel_runtime,
     "evidence": {
         "differential": {"path": "differential.json",
                          "sha256": sha(os.path.join(out, "differential.json"))},
@@ -529,6 +573,10 @@ record = {
                    "sha256": sha(os.path.join(out, "timing.jsonl"))},
         "memory": {"path": "memory-evidence.json",
                    "sha256": sha(os.path.join(out, "memory-evidence.json"))},
+        "kernel_runtime": {"path": "kernel-runtime-evidence.json",
+                   "sha256": sha(os.path.join(out, "kernel-runtime-evidence.json"))},
+        "timing_server_log": {"path": "timing-server.log",
+                   "sha256": sha(os.path.join(out, "timing-server.log"))},
         "model_inventory": {"path": "model-inventory.json",
                    "sha256": sha(os.path.join(out, "model-inventory.json"))},
         "quant_build_record": {"path": "qwen-quant-build-record.json",

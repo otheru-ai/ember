@@ -403,8 +403,18 @@ profile_binary_sha="$(docker run --rm --entrypoint sha256sum "$PROFILE_IMAGE" "$
 [[ "$candidate_binary_sha" =~ ^[0-9a-f]{64}$ && "$candidate_binary_sha" == "$profile_binary_sha" ]] ||
   die "candidate/profiler binaries are not byte-identical"
 
-GPU_ARGS=(--device /dev/kfd --device /dev/dri --group-add video --group-add render
+command -v stat >/dev/null || die "stat is required for numeric GPU device groups"
+GPU_ARGS=(--device /dev/kfd --device /dev/dri
   --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1)
+declare -A GPU_GIDS=()
+for node in /dev/kfd /dev/dri/*; do
+  [[ -c "$node" ]] || continue
+  gid="$(stat -c %g -- "$node")"
+  [[ "$gid" =~ ^[0-9]+$ ]] || die "GPU device has a nonnumeric group: $node"
+  GPU_GIDS["$gid"]=1
+done
+((${#GPU_GIDS[@]} > 0)) || die "no GPU character-device groups found"
+for gid in "${!GPU_GIDS[@]}"; do GPU_ARGS+=(--group-add "$gid"); done
 remove_container() {
   if [[ -n "$CONTAINER" ]]; then docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; CONTAINER=""; fi
 }

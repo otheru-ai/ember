@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -120,6 +122,62 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("--health-endpoint", body)
         self.assertIn("--require-memory-gate", body)
         self.assertIn("runner_rss_gtt_sampler_v1", body)
+        self.assertIn('gid="$(stat -c %g -- "$node")"', body)
+        self.assertNotIn("--group-add video", body)
+        self.assertNotIn("--group-add render", body)
+        self.assertIn('docker logs "$CONTAINER" >"$OUT_DIR/timing-server.log"', body)
+        self.assertIn('"configured_mmq_mode": configured', body)
+        self.assertIn('"dispatch_confirmation": "startup_configuration_only"', body)
+        self.assertIn('"activation_prepack":', body)
+        self.assertIn('"lossy_w4a4_mmq" if w4a4', body)
+        self.assertIn("conflicting W4A8 variants", body)
+        self.assertIn('"kernel_runtime": kernel_runtime', body)
+        self.assertIn('"timing_server_log":', body)
+
+    def test_kernel_runtime_evidence_distinguishes_compiled_variants(self) -> None:
+        body = GATE.read_text(encoding="utf-8")
+        marker = ('python3 - "$OUT_DIR/timing-server.log" '
+                  '"$OUT_DIR/kernel-runtime-evidence.json" <<\'PY\'\n')
+        start = body.index(marker) + len(marker)
+        parser = body[start:body.index("\nPY\n", start)]
+
+        cases = {
+            "unmarked startup": ("exact_int8_mmq_control", None),
+            ("ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0; "
+             "activation_prepack=off\n"): ("w4a8_iu4_register_pack", False),
+            ("ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 3; "
+             "activation_prepack=on\n"): ("w4a8_iu4_prepack", True),
+            "ROCmI4 W4A4: enabled for device 0 (lossy prompt-processing path)\n":
+                ("lossy_w4a4_mmq", None),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            for index, (log, expected) in enumerate(cases.items()):
+                log_path = Path(temporary) / f"server-{index}.log"
+                out_path = Path(temporary) / f"evidence-{index}.json"
+                log_path.write_text(log, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "-c", parser, str(log_path), str(out_path)],
+                    text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                evidence = json.loads(out_path.read_text(encoding="utf-8"))
+                self.assertEqual(evidence["configured_mmq_mode"], expected[0])
+                self.assertEqual(evidence["dispatch_confirmation"],
+                                 "startup_configuration_only")
+                self.assertEqual(evidence["activation_prepack"], expected[1])
+
+            conflict = Path(temporary) / "conflict.log"
+            conflict.write_text(
+                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0; "
+                "activation_prepack=off\n"
+                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 1; "
+                "activation_prepack=on\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-c", parser, str(conflict),
+                 str(Path(temporary) / "conflict.json")],
+                text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("conflicting W4A8 variants", result.stderr)
 
     def test_candidate_and_profiler_images_are_exactly_bound(self) -> None:
         body = GATE.read_text(encoding="utf-8")

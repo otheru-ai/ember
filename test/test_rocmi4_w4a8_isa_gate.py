@@ -26,6 +26,8 @@ def kernel(
     zero_origin: bool = True,
     wave32: int = 1,
     static_lds: int = 0,
+    vgpr: int = 186,
+    sgpr: int = 36,
 ) -> str:
     symbol = (
         "_ZL9mul_mat_qIL9ggml_type108ELi32ELb"
@@ -64,8 +66,8 @@ def kernel(
 \t\t.amdhsa_group_segment_fixed_size {static_lds}
 \t\t.amdhsa_private_segment_fixed_size {scratch}
 \t\t.amdhsa_wavefront_size32 {wave32}
-\t\t.amdhsa_next_free_vgpr 186
-\t\t.amdhsa_next_free_sgpr 36
+\t\t.amdhsa_next_free_vgpr {vgpr}
+\t\t.amdhsa_next_free_sgpr {sgpr}
 \t.end_amdhsa_kernel
 """
 
@@ -105,6 +107,8 @@ def main() -> int:
     ).returncode != 0
     assert run_gate(program(kernel(0, shift_before_high=True), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, scratch=4), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, vgpr=191), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, sgpr=37), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, groups=3), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, partial_shift=True), kernel(1))).returncode != 0
     assert run_gate(

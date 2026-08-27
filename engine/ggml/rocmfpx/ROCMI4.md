@@ -47,6 +47,22 @@ nor the screened W4A8 control build. It carries no performance claim until it
 independently passes the saved-ISA resource gate, device differential
 validation, and alternating A/B timing.
 
+This experiment changes MMQ only. In the Qwen MTP frontiers, dense q=4/q=5
+verification can reach it, and q=16 can reach it for both dense and routed
+expert projections. q=1 and routed experts at q=4/q=5 use MMVQ and therefore
+remain exact-int8 negative dispatch controls. The startup warning records
+`activation_prepack=on` or `activation_prepack=off`; real-weight timing evidence
+must retain that log so two compiler variants cannot be mistaken for one
+another.
+
+For the screened ROCm 10 gfx1151 compiler images, prepacking reduces the saved
+assembly's VGPR counts from 183/190 to 143/141 for unchecked/checked kernels.
+That is a compile-resource observation, not a throughput result. Each block's
+27,776-byte dynamic LDS allocation and eight-wave geometry still cap actual
+residency at eight waves per SIMD on gfx1151's 128-KiB WGP LDS, so the
+compiler-reported register-only occupancy of ten waves does not prove higher
+workgroup residency.
+
 The instruction and fragment contract is pinned to AMD GPUOpen's
 `machine-readable-isa/latest` archive downloaded 2026-08-27 (SHA-256
 `82404f1126761b7877595b622afa7e1f311f2f41e89a3abe9aaf8ad045c082e2`),
