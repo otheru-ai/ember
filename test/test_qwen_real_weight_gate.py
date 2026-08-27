@@ -134,7 +134,7 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn('"kernel_runtime": kernel_runtime', body)
         self.assertIn('"timing_server_log":', body)
 
-    def test_kernel_runtime_evidence_distinguishes_compiled_variants(self) -> None:
+    def test_kernel_runtime_evidence_distinguishes_configured_startup_modes(self) -> None:
         body = GATE.read_text(encoding="utf-8")
         marker = ('python3 - "$OUT_DIR/timing-server.log" '
                   '"$OUT_DIR/kernel-runtime-evidence.json" <<\'PY\'\n')
@@ -178,6 +178,20 @@ class QwenRealWeightGateTest(unittest.TestCase):
                 text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("conflicting W4A8 variants", result.stderr)
+
+            for index, malformed in enumerate((
+                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0\n",
+                "ROCmI4 W4A8 IU4: unsupported on device 0; using exact int8 MMQ\n",
+                "ROCmI4 W4A4: enabled for device zero (lossy prompt-processing path)\n",
+            )):
+                malformed_log = Path(temporary) / f"malformed-{index}.log"
+                malformed_log.write_text(malformed, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "-c", parser, str(malformed_log),
+                     str(Path(temporary) / f"malformed-{index}.json")],
+                    text=True, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unrecognized ROCmI4 mode markers", result.stderr)
 
     def test_candidate_and_profiler_images_are_exactly_bound(self) -> None:
         body = GATE.read_text(encoding="utf-8")

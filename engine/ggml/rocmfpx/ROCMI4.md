@@ -58,10 +58,10 @@ another.
 For the screened ROCm 10 gfx1151 compiler images, prepacking reduces the saved
 assembly's VGPR counts from 183/190 to 143/141 for unchecked/checked kernels.
 That is a compile-resource observation, not a throughput result. Each block's
-27,776-byte dynamic LDS allocation and eight-wave geometry still cap actual
-residency at eight waves per SIMD on gfx1151's 128-KiB WGP LDS, so the
-compiler-reported register-only occupancy of ten waves does not prove higher
-workgroup residency.
+source- and launch-derived 27,776-byte dynamic LDS allocation allows at most
+four workgroups per gfx1151 128-KiB WGP, an eight-wave-per-SIMD LDS upper bound.
+The compiler-reported register-only occupancy of ten waves therefore does not
+prove higher workgroup residency.
 
 The instruction and fragment contract is pinned to AMD GPUOpen's
 `machine-readable-isa/latest` archive downloaded 2026-08-27 (SHA-256

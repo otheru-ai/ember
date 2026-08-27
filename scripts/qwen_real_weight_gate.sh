@@ -449,6 +449,18 @@ python3 - "$OUT_DIR/timing-server.log" "$OUT_DIR/kernel-runtime-evidence.json" <
 import json, re, sys
 
 log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+marker_lines = [line[line.index("ROCmI4"):].strip()
+                for line in log.splitlines() if "ROCmI4 W4A" in line]
+known_marker = re.compile(
+    r"ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device [0-9]+; "
+    r"activation_prepack=(?:on|off)|"
+    r"ROCmI4 W4A4: enabled for device [0-9]+ "
+    r"\(lossy prompt-processing path\)")
+unknown_markers = [line for line in marker_lines
+                   if known_marker.fullmatch(line) is None]
+if unknown_markers:
+    raise SystemExit(f"timing server logged unrecognized ROCmI4 mode markers: "
+                     f"{unknown_markers}")
 prepack_states = set(re.findall(
     r"ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device [0-9]+; "
     r"activation_prepack=(on|off)", log))

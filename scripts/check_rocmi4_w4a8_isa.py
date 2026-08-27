@@ -59,6 +59,48 @@ def kernel_metadata(lines: list[str], symbol: str) -> dict[str, int]:
     return values
 
 
+def compiler_metrics(lines: list[str], symbol: str) -> dict[str, int]:
+    """Read LLVM's per-kernel resource report instead of estimating it."""
+    prefix = f".L{symbol}"
+    start = next(
+        (index for index, line in enumerate(lines)
+         if line.strip().startswith(f".set {prefix}.num_vgpr,")),
+        None,
+    )
+    if start is None:
+        fail(f"missing compiler resource report for {symbol}")
+    end = start + 1
+    while end < len(lines) and not (
+        lines[end].lstrip().startswith(".section") and ".text." in lines[end]
+    ):
+        end += 1
+    report = lines[start:end]
+    values: dict[str, int] = {}
+    properties = {
+        "num_vgpr", "numbered_sgpr", "private_seg_size",
+        "uses_flat_scratch", "has_dyn_sized_stack",
+    }
+    property_re = re.compile(
+        rf"\s*\.set\s+{re.escape(prefix)}\.(\w+),\s*(\d+)\s*$"
+    )
+    for line in report:
+        match = property_re.match(line)
+        if match and match.group(1) in properties:
+            values[match.group(1)] = int(match.group(2))
+        for key, pattern in (
+            ("scratch_size", r"\s*; ScratchSize:\s*(\d+)\s*$"),
+            ("occupancy", r"\s*; Occupancy:\s*(\d+)\s*$"),
+            ("scratch_enable", r"\s*; COMPUTE_PGM_RSRC2:SCRATCH_EN:\s*(\d+)\s*$"),
+        ):
+            if (match := re.match(pattern, line)) is not None:
+                values[key] = int(match.group(1))
+    required = properties | {"scratch_size", "occupancy", "scratch_enable"}
+    missing = sorted(required - values.keys())
+    if missing:
+        fail(f"{symbol}: compiler resource report lacks {missing}")
+    return values
+
+
 def register_range(text: str, operand: int, expected: int) -> list[int]:
     ranges = V_RANGE_RE.findall(text)
     if len(ranges) != 4:
@@ -259,7 +301,7 @@ def inspect(path: pathlib.Path) -> list[str]:
     if targets != [TARGET]:
         fail(f"assembly targets are {targets}, expected exactly ['{TARGET}']")
 
-    candidates: list[tuple[str, int, int, int, int]] = []
+    candidates: list[tuple[str, int, int, int, int, int]] = []
     widths: set[int] = set()
     checked_seen: set[int] = set()
 
@@ -285,8 +327,11 @@ def inspect(path: pathlib.Path) -> list[str]:
         check_accumulator_dataflow(symbol, body)
         if any("scratch_load" in text or "scratch_store" in text for text in body):
             fail(f"{symbol}: explicit scratch instruction emitted")
+        if any("v_readlane" in text or "v_writelane" in text for text in body):
+            fail(f"{symbol}: scalar/vector register-lane spill instruction emitted")
 
         metadata = kernel_metadata(lines, symbol)
+        compiler = compiler_metrics(lines, symbol)
         private = metadata.get("private_segment_fixed_size", -1)
         static_lds = metadata.get("group_segment_fixed_size", -1)
         wave32 = metadata.get("wavefront_size32", -1)
@@ -302,7 +347,17 @@ def inspect(path: pathlib.Path) -> list[str]:
             fail(f"{symbol}: VGPR count {vgpr} exceeds screened ceiling 190")
         if sgpr < 1 or sgpr > 36:
             fail(f"{symbol}: numbered SGPR count {sgpr} exceeds screened ceiling 36")
-        candidates.append((symbol, checked, vgpr, sgpr, static_lds))
+        if compiler["num_vgpr"] != vgpr or compiler["numbered_sgpr"] != sgpr:
+            fail(f"{symbol}: compiler and AMDHSA register counts disagree")
+        if any(compiler[key] != 0 for key in (
+            "private_seg_size", "uses_flat_scratch", "has_dyn_sized_stack",
+            "scratch_size", "scratch_enable",
+        )):
+            fail(f"{symbol}: compiler resource report enables scratch or a dynamic stack")
+        occupancy = compiler["occupancy"]
+        if occupancy < 1 or occupancy > 16:
+            fail(f"{symbol}: compiler occupancy {occupancy} is outside wave32 limits")
+        candidates.append((symbol, checked, vgpr, sgpr, static_lds, occupancy))
 
     if widths != {32}:
         fail(f"candidate widths are {sorted(widths)}, expected only [32]")
@@ -312,16 +367,14 @@ def inspect(path: pathlib.Path) -> list[str]:
         fail(f"found {len(candidates)} candidate functions, expected exactly 2")
 
     reports = []
-    for _symbol, checked, vgpr, sgpr, static_lds in sorted(
+    for _symbol, checked, vgpr, sgpr, static_lds, occupancy in sorted(
         candidates, key=lambda item: item[1]
     ):
-        # LLVM's TotalSGPRs adds VCC to the numbered count. gfx1151 has 1536
-        # vector registers per SIMD; this matches the compiler's 8-wave report.
-        occupancy = 1536 // vgpr
         reports.append(
             f"checked={checked} vgpr={vgpr} numbered_sgpr={sgpr} "
-            f"scratch=0 spills=0 static_lds_bytes={static_lds} "
-            f"occupancy_waves_per_simd={occupancy}"
+            f"scratch_bytes=0 scratch_enable=0 register_lane_spill_ops=0 "
+            f"static_lds_bytes={static_lds} "
+            f"compiler_occupancy_waves_per_simd={occupancy}"
         )
     return reports
 

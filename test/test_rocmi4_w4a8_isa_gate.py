@@ -28,6 +28,9 @@ def kernel(
     static_lds: int = 0,
     vgpr: int = 186,
     sgpr: int = 36,
+    compiler_scratch: int | None = None,
+    compiler_occupancy: int = 8,
+    lane_spill: bool = False,
 ) -> str:
     symbol = (
         "_ZL9mul_mat_qIL9ggml_type108ELi32ELb"
@@ -54,7 +57,11 @@ def kernel(
 \tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[0:7] {modifier_low}
 \tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[0:7] {modifier_low}"""
     body = "\n".join(group for _ in range(groups))
+    if lane_spill:
+        body += "\n\tv_readlane_b32 s8, v0, 0"
     zero = 0 if zero_origin else 1
+    reported_scratch = scratch if compiler_scratch is None else compiler_scratch
+    scratch_enable = int(reported_scratch != 0)
     initialize = "\n".join(
         f"\tv_mov_b32_e32 v{register}, {zero}" for register in range(16, 24)
     )
@@ -69,6 +76,15 @@ def kernel(
 \t\t.amdhsa_next_free_vgpr {vgpr}
 \t\t.amdhsa_next_free_sgpr {sgpr}
 \t.end_amdhsa_kernel
+\t.set .L{symbol}.num_vgpr, {vgpr}
+\t.set .L{symbol}.numbered_sgpr, {sgpr}
+\t.set .L{symbol}.private_seg_size, {reported_scratch}
+\t.set .L{symbol}.uses_flat_scratch, {scratch_enable}
+\t.set .L{symbol}.has_dyn_sized_stack, 0
+; ScratchSize: {reported_scratch}
+; Occupancy: {compiler_occupancy}
+; COMPUTE_PGM_RSRC2:SCRATCH_EN: {scratch_enable}
+\t.section .text.synthetic
 """
 
 
@@ -107,6 +123,12 @@ def main() -> int:
     ).returncode != 0
     assert run_gate(program(kernel(0, shift_before_high=True), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, scratch=4), kernel(1))).returncode != 0
+    assert run_gate(
+        program(kernel(0, compiler_scratch=4), kernel(1))
+    ).returncode != 0
+    assert run_gate(program(kernel(0, lane_spill=True), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, compiler_occupancy=17), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, vgpr=190), kernel(1))).returncode == 0
     assert run_gate(program(kernel(0, vgpr=191), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, sgpr=37), kernel(1))).returncode != 0
     assert run_gate(program(kernel(0, groups=3), kernel(1))).returncode != 0

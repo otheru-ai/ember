@@ -65,9 +65,10 @@ is strict:
 The source-reported four-slice IU4 result (94.044 TOPS versus its 84.560-TOPS
 one-slice control) is evidence for that schedule experiment, not an Ember speed
 claim. Saved ROCm 10 gfx1151 assembly shows that activation prepacking reduces
-the screened kernels' VGPR counts, but their 27,776-byte dynamic LDS allocation
-still limits residency to eight waves per SIMD; the compiler's higher
-register-only occupancy therefore does not establish extra resident workgroups.
+the screened kernels' VGPR counts. Their source- and launch-derived 27,776-byte
+dynamic LDS allocation allows at most four workgroups per 128-KiB WGP, an
+eight-wave-per-SIMD LDS upper bound; the compiler's higher register-only
+occupancy therefore does not establish extra resident workgroups.
 The large prepacked `4096^3` FP16 kernels still do not match Qwen's quantized
 q=1/q=5/q=16 text shapes. QSA bank interleaving/padding and physical VGPR phase
 placement remain separate, profile-led experiments; neither may copy constants
