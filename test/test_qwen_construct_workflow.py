@@ -119,6 +119,27 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/qwen_candidate_manifest.py from-request", body)
         self.assertNotIn("qwen_quantize.py", body)
 
+    def test_expressions_reference_only_declared_dispatch_inputs(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
+        self.assertIsNotNone(dispatch)
+        declared = set(re.findall(r"^      ([a-z0-9_]+):$", dispatch.group(1), re.M))
+        referenced = set(re.findall(r"\binputs\.([a-zA-Z0-9_]+)\b", body))
+        self.assertEqual(referenced - declared, set(),
+                         "workflow expressions reference undeclared dispatch inputs")
+
+        # Candidate kind is parsed from the digest-bound operation request and
+        # exported through GITHUB_ENV. It is deliberately not a dispatch input.
+        self.assertIn(
+            "if: inputs.mode == 'build-candidate' && "
+            "env.QWEN_CANDIDATE_KIND == 'intervention'",
+            body,
+        )
+        self.assertIn(
+            "if: inputs.mode == 'build-candidate' && env.QWEN_CANDIDATE_KIND == 'stock'",
+            body,
+        )
+
     def test_embedded_operation_request_parser_accepts_only_exact_mode_shape(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         scripts = [script for block in workflow_run_blocks(body)

@@ -461,7 +461,7 @@ jobs:
           PY
 
       - name: Build one intervention candidate from the immutable cache
-        if: inputs.mode == 'build-candidate' && inputs.candidate_kind == 'intervention'
+        if: inputs.mode == 'build-candidate' && env.QWEN_CANDIDATE_KIND == 'intervention'
         run: |
           set -euo pipefail
           uid="$(id -u)"; gid="$(id -g)"
@@ -505,7 +505,7 @@ jobs:
           docker rm "$name" >/dev/null
 
       - name: Rebuild the stock control from the immutable cache
-        if: inputs.mode == 'build-candidate' && inputs.candidate_kind == 'stock'
+        if: inputs.mode == 'build-candidate' && env.QWEN_CANDIDATE_KIND == 'stock'
         run: |
           set -euo pipefail
           uid="$(id -u)"; gid="$(id -g)"
