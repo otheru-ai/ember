@@ -249,7 +249,7 @@ keeps verification and publication on one filesystem without exposing
 unverified files at their final paths. Execute mode requires `--work-dir` to be
 absent; an existing directory, file, or dangling symlink is a hard conflict.
 
-The default conversion-runner resource floor is 1 TiB free disk and 256 GiB
+The default conversion-runner resource floor is 1152 GiB free disk and 256 GiB
 physical RAM. The conservative RAM floor covers the pinned converter's roughly
 204 GB intermediate representation; 128 GiB is not a supported conversion
 runner. This host-RAM floor is distinct from the 128 GiB UMA artifact
@@ -426,7 +426,7 @@ lists both pinned intervention tools; it does not infer “Heretic” from a nam
 ## Runners and authentication
 
 Quantization/package work belongs on a dedicated runner such as
-`[self-hosted, linux, x64, qwen-quant]` with at least 1 TiB free local storage
+`[self-hosted, linux, x64, qwen-quant]` with at least 1152 GiB free local storage
 (1.5 TiB preferred), at least 256 GiB physical RAM, and a cache isolated from serving
 models. Runtime certification belongs on the existing
 `[self-hosted, linux, x64, gfx1151]` path. It must use the fixed production

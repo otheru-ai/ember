@@ -332,8 +332,8 @@ def load_profile(path: Path) -> dict[str, Any]:
         release.get("conversion_runner_requirements"),
         "release.conversion_runner_requirements",
     )
-    if runner.get("minimum_free_disk_gib") != 1024 or runner.get("minimum_physical_ram_gib") != 256:
-        raise PackageError("release conversion runner must require 1 TiB disk and 256 GiB RAM")
+    if runner.get("minimum_free_disk_gib") != 1152 or runner.get("minimum_physical_ram_gib") != 256:
+        raise PackageError("release conversion runner must require 1152 GiB disk and 256 GiB RAM")
     layout_gate = require_mapping(release.get("artifact_layout_gate"), "release.artifact_layout_gate")
     if (
         layout_gate.get("current_quantizer_multi_shard_supported") is not True

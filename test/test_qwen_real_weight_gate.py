@@ -81,7 +81,7 @@ class QwenRealWeightGateTest(unittest.TestCase):
                 result = self.run_gate(args)
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_exclusive_restore_and_success_only_publication(self) -> None:
+    def test_exclusive_restore_and_success_only_hardware_certification(self) -> None:
         body = GATE.read_text(encoding="utf-8")
         self.assertIn("trap cleanup EXIT INT TERM", body)
         self.assertIn('sudo -n "$GPU_LOCK" acquire', body)
@@ -90,9 +90,16 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn('sudo -n "$PRODUCTION" mask', body)
         self.assertIn('sudo -n "$PRODUCTION" unmask', body)
         self.assertIn('sudo -n "$PRODUCTION" start', body)
+        self.assertIn('sudo -n "$PRODUCTION" is-active', body)
+        self.assertIn('curl --fail --silent --max-time 2 "$PRODUCTION_HEALTH"', body)
         restore = body.index("restore_exclusive || die")
-        approval = body.index(".publish-approved.")
+        approval = body.index(".hardware-certified.")
         self.assertLess(restore, approval)
+        self.assertIn('"hardware_certified": passed', body)
+        self.assertIn('"publish_approved": False', body)
+        self.assertIn('"text_model_plus_mtp_only" if passed', body)
+        self.assertIn('"measurement_only_not_certified"', body)
+        self.assertIn('os.link(measured, os.path.join(out, "hardware-certified.json"))', body)
         self.assertNotIn("huggingface-cli", body)
         self.assertNotIn("hf upload", body)
 

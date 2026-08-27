@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import statistics
@@ -307,6 +308,37 @@ HARD_GATE_PREFILL_TOKENS = 2074
 HARD_GATE_SAMPLES = 3
 
 
+def derived_tps(tokens: object, milliseconds: object, declared: object,
+                *, declared_decimals: int) -> tuple[float | None, bool]:
+    """Derive throughput from count/time and audit the rounded server value.
+
+    Ember serializes durations to one decimal millisecond, prefill throughput
+    to one decimal tok/s, and decode throughput to two decimals.  The accepted
+    interval accounts only for those two roundings; the declared rate is never
+    itself used by the hard gate.
+    """
+    if (isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0
+            or isinstance(milliseconds, bool)
+            or not isinstance(milliseconds, (int, float))
+            or not math.isfinite(float(milliseconds))
+            or float(milliseconds) <= 0.05
+            or isinstance(declared, bool)
+            or not isinstance(declared, (int, float))
+            or not math.isfinite(float(declared))
+            or float(declared) <= 0.0):
+        return None, False
+    duration_ms = float(milliseconds)
+    rate = float(tokens) * 1000.0 / duration_ms
+    duration_half_unit_ms = 0.05
+    rate_half_unit = 0.5 * 10.0 ** (-declared_decimals)
+    minimum = float(tokens) * 1000.0 / (duration_ms + duration_half_unit_ms)
+    maximum = float(tokens) * 1000.0 / (duration_ms - duration_half_unit_ms)
+    epsilon = max(1.0, abs(rate)) * 1e-12
+    consistent = (minimum - rate_half_unit - epsilon <= float(declared)
+                  <= maximum + rate_half_unit + epsilon)
+    return rate, consistent
+
+
 class Suite:
     def __init__(self, endpoint: str, output: Path, timeout: float,
                  model: str) -> None:
@@ -359,6 +391,12 @@ class Suite:
             timings = usage.get("timings") or {}
             backend = usage.get("backend") or {}
             choice = (body.get("choices") or [{}])[0]
+            prefill_tps, prefill_tps_consistent = derived_tps(
+                timings.get("prefill_tokens"), timings.get("prefill_ms"),
+                timings.get("prefill_tokens_per_sec"), declared_decimals=1)
+            decode_tps, decode_tps_consistent = derived_tps(
+                usage.get("completion_tokens"), timings.get("decode_ms"),
+                timings.get("decode_tokens_per_sec"), declared_decimals=2)
             record = {
                 "kind": "request",
                 "group": group,
@@ -370,9 +408,13 @@ class Suite:
                 "completion_tokens": usage.get("completion_tokens"),
                 "evaluated_prefill_tokens": timings.get("prefill_tokens"),
                 "prefill_ms": timings.get("prefill_ms"),
-                "prefill_tokens_per_second": timings.get("prefill_tokens_per_sec"),
+                "prefill_tokens_per_second": prefill_tps,
+                "declared_prefill_tokens_per_second": timings.get("prefill_tokens_per_sec"),
+                "prefill_tps_rounding_consistent": prefill_tps_consistent,
                 "decode_ms": timings.get("decode_ms"),
-                "decode_tokens_per_second": timings.get("decode_tokens_per_sec"),
+                "decode_tokens_per_second": decode_tps,
+                "declared_decode_tokens_per_second": timings.get("decode_tokens_per_sec"),
+                "decode_tps_rounding_consistent": decode_tps_consistent,
                 "restored_prefix": usage.get("restored_prefix"),
                 "accept_rate": usage.get("accept_rate"),
                 "spec_ran": backend.get("spec_ran"),
@@ -441,6 +483,8 @@ def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
                       for row in prefill_rows]
     decode_values = [float(row["decode_tokens_per_second"])
                      for row in decode_rows]
+    prefill_peak = (max(prefill_values)
+                    if len(prefill_values) == HARD_GATE_SAMPLES else None)
     prefill_median = (statistics.median(prefill_values)
                       if len(prefill_values) == HARD_GATE_SAMPLES else None)
     decode_median = (statistics.median(decode_values)
@@ -448,15 +492,18 @@ def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
     prefill_shape_match = (
         len(prefill_rows) == HARD_GATE_SAMPLES and
         all(row.get("evaluated_prefill_tokens") == HARD_GATE_PREFILL_TOKENS
+            and row.get("prefill_tps_rounding_consistent") is True
             for row in prefill_rows)
     )
     decode_shape_match = (
         len(decode_rows) == HARD_GATE_SAMPLES and
-        all(row.get("completion_tokens") == 256 for row in decode_rows)
+        all(row.get("completion_tokens") == 256
+            and row.get("decode_tps_rounding_consistent") is True
+            for row in decode_rows)
     )
     passed = bool(
         prefill_shape_match and decode_shape_match and
-        prefill_median is not None and prefill_median >= prefill_target and
+        prefill_peak is not None and prefill_peak >= prefill_target and
         decode_median is not None and decode_median >= decode_target
     )
     return {
@@ -468,17 +515,24 @@ def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
             "expected_evaluated_tokens": HARD_GATE_PREFILL_TOKENS,
             "evaluated_tokens": [row.get("evaluated_prefill_tokens")
                                  for row in prefill_rows],
+            "declared_tps_rounding_consistent": [
+                row.get("prefill_tps_rounding_consistent") for row in prefill_rows],
             "shape_match": prefill_shape_match,
+            "statistic": "peak",
+            "peak_tps": prefill_peak,
             "median_tps": prefill_median,
             "target_tps": prefill_target,
-            "passed": bool(prefill_shape_match and prefill_median is not None
-                           and prefill_median >= prefill_target),
+            "passed": bool(prefill_shape_match and prefill_peak is not None
+                           and prefill_peak >= prefill_target),
         },
         "decode_256_counting": {
             "samples": len(decode_values),
             "completion_tokens": [row.get("completion_tokens")
                                   for row in decode_rows],
+            "declared_tps_rounding_consistent": [
+                row.get("decode_tps_rounding_consistent") for row in decode_rows],
             "shape_match": decode_shape_match,
+            "statistic": "median",
             "median_tps": decode_median,
             "target_tps": decode_target,
             "passed": bool(decode_shape_match and decode_median is not None

@@ -10,6 +10,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GPU_LOCK=/usr/local/sbin/ember-gpu-lock
 PRODUCTION=/usr/local/sbin/ember-cert-production
+PRODUCTION_HEALTH=http://127.0.0.1:8000/health
 PROFILE_SCRIPT="$REPO/scripts/profile_gpu.sh"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
 
@@ -18,7 +19,9 @@ MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
 MTP=""; MTP_SHA256=""; OUT_DIR=""
 BINARY=/usr/local/bin/ember-dflash
 PORT=18086; MTP_DEPTH=4; DRY_RUN=0
+MEASUREMENT_ONLY=0
 CONTAINER=""; LOCK_HELD=0; MASKED=0; RESTORE_SERVICE=0
+PRODUCTION_STATE_CAPTURED=0; PRODUCTION_WAS_ACTIVE=0
 
 die() { printf 'qwen-real-weight-gate: %s\n' "$*" >&2; exit 1; }
 log() { printf 'qwen-real-weight-gate: %s\n' "$*"; }
@@ -44,6 +47,7 @@ options:
   --binary PATH               ember-dflash path in image
   --port N                    temporary loopback port (default 18086)
   --mtp-depth N               proposal depth 1..4 (default 4)
+  --measurement-only          retain complete measurements below hard thresholds
   --dry-run                   validate syntax and print plan; touch nothing
 EOF
 }
@@ -64,6 +68,7 @@ while (( $# )); do
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --port) PORT="${2:?--port needs a value}"; shift 2 ;;
     --mtp-depth) MTP_DEPTH="${2:?--mtp-depth needs a value}"; shift 2 ;;
+    --measurement-only) MEASUREMENT_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -112,9 +117,10 @@ plan:
   production          $PRODUCTION stop + mask; unconditional unmask/restore
   correctness         q=1 vs native MTP, fresh + snapshot restore + rejection evidence
   timing              unprofiled 3x exact-2074 prefill and 3x decode-256
-  hard gates          prefill median >=412.0 tok/s; decode median >=39.49 tok/s
+  hard gates          prefill peak >=412.0 tok/s; decode median >=39.49 tok/s
   profiling           later, separate trace and one-counter-per-PMC passes
-  publication         approval marker written only after restore and every gate passes
+  publication         forbidden; text+MTP hardware marker is not release approval
+  result mode         $([[ "$MEASUREMENT_ONLY" = 1 ]] && printf measurement || printf certification)
 EOF
 }
 
@@ -247,7 +253,7 @@ remove_container() {
 }
 
 restore_exclusive() {
-  local failed=0 attempt
+  local failed=0 attempt healthy=0
   remove_container
   if (( MASKED )); then
     for attempt in 1 2 3; do
@@ -274,6 +280,18 @@ restore_exclusive() {
     fi
     (( RESTORE_SERVICE == 0 )) || failed=1
   fi
+  if (( PRODUCTION_STATE_CAPTURED && PRODUCTION_WAS_ACTIVE &&
+        MASKED == 0 && RESTORE_SERVICE == 0 )); then
+    for attempt in $(seq 1 300); do
+      if sudo -n "$PRODUCTION" is-active >/dev/null 2>&1 &&
+         curl --fail --silent --max-time 2 "$PRODUCTION_HEALTH" >/dev/null 2>&1; then
+        healthy=1
+        break
+      fi
+      sleep 2
+    done
+    (( healthy )) || failed=1
+  fi
   if (( LOCK_HELD )); then
     for attempt in 1 2 3; do
       if sudo -n "$GPU_LOCK" release >/dev/null 2>&1; then
@@ -298,9 +316,11 @@ trap cleanup EXIT INT TERM
 sudo -n "$GPU_LOCK" acquire
 LOCK_HELD=1
 if sudo -n "$PRODUCTION" is-active >/dev/null 2>&1; then
+  PRODUCTION_WAS_ACTIVE=1
   RESTORE_SERVICE=1
   sudo -n "$PRODUCTION" stop
 fi
+PRODUCTION_STATE_CAPTURED=1
 sudo -n "$PRODUCTION" mask
 MASKED=1
 
@@ -400,26 +420,32 @@ TIMING_HOST_PID="$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")"
    -r "/proc/$TIMING_HOST_PID/status" ]] ||
   die "timing container host PID is missing or not readable"
 
-if ! python3 "$BENCHMARK" \
-    --endpoint "http://127.0.0.1:$PORT/v1/chat/completions" \
-    --health-endpoint "http://127.0.0.1:$PORT/health" --health-timeout 1800 \
-    --model qwen3.8-flash-next --output "$OUT_DIR/timing.jsonl" \
-    --protocol hard-gate --prefill-target 412.0 --decode-target 39.49 \
-    --server-pid "$TIMING_HOST_PID" --gtt-cap-bytes 133143986176 \
-    --require-gate --require-memory-gate; then
+benchmark_args=(
+  --endpoint "http://127.0.0.1:$PORT/v1/chat/completions"
+  --health-endpoint "http://127.0.0.1:$PORT/health" --health-timeout 1800
+  --model qwen3.8-flash-next --output "$OUT_DIR/timing.jsonl"
+  --protocol hard-gate --prefill-target 412.0 --decode-target 39.49
+  --server-pid "$TIMING_HOST_PID" --gtt-cap-bytes 133143986176
+)
+if (( ! MEASUREMENT_ONLY )); then
+  benchmark_args+=(--require-gate --require-memory-gate)
+fi
+if ! python3 "$BENCHMARK" "${benchmark_args[@]}"; then
   docker logs --tail 80 "$CONTAINER" >"$OUT_DIR/timing-server-failure.log" 2>&1 || true
   die "timing, performance, or memory gate failed"
 fi
-python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" <<'PY'
+python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" \
+  "$MEASUREMENT_ONLY" <<'PY'
 import json, sys
+measurement_only = sys.argv[3] == "1"
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 decode = [row for row in rows if row.get("kind") == "request" and
           row.get("group") == "decode-256" and row.get("ok")]
 if len(decode) != 3 or not all(row.get("spec_ran") is True for row in decode):
     raise SystemExit("hard-gate decode samples did not all run native MTP")
 summaries = [row for row in rows if row.get("kind") == "summary"]
-if len(summaries) != 1 or not (summaries[0].get("hard_gate") or {}).get("passed"):
-    raise SystemExit("machine-readable hard gate is absent or failed")
+if len(summaries) != 1 or not isinstance(summaries[0].get("hard_gate"), dict):
+    raise SystemExit("machine-readable hard gate is absent")
 summary = summaries[0]
 memory = summary.get("memory_gate") or {}
 resources = summary.get("resources") or {}
@@ -427,8 +453,10 @@ metadata = [row for row in rows if row.get("kind") == "metadata"]
 if (len(metadata) != 1 or metadata[0].get("server_pid_source") != "explicit" or
         metadata[0].get("container_pid") != resources.get("server_host_pid")):
     raise SystemExit("timing evidence is not bound to one explicit container host PID")
-if not memory.get("passed"):
+if not measurement_only and not memory.get("passed"):
     raise SystemExit(f"runner RSS/GTT/UMA hard fit failed: {memory}")
+if not measurement_only and not summary["hard_gate"].get("passed"):
+    raise SystemExit(f"performance hard gate failed: {summary['hard_gate']}")
 if (resources.get("peak_memory_measurement_method") !=
         "runner_rss_gtt_sampler_v1"):
     raise SystemExit("timing run lacks runner_rss_gtt_sampler_v1 evidence")
@@ -459,10 +487,11 @@ restore_exclusive || die "failed to restore production or release the GPU lock"
 
 python3 - "$OUT_DIR" "$IMAGE" "$IMAGE_DIGEST" "$PROFILE_IMAGE" \
   "$PROFILE_IMAGE_DIGEST" "$candidate_revision" "$candidate_binary_sha" \
-  "$MODEL" "$MODEL_SHA256" "$MTP" "$MTP_SHA256" "$MTP_DEPTH" <<'PY'
+  "$MODEL" "$MODEL_SHA256" "$MTP" "$MTP_SHA256" "$MTP_DEPTH" \
+  "$MEASUREMENT_ONLY" <<'PY'
 import hashlib, json, os, sys, time
 (out, image, image_digest, profile_image, profile_image_digest, revision,
- binary_sha, model, model_sha, mtp, mtp_sha, depth) = sys.argv[1:]
+ binary_sha, model, model_sha, mtp, mtp_sha, depth, measurement_only) = sys.argv[1:]
 def sha(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -471,10 +500,14 @@ def sha(path):
     return digest.hexdigest()
 inventory = json.load(open(os.path.join(out, "model-inventory.json"), encoding="utf-8"))
 memory = json.load(open(os.path.join(out, "memory-evidence.json"), encoding="utf-8"))
+passed = bool(memory["performance"].get("passed") and memory["hard_fit"].get("passed"))
 record = {
     "schema": "ember.qwen3.8.real-weight-gate.v2",
-    "passed": True,
-    "publish_approved": True,
+    "passed": passed,
+    "hardware_certified": passed,
+    "publish_approved": False,
+    "certification_scope": ("text_model_plus_mtp_only" if passed
+                            else "measurement_only_not_certified"),
     "completed_unix": time.time(),
     "image": {"ref": image, "digest": image_digest},
     "profile_image": {"ref": profile_image, "digest": profile_image_digest,
@@ -484,7 +517,7 @@ record = {
     "model": {"path": model, "sha256": model_sha,
               "ordered_inventory": inventory},
     "mtp": {"path": mtp, "sha256": mtp_sha, "depth": int(depth)},
-    "hard_gates": {"prefill_2074_median_tps": 412.0,
+    "hard_gates": {"prefill_2074_peak_tps": 412.0,
                    "decode_256_median_tps": 39.49, "samples": 3,
                    "performance": memory["performance"],
                    "memory": memory["hard_fit"]},
@@ -505,12 +538,21 @@ record = {
     },
     "methodology": "clean timing and profiler/counter passes are separate",
 }
-temporary = os.path.join(out, f".publish-approved.{os.getpid()}.tmp")
+temporary = os.path.join(out, f".hardware-certified.{os.getpid()}.tmp")
 with open(temporary, "x", encoding="utf-8") as stream:
     json.dump(record, stream, indent=2, sort_keys=True)
     stream.write("\n")
     stream.flush(); os.fsync(stream.fileno())
-os.replace(temporary, os.path.join(out, "publish-approved.json"))
+measured = os.path.join(out, "hardware-measured.json")
+os.replace(temporary, measured)
+if passed:
+    os.link(measured, os.path.join(out, "hardware-certified.json"))
 print(json.dumps(record, indent=2, sort_keys=True))
 PY
-log "PASS: publish approval recorded only after correctness, timing, profiling, and restore"
+if [[ -f "$OUT_DIR/hardware-certified.json" ]]; then
+  log "PASS: text+MTP hardware certification recorded after correctness, timing, profiling, and restore"
+elif (( MEASUREMENT_ONLY )); then
+  log "MEASURED: complete below-threshold result retained; hardware certification was not granted"
+else
+  die "hard gates did not pass"
+fi

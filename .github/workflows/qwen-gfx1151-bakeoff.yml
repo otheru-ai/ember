@@ -1,0 +1,773 @@
+name: Qwen gfx1151 sequential quant bakeoff
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character runtime Ember revision (artifact builder may differ)
+        required: true
+        type: string
+      candidate_manifest:
+        description: Absolute runner path to one immutable v3 candidate/workset manifest
+        required: true
+        type: string
+      candidate_manifest_sha256:
+        description: Exact lowercase SHA-256 of the candidate manifest
+        required: true
+        type: string
+      phase:
+        description: Canonical sequential phase
+        required: true
+        type: choice
+        options: [sweep, format, final]
+      results_accumulator:
+        description: Prior compact externally-attested accumulator (empty only for first sweep row)
+        required: false
+        type: string
+      results_accumulator_sha256:
+        description: SHA-256 of the prior accumulator
+        required: false
+        type: string
+      results_accumulator_bundle:
+        description: GitHub attestation bundle for the prior accumulator
+        required: false
+        type: string
+      results_accumulator_bundle_sha256:
+        description: SHA-256 of the prior accumulator attestation bundle
+        required: false
+        type: string
+      prior_ledger:
+        description: Attested sweep ledger for format, or format ledger for final
+        required: false
+        type: string
+      prior_ledger_sha256:
+        description: SHA-256 of the prior phase ledger
+        required: false
+        type: string
+      prior_ledger_bundle:
+        description: GitHub attestation bundle for the prior phase ledger
+        required: false
+        type: string
+      prior_ledger_bundle_sha256:
+        description: SHA-256 of the prior phase ledger attestation bundle
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: gfx1151-certification
+  cancel-in-progress: false
+
+jobs:
+  sequential-bakeoff:
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 1440
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      CANDIDATE_MANIFEST: ${{ inputs.candidate_manifest }}
+      CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_manifest_sha256 }}
+      QWEN_BAKEOFF_PHASE: ${{ inputs.phase }}
+      QWEN_RESULTS_ACCUMULATOR: ${{ inputs.results_accumulator }}
+      QWEN_RESULTS_ACCUMULATOR_SHA256: ${{ inputs.results_accumulator_sha256 }}
+      QWEN_RESULTS_ACCUMULATOR_BUNDLE: ${{ inputs.results_accumulator_bundle }}
+      QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256: ${{ inputs.results_accumulator_bundle_sha256 }}
+      QWEN_PRIOR_LEDGER: ${{ inputs.prior_ledger }}
+      QWEN_PRIOR_LEDGER_SHA256: ${{ inputs.prior_ledger_sha256 }}
+      QWEN_PRIOR_LEDGER_BUNDLE: ${{ inputs.prior_ledger_bundle }}
+      QWEN_PRIOR_LEDGER_BUNDLE_SHA256: ${{ inputs.prior_ledger_bundle_sha256 }}
+      ATTEST_REPOSITORY: OtherU-AI/ember
+      ATTEST_WORKFLOW: .github/workflows/qwen-gfx1151-bakeoff.yml
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Bind one workset, immutable cache, companions, identities, and sealed phase
+        id: preflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          [[ "$CANDIDATE_MANIFEST" = /* && -f "$CANDIDATE_MANIFEST" && ! -L "$CANDIDATE_MANIFEST" ]]
+          [[ "$CANDIDATE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(sha256sum "$CANDIDATE_MANIFEST" | awk '{print $1}')" = "$CANDIDATE_MANIFEST_SHA256"
+          [[ "$QWEN_BAKEOFF_PHASE" =~ ^(sweep|format|final)$ ]]
+          test -x /usr/local/sbin/ember-gpu-lock
+          test -x /usr/local/sbin/ember-cert-production
+
+          attest_verify() {
+            local subject="$1" subject_sha="$2" bundle="$3" bundle_sha="$4"
+            [[ "$subject" = /* && -f "$subject" && ! -L "$subject" ]]
+            [[ "$bundle" = /* && -f "$bundle" && ! -L "$bundle" ]]
+            [[ "$subject_sha" =~ ^[0-9a-f]{64}$ && "$bundle_sha" =~ ^[0-9a-f]{64}$ ]]
+            test "$(sha256sum "$subject" | awk '{print $1}')" = "$subject_sha"
+            test "$(sha256sum "$bundle" | awk '{print $1}')" = "$bundle_sha"
+            gh attestation verify "$subject" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
+              --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          }
+          prior_count=0
+          if [[ -n "$QWEN_RESULTS_ACCUMULATOR" ]]; then
+            attest_verify "$QWEN_RESULTS_ACCUMULATOR" "$QWEN_RESULTS_ACCUMULATOR_SHA256" \
+              "$QWEN_RESULTS_ACCUMULATOR_BUNDLE" "$QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256"
+            prior_count="$(python3 - "$QWEN_RESULTS_ACCUMULATOR" <<'PY'
+          import json, pathlib, sys
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if value.get("schema") != "ember.qwen3.8.sequential-bakeoff-accumulator.v2":
+              raise SystemExit("prior accumulator schema differs")
+          rows = value.get("assessments")
+          if not isinstance(rows, list):
+              raise SystemExit("prior accumulator has no compact assessment descriptors")
+          print(len(rows))
+          PY
+            )"
+          else
+            test -z "$QWEN_RESULTS_ACCUMULATOR_SHA256$QWEN_RESULTS_ACCUMULATOR_BUNDLE$QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256"
+          fi
+          if [[ "$QWEN_BAKEOFF_PHASE" = sweep ]]; then
+            test -z "$QWEN_PRIOR_LEDGER$QWEN_PRIOR_LEDGER_SHA256$QWEN_PRIOR_LEDGER_BUNDLE$QWEN_PRIOR_LEDGER_BUNDLE_SHA256"
+          else
+            attest_verify "$QWEN_PRIOR_LEDGER" "$QWEN_PRIOR_LEDGER_SHA256" \
+              "$QWEN_PRIOR_LEDGER_BUNDLE" "$QWEN_PRIOR_LEDGER_BUNDLE_SHA256"
+          fi
+
+          mapfile -t manifest < <(python3 - "$CANDIDATE_MANIFEST" "$QWEN_BAKEOFF_PHASE" "$TARGET_SHA" <<'PY'
+          import hashlib, json, pathlib, re, sys
+          p = pathlib.Path(sys.argv[1]); phase, runtime_revision = sys.argv[2:]
+          m = json.loads(p.read_text())
+          if m.get("schema") != "ember.qwen3.8.sequential-bakeoff-candidate.v3":
+              raise SystemExit("candidate manifest schema differs")
+          if m.get("runtime_revision") != runtime_revision:
+              raise SystemExit("runtime engine revision differs from dispatch revision")
+          builder_revision = m.get("builder_revision")
+          if not isinstance(builder_revision, str) or not re.fullmatch(r"[0-9a-f]{40}", builder_revision):
+              raise SystemExit("artifact builder revision is not exact")
+          c = m.get("candidate")
+          if not isinstance(c, dict):
+              raise SystemExit("one-candidate-per-dispatch is required")
+          if c.get("stage") not in ({"stock", "sweep"} if phase == "sweep" else {phase}):
+              raise SystemExit("candidate stage differs from dispatch phase")
+          for key in ("selection_plan", "bf16_cache", "builder_attestation", "build_record"):
+              d = c.get(key) if key == "builder_attestation" else m.get(key)
+              if not isinstance(d, dict) or set(d) != {"path", "sha256"}:
+                  raise SystemExit(f"{key} descriptor is not exact")
+              path=pathlib.Path(d["path"])
+              if path.is_symlink() or not path.is_file(): raise SystemExit(f"{key} is not a regular file")
+              if hashlib.sha256(path.read_bytes()).hexdigest() != d["sha256"]:
+                  raise SystemExit(f"{key} digest differs")
+          cache = m["bf16_cache"]
+          cache_path = pathlib.Path(cache["path"]).resolve()
+          workset = pathlib.Path(m["workset_root"]).resolve()
+          if workset not in cache_path.parents or "bf16-cache" not in cache_path.parts:
+              raise SystemExit("BF16 cache is not content-addressed beneath the workset")
+          companions = m.get("shared_companions")
+          if not isinstance(companions, dict) or not {"ROCMI4", "ROCMFP4-FAST"}.issubset(companions):
+              raise SystemExit("shared MTP/mmproj companion inventories are incomplete")
+          companion = companions.get(c.get("mtp_matrix_quant_contract"))
+          if not isinstance(companion, dict) or set(companion) != {"path", "sha256"}:
+              raise SystemExit("candidate has no exact shared companion inventory")
+          images = m.get("images") or {}; builder = images.get("builder") or {}; runtime = images.get("runtime") or {}
+          for row, keys in ((builder, {"ref", "digest"}),
+                            (runtime, {"release_ref", "release_digest", "dev_ref", "dev_digest",
+                                       "tensor_format_contract_sha256"})):
+              if set(row) != keys:
+                  raise SystemExit("builder/runtime image identities are not separate and exact")
+          if phase == "final" and c.get("corpus_sha256") is not None:
+              raise SystemExit("final corpus must remain unavailable in the candidate manifest")
+          elif phase != "final" and not re.fullmatch(r"[0-9a-f]{64}", str(c.get("corpus_sha256", ""))):
+              raise SystemExit("selection-only corpus digest is missing")
+          values = [m["selection_plan"]["path"], m["selection_plan"]["sha256"],
+                    str(workset), m["corpus_dir"], m["evidence_root"], builder_revision,
+                    builder["ref"], builder["digest"], runtime["release_ref"], runtime["release_digest"],
+                    runtime["dev_ref"], runtime["dev_digest"], runtime["tensor_format_contract_sha256"],
+                    c["id"], c["candidate_id"],
+                    c["builder_attestation"]["path"], c["builder_attestation"]["sha256"],
+                    m["build_record"]["path"], m["build_record"]["sha256"],
+                    companion["path"], companion["sha256"], str(c.get("corpus_sha256") or "")]
+          if any("\n" in str(v) for v in values): raise SystemExit("manifest value contains newline")
+          print("\n".join(map(str, values)))
+          PY
+          )
+          (( ${#manifest[@]} == 22 ))
+          SELECTION_PLAN="${manifest[0]}"; SELECTION_PLAN_SHA256="${manifest[1]}"
+          QWEN_WORKSET_ROOT="${manifest[2]}"; QWEN_CORPUS_DIR="${manifest[3]}"; QWEN_BAKEOFF_EVIDENCE_ROOT="${manifest[4]}"
+          BUILDER_SHA="${manifest[5]}"; BUILDER_IMAGE="${manifest[6]}"; BUILDER_IMAGE_DIGEST="${manifest[7]}"
+          RUNTIME_IMAGE="${manifest[8]}"; RUNTIME_IMAGE_DIGEST="${manifest[9]}"
+          RUNTIME_DEV_IMAGE="${manifest[10]}"; RUNTIME_DEV_IMAGE_DIGEST="${manifest[11]}"
+          RUNTIME_FORMAT_SHA256="${manifest[12]}"
+          CANDIDATE_ROW_ID="${manifest[13]}"; CANDIDATE_ARTIFACT_ID="${manifest[14]}"
+          BUILDER_ATTESTATION="${manifest[15]}"; BUILDER_ATTESTATION_SHA256="${manifest[16]}"
+          BUILD_RECORD="${manifest[17]}"; BUILD_RECORD_SHA256="${manifest[18]}"
+          COMPANION_INVENTORY="${manifest[19]}"; COMPANION_INVENTORY_SHA256="${manifest[20]}"
+          CORPUS_SHA256="${manifest[21]}"
+          for descriptor in "$SELECTION_PLAN:$SELECTION_PLAN_SHA256" "$BUILDER_ATTESTATION:$BUILDER_ATTESTATION_SHA256" \
+                            "$BUILD_RECORD:$BUILD_RECORD_SHA256" "$COMPANION_INVENTORY:$COMPANION_INVENTORY_SHA256"; do
+            path="${descriptor%:*}"; digest="${descriptor##*:}"
+            [[ "$path" = /* && -f "$path" && ! -L "$path" && "$digest" =~ ^[0-9a-f]{64}$ ]]
+            test "$(sha256sum "$path" | awk '{print $1}')" = "$digest"
+          done
+          mkdir -p -- "$QWEN_BAKEOFF_EVIDENCE_ROOT"
+          python3 scripts/qwen_bakeoff.py --plan "$SELECTION_PLAN" --stage verify \
+            --output "$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-selection-plan-verified.json"
+          python3 - "$SELECTION_PLAN" "$QWEN_BAKEOFF_PHASE" "$CANDIDATE_ROW_ID" \
+            "$prior_count" "$QWEN_RESULTS_ACCUMULATOR" "$SELECTION_PLAN_SHA256" \
+            "$CORPUS_SHA256" <<'PY'
+          import json, pathlib, sys
+          plan_path,phase,row_id,count,accumulator,plan_sha,corpus_sha=sys.argv[1:]
+          plan=json.loads(pathlib.Path(plan_path).read_text()); count=int(count)
+          if phase == "sweep":
+              expected=[plan["stock_control"]["id"],*[x["id"] for x in plan["sweep_configurations"]]]
+          elif phase == "format": expected=[x["id"] for x in plan["format_arms"]]
+          else: expected=["final-confirmation"]
+          if count >= len(expected) or row_id != expected[count]:
+              raise SystemExit("candidate is not the next row in the canonical serial phase order")
+          if phase != "final" and corpus_sha != plan["corpora"]["sweep-validation.jsonl"]["sha256"]:
+              raise SystemExit("selection candidate is not bound to the selection-only corpus")
+          if accumulator:
+              old=json.loads(pathlib.Path(accumulator).read_text())
+              if old.get("phase") != phase or old.get("plan_sha256") != plan_sha:
+                  raise SystemExit("prior accumulator belongs to another phase or plan")
+          PY
+          EFFECTIVE_PLAN="$SELECTION_PLAN"
+          EFFECTIVE_PLAN_SHA256="$SELECTION_PLAN_SHA256"
+          if [[ "$QWEN_BAKEOFF_PHASE" = final ]]; then
+            EFFECTIVE_PLAN="$QWEN_BAKEOFF_EVIDENCE_ROOT/final-$CANDIDATE_ROW_ID-plan.json"
+            python3 scripts/qwen_bakeoff.py --plan "$SELECTION_PLAN" --stage unlock-final \
+              --corpus-dir "$QWEN_CORPUS_DIR" --prior-ledger "$QWEN_PRIOR_LEDGER" \
+              --prior-ledger-sha256 "$QWEN_PRIOR_LEDGER_SHA256" \
+              --prior-attestation-bundle "$QWEN_PRIOR_LEDGER_BUNDLE" \
+              --prior-attestation-bundle-sha256 "$QWEN_PRIOR_LEDGER_BUNDLE_SHA256" \
+              --output "$EFFECTIVE_PLAN"
+            EFFECTIVE_PLAN_SHA256="$(python3 - "$EFFECTIVE_PLAN" <<'PY'
+          import hashlib, json, pathlib, sys
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          print(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                            ensure_ascii=True).encode()).hexdigest())
+          PY
+            )"
+            CORPUS_SHA256="$(python3 - "$EFFECTIVE_PLAN" <<'PY'
+          import json, pathlib, sys
+          p = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          print(p["corpora"]["final-heldout.jsonl"]["sha256"])
+          PY
+            )"
+          fi
+
+          python3 - "$CANDIDATE_MANIFEST" "$BUILDER_ATTESTATION" "$BUILDER_SHA" \
+            "$BUILD_RECORD" "$COMPANION_INVENTORY" "$CORPUS_SHA256" "$QWEN_BAKEOFF_PHASE" \
+            "$QWEN_PRIOR_LEDGER" <<'PY'
+          import hashlib, json, pathlib, re, sys
+          manifest, attestation, builder_sha, record, companions, corpus_sha, phase, prior_path = sys.argv[1:]
+          m = json.loads(pathlib.Path(manifest).read_text()); c = m["candidate"]
+          a = json.loads(pathlib.Path(attestation).read_text()); r = json.loads(pathlib.Path(record).read_text())
+          inv = json.loads(pathlib.Path(companions).read_text())
+          if a.get("schema") != "ember.qwen3.8.candidate-workset-attestation.v1":
+              raise SystemExit("builder workset attestation schema differs")
+          if a.get("candidate_id") != c["candidate_id"]:
+              raise SystemExit("builder attestation candidate differs")
+          builder = a.get("builder_identity") or {}
+          if set(builder) != {"ember_revision", "quantizer_tool_sha256", "container_digest",
+                             "tensor_format_contract_sha256"} or builder["ember_revision"] != builder_sha:
+              raise SystemExit("exact builder identity differs")
+          if a.get("tensor_format_compatibility_sha256") != builder["tensor_format_contract_sha256"]:
+              raise SystemExit("builder format compatibility differs")
+          measurement=a.get("measurement") or {}
+          if (measurement.get("status") != "measured_target_cgroup_v2"
+                  or measurement.get("swap_limit_bytes") != 0
+                  or measurement.get("cgroup_peak_bytes", 1) > measurement.get("memory_limit_bytes", 0)
+                  or measurement.get("child_maximum_resident_set_kib", 1)*1024 > measurement.get("memory_limit_bytes", 0)):
+              raise SystemExit("candidate builder did not fail closed on its measured cgroup peak")
+          if r.get("status") != "complete" or r.get("tools", {}).get("ember_revision") != builder_sha:
+              raise SystemExit("build record is not bound to the artifact builder revision")
+          if a.get("build_record_sha256") != m["build_record"]["sha256"]:
+              raise SystemExit("build record digest differs from builder attestation")
+          if (m["build_record"]["path"] != c.get("build_record")
+                  or m["build_record"]["sha256"] != c.get("build_record_sha256")):
+              raise SystemExit("candidate build-record path/digest differs from the immutable descriptor")
+          cache=(r.get("bf16_cache") or {}).get("manifest") or {}
+          if (cache.get("path") != m["bf16_cache"]["path"]
+                  or cache.get("sha256") != m["bf16_cache"]["sha256"]):
+              raise SystemExit("candidate was not built from the declared immutable BF16 cache")
+          if c.get("tensor_format_compatibility_sha256") != a.get("tensor_format_compatibility_sha256"):
+              raise SystemExit("candidate tensor-format compatibility differs")
+          if inv.get("status") != "complete" or inv.get("mtp_matrix_quant_contract") != c.get("mtp_matrix_quant_contract"):
+              raise SystemExit("MTP companion inventory contract differs")
+          if (c.get("companion_inventory") != companions
+                  or c.get("companion_inventory_sha256") != m["shared_companions"][
+                      c["mtp_matrix_quant_contract"]]["sha256"]):
+              raise SystemExit("candidate does not bind its selected shared companion inventory")
+          mmproj = inv.get("mmproj") or {}
+          if (mmproj.get("format") != c.get("vision_mmproj_format")
+                  or c.get("vision_mmproj_format") != "BF16"):
+              raise SystemExit("shared BF16 mmproj inventory differs")
+          if corpus_sha != c.get("corpus_sha256") and phase != "final":
+              raise SystemExit("stock/sweep candidate uses the wrong selection-only corpus")
+          if phase == "final":
+              prior = json.loads(pathlib.Path(prior_path).read_text())
+              selected = prior.get("selected_artifact_identity")
+              if not isinstance(selected, dict): raise SystemExit("format ledger has no selected artifact identity")
+              identity = {
+                  "candidate_id": c.get("candidate_id"),
+                  "build_record_sha256": m["build_record"]["sha256"],
+                  "intervention_manifest_sha256": c.get("intervention_manifest_sha256"),
+                  "profile_sha256": c.get("profile_sha256"),
+                  "quantization_overrides_sha256": c.get("override_sha256"),
+                  "model_inventory_sha256": c.get("model_inventory_sha256"),
+                  "companion_inventory_sha256": c.get("companion_inventory_sha256"),
+                  "artifact_bytes": c.get("artifact_bytes"),
+                  "companion_artifact_bytes": {"mtp": c.get("mtp_bytes"),
+                                                   "vision_mmproj": c.get("vision_mmproj_bytes")},
+                  "quantization_arm": c.get("quantization_arm"),
+                  "intervention_configuration_id": c.get("intervention_configuration_id"),
+                  "builder_identity": builder,
+                  "tensor_format_compatibility_sha256": c.get(
+                      "tensor_format_compatibility_sha256"),
+              }
+              if identity != selected:
+                  raise SystemExit("final-confirmation is not the exact attested format winner")
+              if c.get("id") != "final-confirmation":
+                  raise SystemExit("final row id must be final-confirmation")
+          PY
+
+          umask 077
+          DOCKER_CONFIG="$(mktemp -d /tmp/ember-qwen-docker.XXXXXX)"
+          export DOCKER_CONFIG
+          printf 'DOCKER_CONFIG=%s\n' "$DOCKER_CONFIG" >>"$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          verify_image_digest() {
+            local image="$1" expected="$2"
+            [[ "$image" =~ ^ghcr\.io/ && "$expected" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker pull "$image"
+            docker image inspect "$image" | python3 -c \
+              'import json,sys; e=sys.argv[1]; d=json.load(sys.stdin)[0].get("RepoDigests",[]); raise SystemExit(0 if any(x.endswith("@"+e) for x in d) else 1)' \
+              "$expected"
+          }
+          verify_image_digest "$BUILDER_IMAGE" "$BUILDER_IMAGE_DIGEST"
+          verify_image_digest "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST"
+          verify_image_digest "$RUNTIME_DEV_IMAGE" "$RUNTIME_DEV_IMAGE_DIGEST"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$BUILDER_IMAGE")" = "$BUILDER_SHA"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RUNTIME_IMAGE")" = "$TARGET_SHA"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RUNTIME_DEV_IMAGE")" = "$TARGET_SHA"
+          test "$(python3 - "$BUILDER_ATTESTATION" "$BUILDER_IMAGE_DIGEST" <<'PY'
+          import json, pathlib, sys
+          a=json.loads(pathlib.Path(sys.argv[1]).read_text()); print(a["builder_identity"]["container_digest"] == sys.argv[2])
+          PY
+          )" = True
+          RUNTIME_ENGINE_SHA256="$(docker run --rm --entrypoint sha256sum "$RUNTIME_IMAGE" /usr/local/bin/ember-dflash | awk '{print $1}')"
+          [[ "$RUNTIME_ENGINE_SHA256" =~ ^[0-9a-f]{64}$ && "$RUNTIME_FORMAT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(python3 - "$BUILDER_ATTESTATION" "$RUNTIME_FORMAT_SHA256" <<'PY'
+          import json, pathlib, sys
+          a=json.loads(pathlib.Path(sys.argv[1]).read_text()); print(a["tensor_format_compatibility_sha256"] == sys.argv[2])
+          PY
+          )" = True
+          python3 - "$QWEN_RESULTS_ACCUMULATOR" "$QWEN_PRIOR_LEDGER" "$TARGET_SHA" \
+            "$RUNTIME_ENGINE_SHA256" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_FORMAT_SHA256" <<'PY'
+          import hashlib, json, pathlib, sys
+          accumulator,ledger,revision,binary,image,contract=sys.argv[1:]
+          current={"ember_revision":revision,"engine_binary_sha256":binary,
+                   "container_digest":image,"tensor_format_contract_sha256":contract}
+          expected=[]
+          if accumulator:
+              value=json.loads(pathlib.Path(accumulator).read_text())
+              for descriptor in value["assessments"]:
+                  subject=descriptor["subject"]; path=pathlib.Path(subject["path"])
+                  raw=path.read_bytes()
+                  if hashlib.sha256(raw).hexdigest() != subject["sha256"]:
+                      raise SystemExit("prior assessment changed after its attested accumulator")
+                  expected.append(json.loads(raw)["runtime_identity"])
+          if ledger:
+              expected.append(json.loads(pathlib.Path(ledger).read_text())["runtime_identity"])
+          if any(identity != current for identity in expected):
+              raise SystemExit("comparative phase attempted to change the exact runtime engine identity")
+          PY
+
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
+          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
+          for pair in \
+            "DOCKER_CONFIG=$DOCKER_CONFIG" "SELECTION_PLAN=$SELECTION_PLAN" \
+            "SELECTION_PLAN_SHA256=$SELECTION_PLAN_SHA256" "EFFECTIVE_PLAN=$EFFECTIVE_PLAN" \
+            "EFFECTIVE_PLAN_SHA256=$EFFECTIVE_PLAN_SHA256" "QWEN_BAKEOFF_EVIDENCE_ROOT=$QWEN_BAKEOFF_EVIDENCE_ROOT" \
+            "QWEN_WORKSET_ROOT=$QWEN_WORKSET_ROOT" "CANDIDATE_ROW_ID=$CANDIDATE_ROW_ID" \
+            "CANDIDATE_ARTIFACT_ID=$CANDIDATE_ARTIFACT_ID" "CORPUS_SHA256=$CORPUS_SHA256" \
+            "BUILDER_SHA=$BUILDER_SHA" "BUILDER_IMAGE_DIGEST=$BUILDER_IMAGE_DIGEST" \
+            "RUNTIME_IMAGE=$RUNTIME_IMAGE" "RUNTIME_IMAGE_DIGEST=$RUNTIME_IMAGE_DIGEST" \
+            "RUNTIME_DEV_IMAGE=$RUNTIME_DEV_IMAGE" "RUNTIME_DEV_IMAGE_DIGEST=$RUNTIME_DEV_IMAGE_DIGEST" \
+            "RUNTIME_ENGINE_SHA256=$RUNTIME_ENGINE_SHA256" "RUNTIME_FORMAT_SHA256=$RUNTIME_FORMAT_SHA256" \
+            "BUILD_RECORD=$BUILD_RECORD" "BUILD_RECORD_SHA256=$BUILD_RECORD_SHA256" \
+            "COMPANION_INVENTORY=$COMPANION_INVENTORY" "COMPANION_INVENTORY_SHA256=$COMPANION_INVENTORY_SHA256" \
+            "QWEN_PRIOR_COUNT=$prior_count"; do
+            printf '%s\n' "$pair" >>"$GITHUB_ENV"
+          done
+          printf 'armed=yes\nproduction_was_active=yes\n' >>"$GITHUB_OUTPUT"
+
+      - name: Measure target-only then matching-MTP for the one live artifact
+        run: |
+          set -euo pipefail
+          target_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-target"
+          mtp_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-mtp"
+          legacy_manifest="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-gate-v2.json"
+          python3 - "$CANDIDATE_MANIFEST" "$legacy_manifest" "$SELECTION_PLAN" \
+            "$SELECTION_PLAN_SHA256" "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST" \
+            "$RUNTIME_DEV_IMAGE" "$RUNTIME_DEV_IMAGE_DIGEST" <<'PY'
+          import json, pathlib, sys
+          source, output, plan, plan_sha, image, image_sha, dev, dev_sha = sys.argv[1:]
+          m=json.loads(pathlib.Path(source).read_text()); c=m["candidate"]
+          keys={
+            "id", "stage", "configuration_id", "arm_id", "corpus_sha256",
+            "quantization_arm", "model", "model_sha256", "build_record",
+            "build_record_sha256", "intervention_configuration_id",
+            "intervention_manifest", "intervention_manifest_sha256", "profile_sha256",
+            "override_sha256", "companion_inventory", "companion_inventory_sha256",
+            "mtp", "mtp_bytes", "mtp_sha256", "mtp_export_manifest",
+            "mtp_export_manifest_sha256", "mtp_matrix_quant_contract", "vision_mmproj",
+            "vision_mmproj_bytes", "vision_mmproj_sha256", "vision_mmproj_format",
+            "quality_contract", "quality_contract_sha256", "mtp_depth", "runtime_mode",
+            "final_release_eligible",
+          }
+          if not keys.issubset(c): raise SystemExit(f"candidate lacks legacy gate fields: {sorted(keys-set(c))}")
+          row={key:c[key] for key in keys}
+          row.update(image=image, image_digest=image_sha, profile_image=dev, profile_image_digest=dev_sha)
+          if c["stage"] == "final": row["corpus_sha256"] = None
+          # The final corpus becomes available only after unlock-final; it is
+          # supplied through the environment, never persisted in the input manifest.
+          if row["corpus_sha256"] is None:
+              import os
+              row["corpus_sha256"] = os.environ["CORPUS_SHA256"]
+          value={"schema":"ember.qwen3.8.sequential-bakeoff-candidates.v2",
+                 "ember_revision":m["builder_revision"], "images":m["images"],
+                 "release_profile":m["release_profile"],
+                 "bakeoff_plan":{"path":plan,"sha256":plan_sha},
+                 "candidates":[row], "evidence_root":m["evidence_root"]}
+          pathlib.Path(output).write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
+          PY
+          legacy_sha="$(sha256sum "$legacy_manifest" | awk '{print $1}')"
+          mapfile -t candidate < <(python3 - "$legacy_manifest" <<'PY'
+          import json, pathlib, sys
+          c=json.loads(pathlib.Path(sys.argv[1]).read_text())["candidates"][0]
+          print("\n".join(map(str,[c["model"],c["model_sha256"],c["mtp"],c["mtp_sha256"],c["mtp_depth"]])))
+          PY
+          )
+          scripts/qwen_target_only_gate.sh \
+            --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
+            --profile-image "$RUNTIME_DEV_IMAGE" --profile-image-digest "$RUNTIME_DEV_IMAGE_DIGEST" \
+            --model "${candidate[0]}" --model-sha256 "${candidate[1]}" \
+            --model-build-record "$BUILD_RECORD" --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
+            --bakeoff-manifest "$legacy_manifest" --bakeoff-manifest-sha256 "$legacy_sha" \
+            --candidate-id "$CANDIDATE_ROW_ID" --out-dir "$target_dir"
+          scripts/qwen_real_weight_gate.sh \
+            --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
+            --profile-image "$RUNTIME_DEV_IMAGE" --profile-image-digest "$RUNTIME_DEV_IMAGE_DIGEST" \
+            --model "${candidate[0]}" --model-sha256 "${candidate[1]}" \
+            --model-build-record "$BUILD_RECORD" --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
+            --mtp "${candidate[2]}" --mtp-sha256 "${candidate[3]}" --mtp-depth "${candidate[4]}" \
+            --measurement-only --out-dir "$mtp_dir"
+
+          measurement="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-measurement.json"
+          python3 - "$CANDIDATE_MANIFEST" "$BUILDER_ATTESTATION" "$target_dir/complete.json" \
+            "$mtp_dir/hardware-measured.json" "$measurement" "$TARGET_SHA" \
+            "$RUNTIME_ENGINE_SHA256" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_FORMAT_SHA256" \
+            "$CORPUS_SHA256" <<'PY'
+          import hashlib, json, pathlib, sys
+          (manifest_path, builder_path, target_path, hardware_path, output, runtime_sha,
+           engine_sha, runtime_image_sha, format_sha, corpus_sha)=sys.argv[1:]
+          sys.path.insert(0,"scripts"); import qwen_bakeoff as qb
+          def load(path): return json.loads(pathlib.Path(path).read_text())
+          def sha(path):
+              h=hashlib.sha256()
+              with open(path,"rb") as f:
+                  for b in iter(lambda:f.read(1024*1024),b""): h.update(b)
+              return h.hexdigest()
+          def desc(path): return {"path":str(pathlib.Path(path).resolve()),"sha256":sha(path)}
+          m=load(manifest_path); c=m["candidate"]; builder=load(builder_path)["builder_identity"]
+          hardware=load(hardware_path); hp=pathlib.Path(hardware_path).resolve()
+          timing=(hp.parent/hardware["evidence"]["timing"]["path"]).resolve()
+          facts=qb.timing_facts(timing,True)
+          inventory=hardware["model"]["ordered_inventory"]
+          identities=[{"index":i,"sha256":row["sha256"],"bytes":row["size_bytes"]}
+                      for i,row in enumerate(inventory["shards"],1)]
+          inventory_sha=qb.canonical_sha256(identities); artifact_bytes=sum(x["bytes"] for x in identities)
+          companions={"mtp":c["mtp_bytes"],"vision_mmproj":c["vision_mmproj_bytes"]}
+          runtime={"ember_revision":runtime_sha,"engine_binary_sha256":engine_sha,
+                   "container_digest":runtime_image_sha,"tensor_format_contract_sha256":format_sha}
+          quality=None if c["stage"]=="stock" else {"path":c["quality_contract"],"sha256":c["quality_contract_sha256"]}
+          intervention=None if c["stage"]=="stock" else {"path":c["intervention_manifest"],
+                                                           "sha256":c["intervention_manifest_sha256"]}
+          provenance={"quantization_arm":c["quantization_arm"],"override_sha256":c["override_sha256"],
+             "intervention_configuration_id":c["intervention_configuration_id"],
+             "intervention_manifest_sha256":c["intervention_manifest_sha256"],
+             "build_record_sha256":c["build_record_sha256"],
+             "companion_inventory_sha256":c["companion_inventory_sha256"],
+             "profile_sha256":c["profile_sha256"],"builder_identity":builder,
+             "runtime_identity":runtime,"tensor_format_compatibility_sha256":format_sha}
+          evidence={"schema":"ember.qwen3.8.sequential-bakeoff-result.v3",
+             "candidate_id":c["candidate_id"],"status":"complete","publishes":False,
+             "provenance":provenance,
+             "artifacts":{"combined_fits":True,"model_artifact_bytes":artifact_bytes,
+                          "mtp":{"path":c["mtp"],"bytes":c["mtp_bytes"],"sha256":c["mtp_sha256"]},
+                          "vision_mmproj":{"path":c["vision_mmproj"],"bytes":c["vision_mmproj_bytes"],
+                                           "sha256":c["vision_mmproj_sha256"]}},
+             "evidence":{"target_complete":desc(target_path),
+                         "matching_mtp_hardware_measurement":desc(hardware_path),
+                         "matching_mtp_timing":desc(timing),"quality_contract":quality},
+             "measurement_contract":{"prefill_statistic":"peak","decode_statistic":"median",
+               "evaluated_prefill_tokens":facts["evaluated_prefill_tokens"],
+               "completion_tokens":facts["completion_tokens"],"mtp_spec_ran":facts["mtp_spec_ran"]}}
+          ep=pathlib.Path(output).with_suffix(".evidence.json")
+          ep.write_text(json.dumps(evidence,indent=2,sort_keys=True)+"\n")
+          row={"id":c["id"],"candidate_id":c["candidate_id"],"stage":c["stage"],
+             "configuration_id":c["configuration_id"],"arm_id":c["arm_id"],
+             "final_release_eligible":c["final_release_eligible"],"runtime_mode":c["runtime_mode"],
+             "mtp_matrix_quant_contract":c["mtp_matrix_quant_contract"],"corpus_sha256":corpus_sha,
+             "measurement_kind":"measured","status":"complete","quantization_arm":c["quantization_arm"],
+             "quantization_overrides_sha256":c["override_sha256"],"profile_sha256":c["profile_sha256"],
+             "build_record_sha256":c["build_record_sha256"],"intervention_configuration_id":c["intervention_configuration_id"],
+             "intervention_manifest_sha256":c["intervention_manifest_sha256"],"intervention_manifest":intervention,
+             "companion_inventory_sha256":c["companion_inventory_sha256"],"quality_contract":quality,
+             "builder_identity":builder,"runtime_identity":runtime,
+             "tensor_format_compatibility_sha256":format_sha,"model_inventory_sha256":inventory_sha,
+             "enabled_companions":["mtp","vision_mmproj"],"artifact_bytes":artifact_bytes,
+             "companion_artifact_bytes":companions,"prefill_tps_samples":facts["prefill_tps_samples"],
+             "decode_tps_samples":facts["decode_tps_samples"],
+             "evaluated_prefill_tokens":facts["evaluated_prefill_tokens"],
+             "completion_tokens":facts["completion_tokens"],"mtp_spec_ran":facts["mtp_spec_ran"],
+             **{k:facts["resources"].get(k) for k in ("runner_memtotal_bytes","runner_gtt_pages_limit",
+                 "peak_memory_measurement_method","measured_peak_rss_bytes","measured_peak_gtt_bytes","measured_peak_uma_bytes")},
+             "evidence_manifest":{"path":str(ep.resolve()),"sha256":sha(ep),"schema":evidence["schema"]}}
+          pathlib.Path(output).write_text(json.dumps({"measurement":row},indent=2,sort_keys=True)+"\n")
+          PY
+          printf 'QWEN_MEASUREMENT=%s\n' "$measurement" >>"$GITHUB_ENV"
+
+      - name: Restore production and release exclusive GPU ownership
+        if: ${{ always() && steps.preflight.outputs.armed == 'yes' }}
+        run: |
+          set +e
+          cleanup_failed=0
+          for pattern in '^/qwen-target-only-[0-9]+-[0-9]+$' '^/qwen-real-gate-(validate|timing)-[0-9]+$'; do
+            while IFS= read -r container; do
+              name="$(docker inspect --format '{{.Name}}' "$container" 2>/dev/null)" || cleanup_failed=1
+              if [[ "$name" =~ $pattern ]]; then
+                docker rm -f "$container" >/dev/null 2>&1 || cleanup_failed=1
+              fi
+            done < <(docker ps -aq 2>/dev/null) || cleanup_failed=1
+          done
+          sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
+          production_healthy=0
+          for _ in $(seq 1 300); do
+            if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1 &&
+               curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              production_healthy=1
+              break
+            fi
+            sleep 2
+          done
+          (( production_healthy )) || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
+          exit "$cleanup_failed"
+
+      - name: Assess the candidate while its quantized artifact still exists
+        run: |
+          set -euo pipefail
+          assessment="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment.json"
+          python3 scripts/qwen_bakeoff.py --plan "$EFFECTIVE_PLAN" --stage assess \
+            --results "$QWEN_MEASUREMENT" --output "$assessment"
+          printf 'QWEN_ASSESSMENT=%s\n' "$assessment" >>"$GITHUB_ENV"
+
+      - name: GitHub-attest candidate assessment
+        id: attest_assessment
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
+        with:
+          subject-path: ${{ env.QWEN_ASSESSMENT }}
+
+      - name: Retain and verify candidate assessment attestation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTION_BUNDLE: ${{ steps.attest_assessment.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          bundle="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment.sigstore.json"
+          install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
+          gh attestation verify "$QWEN_ASSESSMENT" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
+            --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          printf 'QWEN_ASSESSMENT_SHA256=%s\n' "$(sha256sum "$QWEN_ASSESSMENT" | awk '{print $1}')" >>"$GITHUB_ENV"
+          printf 'QWEN_ASSESSMENT_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
+          printf 'QWEN_ASSESSMENT_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Append only the externally-attested compact assessment descriptor
+        run: |
+          set -euo pipefail
+          accumulator="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-accumulator-$((QWEN_PRIOR_COUNT + 1)).json"
+          python3 - "$QWEN_RESULTS_ACCUMULATOR" "$QWEN_ASSESSMENT" "$QWEN_ASSESSMENT_SHA256" \
+            "$QWEN_ASSESSMENT_BUNDLE" "$QWEN_ASSESSMENT_BUNDLE_SHA256" "$accumulator" \
+            "$QWEN_BAKEOFF_PHASE" "$SELECTION_PLAN_SHA256" <<'PY'
+          import json, pathlib, sys
+          prior, subject, subject_sha, bundle, bundle_sha, output, phase, plan_sha = sys.argv[1:]
+          rows=[]
+          if prior:
+              old=json.loads(pathlib.Path(prior).read_text())
+              rows=old["assessments"]
+          descriptor={"subject":{"path":str(pathlib.Path(subject).resolve()),"sha256":subject_sha,
+                                 "schema":"ember.qwen3.8.candidate-assessment.v1"},
+                      "bundle":{"path":str(pathlib.Path(bundle).resolve()),"sha256":bundle_sha},
+                      "repository":"OtherU-AI/ember",
+                      "signer_workflow":".github/workflows/qwen-gfx1151-bakeoff.yml"}
+          value={"schema":"ember.qwen3.8.sequential-bakeoff-accumulator.v2","phase":phase,
+                 "plan_sha256":plan_sha,"assessments":[*rows,descriptor],
+                 "contains_raw_measurements":False,"external_attestation_required":True,
+                 "publication_allowed":False}
+          pathlib.Path(output).write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
+          PY
+          printf 'QWEN_CURRENT_ACCUMULATOR=%s\n' "$accumulator" >>"$GITHUB_ENV"
+
+      - name: GitHub-attest compact accumulator
+        id: attest_accumulator
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
+        with:
+          subject-path: ${{ env.QWEN_CURRENT_ACCUMULATOR }}
+
+      - name: Retain and verify compact accumulator; decide only at phase boundary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTION_BUNDLE: ${{ steps.attest_accumulator.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          bundle="$QWEN_CURRENT_ACCUMULATOR.sigstore.json"
+          install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
+          gh attestation verify "$QWEN_CURRENT_ACCUMULATOR" --bundle "$bundle" \
+            --repo "$ATTEST_REPOSITORY" --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          mapfile -t counts < <(python3 - "$SELECTION_PLAN" "$QWEN_BAKEOFF_PHASE" "$QWEN_CURRENT_ACCUMULATOR" <<'PY'
+          import json, pathlib, sys
+          plan=json.loads(pathlib.Path(sys.argv[1]).read_text()); phase=sys.argv[2]
+          acc=json.loads(pathlib.Path(sys.argv[3]).read_text())
+          expected=(1+len(plan["sweep_configurations"]) if phase=="sweep"
+                    else len(plan["format_arms"]) if phase=="format" else 1)
+          print(len(acc["assessments"])); print(expected)
+          PY
+          )
+          current="${counts[0]}"; expected="${counts[1]}"
+          (( current <= expected ))
+          printf 'QWEN_ACCUMULATOR_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
+          printf 'QWEN_ACCUMULATOR_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+          printf 'QWEN_EXPECTED_COUNT=%s\n' "$expected" >>"$GITHUB_ENV"
+          if (( current == expected )); then
+            ledger="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-ledger.json"
+            args=(--plan "$EFFECTIVE_PLAN" --results "$QWEN_CURRENT_ACCUMULATOR"
+                  --stage "$QWEN_BAKEOFF_PHASE" --output "$ledger")
+            if [[ "$QWEN_BAKEOFF_PHASE" != sweep ]]; then
+              args+=(--prior-ledger "$QWEN_PRIOR_LEDGER" --prior-ledger-sha256 "$QWEN_PRIOR_LEDGER_SHA256"
+                     --prior-attestation-bundle "$QWEN_PRIOR_LEDGER_BUNDLE"
+                     --prior-attestation-bundle-sha256 "$QWEN_PRIOR_LEDGER_BUNDLE_SHA256")
+            fi
+            python3 scripts/qwen_bakeoff.py "${args[@]}"
+            printf 'QWEN_LEDGER=%s\nQWEN_LEDGER_PRESENT=yes\n' "$ledger" >>"$GITHUB_ENV"
+          else
+            printf 'QWEN_LEDGER_PRESENT=no\n' >>"$GITHUB_ENV"
+          fi
+
+      - name: GitHub-attest completed phase ledger
+        if: ${{ env.QWEN_LEDGER_PRESENT == 'yes' }}
+        id: attest_ledger
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
+        with:
+          subject-path: ${{ env.QWEN_LEDGER }}
+
+      - name: Retain and verify completed phase ledger
+        if: ${{ env.QWEN_LEDGER_PRESENT == 'yes' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTION_BUNDLE: ${{ steps.attest_ledger.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          test "$(python3 - "$QWEN_LEDGER" <<'PY'
+          import json, pathlib, sys
+          print(json.loads(pathlib.Path(sys.argv[1]).read_text()).get("schema"))
+          PY
+          )" = ember.qwen3.8.sequential-bakeoff-ledger.v2
+          bundle="$QWEN_LEDGER.sigstore.json"
+          install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
+          gh attestation verify "$QWEN_LEDGER" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
+            --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          printf 'QWEN_LEDGER_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
+          printf 'QWEN_LEDGER_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Delete only a durably-assessed artifact proven to be a loser
+        run: |
+          set -euo pipefail
+          authority="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment-authority.json"
+          disposition="$(python3 - "$QWEN_ASSESSMENT" "${QWEN_LEDGER:-}" <<'PY'
+          import json, pathlib, sys
+          assessment=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if sys.argv[2]:
+              ledger=json.loads(pathlib.Path(sys.argv[2]).read_text())
+              print("selected" if assessment["artifact_identity"] == ledger.get("selected_artifact_identity") else "loser")
+          elif assessment.get("observed_decision",{}).get("passes") is False:
+              print("loser")
+          else:
+              print("provisional-retain")
+          PY
+          )"
+          python3 - "$authority" "$CANDIDATE_ARTIFACT_ID" "$QWEN_ASSESSMENT" \
+            "$QWEN_ASSESSMENT_SHA256" "$QWEN_ASSESSMENT_BUNDLE" "$QWEN_ASSESSMENT_BUNDLE_SHA256" \
+            "$disposition" <<'PY'
+          import json, pathlib, sys
+          output,candidate,subject,subject_sha,bundle,bundle_sha,disposition=sys.argv[1:]
+          value={"schema":"ember.qwen3.8.externally-attested-candidate-assessment.v1",
+                 "candidate_id":candidate,"disposition":disposition,
+                 "assessment":{"subject":{"path":str(pathlib.Path(subject).resolve()),"sha256":subject_sha,
+                                            "schema":"ember.qwen3.8.candidate-assessment.v1"},
+                               "bundle":{"path":str(pathlib.Path(bundle).resolve()),"sha256":bundle_sha},
+                               "repository":"OtherU-AI/ember",
+                               "signer_workflow":".github/workflows/qwen-gfx1151-bakeoff.yml"}}
+          pathlib.Path(output).write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
+          PY
+          if [[ "$disposition" = provisional-retain ]]; then
+            printf '%s\n' 'Passing candidate retained: it is not a loser until the phase ledger exists.'
+            exit 0
+          fi
+          candidate_dir="$(dirname -- "$BUILD_RECORD")"
+          lifecycle="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-artifact-lifecycle.json"
+          selected_arg=--no-selected
+          [[ "$disposition" = selected ]] && selected_arg=--selected
+          python3 scripts/qwen_candidate_builder.py record-assessment \
+            --candidate-id "$CANDIDATE_ARTIFACT_ID" --candidate-dir "$candidate_dir" \
+            --build-record-sha256 "$BUILD_RECORD_SHA256" --assessment "$authority" \
+            --assessment-sha256 "$(sha256sum "$authority" | awk '{print $1}')" "$selected_arg" \
+            --output "$lifecycle"
+          if [[ "$disposition" = loser ]]; then
+            python3 scripts/qwen_candidate_builder.py delete-loser --assessment-bundle "$lifecycle" \
+              --assessment-bundle-sha256 "$(sha256sum "$lifecycle" | awk '{print $1}')" --execute
+          fi
+
+      - name: Remove temporary registry credentials
+        if: ${{ always() && env.DOCKER_CONFIG != '' }}
+        run: |
+          set +e
+          credential_cleanup_failed=0
+          rm -f -- "$DOCKER_CONFIG/config.json" || credential_cleanup_failed=1
+          rmdir -- "$DOCKER_CONFIG" || credential_cleanup_failed=1
+          exit "$credential_cleanup_failed"
+
+      - name: Summarize non-publishing sequential result
+        if: ${{ success() }}
+        run: |
+          {
+            echo '## Qwen sequential gfx1151 candidate assessed'
+            echo
+            echo "Artifact builder revision: \`$BUILDER_SHA\`"
+            echo "Runtime engine revision: \`$TARGET_SHA\`"
+            echo "Candidate artifact: \`$CANDIDATE_ARTIFACT_ID\`"
+            echo "Attested compact accumulator: \`$QWEN_CURRENT_ACCUMULATOR\`"
+            echo 'Prefill is the exact-2074 three-sample peak; decode is the three-sample median.'
+            echo 'The final-heldout corpus is inaccessible until unlock-final verifies the attested format ledger.'
+            echo 'No model or evidence artifact was published.'
+          } >>"$GITHUB_STEP_SUMMARY"

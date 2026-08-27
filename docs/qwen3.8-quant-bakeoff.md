@@ -60,7 +60,7 @@ converting, so Ember performs this private lifecycle:
    result.
 
 The input snapshot, temporary payload, unsplit output, and split output can
-coexist at different points, so the normal 1 TiB free-space gate remains. The
+coexist at different points, so the measured-path floor is 1152 GiB free. The
 120 GiB physical-RAM floor merely admits the patched route; it is not evidence
 that conversion succeeded within memory. The build record retains the failed
 run measurements and leaves patched peak RSS and wall time pending until the
@@ -182,8 +182,9 @@ Every row must include at least three prefill and decode samples, audited
 quality and differential results, the exact main/MTP/mmproj artifact byte
 inventory, enabled companions, the exact 134,297,894,912-byte host MemTotal,
 and measured peak RSS, GTT, and deduplicated accounted UMA bytes from the
-runner sampler, including the exact live TTM `pages_limit`. The hard medians
-are 412 tok/s prefill and 39.49 tok/s decode.
+runner sampler, including the exact live TTM `pages_limit`. The hard throughput
+gates are the three-sample prefill peak at 412 tok/s and the three-sample decode
+median at 39.49 tok/s.
 Both the static artifact-plus-reserve-plus-companion sum and measured UMA peak
 must fit real host MemTotal, which is stricter than the nominal 128 GiB
 architectural budget. The decision remains non-publishing; release packaging

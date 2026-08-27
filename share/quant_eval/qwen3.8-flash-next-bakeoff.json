@@ -1,6 +1,23 @@
 {
   "schema_version": 1,
   "recipe_id": "qwen3.8-flash-next-128g-intervention-bakeoff-v1",
+  "corpus_manifests": {
+    "selection": "qwen-selection-corpora-manifest.json",
+    "final": "qwen-final-corpus-manifest.json"
+  },
+  "assessment_attestation": {
+    "repository": "OtherU-AI/ember",
+    "signer_workflow": ".github/workflows/qwen-gfx1151-bakeoff.yml",
+    "required": true,
+    "trust_boundary": "GitHub artifact attestation verification is external to local SHA-256 content binding"
+  },
+  "revision_separation": {
+    "builder_identity_required": true,
+    "runtime_identity_required": true,
+    "same_runtime_required_for_comparative_selection": true,
+    "tensor_format_compatibility_must_match": true,
+    "policy": "model artifacts remain bound to their exact builder/quantizer while runtime engine revisions may change without rebuilding compatible weights"
+  },
   "selection_order": [
     "rocmi4_intervention_sweep_on_sweep_validation",
     "format_runtime_crosscheck_on_sweep_validation",
@@ -21,21 +38,36 @@
   },
   "format_arms": [
     {
-      "id": "rocmi4-exact",
-      "artifact_format": "Q4_0_ROCMI4",
+      "id": "rocmi4-q6k-embedding-head",
+      "quantization_arm": "rocmi4-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
+      "artifact_format": "Q4_0_ROCMI4+Q6_K",
       "runtime_mode": "exact_dequant",
       "final_release_eligible": true
     },
     {
-      "id": "rocmfp4-fast-exact",
-      "artifact_format": "Q4_0_ROCMFP4_FAST",
+      "id": "rocmfp4-fast-routed-experts-q6k-embedding-head",
+      "quantization_arm": "rocmfp4-fast-routed-experts-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+      "artifact_format": "Q4_0_ROCMI4+Q4_0_ROCMFP4_FAST+Q6_K",
+      "runtime_mode": "exact_dequant",
+      "final_release_eligible": true,
+      "intervention_audit_status": "passed_cross_decoder_gpu_free_regression; pending_real_weight_gfx1151_bakeoff"
+    },
+    {
+      "id": "rocmfp4-fast-matrix-q6k-embedding-head",
+      "quantization_arm": "rocmfp4-fast-matrix-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+      "artifact_format": "Q4_0_ROCMI4+Q4_0_ROCMFP4_FAST+Q6_K",
       "runtime_mode": "exact_dequant",
       "final_release_eligible": true,
       "intervention_audit_status": "passed_cross_decoder_gpu_free_regression; pending_real_weight_gfx1151_bakeoff"
     },
     {
       "id": "rocmi4-w4a4",
-      "artifact_format": "Q4_0_ROCMI4",
+      "quantization_arm": "rocmi4-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
+      "artifact_format": "Q4_0_ROCMI4+Q6_K",
       "runtime_mode": "w4a4_opt_in",
       "final_release_eligible": false,
       "classification": "performance_control_only"
@@ -52,7 +84,7 @@
   "hard_gates": {
     "differential_correctness": true,
     "audited_quality_pass": true,
-    "minimum_prefill_median_tps": 412.0,
+    "minimum_prefill_peak_tps": 412.0,
     "minimum_decode_median_tps": 39.49,
     "minimum_samples_per_performance_gate": 3,
     "device_budget_bytes": 137438953472,

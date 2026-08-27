@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import stat
 import struct
@@ -403,14 +404,22 @@ class Fixture:
             "tooling": {
                 "otheru_quant_pipeline": base_profile["intervention"]["otheru_pipeline"],
                 "upstream_heretic": base_profile["intervention"]["upstream_heretic"],
+                "extractor": {"implementation": "ember-qwen-hc-activation-extractor",
+                              "schema_version": 1},
             },
             "corpora": [{
                 "id": "fixture-refusal-pairs",
+                "class": "bad_target",
                 "role": "direction_extraction",
                 "sha256": "7" * 64,
                 "record_count": 2,
                 "held_out_evaluation_overlap_count": 0,
             }],
+            "held_out_evaluation": {
+                "id": "fixture-sweep-validation", "sha256": "6" * 64,
+                "record_count": 2, "overlap_count": 0,
+                "comparison": "canonical_text_chat_messages_sha256",
+            },
             "directions": [{
                 "id": "refusal-r1", "dtype": "F32",
                 "values": direction_values, "sha256": direction_sha,
@@ -460,6 +469,40 @@ class Fixture:
             "--quantizer", str(self.quantizer), "--work-dir", str(self.work),
             "--min-free-gib", "0", "--min-ram-gib", "0", "--threads", "7",
         ]
+
+    def rocmi4_sweep_plan(self, *, scale: float = 1.0) -> Path:
+        profile = json.loads(self.profile.read_text(encoding="utf-8"))
+        manifest = json.loads(self.intervention_manifest.read_text(encoding="utf-8"))
+        arm = qwen_quantize.validated_quantization_arms(profile)["rocmi4-control"]
+        layers = {str(layer): 0.0 for layer in range(48)}
+        layers["0"] = scale
+        direction_basis = {
+            "source": manifest["source"],
+            "tooling": manifest["tooling"],
+            "corpora": [{key: corpus.get(key) for key in (
+                "class", "role", "sha256", "record_count")}
+                        for corpus in manifest["corpora"]],
+        }
+        plan = self.root / f"sweep-plan-{scale}.json"
+        plan.write_text(json.dumps({
+            "schema_version": 1, "phase_scope": "selection",
+            "status": "planned_unmeasured", "publication_allowed": False,
+            "release_profile": {"path": str(self.profile.resolve()),
+                                "sha256": sha256(self.profile)},
+            "corpora": {"sweep-validation.jsonl": {
+                "path": str(self.root / "sweep-validation.jsonl"),
+                "sha256": manifest["held_out_evaluation"]["sha256"],
+                "record_count": manifest["held_out_evaluation"]["record_count"],
+            }},
+            "sweep_configurations": [{
+                "id": "lambda-1.00-all-48", "quantization_arm": "rocmi4-control",
+                "profile_sha256": sha256(self.profile),
+                "quantization_overrides_sha256": arm["per_tensor_overrides_sha256"],
+                "runtime_mode": "exact_dequant", "final_release_eligible": False,
+                "direction_basis": direction_basis, "layer_scales": layers,
+            }],
+        }), encoding="utf-8")
+        return plan
 
     def companion_args(
         self, *, enable_mmproj: bool = False,
@@ -651,6 +694,56 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertNotIn("--intervention-manifest", quantize)
             self.assertIn("--tensor-type", quantize)
 
+    def test_directional_sweep_may_use_only_plan_bound_rocmi4_control(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            plan = fixture.rocmi4_sweep_plan()
+            result = subprocess.run([
+                *fixture.command(), "--quantization-arm", "rocmi4-control",
+                "--bakeoff-plan", str(plan), "--bakeoff-plan-sha256", sha256(plan),
+            ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            self.assertEqual(record["quantization_recipe"]["id"], "rocmi4-control")
+            self.assertEqual(record["experiment"]["kind"], "directional_ablation")
+            self.assertFalse(record["experiment"]["stock_weights_unchanged"])
+            self.assertEqual(record["sweep_authorization"]["status"],
+                             "authorized_selection_sweep_control_encoding")
+            self.assertEqual(record["sweep_authorization"]["configuration_id"],
+                             "lambda-1.00-all-48")
+            self.assertFalse(record["sweep_authorization"]["final_release_eligible"])
+
+    def test_rocmi4_sweep_control_rejects_loose_or_mismatched_authority(self) -> None:
+        cases = ("missing", "one-sided", "bad-digest", "wrong-scale", "stock", "other-arm")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                fixture = Fixture(Path(raw))
+                plan = fixture.rocmi4_sweep_plan(scale=0.5 if case == "wrong-scale" else 1.0)
+                command = [*fixture.command(), "--quantization-arm", "rocmi4-control"]
+                if case == "one-sided":
+                    command += ["--bakeoff-plan", str(plan)]
+                elif case not in {"missing"}:
+                    command += ["--bakeoff-plan", str(plan), "--bakeoff-plan-sha256",
+                                "0" * 64 if case == "bad-digest" else sha256(plan)]
+                if case == "stock":
+                    option = command.index("--intervention-manifest")
+                    command[option:option + 2] = ["--stock-control"]
+                elif case == "other-arm":
+                    option = command.index("--quantization-arm")
+                    command[option + 1] = "rocmi4-q6k-embedding-head"
+                result = subprocess.run(
+                    command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.assertEqual(result.returncode, 2)
+                expected = {
+                    "missing": "exact canonical bakeoff plan descriptor",
+                    "one-sided": "required together",
+                    "bad-digest": "SHA-256 mismatch",
+                    "wrong-scale": "exactly one canonical sweep configuration",
+                    "stock": "applies only to non-stock",
+                    "other-arm": "applies only to non-stock",
+                }[case]
+                self.assertIn(expected, result.stderr)
+
     def test_profile_q6_and_rocmfp4_arms_plumb_all_overrides_in_order(self) -> None:
         expected = {
             "rocmi4-q6k-embedding-head": [
@@ -764,7 +857,47 @@ class QwenQuantizeTests(unittest.TestCase):
                 (fixture.work / "qwen-quant-build-record.json").read_text(encoding="utf-8")
             )
             self.assertEqual(record["conversion_memory"]["mode"], "bounded_temp_file_then_split")
+            self.assertEqual(record["conversion_memory"]["gguf_writer_temp_cleanup"], {
+                "policy": "exact_python_spooled_temporary_file_residue_v1",
+                "removed": [],
+            })
             self.assertEqual(len(record["intermediate"]["shards"]), 2)
+
+    def test_cleanup_accepts_only_exact_gguf_writer_spool_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "private-tmp"
+            directory.mkdir(mode=0o700)
+            residue = directory / "tmpa1_b2c3d"
+            residue.write_bytes(b"already consumed writer spool")
+            residue.chmod(0o600)
+            rows = qwen_quantize.cleanup_gguf_writer_temp(directory)
+            self.assertEqual(rows, [{
+                "name": residue.name, "size_bytes": 29, "mode": 0o600,
+            }])
+            self.assertFalse(directory.exists())
+
+    def test_cleanup_rejects_unexpected_or_unsafe_temp_entries(self) -> None:
+        cases = ("unexpected-name", "symlink", "directory", "hardlink", "mode")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw) / "private-tmp"
+                directory.mkdir(mode=0o700)
+                residue = directory / (
+                    "foreign.bin" if case == "unexpected-name" else "tmpa1_b2c3d")
+                if case == "symlink":
+                    residue.symlink_to(Path(raw) / "outside")
+                elif case == "directory":
+                    residue.mkdir()
+                else:
+                    residue.write_bytes(b"spool")
+                    residue.chmod(0o600)
+                    if case == "hardlink":
+                        os.link(residue, Path(raw) / "second-link")
+                    elif case == "mode":
+                        residue.chmod(0o644)
+                with self.assertRaises(qwen_quantize.PipelineError):
+                    qwen_quantize.cleanup_gguf_writer_temp(directory)
+                self.assertTrue(directory.exists())
 
     def test_bounded_memory_execute_binds_cgroup_measurement(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

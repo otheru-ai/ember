@@ -282,7 +282,7 @@
       "indexer_cache_snapshot_restore_serialization"
     ],
     "conversion_runner_requirements": {
-      "minimum_free_disk_gib": 1024,
+      "minimum_free_disk_gib": 1152,
       "preferred_free_disk_gib": 1536,
       "minimum_physical_ram_gib": 256,
       "bounded_memory_minimum_physical_ram_gib": 120,

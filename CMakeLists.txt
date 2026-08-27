@@ -596,6 +596,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)
   set_tests_properties(qwen_quantize_pipeline PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_candidate_builder
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_candidate_builder.py)
+  set_tests_properties(qwen_candidate_builder PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_corpus_adapter
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_corpus_adapter.py)
@@ -635,6 +640,28 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_real_weight_gate.py)
   set_tests_properties(qwen_real_weight_gate PROPERTIES TIMEOUT 20)
+
+  add_test(
+    NAME qwen_bakeoff_workflow
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_bakeoff_workflow.py)
+  set_tests_properties(qwen_bakeoff_workflow PROPERTIES TIMEOUT 20)
+
+  add_test(
+    NAME qwen_quality_judge
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_judge.py)
+  set_tests_properties(qwen_quality_judge PROPERTIES TIMEOUT 60)
+  add_test(
+    NAME qwen_quality_capture
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_capture.py)
+  set_tests_properties(qwen_quality_capture PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_quality_workflow
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_workflow.py)
+  set_tests_properties(qwen_quality_workflow PROPERTIES TIMEOUT 20)
   add_test(
     NAME qwen_snapshot_fetch
     COMMAND ${Python3_EXECUTABLE}

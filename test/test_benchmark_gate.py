@@ -34,14 +34,22 @@ def row(group: str, rate: float, repeat: int) -> dict:
         "ok": True,
     }
     if group == "prefill-2048":
+        milliseconds = 2074 * 1000.0 / rate
         result.update({
             "evaluated_prefill_tokens": 2074,
-            "prefill_tokens_per_second": rate,
+            "prefill_ms": milliseconds,
+            "declared_prefill_tokens_per_second": round(rate, 1),
+            "prefill_tokens_per_second": 2074 * 1000.0 / milliseconds,
+            "prefill_tps_rounding_consistent": True,
         })
     else:
+        milliseconds = 256 * 1000.0 / rate
         result.update({
             "completion_tokens": 256,
-            "decode_tokens_per_second": rate,
+            "decode_ms": milliseconds,
+            "declared_decode_tokens_per_second": round(rate, 2),
+            "decode_tokens_per_second": 256 * 1000.0 / milliseconds,
+            "decode_tps_rounding_consistent": True,
         })
     return result
 
@@ -56,13 +64,26 @@ class BenchmarkGateTest(unittest.TestCase):
             for index, value in enumerate((39.29, 39.49, 40.44))
         ]
 
-    def test_exact_reference_medians_pass(self) -> None:
+    def test_exact_reference_prefill_peak_and_decode_median_pass(self) -> None:
         gate = benchmark.evaluate_hard_gate(
             self.records(), prefill_target=412.0, decode_target=39.49)
         self.assertEqual(gate["protocol"], benchmark.HARD_GATE_PROTOCOL)
         self.assertTrue(gate["passed"])
+        self.assertEqual(gate["prefill_2048"]["statistic"], "peak")
+        self.assertEqual(gate["prefill_2048"]["peak_tps"], 413.0)
         self.assertEqual(gate["prefill_2048"]["median_tps"], 412.0)
+        self.assertEqual(gate["decode_256_counting"]["statistic"], "median")
         self.assertEqual(gate["decode_256_counting"]["median_tps"], 39.49)
+
+    def test_prefill_peak_can_pass_when_median_is_below_target(self) -> None:
+        records = self.records()
+        for row_value, value in zip(records[:3], (390.0, 400.0, 412.0), strict=True):
+            row_value.update(row("prefill-2048", value, row_value["repeat"]))
+        gate = benchmark.evaluate_hard_gate(
+            records, prefill_target=412.0, decode_target=39.49)
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["prefill_2048"]["peak_tps"], 412.0)
+        self.assertLess(gate["prefill_2048"]["median_tps"], 412.0)
 
     def test_wrong_shape_or_missing_sample_fails(self) -> None:
         records = self.records()
@@ -75,6 +96,27 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertFalse(gate["decode_256_counting"]["shape_match"])
         self.assertFalse(benchmark.evaluate_hard_gate(
             records[:-1], prefill_target=1.0, decode_target=1.0)["passed"])
+
+    def test_rates_are_derived_and_declared_values_are_only_audit_evidence(self) -> None:
+        derived, consistent = benchmark.derived_tps(
+            2074, 5000.0, 414.8, declared_decimals=1)
+        self.assertAlmostEqual(derived, 414.8)
+        self.assertTrue(consistent)
+        derived, consistent = benchmark.derived_tps(
+            256, 6400.0, 999.0, declared_decimals=2)
+        self.assertEqual(derived, 40.0)
+        self.assertFalse(consistent)
+        self.assertEqual(
+            benchmark.derived_tps(256, 0.0, 40.0, declared_decimals=2),
+            (None, False))
+
+        records = self.records()
+        records[2]["prefill_tokens_per_second"] = 900.0
+        records[2]["prefill_tps_rounding_consistent"] = False
+        gate = benchmark.evaluate_hard_gate(
+            records, prefill_target=412.0, decode_target=39.49)
+        self.assertFalse(gate["passed"])
+        self.assertFalse(gate["prefill_2048"]["shape_match"])
 
     def test_bundle_assembly_preserves_machine_gate(self) -> None:
         gate = benchmark.evaluate_hard_gate(

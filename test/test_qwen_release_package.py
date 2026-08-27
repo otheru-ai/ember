@@ -187,9 +187,9 @@ class QwenReleasePackageTests(unittest.TestCase):
             },
             "native_262k_memory_gate": memory_gate,
             "resources": {
-                "minimum_free_gib": 1024,
+                "minimum_free_gib": 1152,
                 "minimum_ram_gib": 256,
-                "free_disk_bytes": 1024 * 1024**3,
+                "free_disk_bytes": 1152 * 1024**3,
                 "physical_ram_bytes": 256 * 1024**3,
             },
             "memory_preflight": {
@@ -303,6 +303,7 @@ class QwenReleasePackageTests(unittest.TestCase):
         self.assertTrue(q1_memory["copy_on_write_accounting"])
         self.assertFalse(q1_memory["performance_claim"])
         runner = profile["release"]["conversion_runner_requirements"]
+        self.assertEqual(runner["minimum_free_disk_gib"], 1152)
         self.assertEqual(runner["minimum_physical_ram_gib"], 256)
         layout = profile["release"]["artifact_layout_gate"]
         self.assertTrue(layout["current_quantizer_multi_shard_supported"])

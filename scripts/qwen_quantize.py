@@ -56,6 +56,8 @@ INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.wei
 DEFAULT_QUANTIZATION_ARM = "profile-default-rocmi4"
 COMPANION_INVENTORY_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
 COMPANION_ROLES = ("mtp", "vision_mmproj")
+BF16_CACHE_SCHEMA = "ember.qwen3.8-flash-next.bf16-cache.v1"
+GGUF_WRITER_TEMP_NAME_RE = re.compile(r"^tmp[a-z0-9_]{8}$")
 TTM_PAGE_BYTES = 4096
 CANONICAL_TTM_PAGES_LIMIT = Path("/sys/module/ttm/parameters/pages_limit")
 DIRECT_IO_MIN_BYTES = 512 * 1024 * 1024
@@ -374,6 +376,222 @@ def read_exact_json_file(
         "regular_file": True, "symlink": False,
     }
     return value, evidence
+
+
+def validate_bf16_cache_manifest(
+    path: Path | None,
+    expected_sha256: str | None,
+    profile: dict[str, Any],
+    profile_sha256: str,
+    tools: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Verify a content-addressed, read-only BF16 conversion cache.
+
+    The cache removes the 360 GB HF -> BF16 conversion from every intervention
+    arm.  It does not cache modified weights: the quantizer still applies the
+    selected direction while encoding each candidate.  Every reuse rehashes the
+    shards so a stale or replaced cache cannot silently enter a bakeoff.
+    """
+    if path is None and expected_sha256 is None:
+        return None
+    if path is None or expected_sha256 is None:
+        raise PipelineError(
+            "--bf16-cache-manifest and --bf16-cache-manifest-sha256 must be supplied together")
+    manifest, manifest_file = read_exact_json_file(
+        path.absolute(), expected_sha256, "BF16 cache manifest")
+    require_exact_keys(
+        manifest,
+        {"schema", "cache_id", "source", "profile", "toolchain", "conversion",
+         "resources", "measurement", "main", "vision_mmproj"},
+        "BF16 cache manifest",
+    )
+    if manifest.get("schema") != BF16_CACHE_SCHEMA:
+        raise PipelineError("unsupported BF16 cache manifest schema")
+    cache_id = manifest.get("cache_id")
+    if not isinstance(cache_id, str) or SHA256_RE.fullmatch(cache_id) is None:
+        raise PipelineError("BF16 cache id must be a lowercase SHA-256 digest")
+    source = require_mapping(manifest.get("source"), "BF16 cache source")
+    expected_source = profile["source"]
+    if source != {
+        "repo_id": expected_source["repo_id"],
+        "revision": expected_source["revision"],
+        "snapshot_inventory_sha256": expected_source["snapshot_inventory_sha256"],
+    }:
+        raise PipelineError("BF16 cache source differs from the pinned release profile")
+    profile_row = require_mapping(manifest.get("profile"), "BF16 cache profile")
+    if profile_row != {"profile_id": profile.get("profile_id"),
+                       "sha256": profile_sha256}:
+        raise PipelineError("BF16 cache profile differs from the current release profile")
+    toolchain = require_mapping(manifest.get("toolchain"), "BF16 cache toolchain")
+    require_exact_keys(toolchain, {
+        "llama_cpp_revision", "llama_cpp_base_revision", "converter_sha256",
+        "qwen4exp_converter_sha256", "ple_cgroup_writeback_patch_sha256",
+        "gguf_splitter_sha256", "converter_environment_lock_sha256",
+        "converter_environment_lock_bytes", "builder_container_digest",
+    }, "BF16 cache toolchain")
+    expected_toolchain = {
+        "llama_cpp_revision": tools["llama_cpp_revision"],
+        "llama_cpp_base_revision": tools["llama_cpp_base_revision"],
+        "converter_sha256": tools["converter_sha256"],
+        "qwen4exp_converter_sha256": tools["qwen4exp_converter_sha256"],
+        "ple_cgroup_writeback_patch_sha256": tools["ple_cgroup_writeback_patch_sha256"],
+        "gguf_splitter_sha256": tools.get("gguf_splitter_sha256"),
+    }
+    if any(toolchain.get(key) != value for key, value in expected_toolchain.items()):
+        raise PipelineError("BF16 cache toolchain differs from the current pinned tools")
+    if (SHA256_RE.fullmatch(str(toolchain.get("converter_environment_lock_sha256", ""))) is None
+            or not isinstance(toolchain.get("converter_environment_lock_bytes"), int)
+            or toolchain["converter_environment_lock_bytes"] < 1
+            or re.fullmatch(r"sha256:[0-9a-f]{64}",
+                            str(toolchain.get("builder_container_digest", ""))) is None):
+        raise PipelineError("BF16 cache converter environment/image provenance is malformed")
+    conversion = require_mapping(manifest.get("conversion"), "BF16 cache conversion")
+    cleanup = conversion.get("gguf_writer_temp_cleanup")
+    conversion_recipe = {key: value for key, value in conversion.items()
+                         if key != "gguf_writer_temp_cleanup"}
+    if conversion_recipe != {
+        "outtype": "bf16", "split_max_size": "48G", "use_temp_file": True,
+        "main_storage_policy": "mostly_bf16_with_f32_ple",
+        "ple_intermediate_storage":
+            "F32_streamed_to_temp_file_then_release_quant_override",
+        "ple_ggml_tensor_type": 0,
+        "mmproj": {"outtype": "bf16", "converter_option": "--mmproj"},
+    }:
+        raise PipelineError("BF16 cache conversion recipe is not canonical")
+    if (not isinstance(cleanup, dict)
+            or set(cleanup) != {"policy", "main_removed", "mmproj_removed"}
+            or cleanup.get("policy") != "exact_python_spooled_temporary_file_residue_v1"):
+        raise PipelineError("BF16 cache lacks its exact GGUFWriter temp cleanup evidence")
+    for label in ("main_removed", "mmproj_removed"):
+        rows = cleanup.get(label)
+        if (not isinstance(rows, list)
+                or any(not isinstance(row, dict)
+                       or set(row) != {"name", "size_bytes", "mode"}
+                       or GGUF_WRITER_TEMP_NAME_RE.fullmatch(str(row.get("name", ""))) is None
+                       or not isinstance(row.get("size_bytes"), int)
+                       or isinstance(row.get("size_bytes"), bool)
+                       or row["size_bytes"] < 0 or row.get("mode") != 0o600
+                       for row in rows)):
+            raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
+    resources = require_mapping(manifest.get("resources"), "BF16 cache resources")
+    if (not isinstance(resources.get("free_bytes"), int)
+            or resources.get("free_bytes", 0) < 1152 * GIB
+            or not isinstance(resources.get("physical_ram_bytes"), int)
+            or resources.get("physical_ram_bytes", 0) < 120 * GIB):
+        raise PipelineError("BF16 cache lacks the pinned disk/RAM construction preflight")
+    measurement = require_mapping(manifest.get("measurement"), "BF16 cache measurement")
+    if (measurement.get("status") != "measured_target_cgroup_v2"
+            or measurement.get("memory_limit_bytes") != 134217728000
+            or measurement.get("swap_limit_bytes") != 0
+            or not isinstance(measurement.get("cgroup_peak_bytes"), int)
+            or measurement["cgroup_peak_bytes"] > measurement["memory_limit_bytes"]):
+        raise PipelineError("BF16 cache lacks a passing 125 GiB no-swap cgroup measurement")
+    main = require_mapping(manifest.get("main"), "BF16 cache main")
+    require_exact_keys(main, {"base_path", "content_sha256", "shards", "gguf", "ple"},
+                       "BF16 cache main")
+    ple = require_mapping(main.get("ple"), "BF16 cache PLE metadata")
+    expected_ple: dict[str, list[int]] = {}
+    if set(ple) != set(PLE_SUFFIXES):
+        raise PipelineError("BF16 cache PLE metadata keys are incomplete")
+    for key, value in ple.items():
+        if (not isinstance(value, list) or not value
+                or any(not isinstance(item, int) or isinstance(item, bool) for item in value)):
+            raise PipelineError(f"BF16 cache PLE metadata {key} is malformed")
+        expected_ple[key] = value
+    base_path = main.get("base_path")
+    if not isinstance(base_path, str) or PurePosixPath(base_path).name != base_path:
+        raise PipelineError("BF16 cache main base_path must be one safe filename")
+    cache_dir = path.absolute().parent
+    shards = main.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise PipelineError("BF16 cache main shard inventory is empty")
+    normalized_shards: list[dict[str, Any]] = []
+    content_rows: list[dict[str, Any]] = []
+    shard_identities: list[tuple[int, int, int, int]] = []
+    for index, row_value in enumerate(shards):
+        row = require_mapping(row_value, f"BF16 cache shard {index}")
+        require_exact_keys(row, {"name", "size_bytes", "sha256"},
+                           f"BF16 cache shard {index}")
+        name = row.get("name")
+        if not isinstance(name, str) or PurePosixPath(name).name != name:
+            raise PipelineError("BF16 cache shard name must be one safe filename")
+        if (not isinstance(row.get("sha256"), str)
+                or SHA256_RE.fullmatch(row["sha256"]) is None
+                or not isinstance(row.get("size_bytes"), int)
+                or isinstance(row["size_bytes"], bool) or row["size_bytes"] < 1):
+            raise PipelineError("BF16 cache shard digest/size is malformed")
+        shard_path = cache_dir / name
+        try:
+            status = os.lstat(shard_path)
+        except OSError as exc:
+            raise PipelineError(f"cannot inspect BF16 cache shard {index}: {exc}") from exc
+        if not stat.S_ISREG(status.st_mode) or status.st_size != row["size_bytes"]:
+            raise PipelineError("BF16 cache shard must be an exact regular file")
+        shard_identities.append(
+            (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns))
+        normalized_shards.append({
+            "path": str(shard_path), "size_bytes": row["size_bytes"],
+            "sha256": row["sha256"], "regular_file": True, "symlink": False,
+            "integrity_read_method": "verify_gguf_set_sha256_v1",
+        })
+        content_rows.append({"name": name, "size_bytes": row["size_bytes"],
+                             "sha256": row["sha256"]})
+    content_sha256 = hashlib.sha256(json.dumps(
+        content_rows, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+    if main.get("content_sha256") != content_sha256:
+        raise PipelineError("BF16 cache main content digest differs from its shard inventory")
+    paths = discover_gguf(cache_dir / base_path)
+    if paths != [Path(row["path"]) for row in normalized_shards]:
+        raise PipelineError("BF16 cache discovered shard set differs from its manifest")
+    gguf = verify_gguf_set(paths, expected_ple, quantized=False, profile=profile)
+    ple_tensors = [tensor for shard in paths for tensor in inspect_gguf(shard)["tensors"]
+                   if tensor["name"] == profile["quantization"]["ple_tensor_name"]]
+    if len(ple_tensors) != 1 or ple_tensors[0]["type"] != 0:
+        raise PipelineError(
+            "BF16 cache must store the one 204.8 GB PLE tensor as streaming F32")
+    for index, (path_value, identity) in enumerate(zip(paths, shard_identities, strict=True)):
+        status = os.lstat(path_value)
+        current = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+        if current != identity:
+            raise PipelineError(f"BF16 cache shard {index} changed during GGUF verification")
+        actual = gguf["shards"][index]
+        if (actual["size_bytes"] != shards[index]["size_bytes"]
+                or actual["sha256"] != shards[index]["sha256"]):
+            raise PipelineError(f"BF16 cache shard {index} differs from its manifest")
+    recorded_gguf = main.get("gguf")
+    if not isinstance(recorded_gguf, dict) or any(
+            gguf.get(key) != recorded_gguf.get(key)
+            for key in ("tensor_count", "tensor_names_sha256", "tensor_type_counts")):
+        raise PipelineError("BF16 cache GGUF inventory differs from its creation record")
+    mmproj = require_mapping(manifest.get("vision_mmproj"), "BF16 cache vision_mmproj")
+    require_exact_keys(mmproj, {"name", "size_bytes", "sha256", "format", "gguf"},
+                       "BF16 cache vision_mmproj")
+    name = mmproj.get("name")
+    if (not isinstance(name, str) or PurePosixPath(name).name != name
+            or name != profile["artifact"]["required_companion_artifacts"][0]["filename"]
+            or mmproj.get("format") != "BF16"):
+        raise PipelineError("BF16 cache mmproj filename/format differs from the profile")
+    mmproj_evidence = inspect_exact_file(
+        cache_dir / name, mmproj.get("sha256"), mmproj.get("size_bytes"),
+        "BF16 cache vision_mmproj")
+    mmproj_gguf = validate_bf16_qwen_mmproj_gguf(cache_dir / name)
+    if mmproj.get("gguf") != mmproj_gguf:
+        raise PipelineError("BF16 cache mmproj GGUF inventory differs from its creation record")
+    cache_address = hashlib.sha256(json.dumps({
+        "main_content_sha256": content_sha256,
+        "vision_mmproj": {"name": name, "size_bytes": mmproj["size_bytes"],
+                           "sha256": mmproj["sha256"]},
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+    if cache_id != cache_address or path.absolute().parent.name != f"bf16-{cache_id}":
+        raise PipelineError("BF16 cache directory is not its exact content address")
+    return {
+        "schema": BF16_CACHE_SCHEMA, "cache_id": cache_id,
+        "manifest": manifest_file, "source": source, "profile": profile_row,
+        "toolchain": toolchain, "conversion": conversion,
+        "resources": resources, "measurement": measurement,
+        "main": {**main, "shards": normalized_shards, "gguf": gguf},
+        "vision_mmproj": {**mmproj, **mmproj_evidence, "gguf": mmproj_gguf},
+    }
 
 
 def expected_mtp_matrix_contract(quantization_arm: dict[str, Any]) -> str:
@@ -937,6 +1155,80 @@ def validate_intervention_manifest(
     }
 
 
+def validate_rocmi4_sweep_authorization(
+    plan_path: Path | None,
+    plan_sha256: str | None,
+    profile_path: Path,
+    profile_sha256: str,
+    quantization_arm: dict[str, Any],
+    intervention_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Authorize ROCMI4 control encoding only for one canonical planned sweep row."""
+    if plan_path is None or plan_sha256 is None:
+        raise PipelineError(
+            "non-stock rocmi4-control requires an exact canonical bakeoff plan descriptor")
+    plan, evidence = read_exact_json_file(
+        plan_path.resolve(), plan_sha256, "ROCMI4 sweep bakeoff plan")
+    if (plan.get("schema_version") != 1 or plan.get("phase_scope") != "selection"
+            or plan.get("status") != "planned_unmeasured"
+            or plan.get("publication_allowed") is not False):
+        raise PipelineError("rocmi4-control authorization requires the selection-only canonical plan")
+    profile = require_mapping(plan.get("release_profile"), "bakeoff plan release_profile")
+    if profile != {"path": str(profile_path), "sha256": profile_sha256}:
+        raise PipelineError("rocmi4-control bakeoff plan differs from the active release profile")
+    corpora = require_mapping(plan.get("corpora"), "bakeoff plan corpora")
+    held_out = require_mapping(
+        intervention_manifest.get("held_out_evaluation"),
+        "intervention.held_out_evaluation",
+    )
+    sweep_corpus = require_mapping(
+        corpora.get("sweep-validation.jsonl"), "bakeoff sweep-validation corpus")
+    if held_out.get("sha256") != sweep_corpus.get("sha256"):
+        raise PipelineError("rocmi4-control intervention used a corpus outside the selection plan")
+
+    actual_scales = {str(layer): 0.0 for layer in range(48)}
+    for target in intervention_manifest.get("targets", []):
+        match = INTERVENTION_TARGET_RE.fullmatch(str(target.get("tensor_name", "")))
+        if match is None:
+            raise PipelineError("rocmi4-control intervention contains an unvalidated target")
+        actual_scales[str(int(match.group(1)))] = float(target["scale"])
+    expected_basis = {
+        "source": intervention_manifest.get("source"),
+        "tooling": intervention_manifest.get("tooling"),
+        "corpora": [{key: corpus.get(key) for key in (
+            "class", "role", "sha256", "record_count")}
+                    for corpus in intervention_manifest.get("corpora", [])],
+    }
+    rows = plan.get("sweep_configurations")
+    if not isinstance(rows, list):
+        raise PipelineError("rocmi4-control bakeoff plan lacks sweep configurations")
+    matches = []
+    for row in rows:
+        if (isinstance(row, dict)
+                and row.get("quantization_arm") == "rocmi4-control"
+                and row.get("profile_sha256") == profile_sha256
+                and row.get("quantization_overrides_sha256") ==
+                    quantization_arm["per_tensor_overrides_sha256"]
+                and row.get("runtime_mode") == "exact_dequant"
+                and row.get("final_release_eligible") is False
+                and row.get("direction_basis") == expected_basis
+                and row.get("layer_scales") == actual_scales):
+            matches.append(row)
+    if len(matches) != 1 or not isinstance(matches[0].get("id"), str):
+        raise PipelineError(
+            "rocmi4-control intervention does not match exactly one canonical sweep configuration")
+    return {
+        "status": "authorized_selection_sweep_control_encoding",
+        "configuration_id": matches[0]["id"],
+        "plan": evidence,
+        "profile_sha256": profile_sha256,
+        "quantization_overrides_sha256": quantization_arm[
+            "per_tensor_overrides_sha256"],
+        "held_out_corpus_sha256": sweep_corpus["sha256"],
+        "final_release_eligible": False,
+    }
+
+
 def fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     descriptor = os.open(path, flags)
@@ -953,6 +1245,78 @@ def path_entry_exists(path: Path) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
+    """Remove only regular Python/GGUFWriter spool residues from a private TMPDIR.
+
+    llama.cpp's pinned ``GGUFWriter`` uses ``SpooledTemporaryFile``.  Once its
+    256 MiB threshold is crossed, Python creates a mode-0600 ``tmpXXXXXXXX``
+    file in TMPDIR.  A successful converter can leave that already-consumed
+    spool inode behind at process teardown.  Treating every nonempty TMPDIR as
+    a conversion failure discarded a completed 9e44 control conversion.
+
+    The directory is private and the converter process has exited, but deletion
+    still fails closed: names must match Python's exact eight-character random
+    tempfile convention, entries must be owner-only regular single-link files,
+    and lstat/fstat identities must agree.  No directory, symlink, hardlink, or
+    conveniently named foreign artifact is removed.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(directory, flags)
+    except OSError as exc:
+        raise PipelineError(f"cannot open private converter TMPDIR {directory}: {exc}") from exc
+    removed: list[dict[str, Any]] = []
+    try:
+        names = sorted(os.listdir(directory_fd))
+        for name in names:
+            if GGUF_WRITER_TEMP_NAME_RE.fullmatch(name) is None:
+                raise PipelineError(
+                    f"converter TMPDIR contains an unexpected entry: {name!r}")
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                    or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600):
+                raise PipelineError(
+                    f"converter TMPDIR entry is not an owner-only regular single-link spool: {name!r}")
+            file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(name, file_flags, dir_fd=directory_fd)
+            except OSError as exc:
+                raise PipelineError(
+                    f"cannot identity-bind converter spool {name!r}: {exc}") from exc
+            try:
+                opened = os.fstat(descriptor)
+                if ((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                        != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)):
+                    raise PipelineError(
+                        f"converter spool changed during cleanup validation: {name!r}")
+                row = {"name": name, "size_bytes": opened.st_size,
+                       "mode": stat.S_IMODE(opened.st_mode)}
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                    raise PipelineError(
+                        f"converter spool pathname changed before removal: {name!r}")
+                os.unlink(name, dir_fd=directory_fd)
+                removed.append(row)
+            finally:
+                os.close(descriptor)
+        if os.listdir(directory_fd):
+            raise PipelineError("converter TMPDIR changed while expected spools were removed")
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    try:
+        directory.rmdir()
+    except OSError as exc:
+        raise PipelineError(f"cannot remove validated empty converter TMPDIR: {exc}") from exc
+    for row in removed:
+        print(
+            "qwen_quantize.py: removed expected GGUFWriter spool residue "
+            f"{row['name']} ({row['size_bytes']} bytes)",
+            file=sys.stderr,
+        )
+    return removed
 
 
 def write_json_atomic(
@@ -1167,14 +1531,14 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
     runner = profile["release"].get("conversion_runner_requirements")
     if (
         not isinstance(runner, dict)
-        or runner.get("minimum_free_disk_gib") != 1024
+        or runner.get("minimum_free_disk_gib") != 1152
         or runner.get("minimum_physical_ram_gib") != 256
         or runner.get("bounded_memory_minimum_physical_ram_gib") != 120
         or runner.get("bounded_memory_mode") != "llama_patched_ple_writeback_use_temp_then_gguf_split"
         or runner.get("bounded_memory_status") != "patched_after_127269264_kib_oom_pending_remeasurement"
         or runner.get("certification_host_memtotal_bytes") != 134297894912
     ):
-        raise PipelineError("release conversion runner must require 1 TiB disk and 256 GiB RAM")
+        raise PipelineError("release conversion runner must require 1152 GiB disk and 256 GiB RAM")
     layout_gate = profile["release"].get("artifact_layout_gate")
     if (
         not isinstance(layout_gate, dict)
@@ -1858,7 +2222,7 @@ def verify_gguf_set(
 def planned_commands(
     args: argparse.Namespace, profile: dict[str, Any], work_dir: Path,
     intervention_manifest: Path | None, quantization_arm: dict[str, Any],
-) -> tuple[list[str], list[str] | None, list[str], list[str], Path, Path, Path | None]:
+) -> tuple[list[str] | None, list[str] | None, list[str], list[str], Path, Path, Path | None]:
     intermediate = work_dir / "Qwen3.8-Flash-Next-BF16.gguf"
     unsplit = (
         work_dir / "Qwen3.8-Flash-Next-BF16.unsplit.gguf"
@@ -1870,21 +2234,23 @@ def planned_commands(
     )
     output = work_dir / output_name
     converter = args.llama_cpp_dir.resolve() / "convert_hf_to_gguf.py"
-    convert = [
-        sys.executable, str(converter), str(args.snapshot_dir.resolve()),
-        "--outfile", str(unsplit or intermediate), "--outtype", "bf16",
-    ]
+    convert: list[str] | None = None
+    if args.bf16_cache_manifest is None:
+        convert = [
+            sys.executable, str(converter), str(args.snapshot_dir.resolve()),
+            "--outfile", str(unsplit or intermediate), "--outtype", "bf16",
+        ]
     split: list[str] | None = None
-    if unsplit is not None:
+    if convert is not None and unsplit is not None:
         convert.append("--use-temp-file")
         assert args.gguf_splitter is not None
         split = [
             str(args.gguf_splitter.resolve()), "--split-max-size",
             args.split_max_size, str(unsplit), str(intermediate),
         ]
-    elif args.split_max_size != "0":
+    elif convert is not None and args.split_max_size != "0":
         convert.extend(["--split-max-size", args.split_max_size])
-    elif args.bounded_memory_temp:
+    elif convert is not None and args.bounded_memory_temp:
         convert.append("--use-temp-file")
     quantize_options = []
     for override in quantization_arm["per_tensor_overrides"]:
@@ -2073,6 +2439,8 @@ def validate_intervention_report(
 
 
 def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
+    if args.bf16_cache_manifest is not None:
+        return orchestrate_with_snapshot_lease(args)
     snapshot = args.snapshot_dir.resolve()
     with SnapshotReadLease(snapshot):
         return orchestrate_with_snapshot_lease(args)
@@ -2115,16 +2483,34 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             DEFAULT_QUANTIZATION_ARM, "rocmi4-control"}:
         raise PipelineError(
             "stock control must use the unchanged default or rocmi4-control arm")
-    if not stock_control and args.quantization_arm == "rocmi4-control":
-        raise PipelineError("rocmi4-control is reserved for unchanged stock weights")
+    if (args.bakeoff_plan is None) != (args.bakeoff_plan_sha256 is None):
+        raise PipelineError("--bakeoff-plan and --bakeoff-plan-sha256 are required together")
+    if (args.bakeoff_plan is not None
+            and (stock_control or args.quantization_arm != "rocmi4-control")):
+        raise PipelineError(
+            "bakeoff-plan authorization applies only to non-stock rocmi4-control sweep weights")
     intervention_source = (
         args.intervention_manifest.resolve()
         if args.intervention_manifest is not None else None
     )
     intervention: dict[str, Any] | None = None
     if intervention_source is not None:
-        _intervention_manifest, intervention = validate_intervention_manifest(
+        intervention_manifest, intervention = validate_intervention_manifest(
             intervention_source, profile
+        )
+    else:
+        intervention_manifest = None
+    sweep_authorization = None
+    if not stock_control and args.quantization_arm == "rocmi4-control":
+        if intervention_manifest is None:
+            raise PipelineError("rocmi4-control sweep encoding requires a validated intervention")
+        sweep_authorization = validate_rocmi4_sweep_authorization(
+            args.bakeoff_plan,
+            args.bakeoff_plan_sha256,
+            profile_path,
+            sha256_file(profile_path),
+            quantization_arm,
+            intervention_manifest,
         )
     final_work_dir = args.work_dir.parent.resolve() / args.work_dir.name
     runner = profile["release"]["conversion_runner_requirements"]
@@ -2132,7 +2518,8 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
     if minimum_ram_gib is None:
         minimum_ram_gib = (
             runner["bounded_memory_minimum_physical_ram_gib"]
-            if args.bounded_memory_temp else runner["minimum_physical_ram_gib"]
+            if args.bounded_memory_temp or args.bf16_cache_manifest is not None
+            else runner["minimum_physical_ram_gib"]
         )
     resources = validate_resources(final_work_dir, args.min_free_gib, minimum_ram_gib)
     conversion_cgroup = (
@@ -2147,9 +2534,28 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
     # Tool provenance is cheap and deterministic.  Fail it before direct-I/O
     # validation of the 360 GB source snapshot so a bad image cannot waste a
     # full model read before reporting its actual error.
-    snapshot = validate_snapshot(
-        args.snapshot_dir.resolve(), args.snapshot_revision, profile, inventory)
-    expected_ple = safetensor_ple_constants(args.snapshot_dir.resolve())
+    bf16_cache = validate_bf16_cache_manifest(
+        args.bf16_cache_manifest,
+        args.bf16_cache_manifest_sha256,
+        profile,
+        sha256_file(profile_path),
+        tools,
+    )
+    if bf16_cache is None:
+        snapshot = validate_snapshot(
+            args.snapshot_dir.resolve(), args.snapshot_revision, profile, inventory)
+        expected_ple = safetensor_ple_constants(args.snapshot_dir.resolve())
+    else:
+        if args.snapshot_revision != profile["source"]["revision"]:
+            raise PipelineError("--snapshot-revision differs from the BF16 cache source")
+        snapshot = {
+            "revision": profile["source"]["revision"],
+            "files_verified": None,
+            "total_bytes": profile["source"]["weight_bytes"],
+            "integrity_source": "content_addressed_bf16_cache",
+            "cache_manifest_sha256": bf16_cache["manifest"]["sha256"],
+        }
+        expected_ple = bf16_cache["main"]["ple"]
     transaction_dir: Path | None = None
     if args.execute:
         requested_record = final_work_dir / "qwen-quant-build-record.json"
@@ -2203,8 +2609,10 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         "profile": {"path": str(profile_path), "sha256": sha256_file(profile_path)},
         "snapshot_inventory": {"path": str(inventory_path), "sha256": sha256_file(inventory_path)},
         "snapshot": snapshot,
+        "bf16_cache": bf16_cache,
         "companion_inventory": companion_inventory,
         "intervention": intervention,
+        "sweep_authorization": sweep_authorization,
         "experiment": {
             "kind": "stock_control" if stock_control else "directional_ablation",
             "stock_weights_unchanged": stock_control,
@@ -2238,7 +2646,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         },
         "commands": {
             "convert": convert,
-            "convert_shell": shlex.join(convert),
+            "convert_shell": shlex.join(convert) if convert is not None else None,
             "split": split,
             "split_shell": shlex.join(split) if split is not None else None,
             "quantize_preflight": preflight,
@@ -2255,16 +2663,22 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         "native_262k_memory_gate": profile["quantization"]["native_262k_memory_gate"],
         "conversion_memory": {
             "mode": (
-                "bounded_temp_file_then_split" if args.bounded_memory_temp
+                "reused_content_addressed_bf16_cache" if bf16_cache is not None
+                else "bounded_temp_file_then_split" if args.bounded_memory_temp
                 else "ordinary_lazy_tensor_registry"
             ),
-            "full_in_memory_tensor_registry": False if args.bounded_memory_temp else None,
-            "temporary_directory": "private_transaction_directory" if args.bounded_memory_temp else None,
+            "full_in_memory_tensor_registry": (
+                False if args.bounded_memory_temp or bf16_cache is not None else None),
+            "temporary_directory": (
+                "private_transaction_directory" if args.bounded_memory_temp else None),
             "target_measurement_status": (
-                profile["conversion"]["bounded_memory"]["target_measurement_status"]
+                "reused_verified_cache_measurement"
+                if bf16_cache is not None
+                else profile["conversion"]["bounded_memory"]["target_measurement_status"]
                 if args.bounded_memory_temp else "not_applicable"
             ),
-            "certification_cgroup": conversion_cgroup,
+            "certification_cgroup": (
+                bf16_cache["measurement"] if bf16_cache is not None else conversion_cgroup),
         },
         "status": "planned",
     }
@@ -2273,7 +2687,15 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         return record
     try:
         write_json_atomic(record_path, record, create=True)
-        if args.bounded_memory_temp:
+        if bf16_cache is not None:
+            intermediate_paths = [
+                Path(row["path"]) for row in bf16_cache["main"]["shards"]
+            ]
+            record["intermediate"] = bf16_cache["main"]["gguf"]
+            record["conversion_memory"]["measurement"] = bf16_cache["measurement"]
+            write_json_atomic(record_path, record, create=False)
+        elif args.bounded_memory_temp:
+            assert convert is not None
             converter_temp = work_dir / ".converter-tmp"
             converter_temp.mkdir(mode=0o700)
             conversion_started = time.monotonic()
@@ -2307,22 +2729,26 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
                     "measured_within_pinned_no_swap_cgroup"
                 )
                 write_json_atomic(record_path, record, create=False)
-            try:
-                converter_temp.rmdir()
-            except OSError as exc:
-                raise PipelineError(f"converter left unexpected temporary files: {exc}") from exc
+            record["conversion_memory"]["gguf_writer_temp_cleanup"] = {
+                "policy": "exact_python_spooled_temporary_file_residue_v1",
+                "removed": cleanup_gguf_writer_temp(converter_temp),
+            }
+            write_json_atomic(record_path, record, create=False)
         else:
+            assert convert is not None
             run_checked(convert)
-        if split is not None:
-            assert unsplit is not None
-            run_checked(split)
-        intermediate_paths = discover_gguf(intermediate)
-        record["intermediate"] = verify_gguf_set(intermediate_paths, expected_ple, quantized=False, profile=profile)
-        if unsplit is not None:
-            try:
-                unsplit.unlink()
-            except OSError as exc:
-                raise PipelineError(f"cannot remove private unsplit BF16 intermediate: {exc}") from exc
+        if bf16_cache is None:
+            if split is not None:
+                assert unsplit is not None
+                run_checked(split)
+            intermediate_paths = discover_gguf(intermediate)
+            record["intermediate"] = verify_gguf_set(
+                intermediate_paths, expected_ple, quantized=False, profile=profile)
+            if unsplit is not None:
+                try:
+                    unsplit.unlink()
+                except OSError as exc:
+                    raise PipelineError(f"cannot remove private unsplit BF16 intermediate: {exc}") from exc
         if "<converted-first-shard>" in quantize:
             first_shard = str(intermediate_paths[0])
             quantize[quantize.index("<converted-first-shard>")] = first_shard
@@ -2420,13 +2846,14 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             ),
         }
         record["status"] = "complete"
-        try:
-            for path in intermediate_paths:
-                path.unlink()
-        except OSError as exc:
-            raise PipelineError(
-                f"cannot remove private BF16 intermediate before commit: {exc}"
-            ) from exc
+        if bf16_cache is None:
+            try:
+                for path in intermediate_paths:
+                    path.unlink()
+            except OSError as exc:
+                raise PipelineError(
+                    f"cannot remove private BF16 intermediate before commit: {exc}"
+                ) from exc
         write_json_atomic(record_path, record, create=False)
         fsync_directory(work_dir)
         assert transaction_dir is not None
@@ -2488,8 +2915,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--quantization-arm", default=DEFAULT_QUANTIZATION_ARM,
         help="validated profile performance_bakeoff arm (default: profile ROCMI4)",
     )
+    parser.add_argument(
+        "--bakeoff-plan", type=Path,
+        help="canonical selection plan required only for non-stock rocmi4-control sweep weights",
+    )
+    parser.add_argument(
+        "--bakeoff-plan-sha256",
+        help="exact SHA-256 binding for --bakeoff-plan",
+    )
     parser.add_argument("--split-max-size", default="48G", help="llama.cpp split size; release default is 48G, 0 writes one GGUF")
-    parser.add_argument("--min-free-gib", type=int, default=1024)
+    parser.add_argument("--min-free-gib", type=int, default=1152)
     parser.add_argument(
         "--bounded-memory-temp", action="store_true",
         help="spill converter tensor payloads under WORK_DIR, then split the single BF16 GGUF",
@@ -2497,6 +2932,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--gguf-splitter", type=Path,
         help="pinned llama-gguf-split executable; required by bounded mode with split output",
+    )
+    parser.add_argument(
+        "--bf16-cache-manifest", type=Path,
+        help="verified content-addressed BF16 cache; skips source conversion",
+    )
+    parser.add_argument(
+        "--bf16-cache-manifest-sha256",
+        help="required out-of-band SHA-256 binding for --bf16-cache-manifest",
     )
     parser.add_argument(
         "--conversion-memory-limit-bytes", type=int,
@@ -2539,10 +2982,21 @@ def main(argv: list[str] | None = None) -> int:
             raise PipelineError("--threads must be positive")
         if not re.fullmatch(r"0|[1-9][0-9]*[KMGT]", args.split_max_size):
             raise PipelineError("--split-max-size must be 0 or an integer followed by K, M, G, or T")
-        if args.bounded_memory_temp and args.split_max_size != "0" and args.gguf_splitter is None:
+        if (args.bounded_memory_temp and args.bf16_cache_manifest is None
+                and args.split_max_size != "0" and args.gguf_splitter is None):
             raise PipelineError("--bounded-memory-temp with split output requires --gguf-splitter")
-        if not args.bounded_memory_temp and args.gguf_splitter is not None:
-            raise PipelineError("--gguf-splitter is only valid with --bounded-memory-temp")
+        if (not args.bounded_memory_temp and args.bf16_cache_manifest is None
+                and args.gguf_splitter is not None):
+            raise PipelineError(
+                "--gguf-splitter is only valid with bounded conversion or BF16 cache reuse")
+        if args.bf16_cache_manifest is not None and args.gguf_splitter is None:
+            raise PipelineError("BF16 cache reuse requires the pinned --gguf-splitter")
+        if args.bf16_cache_manifest is not None and args.bounded_memory_temp:
+            raise PipelineError("BF16 cache reuse and --bounded-memory-temp are mutually exclusive")
+        if ((args.bf16_cache_manifest is None)
+                != (args.bf16_cache_manifest_sha256 is None)):
+            raise PipelineError(
+                "--bf16-cache-manifest and --bf16-cache-manifest-sha256 must be supplied together")
         if args.conversion_memory_limit_bytes is not None:
             if args.conversion_memory_limit_bytes < GIB:
                 raise PipelineError("--conversion-memory-limit-bytes must be at least 1 GiB")
