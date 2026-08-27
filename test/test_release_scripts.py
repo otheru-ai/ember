@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import pathlib
 import re
@@ -325,11 +326,15 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn(
             "/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}", capture,
         )
+        recipe_digest = hashlib.sha256(
+            (ROOT / "share" / "quant_eval" /
+             "qwen3.8-flash-next-bakeoff.json").read_bytes()
+        ).hexdigest()
         for digest in (
             "19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d",
             "a41997529ad28af7234e036f05bd9bca39c504f8ec118568b73699e9b314d140",
             "a3bededd14b030fdf06562f6739f879838902f6f4691817573a98bbe9ac6cf7c",
-            "d0c15c650e1e18ff06069a7db3db843fc7b91b9ea7c730e5794f45a3f529567e",
+            recipe_digest,
         ):
             self.assertIn(digest, capture)
         self.assertIn("qwen-quant-build-record.json", capture)
