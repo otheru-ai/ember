@@ -43,6 +43,8 @@ set -euo pipefail
 
 MODEL="${EMBER_PROFILE_MODEL:-}"
 DRAFT="${EMBER_PROFILE_DRAFT:-}"
+MTP="${EMBER_PROFILE_MTP:-}"
+MTP_DEPTH="${EMBER_PROFILE_MTP_DEPTH:-4}"
 IMAGE="${EMBER_PROFILE_IMAGE:-ember-rocm:10.0-dev}"
 BINARY="${EMBER_PROFILE_BINARY:-/ember/build-rocm/ember-dflash}"
 PORT="${EMBER_PROFILE_PORT:-18081}"
@@ -67,6 +69,8 @@ usage() {
 options:
   --model PATH         target GGUF (required unless --dry-run)
   --draft PATH         DSpark drafter GGUF; enables speculative decode
+  --mtp PATH           Qwen4Exp MTP companion GGUF (exclusive with --draft)
+  --mtp-depth N        Qwen MTP proposal depth 1..4 (default 4)
   --image REF          ROCm image carrying rocprofv3 (default ember-rocm:10.0-dev)
   --binary PATH        ember-dflash path inside the container
   --port N             port for the profiled instance (default 18081)
@@ -84,6 +88,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model) MODEL="${2:?--model needs a path}"; shift 2 ;;
     --draft) DRAFT="${2:?--draft needs a path}"; shift 2 ;;
+    --mtp) MTP="${2:?--mtp needs a path}"; shift 2 ;;
+    --mtp-depth) MTP_DEPTH="${2:?--mtp-depth needs a value}"; shift 2 ;;
     --image) IMAGE="${2:?--image needs a ref}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --port) PORT="${2:?--port needs a number}"; shift 2 ;;
@@ -106,6 +112,9 @@ done
   || die "--decode-tokens must be a positive integer"
 [[ "$GAP_SECS" =~ ^[0-9]+$ ]] && (( GAP_SECS >= 1 )) \
   || die "--gap-secs must be >= 1"
+[[ "$MTP_DEPTH" =~ ^[0-9]+$ ]] && (( MTP_DEPTH >= 1 && MTP_DEPTH <= 4 )) \
+  || die "--mtp-depth must be 1..4"
+[[ -z "$DRAFT" || -z "$MTP" ]] || die "--draft and --mtp are mutually exclusive"
 
 if [[ -z "$OUT_DIR" ]]; then
   OUT_DIR="$REPO/reports/profile-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -124,6 +133,9 @@ preflight_soft() {
   if [[ -n "$DRAFT" && "$DRAFT" != /* ]]; then
     log "--draft must be absolute: $DRAFT"; problems=1
   fi
+  if [[ -n "$MTP" && "$MTP" != /* ]]; then
+    log "--mtp must be absolute: $MTP"; problems=1
+  fi
   return "$problems"
 }
 
@@ -135,6 +147,7 @@ preflight_hard() {
   command -v python3 >/dev/null || die "python3 is required"
   [[ -f "$MODEL" ]] || die "model not found: $MODEL"
   [[ -z "$DRAFT" || -f "$DRAFT" ]] || die "draft not found: $DRAFT"
+  [[ -z "$MTP" || -f "$MTP" ]] || die "MTP companion not found: $MTP"
 
   if grep -Eq '(^| )(iommu|amd_iommu)=off( |$)' /proc/cmdline; then
     die "IOMMU is disabled in the kernel command line"
@@ -214,15 +227,18 @@ cleanup() {
 # tokens out. Both are temperature 0 so a rerun is comparable.
 write_probes() {
   local dir="$1"
-  python3 - "$dir" "$PREFILL_WORDS" "$DECODE_TOKENS" <<'PY'
+  local request_model="deepseek-v4-flash"
+  [[ -n "$MTP" ]] && request_model="qwen3.8-flash-next"
+  python3 - "$dir" "$PREFILL_WORDS" "$DECODE_TOKENS" "$request_model" <<'PY'
 import json, sys
-out, words, decode_tokens = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+out, words, decode_tokens, model = (
+    sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
 filler = " ".join(
     f"Segment {i} carries deterministic profiling context." for i in range(words // 6 + 1)
 )
 def body(prompt, max_tokens):
     return {
-        "model": "deepseek-v4-flash",
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0,
@@ -268,6 +284,11 @@ run_pass() {
   if [[ -n "$DRAFT" ]]; then
     mounts+=(-v "$(dirname -- "$DRAFT"):/pdraft:ro")
     env_args+=(-e DFLASH_DS4_SPEC=1 -e "DFLASH_DS4_DRAFT=/pdraft/$(basename -- "$DRAFT")")
+  fi
+  if [[ -n "$MTP" ]]; then
+    mounts+=(-v "$(dirname -- "$MTP"):/pmtp:ro")
+    env_args+=(-e "DFLASH_QWEN_MTP=/pmtp/$(basename -- "$MTP")"
+               -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH")
   fi
   # Idle graph reclaim would free compute graphs mid-measurement and charge the
   # next request a rebuild, which shows up as phantom kernel time.
@@ -375,6 +396,8 @@ plan:
   binary          $BINARY
   model           ${MODEL:-<unset>}
   draft           ${DRAFT:-<none> (DSpark off)}
+  mtp             ${MTP:-<none> (Qwen MTP off)}
+  mtp depth       $MTP_DEPTH
   port            $PORT
   out-dir         $OUT_DIR
   phase gap       ${GAP_SECS}s
