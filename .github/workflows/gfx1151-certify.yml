@@ -1549,6 +1549,26 @@ jobs:
             "$capture_manifest" "$(sha256sum "$capture_manifest" | awk '{print $1}')" \
             >>"$GITHUB_ENV"
 
+      - name: Report retained activation-container failure log
+        if: ${{ failure() && env.QWEN_CAPTURE_OUTPUT != '' }}
+        run: |
+          set -euo pipefail
+          log="$QWEN_CAPTURE_OUTPUT/activation-container.log"
+          if [[ ! -e "$log" ]]; then
+            echo 'No retained activation-container log was produced.'
+            exit 0
+          fi
+          [[ -f "$log" && ! -L "$log" ]] || {
+            echo 'Refusing a non-regular or symlinked activation-container log.' >&2
+            exit 1
+          }
+          bytes="$(stat -c %s -- "$log")"
+          [[ "$bytes" =~ ^[0-9]+$ ]] || exit 1
+          echo "::group::Last activation-container log bytes ($bytes total)"
+          tail -c 1048576 -- "$log"
+          echo
+          echo '::endgroup::'
+
       - name: Recover production and release the GPU lock
         if: ${{ always() && steps.qwen-capture-safety.outputs.armed == 'yes' }}
         run: |

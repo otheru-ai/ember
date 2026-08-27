@@ -44,6 +44,7 @@ GPU_LOCK = Path("/usr/local/sbin/ember-gpu-lock")
 PRODUCTION = Path("/usr/local/sbin/ember-cert-production")
 HEX64 = set("0123456789abcdef")
 RECORD_BYTES = 48 * 2560 * 4
+CONTAINER_LOG_NAME = "activation-container.log"
 
 
 class CaptureError(ValueError):
@@ -380,6 +381,74 @@ def remove_container(name: str) -> None:
     )
 
 
+def retain_container_logs(name: str, output_dir: Path) -> Path:
+    """Durably retain combined container output without replacing any path.
+
+    The output directory is opened without following a final symlink, then the
+    fixed log basename is created relative to that directory descriptor with
+    O_EXCL. This keeps a concurrent file or symlink from redirecting or being
+    overwritten by failure forensics.
+    """
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(output_dir, directory_flags)
+    except OSError as exc:
+        raise CaptureError(f"cannot open capture output directory for container logs: {exc}") from exc
+    log_fd = -1
+    try:
+        try:
+            log_fd = os.open(
+                CONTAINER_LOG_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError as exc:
+            raise CaptureError(
+                f"refusing to overwrite container log: {output_dir / CONTAINER_LOG_NAME}"
+            ) from exc
+        except OSError as exc:
+            raise CaptureError(f"cannot create container log: {exc}") from exc
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "--timestamps", name], check=False,
+                stdout=log_fd, stderr=subprocess.STDOUT, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CaptureError(f"cannot retain container logs: {exc}") from exc
+        finally:
+            os.fsync(log_fd)
+        if result.returncode != 0:
+            raise CaptureError(
+                f"docker logs exited {result.returncode}; diagnostic output was retained"
+            )
+    finally:
+        try:
+            if log_fd >= 0:
+                os.fsync(directory_fd)
+        finally:
+            if log_fd >= 0:
+                os.close(log_fd)
+            os.close(directory_fd)
+    return output_dir / CONTAINER_LOG_NAME
+
+
+def cleanup_capture_container(
+    name: str, output_dir: Path, started: bool,
+    capture_error: BaseException | None,
+) -> BaseException | None:
+    """Retain failure logs before deleting an owned capture container."""
+    if started and capture_error is not None:
+        try:
+            retain_container_logs(name, output_dir)
+        except BaseException as log_exc:
+            capture_error = CaptureError(
+                f"{capture_error}; additionally failed to retain container logs: {log_exc}"
+            )
+    remove_container(name)
+    return capture_error
+
+
 def wait_healthy(port: int, container: str) -> None:
     endpoint = f"http://127.0.0.1:{port}/health"
     for _ in range(360):
@@ -670,6 +739,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     # every marker.  Recovery therefore never releases another job's lock.
     exclusive = ExclusiveGPU(args.output_dir)
     capture_error: BaseException | None = None
+    container_started = False
 
     def interrupted(signum: int, _frame: Any) -> None:
         raise CaptureError(f"interrupted by signal {signum}")
@@ -695,6 +765,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "-m", f"/control/{args.model.name}", "--host", "127.0.0.1",
             "--port", str(args.port), "--max-ctx", "8192", "--prefix-cache-slots", "1",
         ])
+        container_started = True
         wait_healthy(args.port, container)
         row_count = 0
         for corpus in (good_corpus, bad_corpus):
@@ -715,7 +786,9 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         # A second termination signal must not interrupt the restore sequence.
         for signum in previous_handlers:
             signal.signal(signum, signal.SIG_IGN)
-        remove_container(container)
+        capture_error = cleanup_capture_container(
+            container, args.output_dir, container_started, capture_error,
+        )
         try:
             exclusive.restore()
         except BaseException as restore_exc:

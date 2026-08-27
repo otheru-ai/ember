@@ -17,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/qwen_capture_control.py"
+WORKFLOW = ROOT / ".github/workflows/gfx1151-certify.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("qwen_capture_control", SCRIPT)
 assert SPEC and SPEC.loader
@@ -64,6 +65,13 @@ def write_rows(path: Path, prefix: str) -> str:
 class QwenCaptureControlTest(unittest.TestCase):
     def test_script_compiles(self) -> None:
         subprocess.run([sys.executable, "-m", "py_compile", str(SCRIPT)], check=True)
+
+    def test_workflow_reports_bounded_retained_failure_log(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Report retained activation-container failure log", body)
+        self.assertIn('log="$QWEN_CAPTURE_OUTPUT/activation-container.log"', body)
+        self.assertIn('[[ -f "$log" && ! -L "$log" ]]', body)
+        self.assertIn('tail -c 1048576 -- "$log"', body)
 
     def test_gpu_groups_are_numeric_device_gids_not_image_names(self) -> None:
         body = SCRIPT.read_text(encoding="utf-8")
@@ -220,6 +228,109 @@ class QwenCaptureControlTest(unittest.TestCase):
             ("ember-gpu-lock", "release"),
         ])
         self.assertFalse(exclusive.masked or exclusive.restore_service or exclusive.locked)
+
+    def test_container_logs_are_create_only_and_byte_preserving(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            observed: list[list[str]] = []
+
+            def fake_run(command, **kwargs):
+                observed.append(list(command))
+                self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+                self.assertEqual(kwargs["timeout"], 30)
+                os.write(kwargs["stdout"], b"model load failed\nraw:\xff\n")
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(capture.subprocess, "run", side_effect=fake_run):
+                output = capture.retain_container_logs("capture-owned", directory)
+            self.assertEqual(observed, [[
+                "docker", "logs", "--timestamps", "capture-owned",
+            ]])
+            self.assertEqual(output, directory / capture.CONTAINER_LOG_NAME)
+            self.assertEqual(output.read_bytes(), b"model load failed\nraw:\xff\n")
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+
+    def test_container_log_retention_refuses_existing_file_or_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            output = directory / capture.CONTAINER_LOG_NAME
+            output.write_bytes(b"existing evidence")
+            with mock.patch.object(capture.subprocess, "run") as run:
+                with self.assertRaisesRegex(capture.CaptureError, "refusing to overwrite"):
+                    capture.retain_container_logs("capture-owned", directory)
+                run.assert_not_called()
+            self.assertEqual(output.read_bytes(), b"existing evidence")
+
+            output.unlink()
+            victim = directory / "victim"
+            victim.write_bytes(b"must not change")
+            output.symlink_to(victim)
+            with mock.patch.object(capture.subprocess, "run") as run:
+                with self.assertRaisesRegex(capture.CaptureError, "refusing to overwrite"):
+                    capture.retain_container_logs("capture-owned", directory)
+                run.assert_not_called()
+            self.assertEqual(victim.read_bytes(), b"must not change")
+
+            linked_directory = directory.parent / f"{directory.name}-link"
+            linked_directory.symlink_to(directory, target_is_directory=True)
+            try:
+                with mock.patch.object(capture.subprocess, "run") as run:
+                    with self.assertRaisesRegex(capture.CaptureError,
+                                                "cannot open capture output directory"):
+                        capture.retain_container_logs("capture-owned", linked_directory)
+                    run.assert_not_called()
+            finally:
+                linked_directory.unlink()
+
+    def test_failed_docker_logs_still_retains_diagnostic_before_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+
+            def failed_logs(command, **kwargs):
+                os.write(kwargs["stdout"], b"daemon log retrieval failed\n")
+                return subprocess.CompletedProcess(command, 17)
+
+            with mock.patch.object(capture.subprocess, "run", side_effect=failed_logs):
+                with self.assertRaisesRegex(capture.CaptureError,
+                                            "diagnostic output was retained"):
+                    capture.retain_container_logs("capture-owned", directory)
+            self.assertEqual(
+                (directory / capture.CONTAINER_LOG_NAME).read_bytes(),
+                b"daemon log retrieval failed\n",
+            )
+
+    def test_failure_cleanup_retains_logs_before_container_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events: list[str] = []
+            original = capture.CaptureError("container exited during model load")
+
+            def retain(_name: str, _output: Path) -> Path:
+                events.append("retain")
+                return Path(raw) / capture.CONTAINER_LOG_NAME
+
+            def remove(_name: str) -> None:
+                events.append("remove")
+
+            with mock.patch.object(capture, "retain_container_logs", side_effect=retain), \
+                    mock.patch.object(capture, "remove_container", side_effect=remove):
+                result = capture.cleanup_capture_container(
+                    "capture-owned", Path(raw), True, original,
+                )
+            self.assertIs(result, original)
+            self.assertEqual(events, ["retain", "remove"])
+
+            events.clear()
+            with mock.patch.object(
+                    capture, "retain_container_logs",
+                    side_effect=capture.CaptureError("unsafe destination")), \
+                    mock.patch.object(capture, "remove_container", side_effect=remove):
+                result = capture.cleanup_capture_container(
+                    "capture-owned", Path(raw), True, original,
+                )
+            self.assertIsInstance(result, capture.CaptureError)
+            self.assertIn("container exited during model load", str(result))
+            self.assertIn("failed to retain container logs", str(result))
+            self.assertEqual(events, ["remove"])
 
     def test_durable_recovery_markers_track_only_owned_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
