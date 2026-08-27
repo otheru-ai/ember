@@ -258,15 +258,20 @@ intermediate (`--split-max-size 48G`). Given its first
 `NAME-00001-of-000NN.gguf` shard, `--keep-split` requires every ordered sibling,
 validates `split.no`, `split.count`, `split.tensors.count`, and a unique global
 tensor inventory, then preserves the llama.cpp filenames and split metadata in
-the quantized output. The manual PLE regex is matched across the global set, so
-it need only occur in its owning shard.
+the quantized output. Pinned llama.cpp stores the complete model/provenance
+metadata only in shard 1; every continuation shard must contain exactly the
+three split locator fields. ROCmFPX `--keep-split` preserves that layout, and
+the verifier rejects missing or extra continuation metadata. The manual PLE
+regex is matched across the global set, so it need only occur in its owning
+shard.
 
 Planning all shards and the aggregate 128 GiB fit decision completes before
-publication. The orchestrator rechecks invariant metadata and PLE constants on
-every shard, the global tensor-name inventory, type histogram, ordered sizes,
-and hashes in private. It removes the BF16 intermediate, writes and syncs the
-completed build record beside the verified shards, syncs the private directory,
-then publishes that whole directory in one Linux
+publication. The orchestrator rechecks authoritative shard-1 metadata and PLE
+constants, every shard's split locators, the global tensor-name inventory, type
+histogram, ordered sizes, and hashes in private. It removes the BF16
+intermediate, writes and syncs the completed build record beside the verified
+shards, syncs the private directory, then publishes that whole directory in
+one Linux
 `renameat2(RENAME_NOREPLACE)` operation. Shards and their complete provenance
 record and the exact applied `qwen-intervention-manifest.json` therefore become
 visible together. No check-then-unlink rollback is

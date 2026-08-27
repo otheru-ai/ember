@@ -158,15 +158,21 @@ def make_gguf(
     tensor_type: int, architecture: str = "qwen4exp",
     layer_multipliers: list[int] | None = None,
     intervention: dict | None = None,
+    full_metadata: bool | None = None,
+    omit_metadata_keys: set[str] | None = None,
 ) -> None:
     layer_multipliers = layer_multipliers or [1, 24_000_000_000_001]
-    metadata = [
-        ("general.architecture", 8, architecture, None),
-        ("qwen4exp.ple.layer_multipliers", 9, layer_multipliers, 10),
-        ("qwen4exp.ple.head_offsets", 9, [3, 5], 10),
-        ("qwen4exp.ple.head_vocab_sizes", 9, [7, 11], 10),
-    ]
-    if intervention is not None:
+    if full_metadata is None:
+        full_metadata = split_count == 1 or split_no == 0
+    metadata = []
+    if full_metadata:
+        metadata.extend([
+            ("general.architecture", 8, architecture, None),
+            ("qwen4exp.ple.layer_multipliers", 9, layer_multipliers, 10),
+            ("qwen4exp.ple.head_offsets", 9, [3, 5], 10),
+            ("qwen4exp.ple.head_vocab_sizes", 9, [7, 11], 10),
+        ])
+    if intervention is not None and full_metadata:
         metadata.extend([
             ("ember.intervention.kind", 8, intervention["kind"], None),
             ("ember.intervention.application_stage", 8, intervention["application_stage"], None),
@@ -180,6 +186,8 @@ def make_gguf(
             ("split.count", 2, split_count, None),
             ("split.tensors.count", 5, split_count, None),
         ])
+    omitted = omit_metadata_keys or set()
+    metadata = [row for row in metadata if row[0] not in omitted]
     value = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, len(metadata)))
     for key, value_type, item, subtype in metadata:
         value.extend(pack_string(key))
@@ -1571,7 +1579,35 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertEqual(result["tensor_type_counts"], {"108": 2})
             self.assertEqual(len(result["shards"]), 2)
 
-    def test_split_verification_rejects_later_shard_architecture_or_ple_mismatch(self) -> None:
+    def test_split_verification_accepts_canonical_first_only_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            first = root / "model-00001-of-00002.gguf"
+            second = root / "model-00002-of-00002.gguf"
+            make_gguf(first, split_no=0, split_count=2,
+                      tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                      intervention=TEST_INTERVENTION)
+            profile = json.loads(
+                (ROOT / "share" / "release_profiles" /
+                 "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+            )
+            expected = {
+                "ple_embedding.layer_multipliers": [1, 24_000_000_000_001],
+                "ple_embedding.ngram_heads_offsets": [3, 5],
+                "ple_embedding.ngram_heads_vocab_sizes": [7, 11],
+            }
+            make_gguf(second, split_no=1, split_count=2,
+                      tensor_name="blk.0.ffn_up.weight", tensor_type=108)
+            result = qwen_quantize.verify_gguf_set(
+                [first, second], expected, quantized=True, profile=profile,
+                intervention=TEST_INTERVENTION,
+            )
+            self.assertEqual(set(qwen_quantize.inspect_gguf(second)["metadata"]), {
+                "split.no", "split.count", "split.tensors.count",
+            })
+            self.assertEqual(result["tensor_count"], 2)
+
+    def test_split_verification_rejects_missing_or_unexpected_continuation_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             first = root / "model-00001-of-00002.gguf"
@@ -1590,8 +1626,8 @@ class QwenQuantizeTests(unittest.TestCase):
             }
             make_gguf(second, split_no=1, split_count=2,
                       tensor_name="blk.0.ffn_up.weight", tensor_type=108,
-                      architecture="wrong", intervention=TEST_INTERVENTION)
-            with self.assertRaisesRegex(qwen_quantize.PipelineError, "shard 2 architecture"):
+                      omit_metadata_keys={"split.count"})
+            with self.assertRaisesRegex(qwen_quantize.PipelineError, "split.count is missing"):
                 qwen_quantize.verify_gguf_set(
                     [first, second], expected, quantized=True, profile=profile,
                     intervention=TEST_INTERVENTION,
@@ -1599,8 +1635,11 @@ class QwenQuantizeTests(unittest.TestCase):
 
             make_gguf(second, split_no=1, split_count=2,
                       tensor_name="blk.0.ffn_up.weight", tensor_type=108,
-                      layer_multipliers=[1, 2], intervention=TEST_INTERVENTION)
-            with self.assertRaisesRegex(qwen_quantize.PipelineError, "shard 2 PLE metadata"):
+                      architecture="wrong", full_metadata=True,
+                      intervention=TEST_INTERVENTION)
+            with self.assertRaisesRegex(
+                    qwen_quantize.PipelineError,
+                    r"unexpected=.*general\.architecture"):
                 qwen_quantize.verify_gguf_set(
                     [first, second], expected, quantized=True, profile=profile,
                     intervention=TEST_INTERVENTION,
@@ -1612,14 +1651,14 @@ class QwenQuantizeTests(unittest.TestCase):
             make_gguf(
                 fixture.quant_split[1], split_no=1, split_count=2,
                 tensor_name="blk.0.ffn_up.weight", tensor_type=108,
-                architecture="wrong",
+                architecture="wrong", full_metadata=True,
             )
             result = subprocess.run(
                 [*fixture.command(), "--execute"], text=True,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             self.assertEqual(result.returncode, 2)
-            self.assertIn("shard 2 architecture", result.stderr)
+            self.assertIn("continuation shard 2 metadata", result.stderr)
             outputs = list(fixture.work.glob(
                 "Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-?????-of-?????.gguf"
             ))

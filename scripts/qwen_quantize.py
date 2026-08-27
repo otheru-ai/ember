@@ -2264,73 +2264,82 @@ def verify_gguf_set(
     names = [tensor["name"] for tensor in all_tensors]
     if len(names) != len(set(names)):
         raise PipelineError("GGUF tensor inventory contains duplicate names across shards")
-    invariant_metadata: dict[str, dict[str, Any]] | None = None
-    for shard_index, item in enumerate(inspected):
-        metadata = item["metadata"]
-        architecture = metadata.get("general.architecture", {}).get("value")
-        if architecture != "qwen4exp":
-            raise PipelineError(
-                f"GGUF shard {shard_index + 1} architecture must be qwen4exp, got {architecture!r}"
-            )
-        for source_suffix, gguf_key in PLE_SUFFIXES.items():
-            field = metadata.get(gguf_key)
-            if field is None or field["type"] != 9 or field["subtype"] != 10:
-                raise PipelineError(
-                    f"GGUF shard {shard_index + 1} PLE metadata {gguf_key} must be ARRAY<UINT64>"
-                )
-            if field["value"] != expected_ple[source_suffix]:
-                raise PipelineError(
-                    f"GGUF shard {shard_index + 1} PLE metadata {gguf_key} does not match the source I64 values"
-                )
-        if quantized:
-            if intervention is not None:
-                intervention_fields = {
-                    "ember.intervention.kind": (8, intervention["kind"]),
-                    "ember.intervention.application_stage": (8, intervention["application_stage"]),
-                    "ember.intervention.manifest_sha256": (8, intervention["manifest_sha256"]),
-                    "ember.intervention.target_names_sha256": (8, intervention["target_names_sha256"]),
-                    "ember.intervention.target_count": (4, intervention["target_count"]),
-                }
-                for key, (expected_type, expected_value) in intervention_fields.items():
-                    field = metadata.get(key)
-                    if field is None or field.get("type") != expected_type or field.get("value") != expected_value:
-                        raise PipelineError(
-                            f"GGUF shard {shard_index + 1} intervention metadata {key} does not match the applied manifest"
-                        )
-            elif stock_control:
-                if any(key.startswith("ember.intervention.") for key in metadata):
-                    raise PipelineError(
-                        f"stock-control GGUF shard {shard_index + 1} carries intervention metadata"
-                    )
-            else:
-                raise PipelineError(
-                    "quantized GGUF verification requires intervention evidence or explicit stock-control mode"
-                )
-        # llama.cpp split files intentionally vary only split.no. Every other
-        # metadata value is release-critical provenance/configuration and must
-        # remain byte-semantically identical across the set.
-        current_invariants = {
-            key: value for key, value in metadata.items() if key != "split.no"
-        }
-        if invariant_metadata is None:
-            invariant_metadata = current_invariants
-        elif current_invariants != invariant_metadata:
-            differing = sorted(
-                key for key in set(invariant_metadata) | set(current_invariants)
-                if invariant_metadata.get(key) != current_invariants.get(key)
-            )
-            raise PipelineError(
-                f"GGUF shard {shard_index + 1} invariant metadata differs from shard 1: {differing}"
-            )
+    # Pinned llama.cpp gguf-split saves the complete metadata table in shard 1
+    # and exactly these three locator fields in every continuation shard
+    # (tools/gguf-split/gguf-split.cpp:235-245). ROCmFPX --keep-split preserves
+    # that layout: its first output context receives the loader metadata while
+    # later contexts are empty before the same split triplet is installed
+    # (src/llama-quant.cpp:1352-1458 at c49ebdb). Treat shard 1 as the sole
+    # provenance/configuration authority and reject any other continuation
+    # layout, rather than silently accepting missing or injected metadata.
+    split_fields = {
+        "split.no": 2,
+        "split.count": 2,
+        "split.tensors.count": 5,
+    }
     if len(paths) > 1:
         for index, item in enumerate(inspected):
             metadata = item["metadata"]
-            if metadata.get("split.count", {}).get("value") != len(paths):
+            for key, expected_type in split_fields.items():
+                field = metadata.get(key)
+                if field is None or field.get("type") != expected_type:
+                    raise PipelineError(
+                        f"GGUF shard {index + 1} split metadata {key} is missing or has the wrong type"
+                    )
+            if metadata["split.count"]["value"] != len(paths):
                 raise PipelineError("GGUF split.count does not match discovered shard count")
-            if metadata.get("split.no", {}).get("value") != index:
+            if metadata["split.no"]["value"] != index:
                 raise PipelineError("GGUF split.no is not contiguous")
-            if metadata.get("split.tensors.count", {}).get("value") != len(all_tensors):
+            if metadata["split.tensors.count"]["value"] != len(all_tensors):
                 raise PipelineError("GGUF split.tensors.count does not match tensor inventory")
+            if index > 0 and set(metadata) != set(split_fields):
+                unexpected = sorted(set(metadata) - set(split_fields))
+                missing = sorted(set(split_fields) - set(metadata))
+                raise PipelineError(
+                    f"GGUF continuation shard {index + 1} metadata must contain only "
+                    f"the split locator fields (missing={missing}, unexpected={unexpected})"
+                )
+    elif set(inspected[0]["metadata"]) & set(split_fields):
+        raise PipelineError("unsplit GGUF must not carry split locator metadata")
+
+    metadata = inspected[0]["metadata"]
+    architecture = metadata.get("general.architecture", {}).get("value")
+    if architecture != "qwen4exp":
+        raise PipelineError(
+            f"GGUF shard 1 architecture must be qwen4exp, got {architecture!r}"
+        )
+    for source_suffix, gguf_key in PLE_SUFFIXES.items():
+        field = metadata.get(gguf_key)
+        if field is None or field["type"] != 9 or field["subtype"] != 10:
+            raise PipelineError(
+                f"GGUF shard 1 PLE metadata {gguf_key} must be ARRAY<UINT64>"
+            )
+        if field["value"] != expected_ple[source_suffix]:
+            raise PipelineError(
+                f"GGUF shard 1 PLE metadata {gguf_key} does not match the source I64 values"
+            )
+    if quantized:
+        if intervention is not None:
+            intervention_fields = {
+                "ember.intervention.kind": (8, intervention["kind"]),
+                "ember.intervention.application_stage": (8, intervention["application_stage"]),
+                "ember.intervention.manifest_sha256": (8, intervention["manifest_sha256"]),
+                "ember.intervention.target_names_sha256": (8, intervention["target_names_sha256"]),
+                "ember.intervention.target_count": (4, intervention["target_count"]),
+            }
+            for key, (expected_type, expected_value) in intervention_fields.items():
+                field = metadata.get(key)
+                if field is None or field.get("type") != expected_type or field.get("value") != expected_value:
+                    raise PipelineError(
+                        f"GGUF shard 1 intervention metadata {key} does not match the applied manifest"
+                    )
+        elif stock_control:
+            if any(key.startswith("ember.intervention.") for key in metadata):
+                raise PipelineError("stock-control GGUF shard 1 carries intervention metadata")
+        else:
+            raise PipelineError(
+                "quantized GGUF verification requires intervention evidence or explicit stock-control mode"
+            )
     type_counts = Counter(tensor["type"] for tensor in all_tensors)
     override_evidence: list[dict[str, Any]] | None = None
     if quantized:
