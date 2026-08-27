@@ -104,10 +104,21 @@ exact-dequant, and ROCMI4 W4A4. W4A4 and the stock model are performance
 controls and are final-ineligible. Exactly one already-selected eligible arm
 is evaluated on final-heldout.
 
-The current quantizer has one explicit blocker for the ROCmFP4 FAST
-intervention arm: its post-encoding intervention audit unconditionally decodes
-stored bytes with ROCMI4 traits. Fix that audit and pass a GPU-free differential
-before executing or interpreting the FAST arm.
+The ROCmFP4 FAST post-encoding audit now dispatches through the actual stored
+destination type and its cross-decoder GPU-free regression passes. The arm is
+still unpromoted until its exact intervened artifact passes the real-weight
+gfx1151 differential, quality, memory, and performance gates below.
+
+After the digest-matched stock ROCMI4 control and MTP companion exist, capture
+directions with `scripts/qwen_capture_control.py`. The operator supplies every
+image, build-record, shard, MTP, recipe, contract, and extraction-corpus digest
+explicitly. The driver hashes large model artifacts with direct I/O, takes the
+fixed GPU lock, stops and masks production, captures exactly 32 good plus 32
+bad final-row activation records, and restores production before generating
+the deterministic 4×4 intervention grid. It never opens the sweep or final
+JSONL files and never quantizes or publishes anything. Use `--dry-run` first;
+the printed plan is side-effect free. On the certification host the pinned
+corpus directory is `/srv/ember/qwen3.8-otheru-corpus-a3c6a728`.
 
 After every required row is measured, adjudicate it with:
 
