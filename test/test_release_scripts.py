@@ -295,6 +295,12 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("qwen-docker-$GITHUB_RUN_ID", certify)
         self.assertIn("Remove temporary registry credentials", certify)
         control = certify.split("\n  qwen-convert-control:", 1)[1]
+        for repository in (
+            "/ember", "/qwen-work/tooling/llama.cpp",
+            "/qwen-work/tooling/ROCmFPX",
+        ):
+            self.assertIn(f"safe.directory {repository}", control)
+        self.assertNotIn("safe.directory '*'", control)
         for command in (
             "ember-gpu-lock acquire", "ember-gpu-lock release",
             "ember-cert-production stop", "ember-cert-production mask",

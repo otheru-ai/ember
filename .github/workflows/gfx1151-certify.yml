@@ -842,6 +842,13 @@ jobs:
             --ulimit memlock=-1:-1 \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc "
               set -euo pipefail
+              # The bind-mounted checkouts are owned by the host runner uid,
+              # while the ROCm development image runs this bounded conversion
+              # as root. Pin only the three audited repositories as safe; a
+              # broad '*' exception would disable Git's ownership boundary.
+              git config --global --add safe.directory /ember
+              git config --global --add safe.directory /qwen-work/tooling/llama.cpp
+              git config --global --add safe.directory /qwen-work/tooling/ROCmFPX
               /usr/bin/time -v \
                 -o /qwen-work/evidence/control-${TARGET_SHA:0:12}.time.txt \
                 /qwen-work/tooling/converter-venv/bin/python \
