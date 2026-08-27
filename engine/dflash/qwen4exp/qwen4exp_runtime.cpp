@@ -828,10 +828,10 @@ bool qwen4exp_mtp_sync_cache_q1(
     if (!hc_mix(target, hc, mtp.layer.hc_attn_norm,
                 mtp.layer.hc_attn_down, mtp.layer.hc_attn_up, nullptr, mixed,
                 nullptr, error)) return false;
-    for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
-        state.mrope_positions[axis].push_back(mrope_position[axis]);
     if (!append_qsa_cache(target, state.qsa, mtp.layer, mixed,
                           mrope_position, error)) return false;
+    for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
+        state.mrope_positions[axis].push_back(mrope_position[axis]);
     ++state.cur_pos;
     return true;
 }

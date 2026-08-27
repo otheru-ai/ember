@@ -351,6 +351,13 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                                      prompt_positions[1][absolute],
                                      prompt_positions[2][absolute]});
             }
+            std::vector<Qwen4ExpMtpPromptSyncRow> sync_plan;
+            if (mtp_depth_ && !qwen4exp_mtp_prompt_sync_plan(
+                    target_pos_before, mtp_state_.cur_pos, chunk_rows,
+                    sync_plan, error)) {
+                result.fail(GenerateErrorCode::PrefillFailed, error);
+                return result;
+            }
             std::vector<std::vector<float>> target_row_hc;
             if (!qwen4exp_step_prefill_batch_mrope(
                     weights_, state_, tokens, positions, logits_,
@@ -364,13 +371,6 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 return result;
             }
             if (mtp_depth_) {
-                std::vector<Qwen4ExpMtpPromptSyncRow> sync_plan;
-                if (!qwen4exp_mtp_prompt_sync_plan(
-                        target_pos_before, mtp_state_.cur_pos, chunk_rows,
-                        sync_plan, error)) {
-                    result.fail(GenerateErrorCode::PrefillFailed, error);
-                    return result;
-                }
                 for (const Qwen4ExpMtpPromptSyncRow & sync : sync_plan) {
                     const float * preceding_hc = nullptr;
                     size_t preceding_hc_count = 0;
@@ -629,13 +629,11 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             const int32_t accepted_token = candidates[i];
             if (accepted_token == weights_.eos_id ||
                 accepted_token == weights_.eot_id) break;
-            std::vector<float> ignored_logits, ignored_hc;
-            if (!qwen4exp_mtp_step_q1(
+            if (!qwen4exp_mtp_sync_cache_q1(
                     weights_, mtp_weights_, mtp_state_, accepted_token,
                     nullptr, 0, verify_output.row_hc[i].data(),
                     verify_output.row_hc[i].size(),
-                    verify_rows[i + 1].mrope_position, ignored_logits,
-                    ignored_hc, error)) {
+                    verify_rows[i + 1].mrope_position, error)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "Qwen4Exp MTP accepted draft advance failed: " + error);
                 result.decode_s = seconds_since(decode_start);
