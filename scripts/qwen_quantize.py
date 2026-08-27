@@ -426,7 +426,8 @@ def validate_bf16_cache_manifest(
     require_exact_keys(toolchain, {
         "llama_cpp_revision", "llama_cpp_base_revision", "converter_sha256",
         "qwen4exp_converter_sha256", "ple_cgroup_writeback_patch_sha256",
-        "gguf_splitter_sha256", "converter_environment_lock_sha256",
+        "gguf_split_bounded_copy_patch_sha256", "gguf_splitter_sha256",
+        "converter_environment_lock_sha256",
         "converter_environment_lock_bytes", "builder_container_digest",
     }, "BF16 cache toolchain")
     expected_toolchain = {
@@ -435,6 +436,8 @@ def validate_bf16_cache_manifest(
         "converter_sha256": tools["converter_sha256"],
         "qwen4exp_converter_sha256": tools["qwen4exp_converter_sha256"],
         "ple_cgroup_writeback_patch_sha256": tools["ple_cgroup_writeback_patch_sha256"],
+        "gguf_split_bounded_copy_patch_sha256":
+            tools["gguf_split_bounded_copy_patch_sha256"],
         "gguf_splitter_sha256": tools.get("gguf_splitter_sha256"),
     }
     if any(toolchain.get(key) != value for key, value in expected_toolchain.items()):
@@ -451,6 +454,7 @@ def validate_bf16_cache_manifest(
                          if key != "gguf_writer_temp_cleanup"}
     if conversion_recipe != {
         "outtype": "bf16", "split_max_size": "48G", "use_temp_file": True,
+        "split_copy_buffer_bytes": 16 * 1024 * 1024,
         "main_storage_policy": "mostly_bf16_with_f32_ple",
         "ple_intermediate_storage":
             "F32_streamed_to_temp_file_then_release_quant_override",
@@ -1682,8 +1686,10 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         or runner.get("minimum_free_disk_gib") != 1152
         or runner.get("minimum_physical_ram_gib") != 256
         or runner.get("bounded_memory_minimum_physical_ram_gib") != 120
-        or runner.get("bounded_memory_mode") != "llama_patched_ple_writeback_use_temp_then_gguf_split"
-        or runner.get("bounded_memory_status") != "patched_after_127269264_kib_oom_pending_remeasurement"
+        or runner.get("bounded_memory_mode") !=
+            "llama_patched_ple_writeback_use_temp_then_bounded_copy_gguf_split"
+        or runner.get("bounded_memory_status") !=
+            "patched_after_run_33077679060_splitter_bad_alloc_pending_remeasurement"
         or runner.get("certification_host_memtotal_bytes") != 134297894912
     ):
         raise PipelineError("release conversion runner must require 1152 GiB disk and 256 GiB RAM")
@@ -1875,18 +1881,26 @@ def validate_tools(
     if not isinstance(bounded, dict):
         raise PipelineError("conversion bounded-memory contract is missing")
     patch_path = ember_dir / str(bounded.get("ple_cgroup_writeback_patch", ""))
+    splitter_patch_path = ember_dir / str(
+        bounded.get("gguf_split_bounded_copy_patch", ""))
     if (not patch_path.is_file()
             or sha256_file(patch_path) != bounded.get("ple_cgroup_writeback_patch_sha256")):
         raise PipelineError("pinned Qwen PLE cgroup-writeback patch is missing or changed")
+    if (not splitter_patch_path.is_file()
+            or sha256_file(splitter_patch_path) !=
+            bounded.get("gguf_split_bounded_copy_patch_sha256")):
+        raise PipelineError("pinned GGUF splitter bounded-copy patch is missing or changed")
     llama_dirty = run_git_checked(
         git, llama_dir, ["status", "--porcelain", "--untracked-files=all"])
-    if llama_dirty != "M conversion/qwen4exp.py":
+    if llama_dirty.splitlines() != [
+            "M conversion/qwen4exp.py", " M tools/gguf-split/gguf-split.cpp"]:
         raise PipelineError(
-            "llama.cpp must differ from the pinned base only by the audited Qwen PLE patch")
-    run_checked([
-        git, "-c", f"safe.directory={llama_dir}", "-C", str(llama_dir),
-        "apply", "--reverse", "--check", str(patch_path),
-    ])
+            "llama.cpp must differ from the pinned base only by the audited Qwen PLE and bounded splitter patches")
+    for audited_patch in (patch_path, splitter_patch_path):
+        run_checked([
+            git, "-c", f"safe.directory={llama_dir}", "-C", str(llama_dir),
+            "apply", "--reverse", "--check", str(audited_patch),
+        ])
     clean_checkouts = [(rocmfpx_dir, "ROCmFPX")]
     if ember_has_git:
         clean_checkouts.append((ember_dir, "Ember"))
@@ -1897,12 +1911,23 @@ def validate_tools(
             raise PipelineError(f"{label} checkout is dirty; pinned conversion requires a clean tree")
     converter = llama_dir / "convert_hf_to_gguf.py"
     qwen_converter = llama_dir / "conversion" / "qwen4exp.py"
+    splitter_source = llama_dir / "tools" / "gguf-split" / "gguf-split.cpp"
     quantizer_source = rocmfpx_dir / "tools" / "quantize" / "quantize.cpp"
-    for path in (converter, qwen_converter, quantizer_source):
+    for path in (converter, qwen_converter, splitter_source, quantizer_source):
         if not path.is_file():
             raise PipelineError(f"required tool source is missing: {path}")
     if sha256_file(qwen_converter) != bounded.get("patched_qwen4exp_sha256"):
         raise PipelineError("patched Qwen4Exp converter digest differs from the audited cgroup fix")
+    if sha256_file(splitter_source) != bounded.get("patched_gguf_split_source_sha256"):
+        raise PipelineError("patched GGUF splitter source digest differs from the audited bounded-copy fix")
+    splitter_text = splitter_source.read_text(encoding="utf-8")
+    expected_copy_buffer = bounded.get("gguf_split_copy_buffer_bytes")
+    if (expected_copy_buffer != 16 * 1024 * 1024
+            or "static constexpr size_t COPY_BUFFER_SIZE = 16 * 1024 * 1024;" not in splitter_text
+            or "while (copied < len)" not in splitter_text
+            or "read_buf.resize(n_bytes)" in splitter_text
+            or "read_buf.resize(len)" in splitter_text):
+        raise PipelineError("pinned GGUF splitter does not enforce the audited 16 MiB copy bound")
     qwen_text = qwen_converter.read_text(encoding="utf-8")
     if "Qwen4ExpForConditionalGeneration" not in qwen_text or "_read_hash_constants" not in qwen_text:
         raise PipelineError("pinned converter lacks Qwen4Exp exact PLE metadata handling")
@@ -1935,6 +1960,9 @@ def validate_tools(
         "converter_sha256": sha256_file(converter),
         "qwen4exp_converter_sha256": sha256_file(qwen_converter),
         "ple_cgroup_writeback_patch_sha256": sha256_file(patch_path),
+        "gguf_split_bounded_copy_patch_sha256": sha256_file(splitter_patch_path),
+        "gguf_split_source_sha256": sha256_file(splitter_source),
+        "gguf_split_copy_buffer_bytes": expected_copy_buffer,
         "rocmfpx_revision": rocmfpx_head,
         "ember_revision": ember_head,
         "ember_revision_source": ember_revision_source,
@@ -2823,6 +2851,9 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
                 False if args.bounded_memory_temp or bf16_cache is not None else None),
             "temporary_directory": (
                 "private_transaction_directory" if args.bounded_memory_temp else None),
+            "split_copy_buffer_bytes": (
+                tools["gguf_split_copy_buffer_bytes"]
+                if args.gguf_splitter is not None else None),
             "target_measurement_status": (
                 "reused_verified_cache_measurement"
                 if bf16_cache is not None

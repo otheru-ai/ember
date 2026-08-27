@@ -1,0 +1,242 @@
+name: Qwen gfx1151 construction request bridge
+
+on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      request_payload_base64:
+        required: true
+        type: string
+      request_payload_sha256:
+        required: true
+        type: string
+      output:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character Ember revision containing the request validator
+        required: true
+        type: string
+      mode:
+        description: Exact candidate-construction operation
+        required: true
+        type: choice
+        options: [prepare-cache, prepare-companions, build-candidate, normalize-candidate]
+      request_payload_base64:
+        description: Base64 of the complete candidate-construction-request.v1 JSON bytes
+        required: true
+        type: string
+      request_payload_sha256:
+        description: SHA-256 of the decoded request bytes
+        required: true
+        type: string
+      output:
+        description: New request JSON beneath the fixed workset evidence/operation-requests directory
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-gfx1151-request-bridge
+  cancel-in-progress: false
+
+jobs:
+  persist-request:
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 10
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      REQUEST_MODE: ${{ inputs.mode }}
+      REQUEST_PAYLOAD_BASE64: ${{ inputs.request_payload_base64 }}
+      REQUEST_PAYLOAD_SHA256: ${{ inputs.request_payload_sha256 }}
+      REQUEST_OUTPUT: ${{ inputs.output }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Validate and durably persist one exact construction request
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REQUEST_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --quiet --exit-code
+          python3 - "$REQUEST_MODE" "$REQUEST_PAYLOAD_BASE64" \
+              "$REQUEST_PAYLOAD_SHA256" "$REQUEST_OUTPUT" "$GITHUB_ENV" <<'PY'
+          import base64, binascii, hashlib, json, os, pathlib, re, stat, sys
+
+          mode, encoded, expected_sha, output_raw, env_path = sys.argv[1:]
+          workspace = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next")
+          request_root = workspace / "artifacts/qwen-workset/evidence/operation-requests"
+
+          def fail(message):
+              raise SystemExit(message)
+
+          def exact_path(raw, label, *, exists=True, kind=None):
+              if (not isinstance(raw, str) or not raw.startswith("/")
+                      or os.path.normpath(raw) != raw or "\n" in raw or "\0" in raw):
+                  fail(f"{label} is not one normalized absolute path")
+              path = pathlib.Path(raw)
+              current = pathlib.Path(path.anchor)
+              for index, part in enumerate(path.parts[1:]):
+                  current /= part
+                  if current.is_symlink():
+                      fail(f"{label} traverses a symlink: {current}")
+                  if index < len(path.parts[1:]) - 1 and not current.is_dir():
+                      fail(f"{label} parent is not a directory: {current}")
+              if exists and not path.exists():
+                  fail(f"{label} does not exist")
+              if kind == "file":
+                  metadata = path.stat()
+                  if not path.is_file() or path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                      fail(f"{label} is not one regular non-symlink file")
+              return path
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                      digest.update(block)
+              return digest.hexdigest()
+
+          try:
+              payload = base64.b64decode(encoded, validate=True)
+          except (binascii.Error, ValueError) as exc:
+              fail(f"request payload is not strict base64: {exc}")
+          if not payload or len(payload) > 65536:
+              fail("decoded request payload must contain 1..65536 bytes")
+          if hashlib.sha256(payload).hexdigest() != expected_sha:
+              fail("decoded request payload digest differs")
+          try:
+              value = json.loads(payload)
+          except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+              fail(f"request payload is not UTF-8 JSON: {exc}")
+          if (not isinstance(value, dict)
+                  or set(value) != {"schema", "mode", "parameters", "publishes", "deletes"}
+                  or value.get("schema") != "ember.qwen3.8.candidate-construction-request.v1"
+                  or value.get("mode") != mode or value.get("publishes") is not False
+                  or value.get("deletes") is not False
+                  or not isinstance(value.get("parameters"), dict)):
+              fail("construction request schema/mode/lifecycle differs")
+          parameters = value["parameters"]
+          expected = {
+              "prepare-cache": set(),
+              "prepare-companions": {"cache_manifest"},
+              "build-candidate": {"capture_manifest", "cache_manifest", "companion_rocmi4",
+                  "companion_fast", "selection_plan", "candidate_kind", "candidate_stage",
+                  "row_id", "candidate_id", "intervention_configuration_id",
+                  "intervention_manifest", "quantization_arm", "mtp_matrix_quant_contract"},
+              "normalize-candidate": {"normalization_request"},
+          }
+          if mode not in expected or set(parameters) != expected[mode]:
+              fail("construction request parameters differ for mode")
+
+          def descriptor(name, *, nullable=False):
+              item = parameters.get(name)
+              if item is None:
+                  if nullable:
+                      return None
+                  fail(f"{name} descriptor is required")
+              if (not isinstance(item, dict) or set(item) != {"path", "sha256"}
+                      or re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))) is None):
+                  fail(f"{name} descriptor is malformed")
+              path = exact_path(item.get("path"), name, kind="file")
+              if sha256(path) != item["sha256"]:
+                  fail(f"{name} digest differs")
+              return item
+
+          if mode == "prepare-companions":
+              descriptor("cache_manifest")
+          elif mode == "build-candidate":
+              for name in ("capture_manifest", "cache_manifest", "companion_rocmi4",
+                           "companion_fast", "selection_plan"):
+                  descriptor(name)
+              kind = parameters.get("candidate_kind")
+              stage = parameters.get("candidate_stage")
+              scalar_names = ("row_id", "candidate_id", "quantization_arm",
+                              "mtp_matrix_quant_contract")
+              if kind not in ("stock", "intervention"):
+                  fail("candidate_kind differs")
+              if stage not in ("stock", "sweep", "format"):
+                  fail("candidate_stage differs")
+              for name in scalar_names:
+                  item = parameters.get(name)
+                  if (not isinstance(item, str)
+                          or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", item) is None):
+                      fail(f"{name} is malformed")
+              configuration = parameters.get("intervention_configuration_id")
+              intervention = parameters.get("intervention_manifest")
+              if kind == "stock":
+                  if (stage != "stock" or parameters["row_id"] != "stock-rocmi4-exact"
+                          or parameters["quantization_arm"] != "rocmi4-control"
+                          or parameters["mtp_matrix_quant_contract"] != "Q4_0_ROCMI4"
+                          or configuration is not None or intervention is not None):
+                      fail("stock request identity differs")
+              else:
+                  if stage not in ("sweep", "format") or not isinstance(configuration, str):
+                      fail("intervention request identity differs")
+                  if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", configuration) is None:
+                      fail("intervention configuration id is malformed")
+                  descriptor("intervention_manifest")
+          elif mode == "normalize-candidate":
+              descriptor("normalization_request")
+
+          for parent in (workspace, workspace / "artifacts",
+                         workspace / "artifacts/qwen-workset",
+                         workspace / "artifacts/qwen-workset/evidence"):
+              exact_path(str(parent), "request output parent")
+              if not parent.is_dir():
+                  fail(f"request output parent is not a directory: {parent}")
+          if not request_root.exists():
+              request_root.mkdir(mode=0o700)
+          exact_path(str(request_root), "request root")
+          if not request_root.is_dir() or request_root.is_symlink():
+              fail("request root is not one real directory")
+          output = exact_path(output_raw, "request output", exists=False)
+          if (output.parent != request_root
+                  or re.fullmatch(r"construction-[A-Za-z0-9._-]{1,80}\.json", output.name) is None):
+              fail("request output escapes the fixed request root or has an unsafe name")
+          if output.exists() or output.is_symlink():
+              fail("request output already exists")
+          descriptor_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor_fd, "wb") as stream:
+              stream.write(payload); stream.flush(); os.fsync(stream.fileno())
+          directory_fd = os.open(request_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+          try:
+              os.fsync(directory_fd)
+          finally:
+              os.close(directory_fd)
+          actual_sha = sha256(output)
+          if actual_sha != expected_sha:
+              fail("persisted request digest differs after fsync")
+          with open(env_path, "a", encoding="utf-8") as stream:
+              stream.write(f"PERSISTED_REQUEST={output}\n")
+              stream.write(f"PERSISTED_REQUEST_SHA256={actual_sha}\n")
+          print(json.dumps({"status": "complete", "mode": mode, "path": str(output),
+                            "sha256": actual_sha, "publishes": False, "deletes": False},
+                           sort_keys=True))
+          PY
+
+      - name: Report exact construction request handoff
+        run: |
+          {
+            echo '## Qwen construction request persisted'
+            echo
+            echo "Mode: \`$REQUEST_MODE\`"
+            echo "Request: \`$PERSISTED_REQUEST\`"
+            echo "Request SHA-256: \`$PERSISTED_REQUEST_SHA256\`"
+            echo
+            echo 'No GPU, production service, model artifact, or package was touched.'
+          } >>"$GITHUB_STEP_SUMMARY"

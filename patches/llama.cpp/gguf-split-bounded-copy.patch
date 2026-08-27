@@ -1,0 +1,44 @@
+diff --git a/tools/gguf-split/gguf-split.cpp b/tools/gguf-split/gguf-split.cpp
+index c6cdbb98e..82ee3587a 100644
+--- a/tools/gguf-split/gguf-split.cpp
++++ b/tools/gguf-split/gguf-split.cpp
+@@ -210,8 +210,9 @@ struct split_strategy {
+     // one ctx_out per one output file
+     std::vector<struct gguf_context *> ctx_outs;
+ 
+-    // temporary buffer for reading in tensor data
+-    std::vector<uint8_t> read_buf;
++    // Keep tensor copies bounded: a single tensor may be larger than host RAM.
++    static constexpr size_t COPY_BUFFER_SIZE = 16 * 1024 * 1024;
++    std::vector<uint8_t> read_buf = std::vector<uint8_t>(COPY_BUFFER_SIZE);
+ 
+     split_strategy(const split_params & params,
+             std::ifstream & f_input,
+@@ -337,8 +338,6 @@ struct split_strategy {
+                 const char * t_name = gguf_get_tensor_name(ctx_out, i);
+                 struct ggml_tensor * t = ggml_get_tensor(ctx_meta, t_name);
+                 auto n_bytes = ggml_nbytes(t);
+-                read_buf.resize(n_bytes);
+-
+                 // calculate offset
+                 auto i_tensor_in = gguf_find_tensor(ctx_gguf, t_name); // idx of tensor in the input file
+                 auto offset = gguf_get_data_offset(ctx_gguf) + gguf_get_tensor_offset(ctx_gguf, i_tensor_in);
+@@ -357,11 +356,13 @@ struct split_strategy {
+ 
+     void copy_file_to_file(std::ifstream & f_in, std::ofstream & f_out, const size_t in_offset, const size_t len) {
+         // TODO: detect OS and use copy_file_range() here for better performance
+-        if (read_buf.size() < len) {
+-            read_buf.resize(len);
+-        }
+         f_in.seekg(in_offset);
+-        f_in.read((char *)read_buf.data(), len);
+-        f_out.write((const char *)read_buf.data(), len);
++        size_t copied = 0;
++        while (copied < len) {
++            const size_t chunk = std::min(read_buf.size(), len - copied);
++            f_in.read((char *)read_buf.data(), chunk);
++            f_out.write((const char *)read_buf.data(), chunk);
++            copied += chunk;
++        }
+     }
+ };

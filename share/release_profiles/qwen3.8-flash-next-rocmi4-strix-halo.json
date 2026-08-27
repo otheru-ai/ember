@@ -58,6 +58,10 @@
       "ple_cgroup_writeback_patch": "patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch",
       "ple_cgroup_writeback_patch_sha256": "606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc",
       "patched_qwen4exp_sha256": "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee",
+      "gguf_split_bounded_copy_patch": "patches/llama.cpp/gguf-split-bounded-copy.patch",
+      "gguf_split_bounded_copy_patch_sha256": "b174f2b2a0b11e78e812e5f31d9ac84deaa8f94f9650abdab3760655c3aebe38",
+      "patched_gguf_split_source_sha256": "fc6fc7103959763791d49e338916dd020429b1948ad357a5e5e54d54137be321",
+      "gguf_split_copy_buffer_bytes": 16777216,
       "ple_intermediate_storage": "F32_streamed_to_temp_file_then_release_quant_override",
       "failed_control_run": {
         "github_run_id": 33050472929,
@@ -73,6 +77,12 @@
         "maximum_resident_set_kib": 128524508,
         "elapsed_seconds": 836.42,
         "converter_exit_status": -9
+      },
+      "third_failed_control_run": {
+        "github_run_id": 33077679060,
+        "failure": "splitter_allocated_the_full_204.8GB_PLE_tensor_inside_a_125GiB_cgroup",
+        "splitter_exit_status": -6,
+        "splitter_exception": "std::bad_alloc"
       },
       "target_measurement_status": "pending_patched_peak_rss_and_wall_time"
     },
@@ -291,8 +301,8 @@
       "preferred_free_disk_gib": 1536,
       "minimum_physical_ram_gib": 256,
       "bounded_memory_minimum_physical_ram_gib": 120,
-      "bounded_memory_mode": "llama_patched_ple_writeback_use_temp_then_gguf_split",
-      "bounded_memory_status": "patched_after_127269264_kib_oom_pending_remeasurement",
+      "bounded_memory_mode": "llama_patched_ple_writeback_use_temp_then_bounded_copy_gguf_split",
+      "bounded_memory_status": "patched_after_run_33077679060_splitter_bad_alloc_pending_remeasurement",
       "certification_host_memtotal_bytes": 134297894912,
       "reason": "ordinary conversion needs approximately 204 GB; the 120 GiB path must use --use-temp-file and the pinned splitter and remains unmeasured until its build record captures the OtherU run"
     },

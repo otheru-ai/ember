@@ -1,6 +1,20 @@
 name: Qwen gfx1151 candidate construction
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      mode:
+        required: true
+        type: string
+      operation_request:
+        required: true
+        type: string
+      operation_request_sha256:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -26,7 +40,10 @@ permissions:
   packages: read
 
 concurrency:
-  group: gfx1151-certification
+  # A reusable invocation is already serialized by gfx1151-certify.yml. Give
+  # its nested workflow a run-unique group so it cannot queue behind its own
+  # caller while preserving the global group for direct dispatches.
+  group: ${{ contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@') && format('qwen-construct-called-{0}', github.run_id) || 'gfx1151-certification' }}
   cancel-in-progress: false
 
 jobs:
@@ -42,6 +59,7 @@ jobs:
       LLAMA_REVISION: abdc7a0bf815d3b83e26dd523c6960e4dd597e82
       ROCMFPX_REVISION: c49ebdbd5c9f01ec242369f9e7f7967855f80cba
       PLE_PATCH_SHA256: 606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc
+      SPLITTER_PATCH_SHA256: b174f2b2a0b11e78e812e5f31d9ac84deaa8f94f9650abdab3760655c3aebe38
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -309,10 +327,15 @@ jobs:
           ensure_checkout https://github.com/charlie12345/ROCmFPX.git \
             "$ROCMFPX_REVISION" "$QWEN_TOOLING/ROCmFPX"
           patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
+          splitter_patch="$GITHUB_WORKSPACE/patches/llama.cpp/gguf-split-bounded-copy.patch"
           echo "$PLE_PATCH_SHA256  $patch" | sha256sum -c -
+          echo "$SPLITTER_PATCH_SHA256  $splitter_patch" | sha256sum -c -
           git -C "$QWEN_TOOLING/llama.cpp" apply --check "$patch"
           git -C "$QWEN_TOOLING/llama.cpp" apply "$patch"
+          git -C "$QWEN_TOOLING/llama.cpp" apply --check "$splitter_patch"
+          git -C "$QWEN_TOOLING/llama.cpp" apply "$splitter_patch"
           echo "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee  $QWEN_TOOLING/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
+          echo "fc6fc7103959763791d49e338916dd020429b1948ad357a5e5e54d54137be321  $QWEN_TOOLING/llama.cpp/tools/gguf-split/gguf-split.cpp" | sha256sum -c -
           uid="$(id -u)"; gid="$(id -g)"
           docker run --rm --network host --memory 125g --memory-swap 125g --user "$uid:$gid" \
             -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \

@@ -214,6 +214,8 @@ class CandidateBuilderTests(unittest.TestCase):
                 "qwen4exp_converter_sha256": digest(
                     fixture.llama / "conversion" / "qwen4exp.py"),
                 "ple_cgroup_writeback_patch_sha256": digest(fixture.ple_patch),
+                "gguf_split_bounded_copy_patch_sha256":
+                    digest(fixture.splitter_patch),
                 "gguf_splitter_sha256": "4" * 64,
                 "converter_environment_lock_sha256": "6" * 64,
                 "converter_environment_lock_bytes": 123,
@@ -230,6 +232,7 @@ class CandidateBuilderTests(unittest.TestCase):
                 "toolchain": dict(tools),
                 "conversion": {"outtype": "bf16", "split_max_size": "48G",
                                "use_temp_file": True,
+                               "split_copy_buffer_bytes": 16 * 1024 * 1024,
                                "main_storage_policy": "mostly_bf16_with_f32_ple",
                                "ple_intermediate_storage":
                                    "F32_streamed_to_temp_file_then_release_quant_override",

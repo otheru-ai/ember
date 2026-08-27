@@ -252,6 +252,18 @@ class Fixture:
         (self.llama / "conversion" / "qwen4exp.py").write_text(
             "Qwen4ExpForConditionalGeneration = True\ndef _read_hash_constants(): pass\n", encoding="utf-8",
         )
+        splitter_source = self.llama / "tools" / "gguf-split" / "gguf-split.cpp"
+        splitter_source.parent.mkdir(parents=True)
+        splitter_source.write_text(
+            "#include <algorithm>\n#include <cstddef>\n#include <vector>\n"
+            "struct split_strategy {\n"
+            " std::vector<unsigned char> read_buf;\n"
+            " void write(std::size_t n_bytes) { read_buf.resize(n_bytes); }\n"
+            " void copy_file_to_file(std::size_t len) {\n"
+            "  if (read_buf.size() < len) { read_buf.resize(len); }\n"
+            " }\n};\n",
+            encoding="utf-8",
+        )
         self.llama_base = commit_all(self.llama, "base")
         (self.llama / "rotated-kv.txt").write_text("mandatory fix\n", encoding="utf-8")
         self.gguf_splitter = self.llama / "llama-gguf-split"
@@ -275,6 +287,23 @@ class Fixture:
         )
         ple_patch_text = git(
             self.llama, "diff", "--binary", "--", "conversion/qwen4exp.py") + "\n"
+        splitter_source.write_text(
+            "#include <algorithm>\n#include <cstddef>\n#include <vector>\n"
+            "struct split_strategy {\n"
+            " static constexpr size_t COPY_BUFFER_SIZE = 16 * 1024 * 1024;\n"
+            " std::vector<unsigned char> read_buf = std::vector<unsigned char>(COPY_BUFFER_SIZE);\n"
+            " void write(std::size_t) {}\n"
+            " void copy_file_to_file(std::size_t len) {\n"
+            "  std::size_t copied = 0;\n"
+            "  while (copied < len) {\n"
+            "   const std::size_t chunk = std::min(read_buf.size(), len - copied);\n"
+            "   copied += chunk;\n"
+            "  }\n"
+            " }\n};\n",
+            encoding="utf-8",
+        )
+        splitter_patch_text = git(
+            self.llama, "diff", "--binary", "--", "tools/gguf-split/gguf-split.cpp") + "\n"
 
         self.rocmfpx = root / "rocmfpx"
         init_repo(self.rocmfpx)
@@ -289,6 +318,9 @@ class Fixture:
         self.ple_patch = self.ember / "patches" / "llama.cpp" / "qwen4exp-ple-cgroup-writeback.patch"
         self.ple_patch.parent.mkdir(parents=True)
         self.ple_patch.write_text(ple_patch_text, encoding="utf-8")
+        self.splitter_patch = (
+            self.ember / "patches" / "llama.cpp" / "gguf-split-bounded-copy.patch")
+        self.splitter_patch.write_text(splitter_patch_text, encoding="utf-8")
         self.fail_quantizer = root / "fail-quantizer"
         self.quantizer_started = root / "quantizer-started"
         self.pause_success = root / "pause-success"
@@ -377,6 +409,11 @@ class Fixture:
             "ple_cgroup_writeback_patch": "patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch",
             "ple_cgroup_writeback_patch_sha256": sha256(self.ple_patch),
             "patched_qwen4exp_sha256": sha256(qwen_converter),
+            "gguf_split_bounded_copy_patch":
+                "patches/llama.cpp/gguf-split-bounded-copy.patch",
+            "gguf_split_bounded_copy_patch_sha256": sha256(self.splitter_patch),
+            "patched_gguf_split_source_sha256": sha256(splitter_source),
+            "gguf_split_copy_buffer_bytes": 16 * 1024 * 1024,
         })
         base_profile["quantizer"]["revision"] = self.rocm_revision
         base_profile["quantization"]["source_provenance"] = {
@@ -837,6 +874,43 @@ class QwenQuantizeTests(unittest.TestCase):
                 "pending_patched_peak_rss_and_wall_time",
             )
             self.assertIn("gguf_splitter_sha256", record["tools"])
+            self.assertEqual(
+                record["tools"]["gguf_split_copy_buffer_bytes"], 16 * 1024 * 1024)
+            self.assertEqual(
+                record["conversion_memory"]["split_copy_buffer_bytes"],
+                16 * 1024 * 1024,
+            )
+
+    def test_splitter_provenance_rejects_unbounded_copy_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            splitter_source = (
+                fixture.llama / "tools" / "gguf-split" / "gguf-split.cpp")
+            splitter_source.write_text(
+                splitter_source.read_text(encoding="utf-8")
+                + "\n// regression: read_buf.resize(len);\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                fixture.command(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("patched GGUF splitter source digest differs", result.stderr)
+
+    def test_splitter_patch_digest_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            fixture.splitter_patch.write_text(
+                fixture.splitter_patch.read_text(encoding="utf-8") + "# tampered\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                fixture.command(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("bounded-copy patch is missing or changed", result.stderr)
 
     def test_bounded_memory_execute_removes_unsplit_before_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

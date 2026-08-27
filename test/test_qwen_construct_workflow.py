@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -16,6 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-gfx1151-construct.yml"
+REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
+DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -70,6 +73,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         ):
             self.assertIn(revision, body)
         self.assertIn("PLE_PATCH_SHA256: 606880dd1e23", body)
+        self.assertIn("SPLITTER_PATCH_SHA256: b174f2b2a0b", body)
+        self.assertIn("gguf-split-bounded-copy.patch", body)
+        self.assertIn("fc6fc7103959763791d49e338916dd020429b1948ad357a5e5e54d54137be321", body)
         self.assertIn('builder="$repository@$builder_digest"', body)
         self.assertIn('runtime="$repository@$runtime_digest"', body)
         self.assertIn("converter-requirements.freeze.txt", body)
@@ -79,7 +85,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
 
     def test_construction_is_serial_same_path_uid_and_bounded(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("group: gfx1151-certification", body)
+        self.assertIn("'gfx1151-certification'", body)
         self.assertIn("cancel-in-progress: false", body)
         self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", body)
         self.assertIn("workspace=/var/tmp/ember-qwen3.8-flash-next", body)
@@ -124,6 +130,10 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
         self.assertIsNotNone(dispatch)
         declared = set(re.findall(r"^      ([a-z0-9_]+):$", dispatch.group(1), re.M))
+        reusable = re.search(r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:",
+                             body, re.S)
+        self.assertIsNotNone(reusable)
+        declared.update(re.findall(r"^      ([a-z0-9_]+):$", reusable.group(1), re.M))
         referenced = set(re.findall(r"\binputs\.([a-zA-Z0-9_]+)\b", body))
         self.assertEqual(referenced - declared, set(),
                          "workflow expressions reference undeclared dispatch inputs")
@@ -139,6 +149,167 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "if: inputs.mode == 'build-candidate' && env.QWEN_CANDIDATE_KIND == 'stock'",
             body,
         )
+
+    def test_request_bridge_is_bounded_digest_pinned_and_non_mutating(self) -> None:
+        body = REQUEST_BRIDGE.read_text(encoding="utf-8")
+        ruby = shutil.which("ruby")
+        if ruby:
+            subprocess.run(
+                [ruby, "-e", "require 'yaml'; YAML.parse_file(ARGV[0])", str(REQUEST_BRIDGE)],
+                check=True,
+            )
+        dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
+        self.assertIsNotNone(dispatch)
+        declared = re.findall(r"^      ([a-z0-9_]+):$", dispatch.group(1), re.M)
+        self.assertEqual(declared, ["commit_sha", "mode", "request_payload_base64",
+                                    "request_payload_sha256", "output"])
+        self.assertLessEqual(len(declared), 10)
+        reusable = re.search(r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:",
+                             body, re.S)
+        self.assertIsNotNone(reusable)
+        self.assertEqual(len(re.findall(r"^      [a-z0-9_]+:$", reusable.group(1), re.M)), 5)
+        referenced = set(re.findall(r"\binputs\.([a-zA-Z0-9_]+)\b", body))
+        self.assertEqual(referenced - set(declared), set())
+        self.assertIn("base64.b64decode(encoded, validate=True)", body)
+        self.assertIn("hashlib.sha256(payload).hexdigest() != expected_sha", body)
+        self.assertIn("os.O_WRONLY | os.O_CREAT | os.O_EXCL", body)
+        self.assertGreaterEqual(body.count("os.fsync("), 2)
+        self.assertIn("evidence/operation-requests", body)
+        self.assertIn("construction-[A-Za-z0-9._-]{1,80}", body)
+        self.assertIn("sha256(path) != item[\"sha256\"]", body)
+        self.assertIn("decoded request payload must contain 1..65536 bytes", body)
+        for forbidden in ("docker run", "ember-gpu-lock", "ember-cert-production",
+                          "rm ", "unlink(", "rmtree", "packages: write"):
+            self.assertNotIn(forbidden, body)
+        for block in workflow_run_blocks(body):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            result = subprocess.run(
+                ["bash", "-n"], input=neutral, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, "request-bridge-heredoc.py", "exec")
+        validator = next(
+            script for block in workflow_run_blocks(body)
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.S)
+            if "candidate-construction-request.v1" in script
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env_path = root / "github-env"
+            output = root / "must-not-exist.json"
+            bad_base64 = subprocess.run(
+                [sys.executable, "-", "prepare-cache", "%%%", "0" * 64,
+                 str(output), str(env_path)],
+                input=validator, text=True, capture_output=True,
+            )
+            self.assertNotEqual(bad_base64.returncode, 0)
+            self.assertFalse(output.exists())
+
+            payload = json.dumps({
+                "schema": "ember.qwen3.8.candidate-construction-request.v1",
+                "mode": "prepare-cache", "parameters": {"unexpected": None},
+                "publishes": False, "deletes": False,
+            }, separators=(",", ":")).encode()
+            malformed = subprocess.run(
+                [sys.executable, "-", "prepare-cache",
+                 base64.b64encode(payload).decode(),
+                 hashlib.sha256(payload).hexdigest(), str(output), str(env_path)],
+                input=validator, text=True, capture_output=True,
+            )
+            self.assertNotEqual(malformed.returncode, 0)
+            self.assertFalse(output.exists())
+
+    def test_default_branch_dispatcher_calls_same_revision_reusable_workflows(self) -> None:
+        body = DISPATCHER.read_text(encoding="utf-8")
+        dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
+        self.assertIsNotNone(dispatch)
+        inputs = re.findall(r"^      ([a-z0-9_]+):$", dispatch.group(1), re.M)
+        self.assertEqual(inputs, ["commit_sha", "release_version",
+                                  "qwen_dispatch_envelope_base64",
+                                  "qwen_dispatch_envelope_sha256"])
+        self.assertLessEqual(len(inputs), 10)
+        for path, expected_count in ((REQUEST_BRIDGE, 5), (WORKFLOW, 4),
+                                     (ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml", 10)):
+            called = re.search(r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:",
+                               path.read_text(encoding="utf-8"), re.S)
+            self.assertIsNotNone(called)
+            self.assertEqual(
+                len(re.findall(r"^      [a-z0-9_]+:$", called.group(1), re.M)),
+                expected_count,
+            )
+        self.assertIn("inputs.release_version == 'qwen-dispatch'", body)
+        self.assertIn("CALLER_SHA: ${{ github.sha }}", body)
+        self.assertIn('test "$CALLER_SHA" = "$TARGET_SHA"', body)
+        for workflow in (
+            "qwen-gfx1151-request-bridge.yml",
+            "qwen-gfx1151-construct.yml",
+            "qwen-gfx1151-retire-stock.yml",
+        ):
+            self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
+        self.assertNotRegex(body, r"uses:.*\$\{\{")
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 3)
+        self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
+                      WORKFLOW.read_text(encoding="utf-8"))
+        self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
+        self.assertIn("decoded dispatch envelope must contain 1..32768 bytes", body)
+        self.assertIn("len(nested_payload) > 16384", body)
+        self.assertIn("RETIRE_CAPTURED_STOCK_SHARDS", body)
+        self.assertIn("value.get(\"deletes\") is not (operation == \"retire\")", body)
+        for index, block in enumerate(workflow_run_blocks(body)):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            shell = subprocess.run(
+                ["bash", "-n"], input=neutral, text=True, capture_output=True,
+            )
+            self.assertEqual(shell.returncode, 0,
+                             f"dispatcher run block {index}: {shell.stderr}")
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, f"dispatcher-run-{index}-heredoc.py", "exec")
+
+        parser = next(
+            script for block in workflow_run_blocks(body)
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.S)
+            if "branch-dispatch-envelope.v1" in script
+        )
+        revision = "1" * 40
+        nested = b"{}"
+        valid = {
+            "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+            "ember_revision": revision,
+            "operation": "request",
+            "inputs": {
+                "mode": "prepare-cache",
+                "request_payload_base64": base64.b64encode(nested).decode(),
+                "request_payload_sha256": hashlib.sha256(nested).hexdigest(),
+                "output": ("/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/"
+                           "evidence/operation-requests/construction-cache.json"),
+            },
+            "publishes": False,
+            "deletes": False,
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            output = Path(raw) / "github-output"
+
+            def invoke(value: dict) -> subprocess.CompletedProcess[str]:
+                payload = json.dumps(value, separators=(",", ":")).encode()
+                return subprocess.run(
+                    [sys.executable, "-", revision, base64.b64encode(payload).decode(),
+                     hashlib.sha256(payload).hexdigest(), str(output)],
+                    input=parser, text=True, capture_output=True,
+                )
+
+            accepted = invoke(valid)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=request\n", emitted)
+            self.assertIn("mode=prepare-cache\n", emitted)
+
+            output.unlink()
+            invalid = dict(valid)
+            invalid["deletes"] = True
+            rejected = invoke(invalid)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(output.exists())
 
     def test_embedded_operation_request_parser_accepts_only_exact_mode_shape(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

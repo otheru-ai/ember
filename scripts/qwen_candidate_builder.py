@@ -263,7 +263,9 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                         key: tools.get(key) for key in (
                             "llama_cpp_revision", "llama_cpp_base_revision",
                             "converter_sha256", "qwen4exp_converter_sha256",
-                            "ple_cgroup_writeback_patch_sha256", "gguf_splitter_sha256")
+                            "ple_cgroup_writeback_patch_sha256",
+                            "gguf_split_bounded_copy_patch_sha256",
+                            "gguf_splitter_sha256")
                     } | {
                         "converter_environment_lock_sha256": environment_lock["sha256"],
                         "converter_environment_lock_bytes": environment_lock["size_bytes"],
@@ -271,6 +273,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                     },
                     "conversion": {
                         "outtype": "bf16", "split_max_size": "48G", "use_temp_file": True,
+                        "split_copy_buffer_bytes": tools["gguf_split_copy_buffer_bytes"],
                         "main_storage_policy": "mostly_bf16_with_f32_ple",
                         "ple_intermediate_storage":
                             "F32_streamed_to_temp_file_then_release_quant_override",

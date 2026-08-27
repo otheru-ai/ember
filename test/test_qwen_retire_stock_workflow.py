@@ -74,7 +74,9 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
 
     def test_dispatch_binds_full_revision_digest_and_exact_persistent_paths(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
-        dispatch = body.split("permissions:", 1)[0]
+        match = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
+        self.assertIsNotNone(match)
+        dispatch = match.group(1)
         self.assertEqual(len(re.findall(r"(?m)^      [a-z0-9_]+:$", dispatch)), 10)
         self.assertNotRegex(dispatch, r"(?m)^      stock_dir:$")
         for required_input in (
@@ -96,6 +98,10 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         self.assertIn("filename is not one safe stock retirement id", body)
         self.assertIn("capture-manifest.json under workspace/evidence", body)
         self.assertIn("RETIRE_CAPTURED_STOCK_SHARDS", body)
+        self.assertIn(
+            "contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
+            body,
+        )
 
     def test_stock_artifact_revision_is_independent_from_builder_revision(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
@@ -149,6 +155,9 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         self.assertIn("ember.qwen3.8.stock-retirement-workflow-complete.v1", body)
         self.assertIn("reconstructive_not_undelete", body)
         self.assertIn("not recoverable in place", body)
+        self.assertIn("Capture manifest SHA-256:", body)
+        self.assertIn("Retained stock build record SHA-256:", body)
+        self.assertIn("Workflow completion SHA-256:", body)
         self.assertGreaterEqual(body.count('"publishes": False'), 2)
         self.assertGreaterEqual(body.count('get("publishes") is not False'), 2)
         self.assertIn("permissions:\n  contents: read\n  packages: read", body)

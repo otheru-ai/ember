@@ -1,6 +1,38 @@
 name: Qwen gfx1151 captured-stock retirement
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      builder_image:
+        required: true
+        type: string
+      builder_image_digest:
+        required: true
+        type: string
+      workset_root:
+        required: true
+        type: string
+      stock_artifact_revision:
+        required: true
+        type: string
+      stock_build_record_sha256:
+        required: true
+        type: string
+      capture_manifest:
+        required: true
+        type: string
+      capture_manifest_sha256:
+        required: true
+        type: string
+      authorization_output:
+        required: true
+        type: string
+      authorize:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -49,7 +81,9 @@ permissions:
   packages: read
 
 concurrency:
-  group: gfx1151-certification
+  # The default-branch dispatcher owns the global group for reusable calls.
+  # Direct dispatch retains that same exclusion boundary.
+  group: ${{ contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@') && format('qwen-retire-called-{0}', github.run_id) || 'gfx1151-certification' }}
   cancel-in-progress: false
 
 jobs:
@@ -482,6 +516,9 @@ jobs:
             echo "Source revision: \`$TARGET_SHA\`"
             echo "Stock artifact revision: \`$QWEN_STOCK_ARTIFACT_REVISION\`"
             echo "Builder image digest: \`$BUILDER_IMAGE_DIGEST\`"
+            echo "Capture manifest: \`$QWEN_CAPTURE_MANIFEST\`"
+            echo "Capture manifest SHA-256: \`$QWEN_CAPTURE_MANIFEST_SHA256\`"
+            echo "Retained stock build record SHA-256: \`$QWEN_STOCK_BUILD_RECORD_SHA256\`"
             echo "Builder authorization: \`$QWEN_RETIRE_AUTHORIZATION\`"
             echo "Builder completion: \`$QWEN_RETIRE_AUTHORIZATION.complete.json\`"
             echo "Workflow completion: \`$QWEN_WORKFLOW_COMPLETION\`"

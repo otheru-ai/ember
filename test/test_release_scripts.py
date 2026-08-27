@@ -344,6 +344,9 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", capture)
         self.assertIn("publishes", capture)
         self.assertIn("len(manifest[\"interventions\"]) == 16", capture)
+        self.assertIn("QWEN_CAPTURE_MANIFEST_SHA256", capture)
+        self.assertIn("Capture manifest SHA-256:", capture)
+        self.assertIn("Stock build record SHA-256:", capture)
         for command in (
             "ember-gpu-lock release", "ember-cert-production unmask",
             "ember-cert-production start",

@@ -157,7 +157,35 @@ limits `workflow_dispatch` to ten inputs, so every dispatch supplies only the
 commit, mode, and an exact path/SHA pair for an
 `ember.qwen3.8.candidate-construction-request.v1` manifest. The request has
 exactly `{schema, mode, parameters, publishes, deletes}`; its parameter keys
-are exact and mode-specific. The four serial dispatch modes are:
+are exact and mode-specific.
+
+[`qwen-gfx1151-request-bridge.yml`](../.github/workflows/qwen-gfx1151-request-bridge.yml)
+is the non-GPU bridge for creating that first runner-local request. It accepts
+the complete JSON bytes as strict base64 plus their SHA-256, validates the
+exact mode-specific schema and rehashes every referenced descriptor, and uses
+`O_EXCL` plus file and directory fsync beneath the fixed
+`qwen-workset/evidence/operation-requests` directory. Its summary reports the
+exact persistent path and digest consumed by the construction workflow. It
+does not quiesce production, touch model bytes, publish, delete, or overwrite.
+
+Until these specialized workflows land on the default branch, dispatch them
+through the default-branch `gfx1151-certify.yml` entrypoint at the exact target
+ref with `release_version=qwen-dispatch`. Its two additional inputs carry one
+strict-base64 `ember.qwen3.8.branch-dispatch-envelope.v1` object and the
+SHA-256 of its decoded bytes. The envelope binds the same full Ember revision,
+one of `request`, `construct`, or `retire`, exact operation inputs, and explicit
+non-publication/deletion lifecycle. Three static local reusable-workflow calls
+then select the operation. GitHub resolves a `./.github/workflows/...` reusable
+workflow from the caller's same commit, so branch logic cannot drift from the
+`commit_sha` supplied to the dispatcher. Retirement keeps its literal
+`RETIRE_CAPTURED_STOCK_SHARDS` acknowledgement inside the digest-bound
+envelope. The default dispatcher has four inputs, and every called workflow
+has at most ten.
+The decoded outer envelope is limited to 32 KiB and a nested construction
+request to 16 KiB, leaving headroom beneath GitHub's 65,535-character total
+manual-input payload limit after base64 expansion.
+
+The four serial dispatch modes are:
 
 1. `prepare-cache`, which creates the single content-addressed cache;
 2. `prepare-companions`, which creates both homogeneous `Q4_0_ROCMI4` and

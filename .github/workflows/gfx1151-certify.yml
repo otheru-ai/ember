@@ -11,6 +11,14 @@ on:
         description: Optional YEAR.M.D override; defaults to the current UTC date
         required: false
         type: string
+      qwen_dispatch_envelope_base64:
+        description: Strict base64 Qwen branch-workflow dispatch envelope
+        required: false
+        type: string
+      qwen_dispatch_envelope_sha256:
+        description: SHA-256 of the decoded Qwen dispatch envelope
+        required: false
+        type: string
     secrets:
       RELEASE_AUTOMATION_TOKEN:
         required: true
@@ -28,6 +36,14 @@ on:
         description: Optional YEAR.M.D override; defaults to the current UTC date
         required: false
         type: string
+      qwen_dispatch_envelope_base64:
+        description: Strict base64 Qwen branch-workflow dispatch envelope
+        required: false
+        type: string
+      qwen_dispatch_envelope_sha256:
+        description: SHA-256 of the decoded Qwen dispatch envelope
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -38,6 +54,204 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qwen-dispatch-envelope:
+    # This workflow exists on the default branch, so it is the stable manual
+    # dispatch entrypoint. Local reusable-workflow references resolve from the
+    # same commit as this caller, allowing exact feature-revision logic without
+    # weakening commit or artifact identity checks. GitHub's normative rule:
+    # https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#calling-a-reusable-workflow
+    if: inputs.release_version == 'qwen-dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      operation: ${{ steps.envelope.outputs.operation }}
+      mode: ${{ steps.envelope.outputs.mode }}
+      request_payload_base64: ${{ steps.envelope.outputs.request_payload_base64 }}
+      request_payload_sha256: ${{ steps.envelope.outputs.request_payload_sha256 }}
+      output: ${{ steps.envelope.outputs.output }}
+      operation_request: ${{ steps.envelope.outputs.operation_request }}
+      operation_request_sha256: ${{ steps.envelope.outputs.operation_request_sha256 }}
+      builder_image: ${{ steps.envelope.outputs.builder_image }}
+      builder_image_digest: ${{ steps.envelope.outputs.builder_image_digest }}
+      workset_root: ${{ steps.envelope.outputs.workset_root }}
+      stock_artifact_revision: ${{ steps.envelope.outputs.stock_artifact_revision }}
+      stock_build_record_sha256: ${{ steps.envelope.outputs.stock_build_record_sha256 }}
+      capture_manifest: ${{ steps.envelope.outputs.capture_manifest }}
+      capture_manifest_sha256: ${{ steps.envelope.outputs.capture_manifest_sha256 }}
+      authorization_output: ${{ steps.envelope.outputs.authorization_output }}
+      authorize: ${{ steps.envelope.outputs.authorize }}
+    steps:
+      - name: Decode and validate exact branch-workflow dispatch envelope
+        id: envelope
+        env:
+          TARGET_SHA: ${{ inputs.commit_sha }}
+          CALLER_SHA: ${{ github.sha }}
+          ENVELOPE_BASE64: ${{ inputs.qwen_dispatch_envelope_base64 }}
+          ENVELOPE_SHA256: ${{ inputs.qwen_dispatch_envelope_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$CALLER_SHA" = "$TARGET_SHA"
+          [[ "$ENVELOPE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          python3 - "$TARGET_SHA" "$ENVELOPE_BASE64" "$ENVELOPE_SHA256" \
+              "$GITHUB_OUTPUT" <<'PY'
+          import base64, binascii, hashlib, json, os, re, sys
+
+          revision, encoded, expected_sha, output_path = sys.argv[1:]
+
+          def fail(message):
+              raise SystemExit(message)
+
+          try:
+              payload = base64.b64decode(encoded, validate=True)
+          except (binascii.Error, ValueError) as exc:
+              fail(f"dispatch envelope is not strict base64: {exc}")
+          # The manual-dispatch input payload is capped at 65,535 characters.
+          # Keep ample room for base64 expansion plus the other three inputs.
+          if not payload or len(payload) > 32768:
+              fail("decoded dispatch envelope must contain 1..32768 bytes")
+          if hashlib.sha256(payload).hexdigest() != expected_sha:
+              fail("decoded dispatch envelope digest differs")
+          try:
+              value = json.loads(payload)
+          except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+              fail(f"dispatch envelope is not UTF-8 JSON: {exc}")
+          if (not isinstance(value, dict)
+                  or set(value) != {"schema", "ember_revision", "operation", "inputs",
+                                    "publishes", "deletes"}
+                  or value.get("schema") != "ember.qwen3.8.branch-dispatch-envelope.v1"
+                  or value.get("ember_revision") != revision
+                  or value.get("publishes") is not False
+                  or not isinstance(value.get("inputs"), dict)):
+              fail("dispatch envelope schema/revision/lifecycle differs")
+          operation = value.get("operation")
+          inputs = value["inputs"]
+          expected = {
+              "request": {"mode", "request_payload_base64", "request_payload_sha256", "output"},
+              "construct": {"mode", "operation_request", "operation_request_sha256"},
+              "retire": {"builder_image", "builder_image_digest", "workset_root",
+                         "stock_artifact_revision", "stock_build_record_sha256",
+                         "capture_manifest", "capture_manifest_sha256",
+                         "authorization_output", "authorize"},
+          }
+          if operation not in expected or set(inputs) != expected[operation]:
+              fail("dispatch operation or input keys differ")
+          if value.get("deletes") is not (operation == "retire"):
+              fail("dispatch deletion lifecycle differs")
+
+          def scalar(name):
+              item = inputs.get(name)
+              if not isinstance(item, str) or not item or "\n" in item or "\0" in item:
+                  fail(f"{name} is malformed")
+              return item
+
+          def digest(name, *, oci=False):
+              item = scalar(name)
+              pattern = r"sha256:[0-9a-f]{64}" if oci else r"[0-9a-f]{64}"
+              if re.fullmatch(pattern, item) is None:
+                  fail(f"{name} digest is malformed")
+              return item
+
+          def absolute(name):
+              item = scalar(name)
+              if not item.startswith("/") or os.path.normpath(item) != item:
+                  fail(f"{name} is not one normalized absolute path")
+              return item
+
+          result = {name: "" for names in expected.values() for name in names}
+          if operation == "request":
+              mode = scalar("mode")
+              if mode not in ("prepare-cache", "prepare-companions", "build-candidate",
+                              "normalize-candidate"):
+                  fail("request mode differs")
+              nested = scalar("request_payload_base64")
+              nested_sha = digest("request_payload_sha256")
+              try:
+                  nested_payload = base64.b64decode(nested, validate=True)
+              except (binascii.Error, ValueError) as exc:
+                  fail(f"construction request is not strict base64: {exc}")
+              if (not nested_payload or len(nested_payload) > 16384
+                      or hashlib.sha256(nested_payload).hexdigest() != nested_sha):
+                  fail("construction request payload/digest differs")
+              result.update({"mode": mode, "request_payload_base64": nested,
+                             "request_payload_sha256": nested_sha,
+                             "output": absolute("output")})
+          elif operation == "construct":
+              mode = scalar("mode")
+              if mode not in ("prepare-cache", "prepare-companions", "build-candidate",
+                              "normalize-candidate"):
+                  fail("construction mode differs")
+              result.update({"mode": mode, "operation_request": absolute("operation_request"),
+                             "operation_request_sha256": digest("operation_request_sha256")})
+          else:
+              image = scalar("builder_image")
+              if re.fullmatch(r"ghcr\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+", image) is None:
+                  fail("builder image reference is malformed")
+              stock_revision = scalar("stock_artifact_revision")
+              if re.fullmatch(r"[0-9a-f]{40}", stock_revision) is None:
+                  fail("stock artifact revision is malformed")
+              authorize = scalar("authorize")
+              if authorize != "RETIRE_CAPTURED_STOCK_SHARDS":
+                  fail("destructive acknowledgement differs")
+              result.update({"builder_image": image,
+                  "builder_image_digest": digest("builder_image_digest", oci=True),
+                  "workset_root": absolute("workset_root"),
+                  "stock_artifact_revision": stock_revision,
+                  "stock_build_record_sha256": digest("stock_build_record_sha256"),
+                  "capture_manifest": absolute("capture_manifest"),
+                  "capture_manifest_sha256": digest("capture_manifest_sha256"),
+                  "authorization_output": absolute("authorization_output"),
+                  "authorize": authorize})
+          result["operation"] = operation
+          with open(output_path, "a", encoding="utf-8") as stream:
+              for name, item in sorted(result.items()):
+                  stream.write(f"{name}={item}\n")
+          print(json.dumps({"status": "complete", "operation": operation,
+                            "ember_revision": revision, "envelope_sha256": expected_sha,
+                            "publishes": False, "deletes": operation == "retire"},
+                           sort_keys=True))
+          PY
+
+  qwen-call-request-bridge:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'request'
+    uses: ./.github/workflows/qwen-gfx1151-request-bridge.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      mode: ${{ needs.qwen-dispatch-envelope.outputs.mode }}
+      request_payload_base64: ${{ needs.qwen-dispatch-envelope.outputs.request_payload_base64 }}
+      request_payload_sha256: ${{ needs.qwen-dispatch-envelope.outputs.request_payload_sha256 }}
+      output: ${{ needs.qwen-dispatch-envelope.outputs.output }}
+    secrets: inherit
+
+  qwen-call-construct:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'construct'
+    uses: ./.github/workflows/qwen-gfx1151-construct.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      mode: ${{ needs.qwen-dispatch-envelope.outputs.mode }}
+      operation_request: ${{ needs.qwen-dispatch-envelope.outputs.operation_request }}
+      operation_request_sha256: ${{ needs.qwen-dispatch-envelope.outputs.operation_request_sha256 }}
+    secrets: inherit
+
+  qwen-call-retire-stock:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'retire'
+    uses: ./.github/workflows/qwen-gfx1151-retire-stock.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      builder_image: ${{ needs.qwen-dispatch-envelope.outputs.builder_image }}
+      builder_image_digest: ${{ needs.qwen-dispatch-envelope.outputs.builder_image_digest }}
+      workset_root: ${{ needs.qwen-dispatch-envelope.outputs.workset_root }}
+      stock_artifact_revision: ${{ needs.qwen-dispatch-envelope.outputs.stock_artifact_revision }}
+      stock_build_record_sha256: ${{ needs.qwen-dispatch-envelope.outputs.stock_build_record_sha256 }}
+      capture_manifest: ${{ needs.qwen-dispatch-envelope.outputs.capture_manifest }}
+      capture_manifest_sha256: ${{ needs.qwen-dispatch-envelope.outputs.capture_manifest_sha256 }}
+      authorization_output: ${{ needs.qwen-dispatch-envelope.outputs.authorization_output }}
+      authorize: ${{ needs.qwen-dispatch-envelope.outputs.authorize }}
+    secrets: inherit
+
   qwen-inspect-control-residue:
     # Read-only forensic mode for a failed bounded conversion.  It reports
     # inode metadata and relative names only; it never opens, removes, or
@@ -841,7 +1055,9 @@ jobs:
           fi
           mkdir -p "$workspace/tooling" "$workspace/evidence"
           ple_patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
+          split_patch="$GITHUB_WORKSPACE/patches/llama.cpp/gguf-split-bounded-copy.patch"
           echo "606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc  $ple_patch" | sha256sum -c -
+          echo "b174f2b2a0b11e78e812e5f31d9ac84deaa8f94f9650abdab3760655c3aebe38  $split_patch" | sha256sum -c -
           ensure_checkout() {
             local url="$1" revision="$2" destination="$3"
             if [[ ! -d "$destination/.git" ]]; then
@@ -864,7 +1080,12 @@ jobs:
             -C "$workspace/tooling/llama.cpp" apply --check "$ple_patch"
           git -c safe.directory="$workspace/tooling/llama.cpp" \
             -C "$workspace/tooling/llama.cpp" apply "$ple_patch"
+          git -c safe.directory="$workspace/tooling/llama.cpp" \
+            -C "$workspace/tooling/llama.cpp" apply --check "$split_patch"
+          git -c safe.directory="$workspace/tooling/llama.cpp" \
+            -C "$workspace/tooling/llama.cpp" apply "$split_patch"
           echo "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee  $workspace/tooling/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
+          echo "fc6fc7103959763791d49e338916dd020429b1948ad357a5e5e54d54137be321  $workspace/tooling/llama.cpp/tools/gguf-split/gguf-split.cpp" | sha256sum -c -
           docker run --rm --network host \
             -e LLAMA_REVISION="$LLAMA_REVISION" \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc '
@@ -1272,6 +1493,10 @@ jobs:
           assert manifest["corpus"]["rows"] == {"good": 32, "bad": 32}, manifest
           assert len(manifest["interventions"]) == 16, manifest
           PY
+          capture_manifest="$QWEN_CAPTURE_OUTPUT/capture-manifest.json"
+          printf 'QWEN_CAPTURE_MANIFEST=%s\nQWEN_CAPTURE_MANIFEST_SHA256=%s\n' \
+            "$capture_manifest" "$(sha256sum "$capture_manifest" | awk '{print $1}')" \
+            >>"$GITHUB_ENV"
 
       - name: Recover production and release the GPU lock
         if: ${{ always() && steps.qwen-capture-safety.outputs.armed == 'yes' }}
@@ -1310,6 +1535,10 @@ jobs:
             echo "Ember SHA: \`$TARGET_SHA\`"
             echo "Image digest: \`$QWEN_DEV_IMAGE_DIGEST\`"
             echo "Evidence: \`$QWEN_CAPTURE_OUTPUT\`"
+            echo "Capture manifest: \`$QWEN_CAPTURE_MANIFEST\`"
+            echo "Capture manifest SHA-256: \`$QWEN_CAPTURE_MANIFEST_SHA256\`"
+            echo "Stock build record: \`$QWEN_CONTROL_RECORD\`"
+            echo "Stock build record SHA-256: \`$QWEN_CONTROL_RECORD_SHA256\`"
             echo
             echo 'Generated 16 unselected intervention manifests. No artifact was quantized or published.'
           } >>"$GITHUB_STEP_SUMMARY"

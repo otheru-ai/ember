@@ -45,9 +45,15 @@ was killed at 128,524,508 KiB RSS. The pinned patch therefore also keeps only
 the transient PLE tensor F32 when `--use-temp-file` is active. The release
 quantizer still applies and verifies the selected PLE override, so the F32
 intermediate is a storage mechanism rather than a release precision choice.
-The patch is part of the tool provenance and llama.cpp may differ from its
-pinned commit in that one exact file only. `--use-temp-file` cannot split while
-converting, so Ember performs this private lifecycle:
+The converter patch is part of the tool provenance. A third control run
+(`33077679060`) completed conversion, then exposed a separate upstream splitter
+allocation: `llama-gguf-split` resized its copy buffer to the full 204.8 GB PLE
+tensor and aborted with `std::bad_alloc` inside the 125 GiB cgroup. Ember's
+second digest-pinned patch, `gguf-split-bounded-copy.patch`, retains the exact
+split format while copying every tensor through one fixed 16 MiB buffer.
+llama.cpp may differ from its pinned commit in those two exact files only.
+`--use-temp-file` cannot split while converting, so Ember performs this private
+lifecycle:
 
 1. stream safetensors into one private mostly-BF16 GGUF with the PLE staging
    tensor retained F32, spilling through `TMPDIR` inside the transaction
@@ -69,6 +75,8 @@ target rerun measures them.
 ```sh
 git -C /root/qwen-work/llama.cpp apply \
   /root/qwen-work/ember/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch
+git -C /root/qwen-work/llama.cpp apply \
+  /root/qwen-work/ember/patches/llama.cpp/gguf-split-bounded-copy.patch
 python3 scripts/qwen_quantize.py \
   --snapshot-dir /root/qwen-work/snapshot \
   --snapshot-revision f5d08274bafd880402bd16f5e3e6c514136ec06c \
