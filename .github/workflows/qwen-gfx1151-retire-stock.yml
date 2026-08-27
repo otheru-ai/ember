@@ -392,6 +392,42 @@ jobs:
           PY
           printf 'QWEN_WORKFLOW_AUTHORIZATION=%s\n' "$workflow_authorization" >>"$GITHUB_ENV"
 
+      - name: Hand off only workflow-authorized stock shard inodes
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          uid="$(id -u)"; gid="$(id -g)"
+          # The authenticated, revision-pinned image supplies the privileged
+          # helper environment.  The source checkout is exact and read-only;
+          # only the fixed artifacts mount is writable.  The helper validates
+          # the durable workflow authorization and opens every authorized shard
+          # descriptor before making any non-recursive ownership change.
+          PYTHONDONTWRITEBYTECODE=1 docker run --rm --network none --read-only \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt no-new-privileges --pids-limit 16 --user 0:0 \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            -v "$workspace/artifacts:$workspace/artifacts" \
+            --entrypoint python3 "$PINNED_BUILDER_IMAGE" \
+            "$GITHUB_WORKSPACE/scripts/qwen_stock_ownership_handoff.py" \
+              --authorization "$QWEN_WORKFLOW_AUTHORIZATION" \
+              --builder-authorization "$QWEN_RETIRE_AUTHORIZATION" \
+              --source-revision "$TARGET_SHA" \
+              --stock-artifact-revision "$QWEN_STOCK_ARTIFACT_REVISION" \
+              --builder-image-digest "$BUILDER_IMAGE_DIGEST" \
+              --runner-uid "$uid" --runner-gid "$gid"
+          # Repeat all authorization, inode, owner, mode, and size checks as
+          # the unprivileged host runner.  The builder remains unprivileged.
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            scripts/qwen_stock_ownership_handoff.py \
+              --authorization "$QWEN_WORKFLOW_AUTHORIZATION" \
+              --builder-authorization "$QWEN_RETIRE_AUTHORIZATION" \
+              --source-revision "$TARGET_SHA" \
+              --stock-artifact-revision "$QWEN_STOCK_ARTIFACT_REVISION" \
+              --builder-image-digest "$BUILDER_IMAGE_DIGEST" \
+              --runner-uid "$uid" --runner-gid "$gid" --verify-only
+
       - name: Acquire exclusive gfx1151 ownership and quiesce production
         id: exclusive
         run: |

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_candidate_builder as builder  # noqa: E402
+import qwen_stock_ownership_handoff as handoff  # noqa: E402
 
 
 def digest(path: Path) -> str:
@@ -62,7 +65,7 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
                 check=True,
             )
         blocks = workflow_run_blocks(body)
-        self.assertEqual(len(blocks), 7)
+        self.assertEqual(len(blocks), 8)
         for index, block in enumerate(blocks):
             neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
             result = subprocess.run(
@@ -168,6 +171,116 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         self.assertIn("ember-gpu-lock release", body)
         self.assertGreaterEqual(body.count("http://127.0.0.1:8000/health"), 2)
         self.assertIn('exit "$cleanup_failed"', body)
+
+    def test_stock_inode_handoff_precedes_lock_and_keeps_builder_unprivileged(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        authorization = body.index(
+            'printf \'QWEN_WORKFLOW_AUTHORIZATION=%s\\n\''
+        )
+        handoff_step = body.index("Hand off only workflow-authorized stock shard inodes")
+        acquire = body.index("ember-gpu-lock acquire")
+        builder = body.index("Retire only the activation-captured stock shard inventory")
+        self.assertLess(authorization, handoff_step)
+        self.assertLess(handoff_step, acquire)
+        self.assertLess(acquire, builder)
+        self.assertIn("scripts/qwen_stock_ownership_handoff.py", body)
+        self.assertIn('--authorization "$QWEN_WORKFLOW_AUTHORIZATION"', body)
+        self.assertIn('--builder-authorization "$QWEN_RETIRE_AUTHORIZATION"', body)
+        self.assertIn('--user "$uid:$gid"', body)
+        self.assertIn("--verify-only", body)
+        self.assertNotIn("chown -R", body)
+        self.assertNotIn("chmod -R", body)
+
+    def test_handoff_validates_every_inode_before_nonrecursive_mutation(self) -> None:
+        source = (ROOT / "scripts/qwen_stock_ownership_handoff.py").read_text(
+            encoding="utf-8"
+        )
+        first_mutation = source.index("os.fchown(descriptor, runner_uid, runner_gid)")
+        scope_validation = source.index("shard_descriptors.append")
+        self.assertLess(scope_validation, first_mutation)
+        for required in (
+            "os.O_NOFOLLOW", "stat.S_ISREG", "metadata.st_nlink != 1",
+            "metadata.st_size != size", "path.parent != expected_stock",
+            "deletion scope repeats one shard filename",
+            "deletion scope aliases one shard inode", "os.fchown(stock",
+            "os.fchmod(stock, 0o700)", "os.fchmod(descriptor, 0o600)",
+            "object_pairs_hook=_object_without_duplicates",
+        ):
+            self.assertIn(required, source)
+        for forbidden in ("os.walk", "os.listdir", "glob(", "rglob(", "chown -R"):
+            self.assertNotIn(forbidden, source)
+
+    def test_handoff_rejects_symlink_hardlink_scope_and_preserves_retained_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw) / "workspace"
+            artifacts = workspace / "artifacts"
+            retirement = artifacts / "qwen-workset/evidence/stock-retirement"
+            stock_revision = "a" * 40
+            source_revision = "b" * 40
+            image_digest = "sha256:" + "c" * 64
+            stock = artifacts / f"stock-rocmi4-{stock_revision[:12]}"
+            retirement.mkdir(parents=True)
+            stock.mkdir()
+            shard = stock / "model-00001-of-00001.gguf"
+            shard.write_bytes(b"authorized shard")
+            retained = stock / "qwen-quant-build-record.json"
+            retained.write_bytes(b"retained")
+            retained_mode = retained.stat().st_mode
+            builder_auth = retirement / "stock-test-authorization.json"
+            workflow_auth = Path(f"{builder_auth}.workflow.json")
+
+            def authorization(path: Path, size: int) -> dict:
+                return {
+                    "schema": handoff.AUTH_SCHEMA,
+                    "status": "authorized_before_quiesce",
+                    "authorization_phrase": handoff.ACKNOWLEDGEMENT,
+                    "source": {"revision": source_revision},
+                    "stock_artifact": {"revision": stock_revision},
+                    "image": {"reference": "example", "digest": image_digest},
+                    "workset_root": str(artifacts / "qwen-workset"),
+                    "stock_dir": str(stock),
+                    "builder_authorization": str(builder_auth),
+                    "deletion_scope": [{"path": str(path), "size_bytes": size,
+                                          "sha256": "d" * 64}],
+                    "retained_files": [{"path": str(retained)}],
+                    "publishes": False,
+                }
+
+            write_json(workflow_auth, authorization(shard, shard.stat().st_size))
+            uid = os.getuid()
+            gid = os.getgid()
+            rows = handoff.handoff_authorized_shards(
+                authorization=workflow_auth, builder_authorization=builder_auth,
+                source_revision=source_revision, stock_revision=stock_revision,
+                image_digest=image_digest, runner_uid=uid, runner_gid=gid,
+                workspace=workspace)
+            self.assertEqual(rows, [(shard.name, shard.stat().st_size)])
+            self.assertEqual(stat.S_IMODE(shard.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(stock.stat().st_mode), 0o700)
+            self.assertEqual(retained.read_bytes(), b"retained")
+            self.assertEqual(retained.stat().st_mode, retained_mode)
+
+            shard.unlink()
+            target = stock / "target.gguf"
+            target.write_bytes(b"target")
+            shard.symlink_to(target.name)
+            write_json(workflow_auth, authorization(shard, target.stat().st_size))
+            with self.assertRaises(handoff.HandoffError):
+                handoff.handoff_authorized_shards(
+                    authorization=workflow_auth, builder_authorization=builder_auth,
+                    source_revision=source_revision, stock_revision=stock_revision,
+                    image_digest=image_digest, runner_uid=uid, runner_gid=gid,
+                    workspace=workspace)
+
+            shard.unlink()
+            os.link(target, shard)
+            write_json(workflow_auth, authorization(shard, target.stat().st_size))
+            with self.assertRaises(handoff.HandoffError):
+                handoff.handoff_authorized_shards(
+                    authorization=workflow_auth, builder_authorization=builder_auth,
+                    source_revision=source_revision, stock_revision=stock_revision,
+                    image_digest=image_digest, runner_uid=uid, runner_gid=gid,
+                    workspace=workspace)
 
     def test_retirement_is_exact_durable_reconstructive_and_nonpublishing(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
