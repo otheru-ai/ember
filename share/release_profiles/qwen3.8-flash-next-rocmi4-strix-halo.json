@@ -49,6 +49,14 @@
     "revision": "abdc7a0bf815d3b83e26dd523c6960e4dd597e82",
     "outtype": "bf16",
     "default_split_max_size": "48G",
+    "bounded_memory": {
+      "converter_option": "--use-temp-file",
+      "splitter_tool": "llama-gguf-split",
+      "lifecycle": "single_private_bf16_then_48g_split_then_remove_single_before_quantize",
+      "temporary_filesystem": "runner_root_filesystem_not_/srv/models",
+      "full_in_memory_tensor_registry": false,
+      "target_measurement_status": "pending_peak_rss_and_wall_time"
+    },
     "ple_source_dtype": "I64",
     "ple_gguf_metadata_dtype": "ARRAY<UINT64>"
   },
@@ -96,6 +104,9 @@
       "device_budget_bytes": 137438953472,
       "runtime_reserve_bytes": 34359738368,
       "rule": "artifact_bytes + runtime_reserve_bytes <= device_budget_bytes",
+      "certification_host_memtotal_bytes": 134297894912,
+      "certification_host_rule": "artifact_bytes + runtime_reserve_bytes + enabled_companion_artifact_bytes <= certification_host_memtotal_bytes",
+      "companion_artifact_gate_status": "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt",
       "reserve_status": "provisional_until_measured_peak_rss_and_gtt",
       "yarn_1m_math_oracle_passed": true,
       "yarn_1m_runtime_certified": false,
@@ -215,7 +226,11 @@
       "minimum_free_disk_gib": 1024,
       "preferred_free_disk_gib": 1536,
       "minimum_physical_ram_gib": 256,
-      "reason": "the pinned converter intermediate representation can consume approximately 204 GB"
+      "bounded_memory_minimum_physical_ram_gib": 120,
+      "bounded_memory_mode": "llama_use_temp_file_then_gguf_split",
+      "bounded_memory_status": "mechanically_bounded_unmeasured_on_target",
+      "certification_host_memtotal_bytes": 134297894912,
+      "reason": "ordinary conversion needs approximately 204 GB; the 120 GiB path must use --use-temp-file and the pinned splitter and remains unmeasured until its build record captures the OtherU run"
     },
     "artifact_layout_gate": {
       "current_quantizer_multi_shard_supported": true,

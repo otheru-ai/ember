@@ -198,6 +198,18 @@ class Fixture:
         )
         self.llama_base = commit_all(self.llama, "base")
         (self.llama / "rotated-kv.txt").write_text("mandatory fix\n", encoding="utf-8")
+        self.gguf_splitter = self.llama / "llama-gguf-split"
+        self.gguf_splitter.write_text(
+            "#!/usr/bin/python3\nimport pathlib,shutil,subprocess,sys\n"
+            "if sys.argv[1:] == ['--version']:\n"
+            " print('commit ' + subprocess.check_output(['git','rev-parse','HEAD'],cwd=pathlib.Path(__file__).parent,text=True).strip())\n"
+            f"else:\n sources={[str(path) for path in self.intermediate_split]!r}\n"
+            " out=pathlib.Path(sys.argv[-1])\n"
+            " for index,source in enumerate(sources,1):\n"
+            "  shutil.copyfile(source,out.with_name(f'{out.stem}-{index:05d}-of-00002.gguf'))\n",
+            encoding="utf-8",
+        )
+        self.gguf_splitter.chmod(self.gguf_splitter.stat().st_mode | stat.S_IXUSR)
         self.llama_head = commit_all(self.llama, "rotated kv")
 
         self.rocmfpx = root / "rocmfpx"
@@ -222,10 +234,12 @@ class Fixture:
             f" print(json.dumps({{'tool':'ember-gguf-quantize','ember_revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=pathlib.Path(__file__).parent,text=True).strip(),"
             f"'rocmfpx_revision':'{self.rocm_revision}','format':'Q4_0_ROCMI4','ggml_tensor_type':108,'intervention_manifest_schema':1}}))\n"
             "elif '--dry-size-json' in sys.argv:\n"
-            " manifest_path=pathlib.Path(sys.argv[sys.argv.index('--intervention-manifest') + 1])\n"
-            " manifest_bytes=manifest_path.read_bytes(); manifest=json.loads(manifest_bytes)\n"
-            " target_names=[item['tensor_name'] for item in manifest['targets']]\n"
-            " intervention={'intervention_manifest_sha256':hashlib.sha256(manifest_bytes).hexdigest(),"
+            " intervention={}\n"
+            " if '--intervention-manifest' in sys.argv:\n"
+            "  manifest_path=pathlib.Path(sys.argv[sys.argv.index('--intervention-manifest') + 1])\n"
+            "  manifest_bytes=manifest_path.read_bytes(); manifest=json.loads(manifest_bytes)\n"
+            "  target_names=[item['tensor_name'] for item in manifest['targets']]\n"
+            "  intervention={'intervention_manifest_sha256':hashlib.sha256(manifest_bytes).hexdigest(),"
             "'intervention_target_names_sha256':manifest['tensor_map']['target_names_sha256'],"
             "'intervention_target_count':len(target_names),'intervention_targets':target_names,"
             "'intervention_validated':True,'intervention_applied':False}\n"
@@ -253,10 +267,11 @@ class Fixture:
             f" if pathlib.Path({str(self.pause_success)!r}).exists():\n"
             f"  pathlib.Path({str(self.success_written)!r}).write_text('written')\n"
             "  time.sleep(0.5)\n"
-            " manifest_path=pathlib.Path(sys.argv[sys.argv.index('--intervention-manifest') + 1])\n"
-            " manifest_bytes=manifest_path.read_bytes(); manifest=json.loads(manifest_bytes)\n"
-            " target_names=[item['tensor_name'] for item in manifest['targets']]\n"
-            " print(json.dumps({'intervention_manifest_sha256':hashlib.sha256(manifest_bytes).hexdigest(),"
+            " if '--intervention-manifest' in sys.argv:\n"
+            "  manifest_path=pathlib.Path(sys.argv[sys.argv.index('--intervention-manifest') + 1])\n"
+            "  manifest_bytes=manifest_path.read_bytes(); manifest=json.loads(manifest_bytes)\n"
+            "  target_names=[item['tensor_name'] for item in manifest['targets']]\n"
+            "  print(json.dumps({'intervention_manifest_sha256':hashlib.sha256(manifest_bytes).hexdigest(),"
             "'intervention_target_names_sha256':manifest['tensor_map']['target_names_sha256'],"
             "'intervention_target_count':len(target_names),'intervention_targets':target_names,"
             "'intervention_validated':True,'intervention_applied':True,"
@@ -375,7 +390,7 @@ class Fixture:
 
 
 class QwenQuantizeTests(unittest.TestCase):
-    def test_default_conversion_runner_ram_floor_is_256_gib(self) -> None:
+    def test_profile_selects_ram_floor_for_conversion_mode(self) -> None:
         args = qwen_quantize.parse_args([
             "--snapshot-dir", "/snapshot", "--snapshot-revision", "a" * 40,
             "--intervention-manifest", "/intervention.json",
@@ -383,7 +398,7 @@ class QwenQuantizeTests(unittest.TestCase):
             "--ember-dir", "/ember", "--ember-revision", "b" * 40,
             "--quantizer", "/quantizer", "--work-dir", "/work",
         ])
-        self.assertEqual(args.min_ram_gib, 256)
+        self.assertIsNone(args.min_ram_gib)
         self.assertEqual(args.split_max_size, "48G")
 
     def test_default_is_validated_nonpublishing_dry_run(self) -> None:
@@ -417,6 +432,136 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertTrue(record["intervention"]["weight_intervention"])
             self.assertFalse(record["intervention"]["prompt_only"])
             self.assertEqual(record["intervention"]["target_count"], 1)
+            self.assertFalse(record["experiment"]["final_release_eligible"])
+            self.assertEqual(
+                record["experiment"]["eligibility_status"],
+                "pending_measured_bakeoff_and_hardware_certification",
+            )
+
+    def test_explicit_stock_control_plan_is_unchanged_and_final_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            command = fixture.command()
+            option = command.index("--intervention-manifest")
+            command[option:option + 2] = ["--stock-control"]
+            result = subprocess.run(
+                command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            self.assertIsNone(record["intervention"])
+            self.assertEqual(record["experiment"]["kind"], "stock_control")
+            self.assertTrue(record["experiment"]["stock_weights_unchanged"])
+            self.assertFalse(record["experiment"]["final_release_eligible"])
+            quantize = record["commands"]["quantize"]
+            self.assertNotIn("--intervention-manifest", quantize)
+            self.assertIn("--tensor-type", quantize)
+
+    def test_bounded_memory_plan_spills_then_splits_without_in_memory_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            command = fixture.command() + [
+                "--bounded-memory-temp", "--gguf-splitter", str(fixture.gguf_splitter),
+            ]
+            result = subprocess.run(
+                command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            convert = record["commands"]["convert"]
+            self.assertIn("--use-temp-file", convert)
+            self.assertNotIn("--split-max-size", convert)
+            self.assertEqual(
+                record["commands"]["split"][1:3], ["--split-max-size", "48G"]
+            )
+            self.assertFalse(record["conversion_memory"]["full_in_memory_tensor_registry"])
+            self.assertEqual(
+                record["conversion_memory"]["target_measurement_status"],
+                "pending_peak_rss_and_wall_time",
+            )
+            self.assertIn("gguf_splitter_sha256", record["tools"])
+
+    def test_bounded_memory_execute_removes_unsplit_before_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            command = fixture.command() + [
+                "--bounded-memory-temp", "--gguf-splitter", str(fixture.gguf_splitter),
+                "--execute",
+            ]
+            result = subprocess.run(
+                command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(
+                (fixture.work / "Qwen3.8-Flash-Next-BF16.unsplit.gguf").exists()
+            )
+            self.assertFalse((fixture.work / ".converter-tmp").exists())
+            record = json.loads(
+                (fixture.work / "qwen-quant-build-record.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(record["conversion_memory"]["mode"], "bounded_temp_file_then_split")
+            self.assertEqual(len(record["intermediate"]["shards"]), 2)
+
+    def test_stock_control_verification_rejects_intervention_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            profile = json.loads(
+                (ROOT / "share" / "release_profiles" /
+                 "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+            )
+            expected = {
+                "ple_embedding.layer_multipliers": [1, 24_000_000_000_001],
+                "ple_embedding.ngram_heads_offsets": [3, 5],
+                "ple_embedding.ngram_heads_vocab_sizes": [7, 11],
+            }
+            clean = root / "clean.gguf"
+            make_gguf(
+                clean, split_no=0, split_count=1,
+                tensor_name="per_layer_token_embd.weight", tensor_type=108,
+            )
+            qwen_quantize.verify_gguf_set(
+                [clean], expected, quantized=True, profile=profile,
+                stock_control=True,
+            )
+            edited = root / "edited.gguf"
+            make_gguf(
+                edited, split_no=0, split_count=1,
+                tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                intervention=TEST_INTERVENTION,
+            )
+            with self.assertRaisesRegex(qwen_quantize.PipelineError, "stock-control"):
+                qwen_quantize.verify_gguf_set(
+                    [edited], expected, quantized=True, profile=profile,
+                    stock_control=True,
+                )
+
+    def test_stock_control_executes_and_commits_clean_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            make_gguf(
+                fixture.quant_split[0], split_no=0, split_count=2,
+                tensor_name="per_layer_token_embd.weight", tensor_type=108,
+            )
+            make_gguf(
+                fixture.quant_split[1], split_no=1, split_count=2,
+                tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+            )
+            command = fixture.command()
+            option = command.index("--intervention-manifest")
+            command[option:option + 2] = ["--stock-control"]
+            result = subprocess.run(
+                command + ["--execute"], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(
+                (fixture.work / "qwen-quant-build-record.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(record["status"], "complete")
+            self.assertEqual(record["experiment"]["kind"], "stock_control")
+            self.assertFalse(record["experiment"]["final_release_eligible"])
+            self.assertEqual(len(record["output"]["shards"]), 2)
+            self.assertEqual(record["staging_transaction"]["evidence_promoted"], [])
 
     def test_dry_run_plan_does_not_block_execute_directory_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -455,6 +600,14 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertTrue(record["memory_preflight"]["fits"])
             self.assertEqual(record["memory_preflight"]["budget_bytes"], 137438953472)
             self.assertEqual(record["memory_preflight"]["runtime_reserve_bytes"], 34359738368)
+            self.assertEqual(
+                record["memory_preflight"]["certification_host_memtotal_bytes"],
+                134297894912,
+            )
+            self.assertEqual(
+                record["memory_preflight"]["companion_artifact_fit_status"],
+                "pending_mtp_mmproj_inventory",
+            )
             self.assertEqual(record["memory_preflight"]["shard_count"], 2)
             self.assertEqual(
                 record["memory_preflight"]["shard_bytes"],
@@ -774,6 +927,30 @@ class QwenQuantizeTests(unittest.TestCase):
                 "total_bytes": artifact + gate["runtime_reserve_bytes"],
                 "headroom_bytes": -1,
                 "fits": False,
+            }, profile)
+
+    def test_memory_preflight_uses_real_otheru_memtotal_not_nominal_128g(self) -> None:
+        profile = json.loads(
+            (ROOT / "share" / "release_profiles" /
+             "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+        )
+        gate = profile["quantization"]["native_262k_memory_gate"]
+        artifact = (
+            gate["certification_host_memtotal_bytes"]
+            - gate["runtime_reserve_bytes"] + 1
+        )
+        total = artifact + gate["runtime_reserve_bytes"]
+        self.assertLess(total, gate["device_budget_bytes"])
+        with self.assertRaisesRegex(qwen_quantize.PipelineError, "certification-host MemTotal"):
+            qwen_quantize.validate_memory_preflight({
+                "artifact_bytes": artifact,
+                "shard_count": 1,
+                "shard_bytes": [artifact],
+                "runtime_reserve_bytes": gate["runtime_reserve_bytes"],
+                "budget_bytes": gate["device_budget_bytes"],
+                "total_bytes": total,
+                "headroom_bytes": gate["device_budget_bytes"] - total,
+                "fits": True,
             }, profile)
 
     def test_application_report_requires_finite_metrics_in_target_order(self) -> None:

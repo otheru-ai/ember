@@ -596,6 +596,16 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)
   set_tests_properties(qwen_quantize_pipeline PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_corpus_adapter
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_corpus_adapter.py)
+  set_tests_properties(qwen_corpus_adapter PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_bakeoff
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_bakeoff.py)
+  set_tests_properties(qwen_bakeoff PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_intervention
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_intervention.py)

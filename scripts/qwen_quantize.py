@@ -473,15 +473,35 @@ def credential_free_env() -> dict[str, str]:
     }
 
 
-def run_checked(command: list[str], cwd: Path | None = None) -> str:
+def run_checked(
+    command: list[str], cwd: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> str:
+    environment = credential_free_env()
+    if env_overrides:
+        environment.update(env_overrides)
     result = subprocess.run(
-        command, cwd=cwd, env=credential_free_env(), text=True,
+        command, cwd=cwd, env=environment, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise PipelineError(f"command failed ({result.returncode}): {shlex.join(command)}\n{detail}")
     return result.stdout.strip()
+
+
+def run_checked_combined(command: list[str]) -> str:
+    """Return stdout+stderr for tools such as llama.cpp that version on stderr."""
+    result = subprocess.run(
+        command, env=credential_free_env(), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    combined = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if result.returncode != 0:
+        raise PipelineError(
+            f"command failed ({result.returncode}): {shlex.join(command)}\n{combined}"
+        )
+    return combined
 
 
 def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any], Path]:
@@ -542,6 +562,11 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         memory_gate.get("native_context_tokens") != 262144
         or memory_gate.get("device_budget_bytes") != 137438953472
         or memory_gate.get("runtime_reserve_bytes") != 34359738368
+        or memory_gate.get("certification_host_memtotal_bytes") != 134297894912
+        or memory_gate.get("certification_host_rule")
+        != "artifact_bytes + runtime_reserve_bytes + enabled_companion_artifact_bytes <= certification_host_memtotal_bytes"
+        or memory_gate.get("companion_artifact_gate_status")
+        != "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt"
         or memory_gate.get("rule") != "artifact_bytes + runtime_reserve_bytes <= device_budget_bytes"
         or memory_gate.get("yarn_1m_math_oracle_passed") is not True
         or memory_gate.get("yarn_1m_runtime_certified") is not False
@@ -553,6 +578,10 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         not isinstance(runner, dict)
         or runner.get("minimum_free_disk_gib") != 1024
         or runner.get("minimum_physical_ram_gib") != 256
+        or runner.get("bounded_memory_minimum_physical_ram_gib") != 120
+        or runner.get("bounded_memory_mode") != "llama_use_temp_file_then_gguf_split"
+        or runner.get("bounded_memory_status") != "mechanically_bounded_unmeasured_on_target"
+        or runner.get("certification_host_memtotal_bytes") != 134297894912
     ):
         raise PipelineError("release conversion runner must require 1 TiB disk and 256 GiB RAM")
     layout_gate = profile["release"].get("artifact_layout_gate")
@@ -653,6 +682,7 @@ def validate_tools(
     ember_revision: str,
     quantizer_binary: Path,
     profile: dict[str, Any],
+    gguf_splitter: Path | None = None,
 ) -> dict[str, Any]:
     if sys.version_info < (3, 10):
         raise PipelineError("Python 3.10 or newer is required by the pinned converter")
@@ -706,7 +736,7 @@ def validate_tools(
     }
     if not isinstance(build_info, dict) or any(build_info.get(key) != value for key, value in expected_info.items()):
         raise PipelineError(f"quantizer build provenance mismatch; required fields are {expected_info}")
-    return {
+    result = {
         "python": platform.python_version(),
         "git": git_version,
         "llama_cpp_revision": llama_head,
@@ -719,6 +749,20 @@ def validate_tools(
         "quantizer_build_info": build_info,
         "composite_support": ["qwen4exp-converter", "architecture-agnostic-streaming", "Q4_0_ROCMI4"],
     }
+    if gguf_splitter is not None:
+        splitter = gguf_splitter.resolve()
+        if not splitter.is_file() or not os.access(splitter, os.X_OK):
+            raise PipelineError(f"GGUF splitter is not an executable file: {splitter}")
+        if not splitter.is_relative_to(llama_dir.resolve()):
+            raise PipelineError("GGUF splitter must come from the pinned llama.cpp checkout")
+        version = run_checked_combined([str(splitter), "--version"])
+        version_commit = re.search(r"\bcommit\s+([0-9a-f]{7,40})\b", version)
+        if version_commit is None or not conversion["revision"].startswith(version_commit.group(1)):
+            raise PipelineError("GGUF splitter build revision does not match pinned llama.cpp")
+        result["gguf_splitter_binary"] = str(splitter)
+        result["gguf_splitter_sha256"] = sha256_file(splitter)
+        result["gguf_splitter_version"] = version
+    return result
 
 
 def physical_ram_bytes() -> int:
@@ -874,6 +918,7 @@ def safetensor_ple_constants(snapshot: Path) -> dict[str, list[int]]:
 def verify_gguf_set(
     paths: list[Path], expected_ple: dict[str, list[int]], *, quantized: bool,
     profile: dict[str, Any], intervention: dict[str, Any] | None = None,
+    stock_control: bool = False,
 ) -> dict[str, Any]:
     inspected = [inspect_gguf(path) for path in paths]
     all_tensors = [tensor for item in inspected for tensor in item["tensors"]]
@@ -899,21 +944,29 @@ def verify_gguf_set(
                     f"GGUF shard {shard_index + 1} PLE metadata {gguf_key} does not match the source I64 values"
                 )
         if quantized:
-            if intervention is None:
-                raise PipelineError("quantized GGUF verification requires intervention evidence")
-            intervention_fields = {
-                "ember.intervention.kind": (8, intervention["kind"]),
-                "ember.intervention.application_stage": (8, intervention["application_stage"]),
-                "ember.intervention.manifest_sha256": (8, intervention["manifest_sha256"]),
-                "ember.intervention.target_names_sha256": (8, intervention["target_names_sha256"]),
-                "ember.intervention.target_count": (4, intervention["target_count"]),
-            }
-            for key, (expected_type, expected_value) in intervention_fields.items():
-                field = metadata.get(key)
-                if field is None or field.get("type") != expected_type or field.get("value") != expected_value:
+            if intervention is not None:
+                intervention_fields = {
+                    "ember.intervention.kind": (8, intervention["kind"]),
+                    "ember.intervention.application_stage": (8, intervention["application_stage"]),
+                    "ember.intervention.manifest_sha256": (8, intervention["manifest_sha256"]),
+                    "ember.intervention.target_names_sha256": (8, intervention["target_names_sha256"]),
+                    "ember.intervention.target_count": (4, intervention["target_count"]),
+                }
+                for key, (expected_type, expected_value) in intervention_fields.items():
+                    field = metadata.get(key)
+                    if field is None or field.get("type") != expected_type or field.get("value") != expected_value:
+                        raise PipelineError(
+                            f"GGUF shard {shard_index + 1} intervention metadata {key} does not match the applied manifest"
+                        )
+            elif stock_control:
+                if any(key.startswith("ember.intervention.") for key in metadata):
                     raise PipelineError(
-                        f"GGUF shard {shard_index + 1} intervention metadata {key} does not match the applied manifest"
+                        f"stock-control GGUF shard {shard_index + 1} carries intervention metadata"
                     )
+            else:
+                raise PipelineError(
+                    "quantized GGUF verification requires intervention evidence or explicit stock-control mode"
+                )
         # llama.cpp split files intentionally vary only split.no. Every other
         # metadata value is release-critical provenance/configuration and must
         # remain byte-semantically identical across the set.
@@ -961,21 +1014,36 @@ def verify_gguf_set(
 
 def planned_commands(
     args: argparse.Namespace, profile: dict[str, Any], work_dir: Path,
-    intervention_manifest: Path,
-) -> tuple[list[str], list[str], list[str], Path, Path]:
+    intervention_manifest: Path | None,
+) -> tuple[list[str], list[str] | None, list[str], list[str], Path, Path, Path | None]:
     intermediate = work_dir / "Qwen3.8-Flash-Next-BF16.gguf"
+    unsplit = (
+        work_dir / "Qwen3.8-Flash-Next-BF16.unsplit.gguf"
+        if args.bounded_memory_temp and args.split_max_size != "0" else None
+    )
     output = work_dir / profile["artifact"]["filename"]
     converter = args.llama_cpp_dir.resolve() / "convert_hf_to_gguf.py"
     convert = [
         sys.executable, str(converter), str(args.snapshot_dir.resolve()),
-        "--outfile", str(intermediate), "--outtype", "bf16",
+        "--outfile", str(unsplit or intermediate), "--outtype", "bf16",
     ]
-    if args.split_max_size != "0":
+    split: list[str] | None = None
+    if unsplit is not None:
+        convert.append("--use-temp-file")
+        assert args.gguf_splitter is not None
+        split = [
+            str(args.gguf_splitter.resolve()), "--split-max-size",
+            args.split_max_size, str(unsplit), str(intermediate),
+        ]
+    elif args.split_max_size != "0":
         convert.extend(["--split-max-size", args.split_max_size])
+    elif args.bounded_memory_temp:
+        convert.append("--use-temp-file")
     quantize_options = [
         "--tensor-type", profile["quantization"]["ple_tensor_override"],
-        "--intervention-manifest", str(intervention_manifest),
     ]
+    if intervention_manifest is not None:
+        quantize_options.extend(["--intervention-manifest", str(intervention_manifest)])
     if args.split_max_size != "0":
         quantize_options.append("--keep-split")
     memory_gate = profile["quantization"]["native_262k_memory_gate"]
@@ -996,7 +1064,7 @@ def planned_commands(
         quantize[0], *quantize[1:-4], "--dry-size-json",
         quantize[-4], str(output), *quantize[-2:],
     ]
-    return convert, preflight, quantize, intermediate, output
+    return convert, split, preflight, quantize, intermediate, output, unsplit
 
 
 def validate_memory_preflight(value: Any, profile: dict[str, Any]) -> dict[str, Any]:
@@ -1035,7 +1103,21 @@ def validate_memory_preflight(value: Any, profile: dict[str, Any]) -> dict[str, 
         raise PipelineError(
             "quantized artifact plus provisional non-artifact reserve does not fit the 128 GiB UMA budget"
         )
-    return value
+    certification_memtotal = gate["certification_host_memtotal_bytes"]
+    certification_main_only_total = value["artifact_bytes"] + reserve
+    if certification_main_only_total > certification_memtotal:
+        raise PipelineError(
+            "quantized main artifact plus reserve does not fit measured certification-host MemTotal"
+        )
+    result = dict(value)
+    result["certification_host_memtotal_bytes"] = certification_memtotal
+    result["certification_main_only_total_bytes"] = certification_main_only_total
+    result["certification_main_only_headroom_bytes"] = (
+        certification_memtotal - certification_main_only_total
+    )
+    result["companion_artifact_fit_status"] = "pending_mtp_mmproj_inventory"
+    result["measured_peak_rss_gtt_status"] = "pending_target_run"
+    return result
 
 
 def validate_intervention_report(
@@ -1099,16 +1181,30 @@ def validate_intervention_report(
 def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
     profile_path = args.profile.resolve()
     profile, inventory, inventory_path = validate_profile(profile_path)
-    intervention_source = args.intervention_manifest.resolve()
-    _intervention_manifest, intervention = validate_intervention_manifest(
-        intervention_source, profile
+    stock_control = bool(args.stock_control)
+    intervention_source = (
+        args.intervention_manifest.resolve()
+        if args.intervention_manifest is not None else None
     )
+    intervention: dict[str, Any] | None = None
+    if intervention_source is not None:
+        _intervention_manifest, intervention = validate_intervention_manifest(
+            intervention_source, profile
+        )
     final_work_dir = args.work_dir.parent.resolve() / args.work_dir.name
-    resources = validate_resources(final_work_dir, args.min_free_gib, args.min_ram_gib)
+    runner = profile["release"]["conversion_runner_requirements"]
+    minimum_ram_gib = args.min_ram_gib
+    if minimum_ram_gib is None:
+        minimum_ram_gib = (
+            runner["bounded_memory_minimum_physical_ram_gib"]
+            if args.bounded_memory_temp else runner["minimum_physical_ram_gib"]
+        )
+    resources = validate_resources(final_work_dir, args.min_free_gib, minimum_ram_gib)
     snapshot = validate_snapshot(args.snapshot_dir.resolve(), args.snapshot_revision, profile, inventory)
     tools = validate_tools(
         args.llama_cpp_dir.resolve(), args.rocmfpx_dir.resolve(), args.ember_dir.resolve(),
         args.ember_revision, args.quantizer.resolve(), profile,
+        args.gguf_splitter.resolve() if args.gguf_splitter is not None else None,
     )
     expected_ple = safetensor_ple_constants(args.snapshot_dir.resolve())
     transaction_dir: Path | None = None
@@ -1132,16 +1228,19 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         ))
         work_dir = transaction_dir
         record_path = transaction_dir / "qwen-quant-build-record.json"
-        staged_manifest = transaction_dir / profile["intervention"]["manifest_filename"]
-        try:
-            copy_verified_input(
-                intervention_source, staged_manifest, intervention["manifest_sha256"]
-            )
-        except PipelineError:
-            shutil.rmtree(transaction_dir, ignore_errors=True)
-            transaction_dir = None
-            raise
-        intervention_command_path = staged_manifest
+        if intervention_source is not None and intervention is not None:
+            staged_manifest = transaction_dir / profile["intervention"]["manifest_filename"]
+            try:
+                copy_verified_input(
+                    intervention_source, staged_manifest, intervention["manifest_sha256"]
+                )
+            except PipelineError:
+                shutil.rmtree(transaction_dir, ignore_errors=True)
+                transaction_dir = None
+                raise
+            intervention_command_path: Path | None = staged_manifest
+        else:
+            intervention_command_path = None
     else:
         work_dir = final_work_dir
         record_path = (
@@ -1152,7 +1251,7 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         if path_entry_exists(record_path):
             raise PipelineError(f"refusing to overwrite existing build record: {record_path}")
         intervention_command_path = intervention_source
-    convert, preflight, quantize, intermediate, output = planned_commands(
+    convert, split, preflight, quantize, intermediate, output, unsplit = planned_commands(
         args, profile, work_dir, intervention_command_path
     )
     record: dict[str, Any] = {
@@ -1162,6 +1261,19 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         "snapshot_inventory": {"path": str(inventory_path), "sha256": sha256_file(inventory_path)},
         "snapshot": snapshot,
         "intervention": intervention,
+        "experiment": {
+            "kind": "stock_control" if stock_control else "directional_ablation",
+            "stock_weights_unchanged": stock_control,
+            "final_release_eligible": False,
+            "eligibility_status": (
+                "ineligible_stock_control" if stock_control
+                else "pending_measured_bakeoff_and_hardware_certification"
+            ),
+            "purpose": (
+                "activation_capture_and_bakeoff_baseline"
+                if stock_control else "measured_bakeoff_candidate"
+            ),
+        },
         "tools": tools,
         "resources": resources,
         "mode": "execute" if args.execute else "dry-run",
@@ -1172,6 +1284,8 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         "commands": {
             "convert": convert,
             "convert_shell": shlex.join(convert),
+            "split": split,
+            "split_shell": shlex.join(split) if split is not None else None,
             "quantize_preflight": preflight,
             "quantize_preflight_shell": shlex.join(preflight),
             "quantize": quantize,
@@ -1184,6 +1298,17 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
             "keys": sorted(PLE_SUFFIXES.values()),
         },
         "native_262k_memory_gate": profile["quantization"]["native_262k_memory_gate"],
+        "conversion_memory": {
+            "mode": (
+                "bounded_temp_file_then_split" if args.bounded_memory_temp
+                else "ordinary_lazy_tensor_registry"
+            ),
+            "full_in_memory_tensor_registry": False if args.bounded_memory_temp else None,
+            "temporary_directory": "private_transaction_directory" if args.bounded_memory_temp else None,
+            "target_measurement_status": (
+                "pending_peak_rss_and_wall_time" if args.bounded_memory_temp else "not_applicable"
+            ),
+        },
         "status": "planned",
     }
     if not args.execute:
@@ -1191,9 +1316,26 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         return record
     try:
         write_json_atomic(record_path, record, create=True)
-        run_checked(convert)
+        if args.bounded_memory_temp:
+            converter_temp = work_dir / ".converter-tmp"
+            converter_temp.mkdir(mode=0o700)
+            run_checked(convert, env_overrides={"TMPDIR": str(converter_temp)})
+            try:
+                converter_temp.rmdir()
+            except OSError as exc:
+                raise PipelineError(f"converter left unexpected temporary files: {exc}") from exc
+        else:
+            run_checked(convert)
+        if split is not None:
+            assert unsplit is not None
+            run_checked(split)
         intermediate_paths = discover_gguf(intermediate)
         record["intermediate"] = verify_gguf_set(intermediate_paths, expected_ple, quantized=False, profile=profile)
+        if unsplit is not None:
+            try:
+                unsplit.unlink()
+            except OSError as exc:
+                raise PipelineError(f"cannot remove private unsplit BF16 intermediate: {exc}") from exc
         if "<converted-first-shard>" in quantize:
             first_shard = str(intermediate_paths[0])
             quantize[quantize.index("<converted-first-shard>")] = first_shard
@@ -1208,9 +1350,10 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         except json.JSONDecodeError as exc:
             raise PipelineError("quantizer --dry-size-json returned invalid JSON") from exc
         record["memory_preflight"] = validate_memory_preflight(preflight_json, profile)
-        record["intervention"]["quantizer_preflight"] = validate_intervention_report(
-            preflight_json, intervention, applied=False
-        )
+        if intervention is not None:
+            record["intervention"]["quantizer_preflight"] = validate_intervention_report(
+                preflight_json, intervention, applied=False
+            )
         write_json_atomic(record_path, record, create=False)
         staged_outputs = expected_gguf_outputs(
             output, record["memory_preflight"]["shard_count"]
@@ -1220,17 +1363,20 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         record["commands"]["quantize_shell"] = shlex.join(quantize)
         write_json_atomic(record_path, record, create=False)
         quantize_stdout = run_checked(quantize)
-        try:
-            application_json = json.loads(quantize_stdout)
-        except json.JSONDecodeError as exc:
-            raise PipelineError("quantizer did not return intervention application JSON") from exc
-        record["intervention"]["quantizer_application"] = validate_intervention_report(
-            application_json, intervention, applied=True
-        )
+        if intervention is not None:
+            try:
+                application_json = json.loads(quantize_stdout)
+            except json.JSONDecodeError as exc:
+                raise PipelineError("quantizer did not return intervention application JSON") from exc
+            record["intervention"]["quantizer_application"] = validate_intervention_report(
+                application_json, intervention, applied=True
+            )
+        elif quantize_stdout.strip():
+            raise PipelineError("stock-control quantizer unexpectedly returned intervention evidence")
         staged_paths = discover_gguf(output)
         final = verify_gguf_set(
             staged_paths, expected_ple, quantized=True, profile=profile,
-            intervention=intervention,
+            intervention=intervention, stock_control=stock_control,
         )
         if final["tensor_names_sha256"] != record["intermediate"]["tensor_names_sha256"]:
             raise PipelineError("quantization changed the GGUF tensor inventory")
@@ -1256,9 +1402,10 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
             "verified_before_promotion": True,
             "publication_state": "committed_on_visibility",
             "promoted": [str(path) for path in final_outputs],
-            "evidence_promoted": [
-                str(final_work_dir / profile["intervention"]["manifest_filename"])
-            ],
+            "evidence_promoted": (
+                [str(final_work_dir / profile["intervention"]["manifest_filename"])]
+                if intervention is not None else []
+            ),
         }
         record["status"] = "complete"
         try:
@@ -1293,9 +1440,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--profile", type=Path, default=default_profile)
     parser.add_argument("--snapshot-dir", type=Path, required=True)
     parser.add_argument("--snapshot-revision", required=True)
-    parser.add_argument(
-        "--intervention-manifest", type=Path, required=True,
+    recipe = parser.add_mutually_exclusive_group(required=True)
+    recipe.add_argument(
+        "--intervention-manifest", type=Path,
         help="completed directional-ablation manifest applied by the quantizer",
+    )
+    recipe.add_argument(
+        "--stock-control", action="store_true",
+        help="leave weights unchanged; final-ineligible activation/bakeoff control only",
     )
     parser.add_argument("--llama-cpp-dir", type=Path, required=True)
     parser.add_argument("--rocmfpx-dir", type=Path, required=True)
@@ -1309,7 +1461,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
     parser.add_argument("--split-max-size", default="48G", help="llama.cpp split size; release default is 48G, 0 writes one GGUF")
     parser.add_argument("--min-free-gib", type=int, default=1024)
-    parser.add_argument("--min-ram-gib", type=int, default=256)
+    parser.add_argument(
+        "--bounded-memory-temp", action="store_true",
+        help="spill converter tensor payloads under WORK_DIR, then split the single BF16 GGUF",
+    )
+    parser.add_argument(
+        "--gguf-splitter", type=Path,
+        help="pinned llama-gguf-split executable; required by bounded mode with split output",
+    )
+    parser.add_argument(
+        "--min-ram-gib", type=int,
+        help="override the profile RAM floor (256 GiB ordinary, 120 GiB bounded)",
+    )
     parser.add_argument("--execute", action="store_true", help="run conversion and quantization; default only writes a plan")
     return parser.parse_args(argv)
 
@@ -1331,6 +1494,10 @@ def main(argv: list[str] | None = None) -> int:
             raise PipelineError("--threads must be positive")
         if not re.fullmatch(r"0|[1-9][0-9]*[KMGT]", args.split_max_size):
             raise PipelineError("--split-max-size must be 0 or an integer followed by K, M, G, or T")
+        if args.bounded_memory_temp and args.split_max_size != "0" and args.gguf_splitter is None:
+            raise PipelineError("--bounded-memory-temp with split output requires --gguf-splitter")
+        if not args.bounded_memory_temp and args.gguf_splitter is not None:
+            raise PipelineError("--gguf-splitter is only valid with --bounded-memory-temp")
         record = orchestrate(args)
     except PipelineError as exc:
         print(f"qwen_quantize.py: error: {exc}", file=sys.stderr)
