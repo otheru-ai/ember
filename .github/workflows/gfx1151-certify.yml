@@ -1376,6 +1376,24 @@ jobs:
               "$corpus_dir/extraction-good.jsonl" "$corpus_dir/extraction-bad.jsonl"; do
             test -f "$file" && test ! -L "$file"
           done
+          # The protected source checkout is root-readable only. Stage exactly
+          # the two digest-pinned extraction files for the unprivileged runner;
+          # do not relax permissions on the authoritative corpus.
+          source_corpus_dir="$corpus_dir"
+          corpus_dir="$RUNNER_TEMP/qwen-capture-corpus-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$corpus_dir" && install -d -m 700 "$corpus_dir"
+          printf 'QWEN_STAGED_CORPUS=%s\n' "$corpus_dir" >>"$GITHUB_ENV"
+          docker run --rm --network none \
+            -e RUNNER_UID="$(id -u)" -e RUNNER_GID="$(id -g)" \
+            -v "$source_corpus_dir:/source:ro" -v "$corpus_dir:/staged" \
+            --entrypoint /bin/sh "$QWEN_DEV_IMAGE" -c '
+              set -eu
+              for name in extraction-good.jsonl extraction-bad.jsonl; do
+                test -f "/source/$name" && test ! -L "/source/$name"
+                install -m 0400 -o "$RUNNER_UID" -g "$RUNNER_GID" \
+                  "/source/$name" "/staged/$name"
+              done
+            '
           test "$(sha256sum "$contract" | awk '{print $1}')" = "$CORPUS_CONTRACT_SHA256"
           test "$(sha256sum "$recipe" | awk '{print $1}')" = "$CAPTURE_RECIPE_SHA256"
           test "$(sha256sum "$corpus_dir/extraction-good.jsonl" | awk '{print $1}')" = "$GOOD_CORPUS_SHA256"
@@ -1525,6 +1543,16 @@ jobs:
         run: |
           rm -f -- "$DOCKER_CONFIG/config.json"
           rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+
+      - name: Remove the run-scoped corpus copy
+        if: ${{ always() && env.QWEN_STAGED_CORPUS != '' }}
+        run: |
+          set -euo pipefail
+          expected="$RUNNER_TEMP/qwen-capture-corpus-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test "$QWEN_STAGED_CORPUS" = "$expected"
+          test -d "$expected" && test ! -L "$expected"
+          rm -f -- "$expected/extraction-good.jsonl" "$expected/extraction-bad.jsonl"
+          rmdir -- "$expected"
 
       - name: Record the stock activation-capture result
         if: ${{ success() }}
