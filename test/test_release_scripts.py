@@ -344,6 +344,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("dd if=\"$1\" iflag=direct", capture)
         self.assertIn("qwen-capture-corpus-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", capture)
         self.assertIn("docker run --rm --network none", capture)
+        self.assertIn("artifact entry is not a regular file", capture)
+        self.assertIn("os.chmod(path, 0o400, follow_symlinks=False)", capture)
         self.assertIn("Remove the run-scoped corpus copy", capture)
         self.assertIn("scripts/qwen_capture_control.py", capture)
         self.assertIn("--image-digest \"$QWEN_DEV_IMAGE_DIGEST\"", capture)

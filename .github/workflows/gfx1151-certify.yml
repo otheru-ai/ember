@@ -1376,6 +1376,34 @@ jobs:
               "$corpus_dir/extraction-good.jsonl" "$corpus_dir/extraction-bad.jsonl"; do
             test -f "$file" && test ! -L "$file"
           done
+          # A converter container owns these persistent outputs. If its outer
+          # Docker invocation fails after the tools have atomically completed,
+          # the ordinary host ownership handoff is skipped. Normalize only the
+          # two exact artifact directories, rejecting links, nested directories,
+          # and special files before changing any mode or owner.
+          docker run --rm --network none \
+            -e RUNNER_UID="$(id -u)" -e RUNNER_GID="$(id -g)" \
+            -v "$control_dir:/control" -v "$mtp_dir:/mtp" \
+            --entrypoint /usr/bin/python3 "$QWEN_DEV_IMAGE" -c '
+          import os, pathlib, stat
+          uid = int(os.environ["RUNNER_UID"]); gid = int(os.environ["RUNNER_GID"])
+          for root in (pathlib.Path("/control"), pathlib.Path("/mtp")):
+              root_stat = root.lstat()
+              if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+                  raise SystemExit(f"unsafe artifact directory: {root}")
+              entries = list(root.iterdir())
+              if not entries or len(entries) > 64:
+                  raise SystemExit(f"unexpected artifact inventory size: {root}")
+              for path in entries:
+                  info = path.lstat()
+                  if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                      raise SystemExit(f"artifact entry is not a regular file: {path.name}")
+              for path in entries:
+                  os.chown(path, uid, gid, follow_symlinks=False)
+                  os.chmod(path, 0o400, follow_symlinks=False)
+              os.chown(root, uid, gid, follow_symlinks=False)
+              os.chmod(root, 0o500, follow_symlinks=False)
+          '
           # The protected source checkout is root-readable only. Stage exactly
           # the two digest-pinned extraction files for the unprivileged runner;
           # do not relax permissions on the authoritative corpus.
