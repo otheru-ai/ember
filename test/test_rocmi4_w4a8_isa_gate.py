@@ -21,13 +21,18 @@ def kernel(
     groups: int = 4,
     partial_shift: bool = False,
     dual_shift: bool = False,
+    src0: str = "v[8:9]",
+    src1: str = "v[10:11]",
+    zero_origin: bool = True,
+    wave32: int = 1,
+    static_lds: int = 0,
 ) -> str:
     symbol = (
         "_ZL9mul_mat_qIL9ggml_type108ELi32ELb"
         f"{checked}ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii"
     )
-    high = """\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[16:23] neg_lo:[1,1,0]
-\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] neg_lo:[1,1,0]"""
+    high = f"""\tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[16:23] neg_lo:[1,1,0]
+\tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[0:7] neg_lo:[1,1,0]"""
     lanes = list(range(7 if partial_shift else 8))
     if dual_shift:
         shifts = "\n".join(
@@ -44,18 +49,29 @@ def kernel(
     else:
         high_then_shift = f"{high}\n{shifts}"
     group = f"""{high_then_shift}
-\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}
-\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}"""
+\tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[0:7] {modifier_low}
+\tv_wmma_i32_16x16x16_iu4 v[0:7], {src0}, {src1}, v[0:7] {modifier_low}"""
     body = "\n".join(group for _ in range(groups))
+    zero = 0 if zero_origin else 1
+    initialize = "\n".join(
+        f"\tv_mov_b32_e32 v{register}, {zero}" for register in range(16, 24)
+    )
     return f"""{symbol}:
+{initialize}
 {body}
 .Lfunc_end{checked}:
 \t.amdhsa_kernel {symbol}
+\t\t.amdhsa_group_segment_fixed_size {static_lds}
 \t\t.amdhsa_private_segment_fixed_size {scratch}
+\t\t.amdhsa_wavefront_size32 {wave32}
 \t\t.amdhsa_next_free_vgpr 186
 \t\t.amdhsa_next_free_sgpr 36
 \t.end_amdhsa_kernel
 """
+
+
+def program(*kernels: str, target: str = "amdgcn-amd-amdhsa--gfx1151") -> str:
+    return f'\t.amdgcn_target "{target}"\n' + "".join(kernels)
 
 
 def run_gate(text: str) -> subprocess.CompletedProcess[str]:
@@ -71,15 +87,30 @@ def run_gate(text: str) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> int:
-    valid = kernel(0) + kernel(1)
-    assert run_gate(valid).returncode == 0
-    assert run_gate(kernel(0, modifier_low="neg_lo:[1,1,0]") + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, shift_before_high=True) + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, scratch=4) + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, groups=3) + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, partial_shift=True) + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, dual_shift=True) + kernel(1, dual_shift=True)).returncode == 0
-    assert run_gate(kernel(0) + kernel(0) + kernel(1)).returncode != 0
+    valid = program(kernel(0), kernel(1))
+    result = run_gate(valid)
+    assert result.returncode == 0, result.stderr
+    assert "static_lds_bytes=0" in result.stdout
+    assert "dynamic_lds_bytes=not_encoded_in_saved_assembly" in result.stdout
+    assert run_gate(
+        program(kernel(0), kernel(1), target="amdgcn-amd-amdhsa--gfx1150")
+    ).returncode != 0
+    assert run_gate(program(kernel(0, wave32=0), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, static_lds=4), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, src0="v[8:10]"), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, src1="v[10:10]"), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, zero_origin=False), kernel(1))).returncode != 0
+    assert run_gate(
+        program(kernel(0, modifier_low="neg_lo:[1,1,0]"), kernel(1))
+    ).returncode != 0
+    assert run_gate(program(kernel(0, shift_before_high=True), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, scratch=4), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, groups=3), kernel(1))).returncode != 0
+    assert run_gate(program(kernel(0, partial_shift=True), kernel(1))).returncode != 0
+    assert run_gate(
+        program(kernel(0, dual_shift=True), kernel(1, dual_shift=True))
+    ).returncode == 0
+    assert run_gate(program(kernel(0), kernel(0), kernel(1))).returncode != 0
     print("PASS: rocmi4 W4A8 ISA gate accepts native exact code and rejects drift")
     return 0
 
