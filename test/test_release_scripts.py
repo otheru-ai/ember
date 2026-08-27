@@ -295,6 +295,10 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("qwen-docker-$GITHUB_RUN_ID", certify)
         self.assertIn("Remove temporary registry credentials", certify)
         control = certify.split("\n  qwen-convert-control:", 1)[1]
+        self.assertIn('-e LLAMA_REVISION="$LLAMA_REVISION"', control)
+        self.assertIn('[[ "$LLAMA_REVISION" == "$commit"* ]]', control)
+        self.assertLess(control.index('[[ "$LLAMA_REVISION" == "$commit"* ]]'),
+                        control.index("ember-gpu-lock acquire"))
         for repository in (
             "/ember", "/qwen-work/tooling/llama.cpp",
             "/qwen-work/tooling/ROCmFPX",

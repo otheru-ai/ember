@@ -795,8 +795,10 @@ jobs:
           ensure_checkout https://github.com/charlie12345/ROCmFPX.git \
             "$ROCMFPX_REVISION" "$workspace/tooling/ROCmFPX"
           docker run --rm --network host \
+            -e LLAMA_REVISION="$LLAMA_REVISION" \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc '
               set -euo pipefail
+              git config --global --add safe.directory /qwen-work/tooling/llama.cpp
               cmake -S /qwen-work/tooling/llama.cpp \
                 -B /qwen-work/tooling/llama.cpp/build \
                 -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
@@ -804,6 +806,10 @@ jobs:
                 -DBUILD_SHARED_LIBS=OFF
               cmake --build /qwen-work/tooling/llama.cpp/build \
                 --target llama-gguf-split -j"$(nproc)"
+              splitter=/qwen-work/tooling/llama.cpp/build/bin/llama-gguf-split
+              version="$($splitter --version 2>&1)"
+              commit="$(sed -n "s/.*commit \([0-9a-f]\{7,40\}\).*/\1/p" <<<"$version")"
+              test -n "$commit" && [[ "$LLAMA_REVISION" == "$commit"* ]]
               test -d /qwen-work/tooling/converter-venv || \
                 python3 -m venv /qwen-work/tooling/converter-venv
               /qwen-work/tooling/converter-venv/bin/pip install --no-cache-dir \

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -80,6 +81,60 @@ def make_safetensors(path: Path) -> None:
         offset += len(raw)
     encoded = json.dumps(header, separators=(",", ":")).encode()
     path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + payload)
+
+
+def make_mtp_companion(path: Path, source_revision: str, matrix_contract: str) -> None:
+    def string(value: str) -> bytes:
+        encoded = value.encode("utf-8")
+        return struct.pack("<Q", len(encoded)) + encoded
+
+    metadata = (
+        ("general.architecture", 8, "qwen4exp-mtp"),
+        ("qwen4exp-mtp.source_revision", 8, source_revision),
+        ("qwen4exp-mtp.shared_main_weights", 7, True),
+        ("ember.mtp.matrix_quant_contract", 8, matrix_contract),
+    )
+    names = sorted(qwen_quantize.MTP_QUANTIZED_MATRIX_NAMES |
+                   qwen_quantize.MTP_BF16_TENSOR_NAMES)
+    output = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(names), len(metadata)))
+    for key, kind, value in metadata:
+        output += string(key) + struct.pack("<I", kind)
+        output += string(value) if kind == 8 else struct.pack("<?", value)
+    matrix_type = qwen_quantize.SUPPORTED_TENSOR_FORMATS[matrix_contract]
+    for offset, name in enumerate(names):
+        tensor_type = (matrix_type if name in qwen_quantize.MTP_QUANTIZED_MATRIX_NAMES
+                       else 30)
+        output += string(name) + struct.pack("<IQIQ", 1, 32, tensor_type, offset * 32)
+    output += b"\0" * ((-len(output)) % 32)
+    output += b"\0" * (len(names) * 32)
+    path.write_bytes(output)
+
+
+def make_mmproj_companion(path: Path) -> None:
+    def string(value: str) -> bytes:
+        encoded = value.encode("utf-8")
+        return struct.pack("<Q", len(encoded)) + encoded
+
+    metadata = (
+        ("general.architecture", 8, "clip"),
+        ("general.file_type", 4, 32),
+        ("clip.projector_type", 8, "qwen3vl_merger"),
+        ("clip.has_vision_encoder", 7, True),
+        ("clip.vision.projection_dim", 4, 2560),
+        ("clip.vision.spatial_merge_size", 4, 2),
+    )
+    output = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, len(metadata)))
+    for key, kind, value in metadata:
+        output += string(key) + struct.pack("<I", kind)
+        if kind == 8:
+            output += string(value)
+        elif kind == 7:
+            output += struct.pack("<?", value)
+        else:
+            output += struct.pack("<I", value)
+    output += string("vision.proj.weight") + struct.pack("<IQIQ", 1, 32, 30, 0)
+    output += b"\0" * ((-len(output)) % 32) + b"\0" * 64
+    path.write_bytes(output)
 
 
 def pack_string(value: str) -> bytes:
@@ -390,8 +445,111 @@ class Fixture:
             "--min-free-gib", "0", "--min-ram-gib", "0", "--threads", "7",
         ]
 
+    def companion_args(
+        self, *, enable_mmproj: bool = False,
+        mtp_matrix: str = "Q4_0_ROCMI4",
+    ) -> list[str]:
+        mtp = self.root / "Qwen3.8-Flash-Next-MTP.gguf"
+        make_mtp_companion(mtp, self.revision, mtp_matrix)
+        mtp_manifest = self.root / "Qwen3.8-Flash-Next-MTP.export.json"
+        mtp_manifest.write_text(json.dumps({
+            "schema": "ember.qwen4exp.mtp-gguf-export.v1",
+            "source_revision": self.revision,
+            "quantized_output": str(mtp),
+            "quantized_bytes": mtp.stat().st_size,
+            "quantized_sha256": sha256(mtp),
+            "quantized_matrix_contract": mtp_matrix,
+            "quantized_matrix_ggml_type": qwen_quantize.SUPPORTED_TENSOR_FORMATS[mtp_matrix],
+            "quantized_matrix_tensor_count": len(qwen_quantize.MTP_QUANTIZED_MATRIX_NAMES),
+            "quantized_matrix_tensors": sorted(qwen_quantize.MTP_QUANTIZED_MATRIX_NAMES),
+            "quantizer_sha256": "9" * 64,
+            "quantizer_build_info": {
+                "tool": "ember-gguf-quantize", "ember_revision": self.ember_revision,
+                "rocmfpx_revision": self.rocm_revision, "format": "Q4_0_ROCMI4",
+                "ggml_tensor_type": 108,
+                "per_tensor_formats": list(qwen_quantize.SUPPORTED_TENSOR_FORMATS),
+            },
+            "runtime_status": "loadable quantized companion",
+        }), encoding="utf-8")
+        rows = [{
+            "role": "mtp", "enabled": True, "path": str(mtp),
+            "size_bytes": mtp.stat().st_size, "sha256": sha256(mtp),
+            "matrix_quant_contract": mtp_matrix,
+            "export_manifest_path": str(mtp_manifest),
+            "export_manifest_sha256": sha256(mtp_manifest),
+        }]
+        if enable_mmproj:
+            mmproj = self.root / "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
+            make_mmproj_companion(mmproj)
+            rows.append({
+                "role": "vision_mmproj", "enabled": True, "path": str(mmproj),
+                "size_bytes": mmproj.stat().st_size, "sha256": sha256(mmproj),
+                "format": "BF16",
+            })
+        else:
+            rows.append({"role": "vision_mmproj", "enabled": False})
+        companion_inventory = self.root / "companion-inventory.json"
+        companion_inventory.write_text(json.dumps({
+            "schema": qwen_quantize.COMPANION_INVENTORY_SCHEMA,
+            "source": {
+                "repo_id": "fixture/qwen", "revision": self.revision,
+                "snapshot_inventory_sha256": sha256(self.inventory),
+            },
+            "companions": rows,
+        }), encoding="utf-8")
+        pages_limit = self.root / "pages_limit"
+        pages_limit.write_text("32505856\n", encoding="utf-8")
+        return [
+            "--companion-inventory", str(companion_inventory),
+            "--companion-inventory-sha256", sha256(companion_inventory),
+            "--ttm-pages-limit-path", str(pages_limit),
+        ]
+
 
 class QwenQuantizeTests(unittest.TestCase):
+    def test_git_revision_scopes_safe_directory_without_home(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            checkout = Path(raw) / "checkout"
+            init_repo(checkout)
+            (checkout / "tracked").write_text("bound checkout\n", encoding="utf-8")
+            expected = commit_all(checkout, "initial")
+            with mock.patch.object(
+                    qwen_quantize, "run_checked",
+                    wraps=qwen_quantize.run_checked) as checked:
+                actual = qwen_quantize.git_revision(checkout)
+            self.assertEqual(actual, expected)
+            command = checked.call_args.args[0]
+            self.assertEqual(command[1:3], ["-c", f"safe.directory={checkout.resolve()}"])
+            self.assertEqual(command[3:], ["-C", str(checkout.resolve()), "rev-parse", "HEAD"])
+
+    def test_ember_revision_uses_image_cmake_cache_without_git_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            ember = Path(raw) / "ember-image-root"
+            cache = ember / "build-rocm" / "CMakeCache.txt"
+            cache.parent.mkdir(parents=True)
+            revision = "1" * 40
+            cache.write_text(
+                f"EMBER_CONFIGURED_GIT_HEAD:STRING={revision}\n", encoding="utf-8")
+            actual, source, has_git = qwen_quantize.ember_revision_evidence(ember)
+            self.assertEqual(actual, revision)
+            self.assertEqual(source, "cmake_cache")
+            self.assertFalse(has_git)
+
+    def test_ember_revision_rejects_cache_source_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            ember = Path(raw) / "ember-source"
+            init_repo(ember)
+            (ember / "tracked").write_text("source\n", encoding="utf-8")
+            source_revision = commit_all(ember, "source")
+            cache = ember / "build-rocm" / "CMakeCache.txt"
+            cache.parent.mkdir(parents=True)
+            cache.write_text(
+                f"EMBER_CONFIGURED_GIT_HEAD:STRING={'0' * 40}\n", encoding="utf-8")
+            self.assertNotEqual(source_revision, "0" * 40)
+            with self.assertRaisesRegex(
+                    qwen_quantize.PipelineError, "differs from its configured"):
+                qwen_quantize.ember_revision_evidence(ember)
+
     def test_profile_selects_ram_floor_for_conversion_mode(self) -> None:
         args = qwen_quantize.parse_args([
             "--snapshot-dir", "/snapshot", "--snapshot-revision", "a" * 40,
@@ -452,8 +610,11 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertFalse(record["experiment"]["final_release_eligible"])
             self.assertEqual(
                 record["experiment"]["eligibility_status"],
-                "pending_measured_bakeoff_and_hardware_certification",
+                "pending_exact_companion_inventory_and_measured_bakeoff_and_hardware_certification",
             )
+            self.assertEqual(record["companion_inventory"]["status"], "not_supplied")
+            self.assertIsNone(record["companion_inventory"]["enabled_artifact_bytes"])
+            self.assertFalse(record["companion_inventory"]["estimated_bytes_used"])
 
     def test_explicit_stock_control_plan_is_unchanged_and_final_ineligible(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -742,6 +903,149 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("snapshot file inventory mismatch", result.stderr)
 
+    def test_snapshot_allows_only_regular_root_fetch_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            (fixture.snapshot / ".ember-fetch.lock").write_text(
+                "fetch coordination\n", encoding="utf-8")
+            result = subprocess.run(
+                fixture.command(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            self.assertEqual(
+                record["snapshot"]["ignored_coordination_files"],
+                [".ember-fetch.lock"],
+            )
+
+    def test_snapshot_rejects_fetch_lock_symlink_and_other_dotfile(self) -> None:
+        for kind, expected in (("symlink", "regular non-symlink"),
+                               ("other", "snapshot file inventory mismatch")):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                fixture = Fixture(Path(raw))
+                if kind == "symlink":
+                    (fixture.snapshot / ".ember-fetch.lock").symlink_to("LICENSE")
+                else:
+                    (fixture.snapshot / ".another-fetch-file").write_text(
+                        "not exempt\n", encoding="utf-8")
+                result = subprocess.run(
+                    fixture.command(), text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+
+    def test_snapshot_lease_rejects_active_fetcher_and_blocks_new_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            lock_path = fixture.snapshot / ".ember-fetch.lock"
+            with lock_path.open("w", encoding="utf-8") as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = subprocess.run(
+                    fixture.command(), text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("download still owns the snapshot", result.stderr)
+            with qwen_quantize.SnapshotReadLease(fixture.snapshot):
+                with lock_path.open("w", encoding="utf-8") as writer:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_exact_companion_inventory_drives_combined_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            command = [*fixture.command(), *fixture.companion_args(enable_mmproj=True)]
+            result = subprocess.run(
+                [*command, "--execute"], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(
+                (fixture.work / "qwen-quant-build-record.json").read_text())
+            companion = record["companion_inventory"]
+            self.assertEqual(companion["status"], "verified_exact")
+            self.assertEqual(companion["enabled_roles"], ["mtp", "vision_mmproj"])
+            self.assertEqual(companion["disabled_roles"], [])
+            self.assertEqual(companion["fit_status"], "verified_exact_fit")
+            self.assertFalse(companion["estimated_bytes_used"])
+            self.assertTrue(all(row["regular_file"] and not row["symlink"]
+                                for row in companion["roles"]))
+            preflight = record["memory_preflight"]
+            self.assertTrue(preflight["combined_fits"])
+            self.assertEqual(
+                preflight["combined_accounted_bytes"],
+                preflight["artifact_bytes"] + preflight["runtime_reserve_bytes"]
+                + companion["enabled_artifact_bytes"],
+            )
+            self.assertEqual(preflight["combined_fit_checks"], {
+                "certification_memtotal": True,
+                "device_budget": True,
+                "live_gtt_cap": True,
+            })
+            self.assertEqual(
+                companion["live_gtt_evidence"]["runner_gtt_cap_bytes"],
+                133143986176,
+            )
+            self.assertEqual(
+                record["experiment"]["eligibility_status"],
+                "pending_canonical_live_gtt_evidence_and_measured_bakeoff_and_hardware_certification",
+            )
+            self.assertFalse(companion["live_gtt_evidence"]["authoritative_sysfs"])
+
+    def test_exact_inventory_explicitly_disables_absent_mmproj(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            result = subprocess.run(
+                [*fixture.command(), *fixture.companion_args()], text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            companion = record["companion_inventory"]
+            self.assertEqual(companion["enabled_roles"], ["mtp"])
+            self.assertEqual(companion["disabled_roles"], ["vision_mmproj"])
+            mmproj = companion["roles"][1]
+            self.assertFalse(mmproj["enabled"])
+            self.assertFalse(mmproj["artifact_present"])
+            self.assertEqual(mmproj["counted_bytes"], 0)
+            self.assertNotIn("path", mmproj)
+            self.assertFalse(companion["release_companions_complete"])
+            self.assertEqual(
+                companion["pending_release_evidence"],
+                ["canonical_live_gtt_evidence", "vision_mmproj"],
+            )
+
+    def test_companion_inventory_fails_closed_on_binding_format_and_file_type(self) -> None:
+        cases = ("inventory_sha", "matrix", "symlink", "pages")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                fixture = Fixture(Path(raw))
+                args = fixture.companion_args(
+                    mtp_matrix=("Q4_0_ROCMFP4_FAST" if case == "matrix"
+                                else "Q4_0_ROCMI4"))
+                if case == "inventory_sha":
+                    args[args.index("--companion-inventory-sha256") + 1] = "0" * 64
+                elif case == "symlink":
+                    inventory_path = Path(args[args.index("--companion-inventory") + 1])
+                    inventory = json.loads(inventory_path.read_text())
+                    mtp = Path(inventory["companions"][0]["path"])
+                    target = fixture.root / "mtp-target.gguf"
+                    mtp.rename(target)
+                    mtp.symlink_to(target)
+                elif case == "pages":
+                    pages = Path(args[args.index("--ttm-pages-limit-path") + 1])
+                    pages.write_text("32505857\n", encoding="utf-8")
+                result = subprocess.run(
+                    [*fixture.command(), *args], text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertTrue(any(fragment in result.stderr for fragment in (
+                    "SHA-256 mismatch", "matrix quant contract",
+                    "regular non-symlink", "live TTM pages_limit")), result.stderr)
+
     def test_execute_runs_both_commands_and_completes_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             fixture = Fixture(Path(raw))
@@ -766,8 +1070,9 @@ class QwenQuantizeTests(unittest.TestCase):
             )
             self.assertEqual(
                 record["memory_preflight"]["companion_artifact_fit_status"],
-                "pending_mtp_mmproj_inventory",
+                "pending_exact_companion_inventory",
             )
+            self.assertIsNone(record["memory_preflight"]["combined_fits"])
             self.assertEqual(record["memory_preflight"]["shard_count"], 2)
             self.assertEqual(
                 record["memory_preflight"]["shard_bytes"],
@@ -1122,6 +1427,90 @@ class QwenQuantizeTests(unittest.TestCase):
                 "headroom_bytes": gate["device_budget_bytes"] - total,
                 "fits": True,
             }, profile)
+
+    def test_memory_preflight_rejects_exact_companions_over_live_gtt_cap(self) -> None:
+        profile = json.loads(
+            (ROOT / "share" / "release_profiles" /
+             "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+        )
+        gate = profile["quantization"]["native_262k_memory_gate"]
+        companion_bytes = 4096
+        artifact = (
+            gate["certification_host_gtt_cap_bytes"]
+            - gate["runtime_reserve_bytes"] - companion_bytes + 1
+        )
+        total = artifact + gate["runtime_reserve_bytes"]
+        self.assertLess(total + companion_bytes,
+                        gate["certification_host_memtotal_bytes"])
+        companion = {
+            "status": "verified_exact",
+            "enabled_artifact_bytes": companion_bytes,
+            "live_gtt_evidence": {
+                "runner_gtt_cap_bytes": gate["certification_host_gtt_cap_bytes"],
+            },
+        }
+        with self.assertRaisesRegex(qwen_quantize.PipelineError, "live_gtt_cap"):
+            qwen_quantize.validate_memory_preflight({
+                "artifact_bytes": artifact,
+                "shard_count": 1,
+                "shard_bytes": [artifact],
+                "runtime_reserve_bytes": gate["runtime_reserve_bytes"],
+                "budget_bytes": gate["device_budget_bytes"],
+                "total_bytes": total,
+                "headroom_bytes": gate["device_budget_bytes"] - total,
+                "fits": True,
+            }, profile, companion)
+
+    def test_large_snapshot_digest_routes_through_direct_io_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "large-fixture.safetensors"
+            path.write_bytes(b"large fixture bytes")
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+            with mock.patch.object(qwen_quantize, "DIRECT_IO_MIN_BYTES", 1), \
+                    mock.patch.object(
+                        qwen_quantize, "snapshot_digest_direct",
+                        return_value=expected,
+                    ) as direct:
+                actual, method = qwen_quantize.snapshot_artifact_digest(
+                    path, path.stat().st_size, "sha256")
+            self.assertEqual(actual, expected)
+            self.assertEqual(method, "o_direct_dd_v1")
+            direct.assert_called_once_with(path, path.stat().st_size, "sha256")
+
+    def test_large_exact_file_hash_uses_identity_bound_direct_fd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "large-companion.gguf"
+            path.write_bytes(b"identity-bound companion")
+            expected = hashlib.sha256(path.read_bytes()).hexdigest()
+            with mock.patch.object(qwen_quantize, "DIRECT_IO_MIN_BYTES", 1), \
+                    mock.patch.object(
+                        qwen_quantize, "sha256_open_file",
+                        wraps=qwen_quantize.sha256_open_file,
+                    ) as bound_hash:
+                evidence = qwen_quantize.inspect_exact_file(
+                    path.resolve(), expected, path.stat().st_size, "companion")
+            self.assertEqual(evidence["integrity_read_method"], "o_direct_bound_fd_v1")
+            self.assertEqual(bound_hash.call_args.args[1], path.stat().st_size)
+            self.assertEqual(bound_hash.call_args.args[2], path.resolve())
+
+    def test_direct_git_blob_digest_hashes_exact_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "blob"
+            path.write_bytes(b"git blob payload")
+            fake_dd = mock.Mock()
+            fake_dd.stdout = mock.Mock()
+            fake_dd.stdout.read = mock.Mock(side_effect=[path.read_bytes(), b""])
+            fake_dd.stderr = mock.Mock()
+            fake_dd.stderr.read.return_value = b""
+            fake_dd.wait.return_value = 0
+            with mock.patch.object(qwen_quantize.shutil, "which", return_value="/usr/bin/dd"), \
+                    mock.patch.object(
+                        qwen_quantize.subprocess, "Popen", return_value=fake_dd,
+                    ) as popen:
+                actual = qwen_quantize.snapshot_digest_direct(
+                    path, path.stat().st_size, "git_blob_sha1")
+            self.assertEqual(actual, git_blob(path))
+            self.assertIn("iflag=direct", popen.call_args.args[0])
 
     def test_application_report_requires_finite_metrics_in_target_order(self) -> None:
         evidence = {

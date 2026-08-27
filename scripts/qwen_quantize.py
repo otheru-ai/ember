@@ -13,6 +13,7 @@ from collections import Counter
 import ctypes
 import datetime as dt
 import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -51,11 +52,34 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 QWEN_QSA_LAYERS = {3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47}
 INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.weight$")
 DEFAULT_QUANTIZATION_ARM = "profile-default-rocmi4"
+COMPANION_INVENTORY_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
+COMPANION_ROLES = ("mtp", "vision_mmproj")
+TTM_PAGE_BYTES = 4096
+CANONICAL_TTM_PAGES_LIMIT = Path("/sys/module/ttm/parameters/pages_limit")
+DIRECT_IO_MIN_BYTES = 512 * 1024 * 1024
+DIRECT_IO_BLOCK_BYTES = 8 * 1024 * 1024
 SUPPORTED_TENSOR_FORMATS = {
     "Q4_0_ROCMI4": 108,
     "Q6_K": 14,
     "Q4_0_ROCMFP4_FAST": 101,
 }
+MTP_QUANTIZED_MATRIX_NAMES = frozenset({
+    "mtp_hc_down.weight", "mtp_hc_up.weight",
+    "mtp.hc_attn_inject.weight", "mtp.hc_attn_down.weight", "mtp.hc_attn_up.weight",
+    "mtp.ffn_gate_up_exps.weight", "mtp.ffn_down_exps.weight",
+    "mtp.ffn_gate_shexp.weight", "mtp.ffn_up_shexp.weight", "mtp.ffn_down_shexp.weight",
+    "mtp.hc_ffn_inject.weight", "mtp.hc_ffn_down.weight", "mtp.hc_ffn_up.weight",
+    "mtp.indexer.q_proj.weight", "mtp.indexer.k_proj.weight",
+    "mtp.attn_output.weight", "mtp.attn_k.weight", "mtp.attn_q.weight", "mtp.attn_v.weight",
+    "mtp_fc_emb.weight", "mtp_fc_hc.weight",
+})
+MTP_BF16_TENSOR_NAMES = frozenset({
+    "mtp_hc_norm.weight", "mtp.hc_attn_norm.weight",
+    "mtp.ffn_gate_inp.weight", "mtp.ffn_gate_inp_shexp.weight",
+    "mtp.hc_ffn_norm.weight", "mtp.indexer.k_norm.weight", "mtp.indexer.q_norm.weight",
+    "mtp.attn_k_norm.weight", "mtp.attn_q_norm.weight",
+    "mtp_pre_emb_norm.weight", "mtp_pre_hc_norm.weight",
+})
 ROCMFP4_FAST_MATRIX_PATTERNS = [
     (r"^blk\.[0-9]+\.(hc_(attn|ffn)_(down|up|inject)|"
      r"ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|"
@@ -77,13 +101,92 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_blob_sha1(path: Path) -> str:
-    size = path.stat().st_size
-    digest = hashlib.sha1(f"blob {size}\0".encode("ascii"), usedforsecurity=False)
+def snapshot_digest_buffered(path: Path, size: int, algorithm: str) -> str:
+    if algorithm == "sha256":
+        digest = hashlib.sha256()
+    elif algorithm == "git_blob_sha1":
+        digest = hashlib.sha1(f"blob {size}\0".encode("ascii"), usedforsecurity=False)
+    else:
+        raise PipelineError(f"unsupported snapshot digest algorithm: {algorithm}")
     with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+        for chunk in iter(lambda: source.read(DIRECT_IO_BLOCK_BYTES), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def snapshot_digest_direct(path: Path, size: int, algorithm: str) -> str:
+    """Hash a large snapshot artifact through O_DIRECT, outside page cache."""
+    dd = shutil.which("dd", path=os.defpath)
+    if dd is None:
+        raise PipelineError("dd is required for large snapshot O_DIRECT integrity reads")
+    if algorithm == "sha256":
+        digest = hashlib.sha256()
+    elif algorithm == "git_blob_sha1":
+        digest = hashlib.sha1(f"blob {size}\0".encode("ascii"), usedforsecurity=False)
+    else:
+        raise PipelineError(f"unsupported snapshot digest algorithm: {algorithm}")
+    try:
+        process = subprocess.Popen(
+            [dd, f"if={path}", "iflag=direct", "bs=8M", "status=none"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise PipelineError(f"cannot start O_DIRECT integrity read for {path}: {exc}") from exc
+    assert process.stdout is not None
+    total = 0
+    for chunk in iter(lambda: process.stdout.read(DIRECT_IO_BLOCK_BYTES), b""):
+        total += len(chunk)
+        digest.update(chunk)
+    process.stdout.close()
+    assert process.stderr is not None
+    stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+    process.stderr.close()
+    returncode = process.wait()
+    if returncode != 0 or total != size:
+        detail = f": {stderr}" if stderr else ""
+        raise PipelineError(f"O_DIRECT integrity read failed for {path}{detail}")
+    return digest.hexdigest()
+
+
+def snapshot_artifact_digest(path: Path, size: int, algorithm: str) -> tuple[str, str]:
+    if size >= DIRECT_IO_MIN_BYTES:
+        return snapshot_digest_direct(path, size, algorithm), "o_direct_dd_v1"
+    return snapshot_digest_buffered(path, size, algorithm), "buffered_small_file_v1"
+
+
+def sha256_open_file(stream: Any, size: int, path: Path) -> tuple[str, str]:
+    """Hash an already identity-bound file, using O_DIRECT when it is large."""
+    if size < DIRECT_IO_MIN_BYTES:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(DIRECT_IO_BLOCK_BYTES), b""):
+            digest.update(chunk)
+        return digest.hexdigest(), "buffered_small_file_v1"
+    dd = shutil.which("dd", path=os.defpath)
+    if dd is None:
+        raise PipelineError("dd is required for large companion O_DIRECT integrity reads")
+    descriptor = stream.fileno()
+    try:
+        process = subprocess.Popen(
+            [dd, f"if=/proc/self/fd/{descriptor}", "iflag=direct", "bs=8M", "status=none"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(descriptor,),
+        )
+    except OSError as exc:
+        raise PipelineError(f"cannot start O_DIRECT integrity read for {path}: {exc}") from exc
+    assert process.stdout is not None
+    digest = hashlib.sha256()
+    total = 0
+    for chunk in iter(lambda: process.stdout.read(DIRECT_IO_BLOCK_BYTES), b""):
+        total += len(chunk)
+        digest.update(chunk)
+    process.stdout.close()
+    assert process.stderr is not None
+    stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+    process.stderr.close()
+    returncode = process.wait()
+    if returncode != 0 or total != size:
+        detail = f": {stderr}" if stderr else ""
+        raise PipelineError(f"O_DIRECT integrity read failed for {path}{detail}")
+    return digest.hexdigest(), "o_direct_bound_fd_v1"
 
 
 def read_json(path: Path, label: str) -> dict[str, Any]:
@@ -100,6 +203,336 @@ def require_mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError(f"{field} must be a JSON object")
     return value
+
+
+def require_exact_keys(value: dict[str, Any], expected: set[str], field: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise PipelineError(
+            f"{field} keys differ from the exact contract; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+
+
+class SnapshotReadLease:
+    """Hold the fetcher's coordination inode shared for the full transaction."""
+
+    def __init__(self, snapshot: Path) -> None:
+        self.path = snapshot / ".ember-fetch.lock"
+        self.descriptor = -1
+
+    def __enter__(self) -> "SnapshotReadLease":
+        if not self.path.parent.is_dir():
+            raise PipelineError(f"snapshot directory does not exist: {self.path.parent}")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            self.descriptor = os.open(self.path, flags, 0o600)
+            status = os.fstat(self.descriptor)
+            if not stat.S_ISREG(status.st_mode):
+                raise PipelineError("snapshot coordination inode must be a regular file")
+            fcntl.flock(self.descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            raise PipelineError("the resumable source download still owns the snapshot") from exc
+        except PipelineError:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            raise
+        except OSError as exc:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            if exc.errno == errno.ELOOP:
+                raise PipelineError(
+                    "snapshot coordination file .ember-fetch.lock must be a regular non-symlink file"
+                ) from exc
+            raise PipelineError(
+                f"cannot acquire snapshot read lease {self.path}: {exc}") from exc
+        return self
+
+    def __exit__(self, _type: Any, _value: Any, _traceback: Any) -> None:
+        if self.descriptor >= 0:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+def inspect_exact_file(
+    path: Path, expected_sha256: str, expected_bytes: int, label: str,
+) -> dict[str, Any]:
+    """Hash one named regular file without following symlinks or path swaps."""
+    if not path.is_absolute():
+        raise PipelineError(f"{label} path must be absolute")
+    if not isinstance(expected_sha256, str) or SHA256_RE.fullmatch(expected_sha256) is None:
+        raise PipelineError(f"{label} sha256 must be a lowercase 64-character digest")
+    if (not isinstance(expected_bytes, int) or isinstance(expected_bytes, bool)
+            or expected_bytes < 1):
+        raise PipelineError(f"{label} size_bytes must be a positive integer")
+    try:
+        named = os.lstat(path)
+    except OSError as exc:
+        raise PipelineError(f"cannot inspect {label} {path}: {exc}") from exc
+    if not stat.S_ISREG(named.st_mode):
+        raise PipelineError(f"{label} must be a regular non-symlink file: {path}")
+    try:
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
+                raise PipelineError(f"{label} identity changed before hashing")
+            actual_sha256, read_method = sha256_open_file(
+                stream, before.st_size, path)
+            after = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise PipelineError(f"cannot hash {label} {path}: {exc}") from exc
+    if ((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)):
+        raise PipelineError(f"{label} changed while it was hashed")
+    if after.st_size != expected_bytes:
+        raise PipelineError(
+            f"{label} size mismatch: expected {expected_bytes}, got {after.st_size}")
+    if actual_sha256 != expected_sha256:
+        raise PipelineError(f"{label} SHA-256 mismatch")
+    return {
+        "path": str(path),
+        "size_bytes": after.st_size,
+        "sha256": actual_sha256,
+        "integrity_read_method": read_method,
+        "regular_file": True,
+        "symlink": False,
+    }
+
+
+def read_exact_json_file(
+    path: Path, expected_sha256: str, label: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Hash and parse one bounded JSON manifest from the same open inode."""
+    if not path.is_absolute():
+        raise PipelineError(f"{label} path must be absolute")
+    if SHA256_RE.fullmatch(expected_sha256 or "") is None:
+        raise PipelineError(f"{label} sha256 must be a lowercase 64-character digest")
+    try:
+        named = os.lstat(path)
+        if not stat.S_ISREG(named.st_mode):
+            raise PipelineError(f"{label} must be a regular non-symlink file: {path}")
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino):
+                raise PipelineError(f"{label} identity changed before reading")
+            raw = stream.read(16 * 1024 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+    except OSError as exc:
+        raise PipelineError(f"cannot read {label} {path}: {exc}") from exc
+    if len(raw) > 16 * 1024 * 1024:
+        raise PipelineError(f"{label} exceeds the 16 MiB manifest bound")
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in identity_fields):
+        raise PipelineError(f"{label} changed while it was read")
+    actual_sha256 = hashlib.sha256(raw).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise PipelineError(f"{label} SHA-256 mismatch")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineError(f"cannot parse {label} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PipelineError(f"{label} must be a JSON object")
+    evidence = {
+        "path": str(path), "size_bytes": len(raw), "sha256": actual_sha256,
+        "integrity_read_method": "buffered_bound_fd_v1",
+        "regular_file": True, "symlink": False,
+    }
+    return value, evidence
+
+
+def expected_mtp_matrix_contract(quantization_arm: dict[str, Any]) -> str:
+    return (
+        "Q4_0_ROCMFP4_FAST"
+        if "Q4_0_ROCMFP4_FAST" in quantization_arm["formats"]
+        else "Q4_0_ROCMI4"
+    )
+
+
+def validate_companion_inventory(
+    path: Path | None,
+    expected_inventory_sha256: str | None,
+    pages_limit_path: Path,
+    profile: dict[str, Any],
+    quantization_arm: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind exact enabled companion bytes; absence is explicitly non-final."""
+    if path is None and expected_inventory_sha256 is None:
+        return {
+            "status": "not_supplied",
+            "schema": COMPANION_INVENTORY_SCHEMA,
+            "required_roles": list(COMPANION_ROLES),
+            "roles": [],
+            "enabled_roles": [],
+            "disabled_roles": [],
+            "enabled_artifact_bytes": None,
+            "fit_status": "pending_exact_companion_inventory",
+            "final_release_eligibility": "pending_exact_companion_inventory",
+            "estimated_bytes_used": False,
+        }
+    if path is None or expected_inventory_sha256 is None:
+        raise PipelineError(
+            "--companion-inventory and --companion-inventory-sha256 must be supplied together")
+    inventory, inventory_file = read_exact_json_file(
+        path.absolute(), expected_inventory_sha256, "companion inventory")
+    require_exact_keys(inventory, {"schema", "source", "companions"},
+                       "companion inventory")
+    if inventory.get("schema") != COMPANION_INVENTORY_SCHEMA:
+        raise PipelineError("unsupported companion inventory schema")
+    source = require_mapping(inventory.get("source"), "companion inventory source")
+    require_exact_keys(
+        source, {"repo_id", "revision", "snapshot_inventory_sha256"},
+        "companion inventory source",
+    )
+    expected_source = profile["source"]
+    if source != {
+        "repo_id": expected_source["repo_id"],
+        "revision": expected_source["revision"],
+        "snapshot_inventory_sha256": expected_source["snapshot_inventory_sha256"],
+    }:
+        raise PipelineError("companion inventory source does not match the pinned main snapshot")
+    rows = inventory.get("companions")
+    if not isinstance(rows, list) or len(rows) != len(COMPANION_ROLES):
+        raise PipelineError("companion inventory must contain exactly MTP and vision_mmproj roles")
+    by_role: dict[str, dict[str, Any]] = {}
+    for index, row_value in enumerate(rows):
+        row = require_mapping(row_value, f"companion inventory companions[{index}]")
+        role = row.get("role")
+        if role not in COMPANION_ROLES or role in by_role:
+            raise PipelineError("companion inventory roles must be unique MTP and vision_mmproj")
+        by_role[role] = row
+    if set(by_role) != set(COMPANION_ROLES):
+        raise PipelineError("companion inventory must contain exactly MTP and vision_mmproj roles")
+
+    normalized_roles: list[dict[str, Any]] = []
+    mtp = by_role["mtp"]
+    require_exact_keys(
+        mtp,
+        {"role", "enabled", "path", "size_bytes", "sha256",
+         "matrix_quant_contract", "export_manifest_path", "export_manifest_sha256"},
+        "MTP companion",
+    )
+    if mtp.get("enabled") is not True:
+        raise PipelineError("matching MTP companion must be enabled")
+    expected_matrix = expected_mtp_matrix_contract(quantization_arm)
+    if mtp.get("matrix_quant_contract") != expected_matrix:
+        raise PipelineError(
+            f"MTP matrix quant contract must match the selected arm ({expected_matrix})")
+    mtp_path = mtp.get("path")
+    if not isinstance(mtp_path, str) or not mtp_path:
+        raise PipelineError("MTP companion path must be a non-empty absolute string")
+    mtp_evidence = inspect_exact_file(
+        Path(mtp_path), mtp.get("sha256"), mtp.get("size_bytes"), "MTP companion")
+    mtp_gguf = validate_mtp_companion_gguf(
+        Path(mtp_path), expected_matrix, profile["source"]["revision"])
+    manifest_path = mtp.get("export_manifest_path")
+    if not isinstance(manifest_path, str) or not manifest_path:
+        raise PipelineError("MTP export manifest path must be a non-empty absolute string")
+    mtp_manifest = validate_mtp_export_manifest(
+        Path(manifest_path), mtp.get("export_manifest_sha256"),
+        mtp_evidence, expected_matrix, profile)
+    normalized_roles.append({
+        "role": "mtp", "enabled": True, "artifact_present": True,
+        "matrix_quant_contract": expected_matrix, "gguf_contract": mtp_gguf,
+        "export_manifest": mtp_manifest,
+        **mtp_evidence,
+    })
+
+    mmproj = by_role["vision_mmproj"]
+    enabled = mmproj.get("enabled")
+    if not isinstance(enabled, bool):
+        raise PipelineError("vision_mmproj enabled must be boolean")
+    if not enabled:
+        require_exact_keys(mmproj, {"role", "enabled"}, "disabled vision_mmproj companion")
+        normalized_roles.append({
+            "role": "vision_mmproj", "enabled": False,
+            "artifact_present": False, "counted_bytes": 0,
+        })
+    else:
+        require_exact_keys(
+            mmproj, {"role", "enabled", "path", "size_bytes", "sha256", "format"},
+            "enabled vision_mmproj companion",
+        )
+        required_companions = profile["artifact"].get("required_companion_artifacts")
+        if (not isinstance(required_companions, list) or len(required_companions) != 1
+                or required_companions[0].get("role") != "vision_mmproj"):
+            raise PipelineError("profile vision_mmproj artifact contract is malformed")
+        expected_mmproj = required_companions[0]
+        mmproj_path = mmproj.get("path")
+        if not isinstance(mmproj_path, str) or not mmproj_path:
+            raise PipelineError("vision_mmproj path must be a non-empty absolute string")
+        if (Path(mmproj_path).name != expected_mmproj.get("filename")
+                or mmproj.get("format") != expected_mmproj.get("format")):
+            raise PipelineError("vision_mmproj filename/format differs from the release profile")
+        mmproj_evidence = inspect_exact_file(
+            Path(mmproj_path), mmproj.get("sha256"), mmproj.get("size_bytes"),
+            "vision_mmproj companion",
+        )
+        mmproj_gguf = validate_bf16_qwen_mmproj_gguf(Path(mmproj_path))
+        normalized_roles.append({
+            "role": "vision_mmproj", "enabled": True, "artifact_present": True,
+            "format": mmproj["format"], "gguf_contract": mmproj_gguf,
+            **mmproj_evidence,
+        })
+
+    try:
+        pages_limit_text = pages_limit_path.read_text(encoding="utf-8").strip()
+        live_pages_limit = int(pages_limit_text)
+    except (OSError, ValueError) as exc:
+        raise PipelineError(
+            f"cannot read live TTM pages_limit evidence {pages_limit_path}: {exc}") from exc
+    gate = profile["quantization"]["native_262k_memory_gate"]
+    host_page_bytes = int(os.sysconf("SC_PAGE_SIZE"))
+    if host_page_bytes != TTM_PAGE_BYTES:
+        raise PipelineError(
+            f"host page size {host_page_bytes} differs from the pinned TTM page contract")
+    live_gtt_cap = live_pages_limit * host_page_bytes
+    if (live_pages_limit != gate["certification_host_gtt_pages_limit"]
+            or live_gtt_cap != gate["certification_host_gtt_cap_bytes"]):
+        raise PipelineError("live TTM pages_limit does not match the pinned 124 GiB certification cap")
+    enabled_roles = [row["role"] for row in normalized_roles if row["enabled"]]
+    disabled_roles = [row["role"] for row in normalized_roles if not row["enabled"]]
+    enabled_bytes = sum(row["size_bytes"] for row in normalized_roles if row["enabled"])
+    pages_path_absolute = pages_limit_path.absolute()
+    authoritative_live_gtt = pages_path_absolute == CANONICAL_TTM_PAGES_LIMIT
+    pending_release_evidence: list[str] = []
+    if not authoritative_live_gtt:
+        pending_release_evidence.append("canonical_live_gtt_evidence")
+    if "vision_mmproj" in disabled_roles:
+        pending_release_evidence.append("vision_mmproj")
+    return {
+        "status": "verified_exact",
+        "schema": COMPANION_INVENTORY_SCHEMA,
+        "manifest": inventory_file,
+        "source": dict(source),
+        "required_roles": list(COMPANION_ROLES),
+        "roles": normalized_roles,
+        "enabled_roles": enabled_roles,
+        "disabled_roles": disabled_roles,
+        "enabled_artifact_bytes": enabled_bytes,
+        "fit_status": "pending_main_artifact_preflight",
+        "final_release_eligibility": (
+            "pending_" + "_and_".join(pending_release_evidence)
+            if pending_release_evidence else "pending_combined_memory_preflight"
+        ),
+        "pending_release_evidence": pending_release_evidence,
+        "release_companions_complete": "vision_mmproj" not in disabled_roles,
+        "estimated_bytes_used": False,
+        "live_gtt_evidence": {
+            "pages_limit_path": str(pages_path_absolute),
+            "runner_gtt_pages_limit": live_pages_limit,
+            "runner_gtt_cap_bytes": live_gtt_cap,
+            "page_bytes": host_page_bytes,
+            "matches_required_cap": True,
+            "authoritative_sysfs": authoritative_live_gtt,
+        },
+    }
 
 
 def parse_profile_tensor_override(value: Any, field: str) -> dict[str, Any]:
@@ -732,9 +1165,32 @@ def validate_snapshot(snapshot: Path, revision: str, profile: dict[str, Any], in
         raise PipelineError(f"snapshot directory does not exist: {snapshot}")
     if snapshot.parent.name == "snapshots" and snapshot.name != revision:
         raise PipelineError("Hugging Face cache snapshot directory name does not match --snapshot-revision")
-    actual_paths = sorted(
-        path.relative_to(snapshot).as_posix() for path in snapshot.rglob("*") if path.is_file()
-    )
+    ignored_coordination_files: list[str] = []
+    fetch_lock = snapshot / ".ember-fetch.lock"
+    try:
+        fetch_lock_status = os.lstat(fetch_lock)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PipelineError(f"cannot inspect snapshot coordination file: {exc}") from exc
+    else:
+        if not stat.S_ISREG(fetch_lock_status.st_mode):
+            raise PipelineError(
+                "snapshot coordination file .ember-fetch.lock must be a regular non-symlink file")
+        ignored_coordination_files.append(".ember-fetch.lock")
+    actual_paths: list[str] = []
+    for path in snapshot.rglob("*"):
+        try:
+            status = os.lstat(path)
+        except OSError as exc:
+            raise PipelineError(f"cannot inspect snapshot entry {path}: {exc}") from exc
+        if stat.S_ISLNK(status.st_mode):
+            raise PipelineError(f"snapshot entries must not be symlinks: {path}")
+        if stat.S_ISREG(status.st_mode) and path != fetch_lock:
+            actual_paths.append(path.relative_to(snapshot).as_posix())
+        elif not stat.S_ISREG(status.st_mode) and not stat.S_ISDIR(status.st_mode):
+            raise PipelineError(f"snapshot entry must be a regular file or directory: {path}")
+    actual_paths.sort()
     expected_rows = inventory["files"]
     expected_paths = [row["path"] for row in expected_rows]
     if actual_paths != expected_paths:
@@ -751,16 +1207,19 @@ def validate_snapshot(snapshot: Path, revision: str, profile: dict[str, Any], in
         if size != row["size"]:
             raise PipelineError(f"snapshot size mismatch for {row['path']}: expected {row['size']}, got {size}")
         if "sha256" in row:
-            actual_digest = sha256_file(path)
+            algorithm = "sha256"
+            actual_digest, read_method = snapshot_artifact_digest(path, size, algorithm)
             if actual_digest != row["sha256"]:
                 raise PipelineError(f"snapshot SHA-256 mismatch for {row['path']}")
-            algorithm = "sha256"
         else:
-            actual_digest = git_blob_sha1(path)
+            algorithm = "git_blob_sha1"
+            actual_digest, read_method = snapshot_artifact_digest(path, size, algorithm)
             if actual_digest != row["git_blob"]:
                 raise PipelineError(f"snapshot Git blob mismatch for {row['path']}")
-            algorithm = "git_blob_sha1"
-        checked.append({"path": row["path"], "size_bytes": size, algorithm: actual_digest})
+        checked.append({
+            "path": row["path"], "size_bytes": size,
+            algorithm: actual_digest, "integrity_read_method": read_method,
+        })
     license_path = snapshot / profile["source"]["license"]["path_in_source"]
     if sha256_file(license_path) != profile["source"]["license"]["sha256"]:
         raise PipelineError("snapshot license does not match the release profile")
@@ -770,7 +1229,14 @@ def validate_snapshot(snapshot: Path, revision: str, profile: dict[str, Any], in
         raise PipelineError("snapshot config architecture does not match the release profile")
     if config.get("model_type") != profile["source"]["model_type"]:
         raise PipelineError("snapshot config model_type does not match the release profile")
-    return {"revision": revision, "files_verified": len(checked), "total_bytes": sum(x["size_bytes"] for x in checked)}
+    return {
+        "revision": revision,
+        "files_verified": len(checked),
+        "total_bytes": sum(x["size_bytes"] for x in checked),
+        "ignored_coordination_files": ignored_coordination_files,
+        "integrity_read_methods": dict(Counter(
+            item["integrity_read_method"] for item in checked)),
+    }
 
 
 def git_revision(directory: Path) -> str:
@@ -779,7 +1245,39 @@ def git_revision(directory: Path) -> str:
         raise PipelineError("git is required for source revision validation")
     if not directory.is_dir():
         raise PipelineError(f"source checkout does not exist: {directory}")
-    return run_checked([git, "-C", str(directory), "rev-parse", "HEAD"])
+    return run_git_checked(git, directory, ["rev-parse", "HEAD"])
+
+
+def run_git_checked(git: str, directory: Path, arguments: list[str]) -> str:
+    """Run Git against one audited checkout despite the credential-free HOME."""
+    checkout = directory.resolve(strict=True)
+    return run_checked([
+        git, "-c", f"safe.directory={checkout}", "-C", str(checkout), *arguments,
+    ])
+
+
+def ember_revision_evidence(ember_dir: Path) -> tuple[str, str, bool]:
+    """Read Ember provenance from its build cache, with Git as a source-tree check."""
+    cache = ember_dir / "build-rocm" / "CMakeCache.txt"
+    configured: str | None = None
+    if cache.is_file():
+        prefix = "EMBER_CONFIGURED_GIT_HEAD:STRING="
+        matches = [line[len(prefix):].strip() for line in
+                   cache.read_text(encoding="utf-8", errors="strict").splitlines()
+                   if line.startswith(prefix)]
+        if len(matches) != 1 or HEX40.fullmatch(matches[0]) is None:
+            raise PipelineError(
+                "Ember CMake cache must contain exactly one configured 40-character revision")
+        configured = matches[0]
+    has_git_metadata = path_entry_exists(ember_dir / ".git")
+    source_revision = git_revision(ember_dir) if has_git_metadata else None
+    if configured is not None and source_revision is not None and configured != source_revision:
+        raise PipelineError("Ember source revision differs from its configured ROCm build revision")
+    revision = configured or source_revision
+    if revision is None:
+        raise PipelineError(
+            "Ember provenance requires build-rocm/CMakeCache.txt or a Git checkout")
+    return revision, ("cmake_cache_and_git" if source_revision else "cmake_cache"), has_git_metadata
 
 
 def validate_tools(
@@ -797,21 +1295,25 @@ def validate_tools(
     quantizer = profile["quantizer"]
     llama_head = git_revision(llama_dir)
     rocmfpx_head = git_revision(rocmfpx_dir)
-    ember_head = git_revision(ember_dir)
+    ember_head, ember_revision_source, ember_has_git = ember_revision_evidence(ember_dir)
     if llama_head != conversion["revision"]:
         raise PipelineError(f"llama.cpp checkout must be at {conversion['revision']}, got {llama_head}")
     git = shutil.which("git", path=os.defpath)
     assert git is not None
     git_version = run_checked([git, "--version"])
-    llama_parent = run_checked([git, "-C", str(llama_dir), "rev-parse", "HEAD^"])
+    llama_parent = run_git_checked(git, llama_dir, ["rev-parse", "HEAD^"])
     if llama_parent != conversion["base_revision"]:
         raise PipelineError("Qwen4Exp rotated-KV head is not directly based on the pinned PR #27742 head")
     if rocmfpx_head != quantizer["revision"]:
         raise PipelineError(f"ROCmFPX checkout must be at {quantizer['revision']}, got {rocmfpx_head}")
     if not HEX40.fullmatch(ember_revision) or ember_head != ember_revision:
         raise PipelineError(f"Ember checkout must be at requested revision {ember_revision}, got {ember_head}")
-    for directory, label in ((llama_dir, "llama.cpp"), (rocmfpx_dir, "ROCmFPX"), (ember_dir, "Ember")):
-        dirty = run_checked([git, "-C", str(directory), "status", "--porcelain", "--untracked-files=all"])
+    clean_checkouts = [(llama_dir, "llama.cpp"), (rocmfpx_dir, "ROCmFPX")]
+    if ember_has_git:
+        clean_checkouts.append((ember_dir, "Ember"))
+    for directory, label in clean_checkouts:
+        dirty = run_git_checked(
+            git, directory, ["status", "--porcelain", "--untracked-files=all"])
         if dirty:
             raise PipelineError(f"{label} checkout is dirty; pinned conversion requires a clean tree")
     converter = llama_dir / "convert_hf_to_gguf.py"
@@ -852,6 +1354,7 @@ def validate_tools(
         "converter_sha256": sha256_file(converter),
         "rocmfpx_revision": rocmfpx_head,
         "ember_revision": ember_head,
+        "ember_revision_source": ember_revision_source,
         "quantizer_binary": str(quantizer_binary),
         "quantizer_sha256": sha256_file(quantizer_binary),
         "quantizer_build_info": build_info,
@@ -953,6 +1456,8 @@ def inspect_gguf(path: Path) -> dict[str, Any]:
             raise PipelineError(f"unsupported GGUF version {version}: {path}")
         tensor_count = read_u64(stream)
         metadata_count = read_u64(stream)
+        if tensor_count < 1 or tensor_count > 1_000_000 or metadata_count > 1_000_000:
+            raise PipelineError(f"GGUF header counts are outside audit bounds: {path}")
         metadata: dict[str, dict[str, Any]] = {}
         for _ in range(metadata_count):
             key = read_gguf_string(stream)
@@ -968,6 +1473,117 @@ def inspect_gguf(path: Path) -> dict[str, Any]:
             offset = read_u64(stream)
             tensors.append({"name": name, "shape": shape, "type": tensor_type, "offset": offset})
     return {"path": str(path), "version": version, "metadata": metadata, "tensors": tensors}
+
+
+def validate_mtp_companion_gguf(
+    path: Path, matrix_contract: str, source_revision: str,
+) -> dict[str, Any]:
+    """Verify the runtime-visible MTP GGUF contract and exact type partition."""
+    inspected = inspect_gguf(path)
+    metadata = inspected["metadata"]
+    expected_metadata = {
+        "general.architecture": "qwen4exp-mtp",
+        "qwen4exp-mtp.source_revision": source_revision,
+        "qwen4exp-mtp.shared_main_weights": True,
+        "ember.mtp.matrix_quant_contract": matrix_contract,
+    }
+    if any(metadata.get(key, {}).get("value") != value
+           for key, value in expected_metadata.items()):
+        raise PipelineError("MTP companion GGUF metadata does not match the pinned runtime contract")
+    tensors = inspected["tensors"]
+    by_name = {item["name"]: item for item in tensors}
+    expected_names = MTP_QUANTIZED_MATRIX_NAMES | MTP_BF16_TENSOR_NAMES
+    if len(by_name) != len(tensors) or set(by_name) != expected_names:
+        raise PipelineError("MTP companion GGUF tensor inventory does not match the pinned exporter")
+    matrix_type = SUPPORTED_TENSOR_FORMATS[matrix_contract]
+    if any(by_name[name]["type"] != matrix_type for name in MTP_QUANTIZED_MATRIX_NAMES):
+        raise PipelineError("MTP companion GGUF matrix tensors do not match its quant contract")
+    if any(by_name[name]["type"] != 30 for name in MTP_BF16_TENSOR_NAMES):
+        raise PipelineError("MTP companion routers/norms must remain BF16")
+    return {
+        "version": inspected["version"],
+        "architecture": "qwen4exp-mtp",
+        "source_revision": source_revision,
+        "matrix_quant_contract": matrix_contract,
+        "matrix_ggml_tensor_type": matrix_type,
+        "matrix_tensor_count": len(MTP_QUANTIZED_MATRIX_NAMES),
+        "bf16_tensor_count": len(MTP_BF16_TENSOR_NAMES),
+        "tensor_count": len(tensors),
+        "tensor_names_sha256": hashlib.sha256(
+            "\n".join(sorted(by_name)).encode("utf-8")).hexdigest(),
+    }
+
+
+def validate_mtp_export_manifest(
+    path: Path, expected_sha256: Any, artifact: dict[str, Any],
+    matrix_contract: str, profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the MTP artifact to the audited exporter and quantizer evidence."""
+    if not isinstance(expected_sha256, str):
+        raise PipelineError("MTP export manifest SHA-256 must be a string")
+    manifest, evidence = read_exact_json_file(
+        path.absolute(), expected_sha256, "MTP export manifest")
+    matrix_names = manifest.get("quantized_matrix_tensors")
+    build_info = manifest.get("quantizer_build_info")
+    expected_type = SUPPORTED_TENSOR_FORMATS[matrix_contract]
+    required = {
+        "schema": "ember.qwen4exp.mtp-gguf-export.v1",
+        "source_revision": profile["source"]["revision"],
+        "quantized_output": artifact["path"],
+        "quantized_bytes": artifact["size_bytes"],
+        "quantized_sha256": artifact["sha256"],
+        "quantized_matrix_contract": matrix_contract,
+        "quantized_matrix_ggml_type": expected_type,
+        "quantized_matrix_tensor_count": len(MTP_QUANTIZED_MATRIX_NAMES),
+        "runtime_status": "loadable quantized companion",
+    }
+    if any(manifest.get(key) != value for key, value in required.items()):
+        raise PipelineError("MTP export manifest does not bind the exact companion artifact")
+    if (not isinstance(matrix_names, list) or len(matrix_names) != len(MTP_QUANTIZED_MATRIX_NAMES)
+            or set(matrix_names) != MTP_QUANTIZED_MATRIX_NAMES):
+        raise PipelineError("MTP export manifest matrix tensor inventory is not exact")
+    quantizer = profile["quantizer"]
+    if (not isinstance(build_info, dict)
+            or build_info.get("tool") != profile["quantization"]["tool"]
+            or build_info.get("rocmfpx_revision") != quantizer["revision"]
+            or HEX40.fullmatch(str(build_info.get("ember_revision", ""))) is None
+            or build_info.get("format") != profile["quantization"]["format"]
+            or build_info.get("ggml_tensor_type") != profile["quantization"]["ggml_tensor_type"]
+            or build_info.get("per_tensor_formats") != list(SUPPORTED_TENSOR_FORMATS)):
+        raise PipelineError("MTP export manifest quantizer build provenance is invalid")
+    quantizer_sha = manifest.get("quantizer_sha256")
+    if not isinstance(quantizer_sha, str) or SHA256_RE.fullmatch(quantizer_sha) is None:
+        raise PipelineError("MTP export manifest quantizer SHA-256 is invalid")
+    return {
+        **evidence,
+        "schema": required["schema"],
+        "quantizer_sha256": quantizer_sha,
+        "quantizer_build_info": build_info,
+        "matrix_tensor_count": len(matrix_names),
+    }
+
+
+def validate_bf16_qwen_mmproj_gguf(path: Path) -> dict[str, Any]:
+    """Verify the separate vision artifact before counting it as release-ready."""
+    inspected = inspect_gguf(path)
+    metadata = inspected["metadata"]
+    expected = {
+        "general.architecture": "clip",
+        "general.file_type": 32,
+        "clip.projector_type": "qwen3vl_merger",
+        "clip.has_vision_encoder": True,
+        "clip.vision.projection_dim": 2560,
+        "clip.vision.spatial_merge_size": 2,
+    }
+    if any(metadata.get(key, {}).get("value") != value for key, value in expected.items()):
+        raise PipelineError("vision mmproj GGUF metadata is not the pinned Qwen3.8 BF16 tower")
+    tensor_types = {item["type"] for item in inspected["tensors"]}
+    if 30 not in tensor_types or not tensor_types.issubset({0, 30}):
+        raise PipelineError("vision mmproj tensor inventory is not unquantized BF16/F32")
+    return {
+        "version": inspected["version"], "tensor_count": len(inspected["tensors"]),
+        "tensor_types": sorted(tensor_types), "metadata": expected,
+    }
 
 
 def discover_gguf(base: Path) -> list[Path]:
@@ -1227,7 +1843,10 @@ def planned_commands(
     return convert, split, preflight, quantize, intermediate, output, unsplit
 
 
-def validate_memory_preflight(value: Any, profile: dict[str, Any]) -> dict[str, Any]:
+def validate_memory_preflight(
+    value: Any, profile: dict[str, Any],
+    companion_inventory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError("quantizer --dry-size-json did not return a JSON object")
     gate = profile["quantization"]["native_262k_memory_gate"]
@@ -1277,7 +1896,49 @@ def validate_memory_preflight(value: Any, profile: dict[str, Any]) -> dict[str, 
     result["certification_main_only_headroom_bytes"] = (
         certification_memtotal - certification_main_only_total
     )
-    result["companion_artifact_fit_status"] = "pending_mtp_mmproj_inventory"
+    companion = companion_inventory or {
+        "status": "not_supplied", "enabled_artifact_bytes": None,
+    }
+    if companion.get("status") == "verified_exact":
+        enabled_companion_bytes = companion.get("enabled_artifact_bytes")
+        live = companion.get("live_gtt_evidence")
+        if (not isinstance(enabled_companion_bytes, int)
+                or isinstance(enabled_companion_bytes, bool)
+                or enabled_companion_bytes < 1 or not isinstance(live, dict)):
+            raise PipelineError("verified companion inventory evidence is incomplete")
+        combined_total = certification_main_only_total + enabled_companion_bytes
+        live_gtt_cap = live.get("runner_gtt_cap_bytes")
+        if live_gtt_cap != gate["certification_host_gtt_cap_bytes"]:
+            raise PipelineError("companion inventory live GTT evidence changed before preflight")
+        fit_checks = {
+            "device_budget": combined_total <= budget,
+            "certification_memtotal": combined_total <= certification_memtotal,
+            "live_gtt_cap": combined_total <= live_gtt_cap,
+        }
+        if not all(fit_checks.values()):
+            failed = [name for name, fits in fit_checks.items() if not fits]
+            raise PipelineError(
+                "quantized artifact plus reserve plus enabled exact companions does not fit "
+                + ", ".join(failed))
+        result.update({
+            "enabled_companion_artifact_bytes": enabled_companion_bytes,
+            "combined_accounted_bytes": combined_total,
+            "combined_device_budget_headroom_bytes": budget - combined_total,
+            "combined_certification_memtotal_headroom_bytes": (
+                certification_memtotal - combined_total),
+            "combined_live_gtt_headroom_bytes": live_gtt_cap - combined_total,
+            "combined_fit_checks": fit_checks,
+            "combined_fits": True,
+            "companion_artifact_fit_status": "verified_exact_fit",
+        })
+    else:
+        result.update({
+            "enabled_companion_artifact_bytes": None,
+            "combined_accounted_bytes": None,
+            "combined_fit_checks": None,
+            "combined_fits": None,
+            "companion_artifact_fit_status": "pending_exact_companion_inventory",
+        })
     result["measured_peak_rss_gtt_status"] = "pending_target_run"
     return result
 
@@ -1341,6 +2002,12 @@ def validate_intervention_report(
 
 
 def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
+    snapshot = args.snapshot_dir.resolve()
+    with SnapshotReadLease(snapshot):
+        return orchestrate_with_snapshot_lease(args)
+
+
+def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
     profile_path = args.profile.resolve()
     profile, inventory, inventory_path = validate_profile(profile_path)
     quantization_arms = validated_quantization_arms(profile)
@@ -1364,6 +2031,13 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         raise PipelineError(
             f"--quantization-arm must name one of "
             f"{[DEFAULT_QUANTIZATION_ARM, *quantization_arms]}")
+    companion_inventory = validate_companion_inventory(
+        args.companion_inventory,
+        args.companion_inventory_sha256,
+        args.ttm_pages_limit_path,
+        profile,
+        quantization_arm,
+    )
     stock_control = bool(args.stock_control)
     if stock_control and args.quantization_arm not in {
             DEFAULT_QUANTIZATION_ARM, "rocmi4-control"}:
@@ -1449,6 +2123,7 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         "profile": {"path": str(profile_path), "sha256": sha256_file(profile_path)},
         "snapshot_inventory": {"path": str(inventory_path), "sha256": sha256_file(inventory_path)},
         "snapshot": snapshot,
+        "companion_inventory": companion_inventory,
         "intervention": intervention,
         "experiment": {
             "kind": "stock_control" if stock_control else "directional_ablation",
@@ -1456,7 +2131,11 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
             "final_release_eligible": False,
             "eligibility_status": (
                 "ineligible_stock_control" if stock_control
-                else "pending_measured_bakeoff_and_hardware_certification"
+                else (
+                    "pending_exact_companion_inventory_and_measured_bakeoff_and_hardware_certification"
+                    if companion_inventory["status"] == "not_supplied"
+                    else "pending_combined_memory_preflight_and_measured_bakeoff_and_hardware_certification"
+                )
             ),
             "purpose": (
                 "activation_capture_and_bakeoff_baseline"
@@ -1545,7 +2224,31 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
             preflight_json = json.loads(run_checked(preflight))
         except json.JSONDecodeError as exc:
             raise PipelineError("quantizer --dry-size-json returned invalid JSON") from exc
-        record["memory_preflight"] = validate_memory_preflight(preflight_json, profile)
+        current_companion_inventory = validate_companion_inventory(
+            args.companion_inventory,
+            args.companion_inventory_sha256,
+            args.ttm_pages_limit_path,
+            profile,
+            quantization_arm,
+        )
+        if current_companion_inventory != record["companion_inventory"]:
+            raise PipelineError("companion inventory evidence changed during conversion")
+        record["memory_preflight"] = validate_memory_preflight(
+            preflight_json, profile, current_companion_inventory)
+        if current_companion_inventory["status"] == "verified_exact":
+            record["companion_inventory"]["fit_status"] = "verified_exact_fit"
+            pending_evidence = current_companion_inventory["pending_release_evidence"]
+            next_status = (
+                "pending_" + "_and_".join([
+                    *pending_evidence,
+                    "measured_bakeoff_and_hardware_certification",
+                ])
+                if pending_evidence
+                else "pending_measured_bakeoff_and_hardware_certification"
+            )
+            record["companion_inventory"]["final_release_eligibility"] = next_status
+            if not stock_control:
+                record["experiment"]["eligibility_status"] = next_status
         if intervention is not None:
             record["intervention"]["quantizer_preflight"] = validate_intervention_report(
                 preflight_json, intervention, applied=False
@@ -1655,6 +2358,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="execute mode atomically publishes this previously absent directory")
     parser.add_argument("--build-record", type=Path,
                         help="dry-run record path; execute mode only accepts WORK_DIR/qwen-quant-build-record.json")
+    parser.add_argument(
+        "--companion-inventory", type=Path,
+        help="exact MTP/vision companion inventory; omission keeps final release eligibility pending",
+    )
+    parser.add_argument(
+        "--companion-inventory-sha256",
+        help="required out-of-band SHA-256 binding for --companion-inventory",
+    )
+    parser.add_argument(
+        "--ttm-pages-limit-path", type=Path,
+        default=Path("/sys/module/ttm/parameters/pages_limit"),
+        help="live TTM pages_limit evidence (must match the pinned 124 GiB cap)",
+    )
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
     parser.add_argument(
         "--quantization-arm", default=DEFAULT_QUANTIZATION_ARM,
@@ -1699,6 +2415,10 @@ def main(argv: list[str] | None = None) -> int:
             raise PipelineError("--bounded-memory-temp with split output requires --gguf-splitter")
         if not args.bounded_memory_temp and args.gguf_splitter is not None:
             raise PipelineError("--gguf-splitter is only valid with --bounded-memory-temp")
+        if ((args.companion_inventory is None)
+                != (args.companion_inventory_sha256 is None)):
+            raise PipelineError(
+                "--companion-inventory and --companion-inventory-sha256 must be supplied together")
         record = orchestrate(args)
     except PipelineError as exc:
         print(f"qwen_quantize.py: error: {exc}", file=sys.stderr)
