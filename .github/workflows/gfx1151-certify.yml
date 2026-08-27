@@ -38,11 +38,45 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  qwen-preflight:
+    # Feature-branch research uses the existing release_version input so this
+    # branch can be dispatched before a new workflow interface reaches main.
+    # It is read-only: no GPU lock, production quiesce, model load, or artifact
+    # download occurs in this mode.
+    if: startsWith(inputs.release_version, 'qwen-preflight')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 10
+    steps:
+      - name: Inspect Qwen conversion and benchmark capacity
+        run: |
+          set -euo pipefail
+          echo 'host:' "$(hostname)"
+          echo 'kernel:' "$(uname -srmo)"
+          awk '/^(MemTotal|MemAvailable|SwapTotal):/ { print }' /proc/meminfo
+          for path in / /scratch /models /srv/models; do
+            [[ ! -e "$path" ]] || df -B1 --output=source,size,avail,target "$path"
+          done
+          printf 'kfd_readable=%s dri_present=%s\n' \
+            "$([[ -r /dev/kfd ]] && echo true || echo false)" \
+            "$([[ -d /dev/dri ]] && echo true || echo false)"
+          revision=f5d08274bafd880402bd16f5e3e6c514136ec06c
+          for path in \
+            "/models/Qwen3.8-Flash-Next/snapshots/$revision" \
+            "/srv/models/Qwen3.8-Flash-Next/snapshots/$revision" \
+            "/scratch/Qwen3.8-Flash-Next/snapshots/$revision"; do
+            [[ ! -e "$path" ]] || {
+              printf 'snapshot_candidate=%s config=%s index=%s\n' "$path" \
+                "$([[ -f "$path/config.json" ]] && echo true || echo false)" \
+                "$([[ -f "$path/model.safetensors.index.json" ]] && echo true || echo false)"
+            }
+          done
+
   certify:
     # This reusable workflow is called only after the exact main-branch
     # candidate image passes every hosted and container gate. It is never
     # referenced by pull_request jobs: the runner has direct GPU and production
     # Docker access.
+    if: ${{ !startsWith(inputs.release_version, 'qwen-preflight') }}
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 180
     env:
