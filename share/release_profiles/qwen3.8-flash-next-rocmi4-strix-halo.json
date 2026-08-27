@@ -52,12 +52,13 @@
     "bounded_memory": {
       "converter_option": "--use-temp-file",
       "splitter_tool": "llama-gguf-split",
-      "lifecycle": "single_private_bf16_then_48g_split_then_remove_single_before_quantize",
+      "lifecycle": "single_private_mostly_bf16_with_f32_ple_then_48g_split_then_remove_single_before_quantize",
       "temporary_filesystem": "runner_root_filesystem_not_/srv/models",
       "full_in_memory_tensor_registry": false,
       "ple_cgroup_writeback_patch": "patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch",
-      "ple_cgroup_writeback_patch_sha256": "31fa8637e8c2594a3c3e84811940773f0cef881f2771820aa33f9b198116ad3e",
-      "patched_qwen4exp_sha256": "4f137e8b4b6507a2f02df12ff8f3fcf19e42bca426ff793384a6c43d3ba01b50",
+      "ple_cgroup_writeback_patch_sha256": "606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc",
+      "patched_qwen4exp_sha256": "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee",
+      "ple_intermediate_storage": "F32_streamed_to_temp_file_then_release_quant_override",
       "failed_control_run": {
         "github_run_id": 33050472929,
         "failure": "cgroup_oom_during_dirty_ple_memmap_population",
@@ -65,6 +66,13 @@
         "source_bytes_total": 360000192888,
         "maximum_resident_set_kib": 127269264,
         "elapsed_seconds": 1011.61
+      },
+      "second_failed_control_run": {
+        "github_run_id": 33058038825,
+        "failure": "cgroup_oom_during_monolithic_f32_to_bf16_ple_quantization",
+        "maximum_resident_set_kib": 128524508,
+        "elapsed_seconds": 836.42,
+        "converter_exit_status": -9
       },
       "target_measurement_status": "pending_patched_peak_rss_and_wall_time"
     },

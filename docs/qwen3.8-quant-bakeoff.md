@@ -37,13 +37,21 @@ pages accumulated as cgroup resident memory.
 
 The pinned llama.cpp base is now combined with the digest-pinned
 `qwen4exp-ple-cgroup-writeback.patch`. It flushes and `MADV_DONTNEED`s each
-completed PLE shard and marks the final clean read sequential. The patch is
-part of the tool provenance and llama.cpp may differ from its pinned commit in
-that one exact file only. `--use-temp-file` cannot split while converting, so
-Ember performs this private lifecycle:
+completed PLE shard and marks the final clean read sequential. A second control
+run (`33058038825`) proved that this removed dirty-map pressure, but then exposed
+another monolithic allocation: llama.cpp's grouped BF16 converter tried to
+materialize the 204.8 GB F32 PLE table as a roughly 102.4 GB anonymous array and
+was killed at 128,524,508 KiB RSS. The pinned patch therefore also keeps only
+the transient PLE tensor F32 when `--use-temp-file` is active. The release
+quantizer still applies and verifies the selected PLE override, so the F32
+intermediate is a storage mechanism rather than a release precision choice.
+The patch is part of the tool provenance and llama.cpp may differ from its
+pinned commit in that one exact file only. `--use-temp-file` cannot split while
+converting, so Ember performs this private lifecycle:
 
-1. stream safetensors into one private BF16 GGUF, spilling through `TMPDIR`
-   inside the transaction directory;
+1. stream safetensors into one private mostly-BF16 GGUF with the PLE staging
+   tensor retained F32, spilling through `TMPDIR` inside the transaction
+   directory;
 2. use `llama-gguf-split` from the same pinned llama.cpp checkout to create 48G
    shards;
 3. verify the complete ordered GGUF set and remove the unsplit BF16 file;

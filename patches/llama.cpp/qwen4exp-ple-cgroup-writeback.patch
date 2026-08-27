@@ -9,7 +9,27 @@ diff --git a/conversion/qwen4exp.py b/conversion/qwen4exp.py
  from typing import Iterable
  
  import torch
-@@ -213,11 +214,31 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+@@ -163,6 +164,19 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+ 
+         return super().modify_tensors(data_torch, name, bid)
+ 
++    def tensor_force_quant(self, name: str, new_name: str, bid: int | None, n_dims: int):
++        # In bounded conversion mode the 204.8 GB F32 PLE map must stream
++        # directly into GGUFWriter's temporary file. BF16.quantize() first
++        # materializes a 102.4 GB anonymous result (and grouped intermediates),
++        # which is enough to kill a 125 GiB cgroup before the writer sees it.
++        # Keeping only this transient tensor F32 avoids that allocation. The
++        # downstream release quantizer still applies the required, explicitly
++        # audited PLE override, so this does not select the release precision.
++        ple_name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD]
++        if self.use_temp_file and new_name == ple_name + ".weight":
++            return gguf.GGMLQuantizationType.F32
++        return super().tensor_force_quant(name, new_name, bid, n_dims)
++
+     # -- the PLE table ----------------------------------------------------
+     #
+     # 128 shards concatenate into one enormous tensor. Holding them all and then
+@@ -213,11 +227,31 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
          start = idx * self._ple_rows_per_shard
          # the shard is still lazy here; force it, since the point of this path
          # is that exactly one shard is resident at a time
@@ -41,7 +61,7 @@ diff --git a/conversion/qwen4exp.py b/conversion/qwen4exp.py
  
      def _finish_ple_table(self, total_rows: int):
  
-@@ -234,5 +255,8 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+@@ -234,5 +268,8 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
  
          raw = np.memmap(self._ple_path, dtype=np.float32, mode="r+",
                          shape=(total_rows, self._ple_row_dim))

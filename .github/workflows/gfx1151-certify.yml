@@ -783,7 +783,7 @@ jobs:
           fi
           mkdir -p "$workspace/tooling" "$workspace/evidence"
           ple_patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
-          echo "31fa8637e8c2594a3c3e84811940773f0cef881f2771820aa33f9b198116ad3e  $ple_patch" | sha256sum -c -
+          echo "606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc  $ple_patch" | sha256sum -c -
           ensure_checkout() {
             local url="$1" revision="$2" destination="$3"
             if [[ ! -d "$destination/.git" ]]; then
@@ -806,7 +806,7 @@ jobs:
             -C "$workspace/tooling/llama.cpp" apply --check "$ple_patch"
           git -c safe.directory="$workspace/tooling/llama.cpp" \
             -C "$workspace/tooling/llama.cpp" apply "$ple_patch"
-          echo "4f137e8b4b6507a2f02df12ff8f3fcf19e42bca426ff793384a6c43d3ba01b50  $workspace/tooling/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
+          echo "3b226aaafa05cc7f56670e86f408e6708dc65eb95266eb23b71b294963f276ee  $workspace/tooling/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
           docker run --rm --network host \
             -e LLAMA_REVISION="$LLAMA_REVISION" \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc '
