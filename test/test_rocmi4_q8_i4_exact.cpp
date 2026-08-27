@@ -173,6 +173,40 @@ void check_fragment_packing() {
     CHECK(ok, "q8 fragment packing preserves all low/high nibble bit patterns");
 }
 
+void check_split_half_weight_fragment_order() {
+    std::array<std::int8_t, kTileK> weights{};
+    std::array<std::uint8_t, kTileK / 2> storage{};
+    for (std::size_t k = 0; k < kTileK; ++k) {
+        weights[k] = static_cast<std::int8_t>(
+            k < storage.size() ? static_cast<int>(k) - 8
+                               : 7 - static_cast<int>(k - storage.size()));
+    }
+    for (std::size_t k = 0; k < storage.size(); ++k) {
+        storage[k] = static_cast<std::uint8_t>(
+            (static_cast<std::uint8_t>(weights[k]) & 0x0fu) |
+            ((static_cast<std::uint8_t>(weights[k + storage.size()]) & 0x0fu) << 4));
+    }
+
+    bool ok = true;
+    for (std::size_t half = 0; half < 2; ++half) {
+        std::uint32_t first4 = 0;
+        std::uint32_t next4 = 0;
+        for (std::size_t byte = 0; byte < 4; ++byte) {
+            first4 |= static_cast<std::uint32_t>(storage[8 * half + byte]) << (8 * byte);
+            next4 |= static_cast<std::uint32_t>(storage[8 * half + 4 + byte]) << (8 * byte);
+        }
+        const std::uint32_t low = rocmi4_pack_split_half_low_i4(first4, next4);
+        const std::uint32_t high = rocmi4_pack_split_half_high_i4(first4, next4);
+        for (std::size_t nibble = 0; nibble < kPackedValues; ++nibble) {
+            const std::size_t low_k = 8 * half + nibble;
+            const std::size_t high_k = storage.size() + low_k;
+            ok = ok && sign_extend_i4(low >> (4 * nibble)) == weights[low_k] &&
+                 sign_extend_i4(high >> (4 * nibble)) == weights[high_k];
+        }
+    }
+    CHECK(ok, "split-half ROCMI4 storage packs a K-contiguous gfx1151 A fragment");
+}
+
 void check_runtime_opt_in() {
     CHECK(!rocmi4_w4a8_iu4_requested(nullptr) &&
               !rocmi4_w4a8_iu4_requested("") &&
@@ -254,6 +288,7 @@ int main() {
     check_endpoints();
     check_all_q8_values();
     check_fragment_packing();
+    check_split_half_weight_fragment_order();
     check_runtime_opt_in();
     check_exhaustive_scalar_products();
     check_adversarial_tiles();

@@ -63,16 +63,32 @@ rocmi4_compact_q8_nibbles4(uint32_t values) {
            ((values & UINT32_C(0x0f000000)) >> 12);
 }
 
+/*
+ * ROCMI4 stores K0..K15 in the low nibbles and K16..K31 in the high
+ * nibbles of sixteen consecutive bytes.  Compact two consecutive groups of
+ * four storage bytes without byte-interleaving them: one IU4 operand word
+ * must remain K-contiguous within a gfx1151 A fragment.
+ */
 static ROCMI4_EXACT_HD inline uint32_t
-rocmi4_pack_q8x8_low_u4(uint32_t first4, uint32_t next4) {
+rocmi4_pack_split_half_low_i4(uint32_t first4, uint32_t next4) {
     return rocmi4_compact_q8_nibbles4(first4) |
            (rocmi4_compact_q8_nibbles4(next4) << 16);
 }
 
 static ROCMI4_EXACT_HD inline uint32_t
-rocmi4_pack_q8x8_high_i4(uint32_t first4, uint32_t next4) {
+rocmi4_pack_split_half_high_i4(uint32_t first4, uint32_t next4) {
     return rocmi4_compact_q8_nibbles4(first4 >> 4) |
            (rocmi4_compact_q8_nibbles4(next4 >> 4) << 16);
+}
+
+static ROCMI4_EXACT_HD inline uint32_t
+rocmi4_pack_q8x8_low_u4(uint32_t first4, uint32_t next4) {
+    return rocmi4_pack_split_half_low_i4(first4, next4);
+}
+
+static ROCMI4_EXACT_HD inline uint32_t
+rocmi4_pack_q8x8_high_i4(uint32_t first4, uint32_t next4) {
+    return rocmi4_pack_split_half_high_i4(first4, next4);
 }
 
 /* The runtime experiment is selected only by the exact, documented value. */

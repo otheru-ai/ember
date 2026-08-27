@@ -1088,12 +1088,6 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 }
 
 #if GGML_ROCMI4_W4A4 || GGML_ROCMI4_W4A8_IU4
-static __device__ __forceinline__ int rocmi4_pack_lo(const int a, const int b) {
-    return (a & 0x0f0f0f0f) | ((b & 0x0f0f0f0f) << 4);
-}
-static __device__ __forceinline__ int rocmi4_pack_hi(const int a, const int b) {
-    return ((a >> 4) & 0x0f0f0f0f) | (((b >> 4) & 0x0f0f0f0f) << 4);
-}
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_rocmi4_packed(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
     constexpr int nwarps = mmq_get_nwarps_device();
@@ -1113,8 +1107,10 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const int d0 = rocmfp4_get_qs_i32(bxi->qs, 2*half);
         const int d1 = rocmfp4_get_qs_i32(bxi->qs, 2*half + 1);
         const int kp = kbx*4 + half;
-        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp] = rocmi4_pack_lo(d0, d1);
-        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp + 2] = rocmi4_pack_hi(d0, d1);
+        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp] = (int) rocmi4_pack_split_half_low_i4(
+            (uint32_t) d0, (uint32_t) d1);
+        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp + 2] = (int) rocmi4_pack_split_half_high_i4(
+            (uint32_t) d0, (uint32_t) d1);
     }
     constexpr int blocks_per_row = MMQ_TILE_NE_K / QI_ROCMI4;
     constexpr int rows_per_warp = warp_size / blocks_per_row;
