@@ -562,6 +562,11 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertFalse(record["experiment"]["final_release_eligible"])
             self.assertEqual(len(record["output"]["shards"]), 2)
             self.assertEqual(record["staging_transaction"]["evidence_promoted"], [])
+            self.assertTrue(all(
+                "Stock-Control" in Path(item["path"]).name
+                and "Heretic" not in Path(item["path"]).name
+                for item in record["output"]["shards"]
+            ))
 
     def test_dry_run_plan_does_not_block_execute_directory_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

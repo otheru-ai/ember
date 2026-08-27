@@ -724,3 +724,185 @@ jobs:
             --inventory share/release_profiles/qwen3.8-flash-next-snapshot.json \
             --output "$snapshot" --workers 4
           printf 'snapshot=%s\n' "$snapshot" >>"$GITHUB_STEP_SUMMARY"
+
+  qwen-convert-control:
+    # Build the exact, final-ineligible stock ROCMI4 control used for activation
+    # capture and the measured format bakeoff.  Tool/image preparation leaves
+    # production online.  Only the 125 GiB bounded conversion owns the GPU/UMA
+    # host, through the same fixed-purpose lock and service wrapper as release
+    # certification.
+    if: startsWith(inputs.release_version, 'qwen-convert-control')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 720
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      QWEN_REVISION: f5d08274bafd880402bd16f5e3e6c514136ec06c
+      LLAMA_REVISION: abdc7a0bf815d3b83e26dd523c6960e4dd597e82
+      ROCMFPX_REVISION: c49ebdbd5c9f01ec242369f9e7f7967855f80cba
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Pull and bind the exact ROCm 10 development image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          docker_config="$RUNNER_TEMP/qwen-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$docker_config"
+          export DOCKER_CONFIG="$docker_config"
+          printf 'DOCKER_CONFIG=%s\n' "$docker_config" >>"$GITHUB_ENV"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${TARGET_SHA:0:12}"
+          docker pull "$image"
+          embedded="$(docker run --rm --entrypoint /bin/sh "$image" -c \
+            'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
+          test "$embedded" = "$TARGET_SHA"
+          docker run --rm --entrypoint /bin/sh "$image" -c \
+            'test -x /ember/build-rocm/ember-gguf-quantize && /usr/bin/time --version >/dev/null'
+          printf 'QWEN_DEV_IMAGE=%s\n' "$image" >>"$GITHUB_ENV"
+          docker image inspect "$image" >"$RUNNER_TEMP/qwen-dev-image-$GITHUB_RUN_ID.json"
+
+      - name: Prepare pinned conversion tools while production remains online
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          snapshot="$workspace/snapshots/$QWEN_REVISION"
+          test -f "$snapshot/model.safetensors.index.json"
+          if [[ -e "$snapshot/.ember-fetch.lock" ]] && \
+              ! flock -n "$snapshot/.ember-fetch.lock" -c true; then
+              echo 'the resumable source download still owns the snapshot'
+              exit 1
+          fi
+          mkdir -p "$workspace/tooling" "$workspace/evidence"
+          ensure_checkout() {
+            local url="$1" revision="$2" destination="$3"
+            if [[ ! -d "$destination/.git" ]]; then
+              git clone --filter=blob:none "$url" "$destination"
+            fi
+            test -z "$(git -C "$destination" status --porcelain --untracked-files=no)"
+            git -C "$destination" fetch --filter=blob:none origin "$revision"
+            git -C "$destination" checkout --detach "$revision"
+            test "$(git -C "$destination" rev-parse HEAD)" = "$revision"
+          }
+          ensure_checkout https://github.com/ggml-org/llama.cpp.git \
+            "$LLAMA_REVISION" "$workspace/tooling/llama.cpp"
+          ensure_checkout https://github.com/charlie12345/ROCmFPX.git \
+            "$ROCMFPX_REVISION" "$workspace/tooling/ROCmFPX"
+          docker run --rm --network host \
+            -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc '
+              set -euo pipefail
+              cmake -S /qwen-work/tooling/llama.cpp \
+                -B /qwen-work/tooling/llama.cpp/build \
+                -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
+                -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+                -DBUILD_SHARED_LIBS=OFF
+              cmake --build /qwen-work/tooling/llama.cpp/build \
+                --target llama-gguf-split -j"$(nproc)"
+              test -d /qwen-work/tooling/converter-venv || \
+                python3 -m venv /qwen-work/tooling/converter-venv
+              /qwen-work/tooling/converter-venv/bin/pip install --no-cache-dir \
+                -r /qwen-work/tooling/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
+              /qwen-work/tooling/converter-venv/bin/python -m pip freeze \
+                > /qwen-work/evidence/converter-requirements.freeze.txt
+            '
+
+      - name: Take exclusive UMA ownership and quiesce production
+        id: qwen-control-exclusive
+        run: |
+          set -euo pipefail
+          echo 'lock=no' >>"$GITHUB_OUTPUT"
+          echo 'restore=no' >>"$GITHUB_OUTPUT"
+          echo 'masked=no' >>"$GITHUB_OUTPUT"
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          echo 'lock=yes' >>"$GITHUB_OUTPUT"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'restore=yes' >>"$GITHUB_OUTPUT"
+            sudo -n /usr/local/sbin/ember-cert-production stop
+          fi
+          sudo -n /usr/local/sbin/ember-cert-production mask
+          echo 'masked=yes' >>"$GITHUB_OUTPUT"
+
+      - name: Convert, split, and quantize the stock control within 125 GiB
+        id: qwen-control-build
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          snapshot="$workspace/snapshots/$QWEN_REVISION"
+          output="$workspace/artifacts/stock-rocmi4-${TARGET_SHA:0:12}"
+          test ! -e "$output"
+          name="qwen-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "name=$name" >>"$GITHUB_OUTPUT"
+          docker run --name "$name" --network none --ipc host \
+            --ulimit memlock=-1:-1 \
+            -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc "
+              set -euo pipefail
+              /usr/bin/time -v \
+                -o /qwen-work/evidence/control-${TARGET_SHA:0:12}.time.txt \
+                /qwen-work/tooling/converter-venv/bin/python \
+                /ember/scripts/qwen_quantize.py \
+                  --snapshot-dir /qwen-work/snapshots/$QWEN_REVISION \
+                  --snapshot-revision $QWEN_REVISION \
+                  --stock-control \
+                  --llama-cpp-dir /qwen-work/tooling/llama.cpp \
+                  --gguf-splitter /qwen-work/tooling/llama.cpp/build/bin/llama-gguf-split \
+                  --bounded-memory-temp \
+                  --rocmfpx-dir /qwen-work/tooling/ROCmFPX \
+                  --ember-dir /ember --ember-revision $TARGET_SHA \
+                  --quantizer /ember/build-rocm/ember-gguf-quantize \
+                  --work-dir /qwen-work/artifacts/stock-rocmi4-${TARGET_SHA:0:12} \
+                  --execute
+            " 2>&1 | tee "$workspace/evidence/control-${TARGET_SHA:0:12}.log"
+          docker rm "$name" >/dev/null
+          test -s "$output/qwen-quant-build-record.json"
+          python3 - "$output/qwen-quant-build-record.json" <<'PY'
+          import json, sys
+          record = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert record["status"] == "complete", record
+          assert record["experiment"]["kind"] == "stock_control", record
+          assert record["experiment"]["final_release_eligible"] is False, record
+          assert all("Stock-Control" in row["path"] and "Heretic" not in row["path"]
+                     for row in record["output"]["shards"]), record
+          print(json.dumps({"artifact_bytes": sum(row["size_bytes"] for row in record["output"]["shards"]),
+                            "shards": len(record["output"]["shards"])}, sort_keys=True))
+          PY
+          printf 'QWEN_CONTROL_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
+
+      - name: Remove a failed conversion container
+        if: ${{ always() && steps.qwen-control-build.outputs.name != '' }}
+        run: docker rm -f "${{ steps.qwen-control-build.outputs.name }}" >/dev/null 2>&1 || true
+
+      - name: Unblock production
+        if: ${{ always() && steps.qwen-control-exclusive.outputs.masked == 'yes' }}
+        run: sudo -n /usr/local/sbin/ember-cert-production unmask
+
+      - name: Restore production
+        if: ${{ always() && steps.qwen-control-exclusive.outputs.restore == 'yes' }}
+        run: sudo -n /usr/local/sbin/ember-cert-production start
+
+      - name: Release the GPU lock
+        if: ${{ always() && steps.qwen-control-exclusive.outputs.lock == 'yes' }}
+        run: sudo -n /usr/local/sbin/ember-gpu-lock release
+
+      - name: Remove temporary registry credentials
+        if: ${{ always() && env.DOCKER_CONFIG != '' }}
+        run: |
+          rm -f -- "$DOCKER_CONFIG/config.json"
+          rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+
+      - name: Record the bounded stock-control result
+        if: ${{ success() }}
+        run: |
+          {
+            echo '## Qwen stock-control conversion passed'
+            echo
+            echo "Ember SHA: \`$TARGET_SHA\`"
+            echo "Output: \`$QWEN_CONTROL_OUTPUT\`"
+            echo
+            echo 'This artifact is final-ineligible and exists only for activation capture and bakeoff.'
+          } >>"$GITHUB_STEP_SUMMARY"

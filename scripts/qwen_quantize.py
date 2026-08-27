@@ -1021,7 +1021,11 @@ def planned_commands(
         work_dir / "Qwen3.8-Flash-Next-BF16.unsplit.gguf"
         if args.bounded_memory_temp and args.split_max_size != "0" else None
     )
-    output = work_dir / profile["artifact"]["filename"]
+    output_name = (
+        "Qwen3.8-Flash-Next-Stock-Control-ROCmI4-Strix-Halo.gguf"
+        if args.stock_control else profile["artifact"]["filename"]
+    )
+    output = work_dir / output_name
     converter = args.llama_cpp_dir.resolve() / "convert_hf_to_gguf.py"
     convert = [
         sys.executable, str(converter), str(args.snapshot_dir.resolve()),

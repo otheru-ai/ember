@@ -273,6 +273,34 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("advice.detachedHead", container)
         self.assertNotIn("tags: ['v*']", forgejo_container)
 
+    def test_qwen_control_conversion_is_exact_bounded_and_recoverable(self) -> None:
+        container = GITHUB_CONTAINER.read_text()
+        certify = GITHUB_CERTIFY.read_text()
+        dockerfile = DOCKERFILE.read_text()
+        self.assertIn('tag "$image:dev-sha-$short_sha"', container)
+        self.assertIn("--target dev", container)
+        self.assertIn("dev-image-metadata.json", container)
+        self.assertIn("ember-gguf-quantize ember-token-dump", dockerfile)
+        self.assertIn("python3-venv git time", dockerfile)
+        self.assertIn("qwen-convert-control:", certify)
+        self.assertIn("--bounded-memory-temp", certify)
+        self.assertIn("--stock-control", certify)
+        self.assertIn("--gguf-splitter", certify)
+        self.assertIn("--network none", certify)
+        self.assertIn("/usr/bin/time -v", certify)
+        self.assertIn("final_release_eligible", certify)
+        self.assertIn("Stock-Control", certify)
+        self.assertIn("qwen-docker-$GITHUB_RUN_ID", certify)
+        self.assertIn("Remove temporary registry credentials", certify)
+        control = certify.split("\n  qwen-convert-control:", 1)[1]
+        for command in (
+            "ember-gpu-lock acquire", "ember-gpu-lock release",
+            "ember-cert-production stop", "ember-cert-production mask",
+            "ember-cert-production unmask", "ember-cert-production start",
+        ):
+            self.assertIn(command, control)
+        self.assertGreaterEqual(control.count("if: ${{ always()"), 4)
+
     def test_release_build_caches_are_persistent_and_bounded(self) -> None:
         dockerfile = DOCKERFILE.read_text()
         forgejo_ci = FORGEJO_CI.read_text()
@@ -553,4 +581,3 @@ class ToolResultDecodePolicyTest(unittest.TestCase):
         self.assertIn("tool_result_forces_ar() &&", src)
         self.assertIn(
             "ember_chat_request_is_tool_result_continuation(req);", src)
-

@@ -93,7 +93,7 @@ RUN command -v rocprofv3 >/dev/null 2>&1 \
 ARG HYPERLOOM_REF
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      python3-venv git \
+      python3-venv git time \
  && python3 -m venv /opt/hyperloom \
  && /opt/hyperloom/bin/pip install --no-cache-dir \
       "hyperloom-inference_optimizer[web] @ git+https://github.com/AMD-AGI/Hyperloom@${HYPERLOOM_REF}" \
@@ -129,7 +129,8 @@ RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharin
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /ember/build-rocm \
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
-      ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench -j"$(nproc)" \
+      ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench \
+      ember-gguf-quantize ember-token-dump -j"$(nproc)" \
  && ccache --show-stats
 
 RUN gcc -shared -fPIC -O2 -g \

@@ -193,10 +193,36 @@ jobs:
             --output type=registry,compression=gzip,compression-level=9,force-compression=true \
             -f docker/Dockerfile .
 
+      - name: Publish the matching ROCm development and profiler image
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          publish_sha="$(git rev-parse HEAD)"
+          short_sha="${publish_sha:0:12}"
+          project_version="$(tr -d '\n' < VERSION)"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # This is the exact dev stage cached by the release build above.  The
+          # Qwen real-weight gate additionally compares its embedded CMake SHA
+          # and ember-dflash bytes against the release image before taking the
+          # GPU lock, so a merely similarly tagged profiler cannot qualify.
+          docker buildx build \
+            --platform linux/amd64 \
+            --target dev \
+            --build-arg EMBER_VERSION="dev-$short_sha" \
+            --build-arg EMBER_VCS_REF="$publish_sha" \
+            --tag "$image:dev-sha-$short_sha" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file dev-image-metadata.json \
+            --output type=registry,compression=gzip,compression-level=9,force-compression=true \
+            -f docker/Dockerfile .
+
       - name: Report digest, size, and vulnerability scan
         run: |
           set -euo pipefail
           python3 -c 'import json; d=json.load(open("image-metadata.json")); print(d.get("containerimage.digest", d))'
+          python3 -c 'import json; d=json.load(open("dev-image-metadata.json")); print(d.get("containerimage.digest", d))'
           publish_sha="$(git rev-parse HEAD)"
           image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${publish_sha:0:12}"
           docker pull "$image"
