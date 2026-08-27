@@ -108,6 +108,13 @@ COPY . /ember
 COPY --from=qwen-vision-provider-build /opt/qwen-vision-provider/ /opt/qwen-vision-provider/
 COPY --from=qwen-vision-provider-build /qwen-vision-licenses/ /ember-licenses/
 
+# Make the provider's private llama.cpp/mtmd dependency family visible to the
+# recursive ELF-closure scanner below.  The libraries deliberately live away
+# from Ember's vendored ggml lineage, so relying on a build-tree RUNPATH would
+# make the release image non-reproducible.
+RUN echo /opt/qwen-vision-provider/lib > /etc/ld.so.conf.d/11-qwen-vision.conf \
+ && ldconfig
+
 ENV CCACHE_DIR=/root/.cache/ccache \
     CCACHE_COMPRESS=true \
     CCACHE_MAXSIZE=20G
@@ -197,7 +204,8 @@ COPY --from=dev /ember-runtime/ /
 COPY --from=dev /ember-licenses/ /usr/share/licenses/ember/
 COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
- && echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
+ && printf '%s\n' /opt/rocm/lib /opt/qwen-vision-provider/lib \
+      > /etc/ld.so.conf.d/10-ember-runtime.conf \
  && ldconfig \
  && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found' \
  && ! ldd /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so | grep -q 'not found'
