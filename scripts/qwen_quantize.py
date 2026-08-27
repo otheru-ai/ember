@@ -832,6 +832,9 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
             bakeoff.get("control_unchanged") is not True or
             bakeoff.get("override_precedence") !=
             "exactly_one_matching_regex; overlap_is_an_error" or
+            bakeoff.get("winner_order") != [
+                "decode_median_tps_desc", "prefill_median_tps_desc",
+                "quality_score_desc", "id_asc"] or
             bakeoff.get("mtp_pairing_policy") !=
             "arm mtp_matrix_quant_contract is the build default only; the release bakeoff independently cross-pairs exact ROCMI4 and ROCmFP4 FAST companions" or
             bakeoff.get("supported_mtp_matrix_contracts") !=
@@ -2266,17 +2269,50 @@ def verify_gguf_set(
         raise PipelineError("GGUF tensor inventory contains duplicate names across shards")
     # Pinned llama.cpp gguf-split saves the complete metadata table in shard 1
     # and exactly these three locator fields in every continuation shard
-    # (tools/gguf-split/gguf-split.cpp:235-245). ROCmFPX --keep-split preserves
-    # that layout: its first output context receives the loader metadata while
-    # later contexts are empty before the same split triplet is installed
-    # (src/llama-quant.cpp:1352-1458 at c49ebdb). Treat shard 1 as the sole
-    # provenance/configuration authority and reject any other continuation
-    # layout, rather than silently accepting missing or injected metadata.
+    # (tools/gguf-split/gguf-split.cpp:235-245). Native ROCmFPX --keep-split at
+    # c49ebdb follows the same first-shard-only model metadata convention, but
+    # it is not Ember's final writer: tools/gguf_quantize.cpp:1129-1163 copies
+    # each input shard and stamps quantization plus mode evidence onto every
+    # output shard. Keep exact closed contracts for the intermediate, stock
+    # output, and intervened output rather than accepting arbitrary metadata.
     split_fields = {
         "split.no": 2,
         "split.count": 2,
         "split.tensors.count": 5,
     }
+    quantized_fields: dict[str, tuple[int, Any]] = {}
+    if quantized:
+        if intervention is not None and stock_control:
+            raise PipelineError(
+                "quantized GGUF verification modes are mutually exclusive"
+            )
+        quantized_fields = {
+            "general.quantization_version": (4, 2),
+            "general.file_type": (4, 118),
+        }
+        if intervention is not None:
+            quantized_fields.update({
+                "ember.intervention.kind": (8, intervention["kind"]),
+                "ember.intervention.application_stage": (
+                    8, intervention["application_stage"]),
+                "ember.intervention.manifest_sha256": (
+                    8, intervention["manifest_sha256"]),
+                "ember.intervention.target_names_sha256": (
+                    8, intervention["target_names_sha256"]),
+                "ember.intervention.target_count": (
+                    4, intervention["target_count"]),
+            })
+        elif stock_control:
+            quantized_fields.update({
+                "ember.intervention.kind": (8, "none_control"),
+                "ember.intervention.release_eligibility": (
+                    8, "control_only_requires_manifest_for_release"),
+            })
+        else:
+            raise PipelineError(
+                "quantized GGUF verification requires intervention evidence or explicit stock-control mode"
+            )
+
     if len(paths) > 1:
         for index, item in enumerate(inspected):
             metadata = item["metadata"]
@@ -2292,12 +2328,24 @@ def verify_gguf_set(
                 raise PipelineError("GGUF split.no is not contiguous")
             if metadata["split.tensors.count"]["value"] != len(all_tensors):
                 raise PipelineError("GGUF split.tensors.count does not match tensor inventory")
-            if index > 0 and set(metadata) != set(split_fields):
-                unexpected = sorted(set(metadata) - set(split_fields))
-                missing = sorted(set(split_fields) - set(metadata))
+            if quantized:
+                for key, (expected_type, expected_value) in quantized_fields.items():
+                    field = metadata.get(key)
+                    if (field is None or field.get("type") != expected_type
+                            or field.get("value") != expected_value):
+                        raise PipelineError(
+                            f"GGUF shard {index + 1} output metadata {key} "
+                            "does not match the pinned quantizer contract"
+                        )
+            if index > 0:
+                allowed = set(split_fields) | set(quantized_fields)
+                unexpected = sorted(set(metadata) - allowed)
+                missing = sorted(allowed - set(metadata))
+                if not unexpected and not missing:
+                    continue
                 raise PipelineError(
-                    f"GGUF continuation shard {index + 1} metadata must contain only "
-                    f"the split locator fields (missing={missing}, unexpected={unexpected})"
+                    f"GGUF continuation shard {index + 1} metadata does not match "
+                    f"the pinned writer layout (missing={missing}, unexpected={unexpected})"
                 )
     elif set(inspected[0]["metadata"]) & set(split_fields):
         raise PipelineError("unsplit GGUF must not carry split locator metadata")
@@ -2319,26 +2367,25 @@ def verify_gguf_set(
                 f"GGUF shard 1 PLE metadata {gguf_key} does not match the source I64 values"
             )
     if quantized:
-        if intervention is not None:
-            intervention_fields = {
-                "ember.intervention.kind": (8, intervention["kind"]),
-                "ember.intervention.application_stage": (8, intervention["application_stage"]),
-                "ember.intervention.manifest_sha256": (8, intervention["manifest_sha256"]),
-                "ember.intervention.target_names_sha256": (8, intervention["target_names_sha256"]),
-                "ember.intervention.target_count": (4, intervention["target_count"]),
-            }
-            for key, (expected_type, expected_value) in intervention_fields.items():
-                field = metadata.get(key)
-                if field is None or field.get("type") != expected_type or field.get("value") != expected_value:
-                    raise PipelineError(
-                        f"GGUF shard 1 intervention metadata {key} does not match the applied manifest"
-                    )
-        elif stock_control:
-            if any(key.startswith("ember.intervention.") for key in metadata):
-                raise PipelineError("stock-control GGUF shard 1 carries intervention metadata")
-        else:
+        for key, (expected_type, expected_value) in quantized_fields.items():
+            field = metadata.get(key)
+            if (field is None or field.get("type") != expected_type
+                    or field.get("value") != expected_value):
+                raise PipelineError(
+                    f"GGUF shard 1 output metadata {key} does not match "
+                    "the pinned quantizer contract"
+                )
+        intervention_keys = {
+            key for key in metadata if key.startswith("ember.intervention.")
+        }
+        expected_intervention_keys = {
+            key for key in quantized_fields if key.startswith("ember.intervention.")
+        }
+        if intervention_keys != expected_intervention_keys:
             raise PipelineError(
-                "quantized GGUF verification requires intervention evidence or explicit stock-control mode"
+                "GGUF shard 1 intervention metadata does not match the pinned mode "
+                f"(missing={sorted(expected_intervention_keys - intervention_keys)}, "
+                f"unexpected={sorted(intervention_keys - expected_intervention_keys)})"
             )
     type_counts = Counter(tensor["type"] for tensor in all_tensors)
     override_evidence: list[dict[str, Any]] | None = None

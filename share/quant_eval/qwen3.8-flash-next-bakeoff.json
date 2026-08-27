@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "recipe_id": "qwen3.8-flash-next-128g-intervention-bakeoff-v2",
+  "schema_version": 3,
+  "recipe_id": "qwen3.8-flash-next-128g-intervention-bakeoff-v3",
   "corpus_manifests": {
     "selection": "qwen-selection-corpora-manifest.json",
     "final": "qwen-final-corpus-manifest.json"
@@ -146,6 +146,6 @@
     "final_corpus_may_select_recipe": false,
     "missing_measurement_is_failure": true,
     "synthetic_or_estimated_measurement_is_failure": true,
-    "winner_order": ["quality_score_desc", "decode_median_tps_desc", "prefill_median_tps_desc", "id_asc"]
+    "winner_order": ["decode_median_tps_desc", "prefill_median_tps_desc", "quality_score_desc", "id_asc"]
   }
 }

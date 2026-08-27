@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECIPE = ROOT / "share" / "quant_eval" / "qwen3.8-flash-next-bakeoff.json"
 DEFAULT_PROFILE = (ROOT / "share" / "release_profiles" /
                    "qwen3.8-flash-next-rocmi4-strix-halo.json")
-RECIPE_SCHEMA_VERSION = 2
+RECIPE_SCHEMA_VERSION = 3
 PLAN_SCHEMA_VERSION = 2
 RESULT_SCHEMA = "ember.qwen3.8.sequential-bakeoff-result.v4"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment.v2"
@@ -35,6 +35,12 @@ LEDGER_SCHEMA = "ember.qwen3.8.sequential-bakeoff-ledger.v3"
 SUPPORTED_MTP_MATRIX_CONTRACTS = {
     "Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST",
 }
+WINNER_ORDER = [
+    "decode_median_tps_desc",
+    "prefill_median_tps_desc",
+    "quality_score_desc",
+    "id_asc",
+]
 QUALITY_SPEC = importlib.util.spec_from_file_location(
     "ember_qwen_quality_judge", ROOT / "scripts" / "qwen_quality_judge.py")
 if QUALITY_SPEC is None or QUALITY_SPEC.loader is None:
@@ -157,9 +163,16 @@ def make_plan(
     if recipe.get("schema_version") != RECIPE_SCHEMA_VERSION:
         raise BakeoffError("unsupported bakeoff recipe")
     profile = read_object(profile_path, "release profile")
-    profile_rows = profile.get("quantization", {}).get("performance_bakeoff", {}).get("arms")
+    profile_bakeoff = profile.get("quantization", {}).get("performance_bakeoff", {})
+    profile_rows = profile_bakeoff.get("arms")
     if not isinstance(profile_rows, list):
         raise BakeoffError("release profile has no quantization arm inventory")
+    measurement_policy = recipe.get("measurement_policy")
+    if (not isinstance(measurement_policy, dict)
+            or measurement_policy.get("winner_order") != WINNER_ORDER
+            or profile_bakeoff.get("winner_order") != WINNER_ORDER):
+        raise BakeoffError(
+            "recipe and release profile must pin the performance-first winner order")
     profile_arms = {
         row.get("id"): row for row in profile_rows
         if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -1291,6 +1304,23 @@ def _same_direction(rows: list[dict[str, Any]], expected: dict[str, Any] | None 
     return first
 
 
+def _winner_key(metrics: dict[str, Any], identifier: str) -> tuple[float, float, float, str]:
+    """Rank candidates that have already passed every hard gate.
+
+    The checked recipe/profile pin this exact order. Keep the implementation
+    explicit so an unknown policy token cannot silently change a release
+    decision.
+    """
+    if not isinstance(identifier, str) or not identifier:
+        raise BakeoffError("winner candidate lacks a stable non-empty id")
+    return (
+        -finite_number(metrics.get("decode_median_tps"), "winner decode median"),
+        -finite_number(metrics.get("prefill_median_tps"), "winner prefill median"),
+        -finite_number(metrics.get("quality_score"), "winner quality score"),
+        identifier,
+    )
+
+
 def verify_ledger_semantics(plan: dict[str, Any], ledger: dict[str, Any]) -> None:
     phase = ledger.get("phase")
     rows = ledger.get("assessments")
@@ -1358,9 +1388,7 @@ def select_sweep_from_assessments(plan: dict[str, Any], rows: list[dict[str, Any
     if not passing:
         raise BakeoffError("no intervention sweep configuration passed all gates")
     winner, metrics = sorted(
-        passing, key=lambda pair: (-pair[1]["quality_score"],
-                                   -pair[1]["decode_median_tps"],
-                                   -pair[1]["prefill_median_tps"], pair[0]["row_id"]))[0]
+        passing, key=lambda pair: _winner_key(pair[1], pair[0]["row_id"]))[0]
     return {**ledger_base("sweep", plan, rows, digests),
             "stock_identity": stock_identity,
             "stock_metrics": stock_metrics,
@@ -1412,9 +1440,7 @@ def select_format_from_assessments(plan: dict[str, Any], rows: list[dict[str, An
     if not eligible:
         raise BakeoffError("no final-eligible format passed all measured gates")
     winner, metrics = sorted(
-        eligible, key=lambda pair: (-pair[1]["quality_score"],
-                                    -pair[1]["decode_median_tps"],
-                                    -pair[1]["prefill_median_tps"], pair[0]["arm_id"]))[0]
+        eligible, key=lambda pair: _winner_key(pair[1], pair[0]["arm_id"]))[0]
     return {**ledger_base("format", plan, rows, digests),
             "prior_sweep_ledger": prior,
             "prior_sweep_ledger_sha256": canonical_sha256(prior),
@@ -1486,10 +1512,7 @@ def select_mtp_depth_from_assessments(
     if not eligible:
         raise BakeoffError("no MTP depth passed all measured gates")
     winner, configuration, metrics = sorted(
-        eligible, key=lambda item: (-item[2]["quality_score"],
-                                    -item[2]["decode_median_tps"],
-                                    -item[2]["prefill_median_tps"],
-                                    item[1]["mtp_depth"]))[0]
+        eligible, key=lambda item: _winner_key(item[2], item[0]["row_id"]))[0]
     return {**ledger_base("mtp-depth", plan, rows, digests),
             "prior_format_ledger": prior,
             "prior_format_ledger_sha256": canonical_sha256(prior),

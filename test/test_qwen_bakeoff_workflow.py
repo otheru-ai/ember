@@ -193,14 +193,12 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         body = WORKFLOW.read_text(encoding="utf-8")
         target = body.index("scripts/qwen_target_only_gate.sh")
         mtp = body.index("scripts/qwen_real_weight_gate.sh")
-        cleanup = body.index("Restore production and release exclusive GPU ownership")
         assess = body.index("--stage assess")
         attest = body.index("GitHub-attest candidate assessment")
         durable = body.index("externally-attested-candidate-assessment.v1")
         delete = body.index("scripts/qwen_candidate_builder.py delete-loser")
         self.assertLess(target, mtp)
-        self.assertLess(mtp, cleanup)
-        self.assertLess(cleanup, assess)
+        self.assertLess(mtp, assess)
         self.assertLess(assess, attest)
         self.assertLess(attest, durable)
         self.assertLess(durable, delete)
@@ -208,19 +206,63 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn("it is not a loser until the phase ledger exists", body)
         self.assertIn("--measurement-only", body)
 
-    def test_cleanup_accumulates_failures_and_requires_real_health(self) -> None:
+    def test_nested_gates_exclusively_own_gpu_and_production_lifecycle(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("cleanup_failed=0", body)
-        self.assertGreaterEqual(body.count("cleanup_failed=1"), 5)
-        self.assertIn("ember-cert-production unmask", body)
-        self.assertIn("ember-cert-production start", body)
+        self.assertNotIn("Restore production and release exclusive GPU ownership", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-gpu-lock acquire", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-gpu-lock release", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-cert-production stop", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-cert-production mask", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-cert-production unmask", body)
+        self.assertNotIn("sudo -n /usr/local/sbin/ember-cert-production start", body)
+        self.assertNotIn("production_was_active", body)
+        self.assertNotIn("armed=yes", body)
         self.assertIn("ember-cert-production is-active", body)
         self.assertIn("http://127.0.0.1:8000/health", body)
-        self.assertIn('exit "$cleanup_failed"', body)
-        self.assertIn("ember-gpu-lock release", body)
         for forbidden in ("docker push", "huggingface-cli", "hf upload",
                           "actions/upload-artifact", "gh release"):
             self.assertNotIn(forbidden, body)
+
+    def test_mtp_depth_disposition_cannot_delete_shared_selected_bytes(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        scripts = [script for block in workflow_run_blocks(body)
+                   for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.S)]
+        disposition = next(script for script in scripts
+                           if "shared-selected-retain" in script)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            assessment = root / "assessment.json"
+            prior = root / "format-ledger.json"
+            phase = root / "mtp-depth-ledger.json"
+            shared = {"candidate_id": "format-winner", "model_inventory_sha256": HEX,
+                      "build_record_sha256": "2" * 64}
+            assessment.write_text(json.dumps({
+                "artifact_identity": shared | {"mtp_depth": 4},
+                "observed_decision": {"passes": False},
+            }), encoding="utf-8")
+            prior.write_text(json.dumps({
+                "selected_artifact_identity": shared | {"mtp_depth": 3},
+            }), encoding="utf-8")
+            phase.write_text(json.dumps({
+                "selected_artifact_identity": shared | {"mtp_depth": 2},
+            }), encoding="utf-8")
+            retained = subprocess.run(
+                [sys.executable, "-", str(assessment), str(phase), "mtp-depth", str(prior)],
+                input=disposition, text=True, capture_output=True,
+            )
+            self.assertEqual(retained.returncode, 0, retained.stderr)
+            self.assertEqual(retained.stdout.strip(), "shared-selected-retain")
+
+            prior.write_text(json.dumps({
+                "selected_artifact_identity": shared | {
+                    "mtp_depth": 3, "model_inventory_sha256": "3" * 64},
+            }), encoding="utf-8")
+            rejected = subprocess.run(
+                [sys.executable, "-", str(assessment), "", "mtp-depth", str(prior)],
+                input=disposition, text=True, capture_output=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("not the shared format-selected artifact", rejected.stderr)
 
 
 if __name__ == "__main__":

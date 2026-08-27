@@ -88,7 +88,7 @@ class QwenQualityWorkflowTest(unittest.TestCase):
         self.assertIn("final-heldout quality is inaccessible to the sweep workflow", body)
         self.assertIn("sweep capture plan references final-heldout capability", body)
         self.assertIn('unlocked.get("phase_scope") != "final_confirmation"', body)
-        self.assertIn("final_heldout_unlocked_after_format_selection", body)
+        self.assertIn("final_heldout_unlocked_after_mtp_depth_selection", body)
         self.assertIn("capture corpus differs from the already-unlocked phase corpus", body)
         self.assertIn("scripts/qwen_bakeoff.py --plan \"$UNLOCKED_PLAN\" --stage verify", body)
         self.assertIn("canonical_plan_verified", body)

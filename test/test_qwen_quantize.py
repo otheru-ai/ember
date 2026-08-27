@@ -158,8 +158,11 @@ def make_gguf(
     tensor_type: int, architecture: str = "qwen4exp",
     layer_multipliers: list[int] | None = None,
     intervention: dict | None = None,
+    stock_control: bool = False,
+    quantized: bool = False,
     full_metadata: bool | None = None,
     omit_metadata_keys: set[str] | None = None,
+    metadata_overrides: dict[str, tuple[int, object, int | None]] | None = None,
 ) -> None:
     layer_multipliers = layer_multipliers or [1, 24_000_000_000_001]
     if full_metadata is None:
@@ -172,13 +175,24 @@ def make_gguf(
             ("qwen4exp.ple.head_offsets", 9, [3, 5], 10),
             ("qwen4exp.ple.head_vocab_sizes", 9, [7, 11], 10),
         ])
-    if intervention is not None and full_metadata:
+    if quantized:
+        metadata.extend([
+            ("general.quantization_version", 4, 2, None),
+            ("general.file_type", 4, 118, None),
+        ])
+    if intervention is not None and quantized:
         metadata.extend([
             ("ember.intervention.kind", 8, intervention["kind"], None),
             ("ember.intervention.application_stage", 8, intervention["application_stage"], None),
             ("ember.intervention.manifest_sha256", 8, intervention["manifest_sha256"], None),
             ("ember.intervention.target_names_sha256", 8, intervention["target_names_sha256"], None),
             ("ember.intervention.target_count", 4, intervention["target_count"], None),
+        ])
+    elif stock_control and quantized:
+        metadata.extend([
+            ("ember.intervention.kind", 8, "none_control", None),
+            ("ember.intervention.release_eligibility", 8,
+             "control_only_requires_manifest_for_release", None),
         ])
     if split_count > 1:
         metadata.extend([
@@ -188,6 +202,13 @@ def make_gguf(
         ])
     omitted = omit_metadata_keys or set()
     metadata = [row for row in metadata if row[0] not in omitted]
+    overrides = metadata_overrides or {}
+    metadata = [
+        (row[0], *overrides[row[0]]) if row[0] in overrides else row
+        for row in metadata
+    ]
+    metadata.extend((key, *row) for key, row in overrides.items()
+                    if all(existing[0] != key for existing in metadata))
     value = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, len(metadata)))
     for key, value_type, item, subtype in metadata:
         value.extend(pack_string(key))
@@ -491,17 +512,17 @@ class Fixture:
         make_gguf(
             self.quant_template, split_no=0, split_count=1,
             tensor_name="per_layer_token_embd.weight", tensor_type=108,
-            intervention=intervention_evidence,
+            intervention=intervention_evidence, quantized=True,
         )
         make_gguf(
             self.quant_split[0], split_no=0, split_count=2,
             tensor_name="per_layer_token_embd.weight", tensor_type=108,
-            intervention=intervention_evidence,
+            intervention=intervention_evidence, quantized=True,
         )
         make_gguf(
             self.quant_split[1], split_no=1, split_count=2,
             tensor_name="blk.0.ffn_up.weight", tensor_type=108,
-            intervention=intervention_evidence,
+            intervention=intervention_evidence, quantized=True,
         )
         self.revision = revision
         self.work = root / "work"
@@ -613,6 +634,21 @@ class Fixture:
 
 
 class QwenQuantizeTests(unittest.TestCase):
+    def test_profile_winner_order_is_pinned_performance_first(self) -> None:
+        profile = json.loads((
+            ROOT / "share" / "release_profiles" /
+            "qwen3.8-flash-next-rocmi4-strix-halo.json"
+        ).read_text(encoding="utf-8"))
+        arms = qwen_quantize.validated_quantization_arms(profile)
+        self.assertIn("rocmi4-control", arms)
+        profile["quantization"]["performance_bakeoff"]["winner_order"] = [
+            "quality_score_desc", "decode_median_tps_desc",
+            "prefill_median_tps_desc", "id_asc",
+        ]
+        with self.assertRaisesRegex(qwen_quantize.PipelineError,
+                                    "pinned override contract"):
+            qwen_quantize.validated_quantization_arms(profile)
+
     def test_git_revision_scopes_safe_directory_without_home(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             checkout = Path(raw) / "checkout"
@@ -1098,7 +1134,7 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertIn("memory.max differs", result.stderr)
             self.assertFalse(fixture.work.exists())
 
-    def test_stock_control_verification_rejects_intervention_metadata(self) -> None:
+    def test_stock_control_verification_requires_exact_control_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             profile = json.loads(
@@ -1114,18 +1150,26 @@ class QwenQuantizeTests(unittest.TestCase):
             make_gguf(
                 clean, split_no=0, split_count=1,
                 tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                stock_control=True, quantized=True,
             )
             qwen_quantize.verify_gguf_set(
                 [clean], expected, quantized=True, profile=profile,
                 stock_control=True,
             )
+            with self.assertRaisesRegex(qwen_quantize.PipelineError,
+                                        "mutually exclusive"):
+                qwen_quantize.verify_gguf_set(
+                    [clean], expected, quantized=True, profile=profile,
+                    intervention=TEST_INTERVENTION, stock_control=True,
+                )
             edited = root / "edited.gguf"
             make_gguf(
                 edited, split_no=0, split_count=1,
                 tensor_name="per_layer_token_embd.weight", tensor_type=108,
-                intervention=TEST_INTERVENTION,
+                intervention=TEST_INTERVENTION, quantized=True,
             )
-            with self.assertRaisesRegex(qwen_quantize.PipelineError, "stock-control"):
+            with self.assertRaisesRegex(qwen_quantize.PipelineError,
+                                        "pinned quantizer contract"):
                 qwen_quantize.verify_gguf_set(
                     [edited], expected, quantized=True, profile=profile,
                     stock_control=True,
@@ -1154,7 +1198,8 @@ class QwenQuantizeTests(unittest.TestCase):
             for index, (name, tensor_type) in enumerate(q6_tensors):
                 path = root / f"q6-{index + 1:05d}-of-00003.gguf"
                 make_gguf(path, split_no=index, split_count=3,
-                          tensor_name=name, tensor_type=tensor_type)
+                          tensor_name=name, tensor_type=tensor_type,
+                          stock_control=True, quantized=True)
                 q6_paths.append(path)
             result = qwen_quantize.verify_gguf_set(
                 q6_paths, expected_ple, quantized=True, profile=profile,
@@ -1166,7 +1211,8 @@ class QwenQuantizeTests(unittest.TestCase):
                 [1, 1, 1],
             )
             make_gguf(q6_paths[-1], split_no=2, split_count=3,
-                      tensor_name="output.weight", tensor_type=1)
+                      tensor_name="output.weight", tensor_type=1,
+                      stock_control=True, quantized=True)
             with self.assertRaisesRegex(qwen_quantize.PipelineError, "expected 14"):
                 qwen_quantize.verify_gguf_set(
                     q6_paths, expected_ple, quantized=True, profile=profile,
@@ -1183,7 +1229,8 @@ class QwenQuantizeTests(unittest.TestCase):
             for index, (name, tensor_type) in enumerate(fast_tensors):
                 path = root / f"fast-{index + 1:05d}-of-00003.gguf"
                 make_gguf(path, split_no=index, split_count=3,
-                          tensor_name=name, tensor_type=tensor_type)
+                          tensor_name=name, tensor_type=tensor_type,
+                          stock_control=True, quantized=True)
                 fast_paths.append(path)
             result = qwen_quantize.verify_gguf_set(
                 fast_paths, expected_ple, quantized=True, profile=profile,
@@ -1201,10 +1248,12 @@ class QwenQuantizeTests(unittest.TestCase):
             make_gguf(
                 fixture.quant_split[0], split_no=0, split_count=2,
                 tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                stock_control=True, quantized=True,
             )
             make_gguf(
                 fixture.quant_split[1], split_no=1, split_count=2,
                 tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+                stock_control=True, quantized=True,
             )
             command = fixture.command()
             option = command.index("--intervention-manifest")
@@ -1566,8 +1615,12 @@ class QwenQuantizeTests(unittest.TestCase):
             root = Path(raw)
             first = root / "model-00001-of-00002.gguf"
             second = root / "model-00002-of-00002.gguf"
-            make_gguf(first, split_no=0, split_count=2, tensor_name="per_layer_token_embd.weight", tensor_type=108, intervention=TEST_INTERVENTION)
-            make_gguf(second, split_no=1, split_count=2, tensor_name="blk.0.ffn_up.weight", tensor_type=108, intervention=TEST_INTERVENTION)
+            make_gguf(first, split_no=0, split_count=2,
+                      tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                      intervention=TEST_INTERVENTION, quantized=True)
+            make_gguf(second, split_no=1, split_count=2,
+                      tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+                      intervention=TEST_INTERVENTION, quantized=True)
             profile = json.loads((ROOT / "share" / "release_profiles" / "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text())
             expected = {
                 "ple_embedding.layer_multipliers": [1, 24_000_000_000_001],
@@ -1579,14 +1632,14 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertEqual(result["tensor_type_counts"], {"108": 2})
             self.assertEqual(len(result["shards"]), 2)
 
-    def test_split_verification_accepts_canonical_first_only_metadata(self) -> None:
+    def test_split_verification_accepts_canonical_quantized_continuation_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             first = root / "model-00001-of-00002.gguf"
             second = root / "model-00002-of-00002.gguf"
             make_gguf(first, split_no=0, split_count=2,
                       tensor_name="per_layer_token_embd.weight", tensor_type=108,
-                      intervention=TEST_INTERVENTION)
+                      intervention=TEST_INTERVENTION, quantized=True)
             profile = json.loads(
                 (ROOT / "share" / "release_profiles" /
                  "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
@@ -1597,13 +1650,20 @@ class QwenQuantizeTests(unittest.TestCase):
                 "ple_embedding.ngram_heads_vocab_sizes": [7, 11],
             }
             make_gguf(second, split_no=1, split_count=2,
-                      tensor_name="blk.0.ffn_up.weight", tensor_type=108)
+                      tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+                      intervention=TEST_INTERVENTION, quantized=True)
             result = qwen_quantize.verify_gguf_set(
                 [first, second], expected, quantized=True, profile=profile,
                 intervention=TEST_INTERVENTION,
             )
             self.assertEqual(set(qwen_quantize.inspect_gguf(second)["metadata"]), {
                 "split.no", "split.count", "split.tensors.count",
+                "general.quantization_version", "general.file_type",
+                "ember.intervention.kind",
+                "ember.intervention.application_stage",
+                "ember.intervention.manifest_sha256",
+                "ember.intervention.target_names_sha256",
+                "ember.intervention.target_count",
             })
             self.assertEqual(result["tensor_count"], 2)
 
@@ -1614,7 +1674,7 @@ class QwenQuantizeTests(unittest.TestCase):
             second = root / "model-00002-of-00002.gguf"
             make_gguf(first, split_no=0, split_count=2,
                       tensor_name="per_layer_token_embd.weight", tensor_type=108,
-                      intervention=TEST_INTERVENTION)
+                      intervention=TEST_INTERVENTION, quantized=True)
             profile = json.loads(
                 (ROOT / "share" / "release_profiles" /
                  "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
@@ -1626,6 +1686,7 @@ class QwenQuantizeTests(unittest.TestCase):
             }
             make_gguf(second, split_no=1, split_count=2,
                       tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+                      intervention=TEST_INTERVENTION, quantized=True,
                       omit_metadata_keys={"split.count"})
             with self.assertRaisesRegex(qwen_quantize.PipelineError, "split.count is missing"):
                 qwen_quantize.verify_gguf_set(
@@ -1636,7 +1697,7 @@ class QwenQuantizeTests(unittest.TestCase):
             make_gguf(second, split_no=1, split_count=2,
                       tensor_name="blk.0.ffn_up.weight", tensor_type=108,
                       architecture="wrong", full_metadata=True,
-                      intervention=TEST_INTERVENTION)
+                      intervention=TEST_INTERVENTION, quantized=True)
             with self.assertRaisesRegex(
                     qwen_quantize.PipelineError,
                     r"unexpected=.*general\.architecture"):
@@ -1645,13 +1706,64 @@ class QwenQuantizeTests(unittest.TestCase):
                     intervention=TEST_INTERVENTION,
                 )
 
+    def test_split_verification_rejects_tampered_quantizer_metadata(self) -> None:
+        profile = json.loads(
+            (ROOT / "share" / "release_profiles" /
+             "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+        )
+        expected = {
+            "ple_embedding.layer_multipliers": [1, 24_000_000_000_001],
+            "ple_embedding.ngram_heads_offsets": [3, 5],
+            "ple_embedding.ngram_heads_vocab_sizes": [7, 11],
+        }
+        mutations = (
+            ({"general.file_type"}, {}, "general.file_type"),
+            (set(), {"general.quantization_version": (2, 2, None)},
+             "general.quantization_version"),
+            (set(), {"general.file_type": (4, 117, None)}, "general.file_type"),
+            (set(), {"ember.injected": (8, "malicious", None)},
+             r"unexpected=.*ember\.injected"),
+        )
+        for omitted, overrides, expected_error in mutations:
+            with self.subTest(expected_error=expected_error), \
+                    tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                first = root / "model-00001-of-00002.gguf"
+                second = root / "model-00002-of-00002.gguf"
+                make_gguf(
+                    first, split_no=0, split_count=2,
+                    tensor_name="per_layer_token_embd.weight", tensor_type=108,
+                    intervention=TEST_INTERVENTION, quantized=True,
+                )
+                make_gguf(
+                    second, split_no=1, split_count=2,
+                    tensor_name="blk.0.ffn_up.weight", tensor_type=108,
+                    intervention=TEST_INTERVENTION, quantized=True,
+                    omit_metadata_keys=omitted,
+                    metadata_overrides=overrides,
+                )
+                with self.assertRaisesRegex(qwen_quantize.PipelineError,
+                                            expected_error):
+                    qwen_quantize.verify_gguf_set(
+                        [first, second], expected, quantized=True,
+                        profile=profile, intervention=TEST_INTERVENTION,
+                    )
+
     def test_execute_rolls_back_final_shards_after_semantic_verification_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             fixture = Fixture(Path(raw))
+            first_metadata = qwen_quantize.inspect_gguf(
+                fixture.quant_split[0])["metadata"]
+            intervention = {
+                key.removeprefix("ember.intervention."): field["value"]
+                for key, field in first_metadata.items()
+                if key.startswith("ember.intervention.")
+            }
             make_gguf(
                 fixture.quant_split[1], split_no=1, split_count=2,
                 tensor_name="blk.0.ffn_up.weight", tensor_type=108,
                 architecture="wrong", full_metadata=True,
+                intervention=intervention, quantized=True,
             )
             result = subprocess.run(
                 [*fixture.command(), "--execute"], text=True,

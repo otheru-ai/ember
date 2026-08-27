@@ -314,7 +314,6 @@ jobs:
           done
 
       - name: Bind candidate provenance and exact runtime identity
-        id: preflight
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -492,8 +491,6 @@ jobs:
             "QWEN_PRIOR_COUNT=$QWEN_PRIOR_COUNT"; do
             printf '%s\n' "$pair" >>"$GITHUB_ENV"
           done
-          printf 'armed=yes\nproduction_was_active=yes\n' >>"$GITHUB_OUTPUT"
-
       - name: Measure target-only then matching-MTP for the one live artifact
         run: |
           set -euo pipefail
@@ -639,34 +636,6 @@ jobs:
           PY
           printf 'QWEN_MEASUREMENT=%s\n' "$measurement" >>"$GITHUB_ENV"
 
-      - name: Restore production and release exclusive GPU ownership
-        if: ${{ always() && steps.preflight.outputs.armed == 'yes' }}
-        run: |
-          set +e
-          cleanup_failed=0
-          for pattern in '^/qwen-target-only-[0-9]+-[0-9]+$' '^/qwen-real-gate-(validate|timing)-[0-9]+$'; do
-            while IFS= read -r container; do
-              name="$(docker inspect --format '{{.Name}}' "$container" 2>/dev/null)" || cleanup_failed=1
-              if [[ "$name" =~ $pattern ]]; then
-                docker rm -f "$container" >/dev/null 2>&1 || cleanup_failed=1
-              fi
-            done < <(docker ps -aq 2>/dev/null) || cleanup_failed=1
-          done
-          sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
-          sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
-          production_healthy=0
-          for _ in $(seq 1 300); do
-            if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1 &&
-               curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null 2>&1; then
-              production_healthy=1
-              break
-            fi
-            sleep 2
-          done
-          (( production_healthy )) || cleanup_failed=1
-          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
-          exit "$cleanup_failed"
-
       - name: Assess the candidate while its quantized artifact still exists
         run: |
           set -euo pipefail
@@ -797,10 +766,26 @@ jobs:
         run: |
           set -euo pipefail
           authority="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment-authority.json"
-          disposition="$(python3 - "$QWEN_ASSESSMENT" "${QWEN_LEDGER:-}" <<'PY'
+          disposition="$(python3 - "$QWEN_ASSESSMENT" "${QWEN_LEDGER:-}" \
+            "$QWEN_BAKEOFF_PHASE" "$QWEN_PRIOR_LEDGER" <<'PY'
           import json, pathlib, sys
           assessment=json.loads(pathlib.Path(sys.argv[1]).read_text())
-          if sys.argv[2]:
+          phase=sys.argv[3]
+          if phase == "mtp-depth":
+              # Every depth row reuses the format ledger's selected main model
+              # and companion bytes.  A losing depth is a runtime-label loss,
+              # never authority to delete the shared selected artifact.
+              prior=json.loads(pathlib.Path(sys.argv[4]).read_text())
+              artifact=assessment.get("artifact_identity")
+              selected=prior.get("selected_artifact_identity")
+              def without_depth(value):
+                  if not isinstance(value,dict):
+                      raise SystemExit("MTP-depth artifact identity is malformed")
+                  return {key:item for key,item in value.items() if key != "mtp_depth"}
+              if without_depth(artifact) != without_depth(selected):
+                  raise SystemExit("MTP-depth row is not the shared format-selected artifact")
+              print("shared-selected-retain")
+          elif sys.argv[2]:
               ledger=json.loads(pathlib.Path(sys.argv[2]).read_text())
               print("selected" if assessment["artifact_identity"] == ledger.get("selected_artifact_identity") else "loser")
           elif assessment.get("observed_decision",{}).get("passes") is False:
@@ -825,6 +810,10 @@ jobs:
           PY
           if [[ "$disposition" = provisional-retain ]]; then
             printf '%s\n' 'Passing candidate retained: it is not a loser until the phase ledger exists.'
+            exit 0
+          fi
+          if [[ "$disposition" = shared-selected-retain ]]; then
+            printf '%s\n' 'MTP-depth row retained: every depth reuses the format-selected artifact bytes.'
             exit 0
           fi
           candidate_dir="$(dirname -- "$BUILD_RECORD")"

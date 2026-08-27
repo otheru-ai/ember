@@ -258,12 +258,18 @@ intermediate (`--split-max-size 48G`). Given its first
 `NAME-00001-of-000NN.gguf` shard, `--keep-split` requires every ordered sibling,
 validates `split.no`, `split.count`, `split.tensors.count`, and a unique global
 tensor inventory, then preserves the llama.cpp filenames and split metadata in
-the quantized output. Pinned llama.cpp stores the complete model/provenance
-metadata only in shard 1; every continuation shard must contain exactly the
-three split locator fields. ROCmFPX `--keep-split` preserves that layout, and
-the verifier rejects missing or extra continuation metadata. The manual PLE
-regex is matched across the global set, so it need only occur in its owning
-shard.
+the quantized output. Pinned llama.cpp stores complete model/provenance metadata
+only in intermediate shard 1; every intermediate continuation contains exactly
+the three split locator fields. Native ROCmFPX `--keep-split` at the pinned
+revision follows that first-shard-only convention, but the final writer is
+Ember's streaming quantizer. It copies each input shard, stamps
+`general.quantization_version=2` and `general.file_type=118` onto every output,
+and stamps either the two exact stock-control labels or all five exact
+directional-ablation evidence fields onto every output. Final continuation
+shards must contain precisely those mode-specific fields plus the split
+triplet; the verifier rejects missing, extra, mistyped, or mismatched values.
+The manual PLE regex is matched across the global set, so it need only occur in
+its owning shard.
 
 Planning all shards and the aggregate 128 GiB fit decision completes before
 publication. The orchestrator rechecks authoritative shard-1 metadata and PLE

@@ -187,7 +187,8 @@ jobs:
               expected_sha = SWEEP_SHA
           else:
               if (unlocked.get("phase_scope") != "final_confirmation"
-                      or unlocked.get("status") != "final_heldout_unlocked_after_format_selection"):
+                      or unlocked.get("status") !=
+                      "final_heldout_unlocked_after_mtp_depth_selection"):
                   fail("final quality requires the separately unlocked final plan")
               expected_corpus = (unlocked.get("corpora") or {}).get("final-heldout.jsonl")
               if not isinstance(expected_corpus, dict): fail("unlocked final corpus is absent")

@@ -371,6 +371,20 @@ class BakeoffTest(unittest.TestCase):
                 "included_in_exact_runtime_winner_ledger"])
             self.assertFalse(plan["publication_allowed"])
             self.assertEqual(plan["phase_scope"], "selection")
+            expected_winner_order = [
+                "decode_median_tps_desc",
+                "prefill_median_tps_desc",
+                "quality_score_desc",
+                "id_asc",
+            ]
+            self.assertEqual(
+                plan["recipe"]["value"]["measurement_policy"]["winner_order"],
+                expected_winner_order,
+            )
+            self.assertEqual(
+                profile["quantization"]["performance_bakeoff"]["winner_order"],
+                expected_winner_order,
+            )
             self.assertNotIn("final-heldout.jsonl", plan["corpora"])
             for configuration in plan["sweep_configurations"]:
                 self.assertEqual(len(configuration["layer_scales"]), 48)
@@ -402,6 +416,65 @@ class BakeoffTest(unittest.TestCase):
             with self.assertRaisesRegex(qb.BakeoffError,
                                         "selectable format arms must be exact-runtime"):
                 qb.make_plan(injected, corpora)
+
+            recipe = json.loads(qb.DEFAULT_RECIPE.read_text(encoding="utf-8"))
+            recipe["measurement_policy"]["winner_order"] = [
+                "quality_score_desc", "decode_median_tps_desc",
+                "prefill_median_tps_desc", "id_asc",
+            ]
+            quality_first = root / "quality-first-policy.json"
+            quality_first.write_text(json.dumps(recipe), encoding="utf-8")
+            with self.assertRaisesRegex(qb.BakeoffError, "performance-first winner order"):
+                qb.make_plan(quality_first, corpora)
+
+    def test_performance_first_winner_key_and_hard_gate_filter(self) -> None:
+        def metrics(decode: float, prefill: float, quality: float) -> dict:
+            return {
+                "decode_median_tps": decode,
+                "prefill_median_tps": prefill,
+                "quality_score": quality,
+            }
+
+        cases = [
+            ("decode", [
+                ("quality", metrics(40.0, 500.0, 1.0)),
+                ("decode", metrics(41.0, 412.0, 0.5)),
+            ]),
+            ("prefill", [
+                ("quality", metrics(40.0, 413.0, 1.0)),
+                ("prefill", metrics(40.0, 414.0, 0.5)),
+            ]),
+            ("quality", [
+                ("lower-quality", metrics(40.0, 414.0, 0.5)),
+                ("quality", metrics(40.0, 414.0, 1.0)),
+            ]),
+            ("a", [
+                ("z", metrics(40.0, 414.0, 1.0)),
+                ("a", metrics(40.0, 414.0, 1.0)),
+            ]),
+        ]
+        for expected, rows in cases:
+            with self.subTest(expected=expected):
+                selected = sorted(rows, key=lambda item: qb._winner_key(item[1], item[0]))[0]
+                self.assertEqual(selected[0], expected)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = qb.make_plan(qb.DEFAULT_RECIPE, self.make_corpora(root))
+            rows = self.complete_results(plan)["results"]
+            sweep_rows = [row for row in rows if row["stage"] in {"stock", "sweep"}]
+            candidates = [row for row in sweep_rows if row["stage"] == "sweep"]
+            faster = candidates[1]
+            faster["decode_tps_samples"] = [41.0, 42.0, 43.0]
+            # This row has the highest raw decode result, but misses the hard
+            # prefill-peak gate and therefore cannot enter the winner ranking.
+            ineligible = candidates[2]
+            ineligible["decode_tps_samples"] = [90.0, 100.0, 110.0]
+            ineligible["prefill_tps_samples"] = [300.0, 301.0, 302.0]
+            selected = qb.select_sweep(
+                plan, self.assessment_input(root, plan, sweep_rows, "performance-first"))
+            self.assertEqual(selected["selected_configuration_id"], faster["id"])
+            self.assertEqual(selected["selected_metrics"]["decode_median_tps"], 42.0)
 
     def test_missing_estimated_or_final_reselection_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

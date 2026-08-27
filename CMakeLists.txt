@@ -685,6 +685,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_capture.py)
   set_tests_properties(qwen_quality_capture PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_quality_descriptor
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_descriptor.py)
+  set_tests_properties(qwen_quality_descriptor PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_quality_workflow
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_workflow.py)

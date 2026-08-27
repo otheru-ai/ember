@@ -100,10 +100,12 @@ zero, and binds the observed cgroup peak, converter child RSS, and wall time
 into the build record. The workflow also hashes the outer `/usr/bin/time`
 evidence together with that record.
 
-The stock control carries no `ember.intervention.*` metadata and is always
-final-ineligible. It exists to establish correctness/quality/performance and
-to capture the 48×2560 per-prompt mixed-input activations. A release package
-still requires a separately measured intervention artifact.
+The stock control carries explicit `none_control` and
+`control_only_requires_manifest_for_release` metadata on every shard and is
+always final-ineligible. Those labels are negative control evidence, not proof
+of a weight intervention. It exists to establish correctness, quality, and
+performance and to capture the 48×2560 per-prompt mixed-input activations. A
+release package still requires a separately measured intervention artifact.
 
 ## Pinned and disjoint corpora
 
@@ -178,6 +180,54 @@ the mmproj may be inventoried for memory accounting, but no multimodal quality
 or release claim is permitted until a separate measured vision differential
 passes.
 
+Generate the live capture handoff with `scripts/qwen_quality_descriptor.py`.
+The generator is GPU-free and stdlib-only: it reproduces the supplied
+selection or MTP-depth-unlocked final plan, hashes both completed build records
+and every ordered GGUF shard, verifies the checked rubric and agentic corpus,
+and emits the exact `quality-capture-plan.v1` and `quality-phase-descriptor.v1`
+objects consumed by `.github/workflows/qwen-quality-capture.yml`. The candidate
+ID is explicit because it belongs to the construction receipt and is not stored
+in the quantizer build record; final generation verifies it against the sealed
+winner. The quality output root must not exist yet, and the generator does not
+create it, start a runtime, quiesce production, publish, or delete anything.
+
+The judge is supplied through a separately hashed, fail-closed inventory:
+
+```json
+{
+  "schema": "ember.qwen3.8.quality-judge-inventory.v1",
+  "artifact": {"path": "/abs/judge.gguf", "sha256": "<64-hex>", "bytes": 1}
+}
+```
+
+For a selection-corpus capture, the invocation shape is:
+
+```sh
+python3 scripts/qwen_quality_descriptor.py \
+  --phase sweep \
+  --phase-plan /abs/qwen-bakeoff-plan.json \
+  --phase-plan-sha256 '<64-hex>' \
+  --stock-build-record /abs/stock/qwen-quant-build-record.json \
+  --stock-build-record-sha256 '<64-hex>' \
+  --candidate-build-record /abs/candidate/qwen-quant-build-record.json \
+  --candidate-build-record-sha256 '<64-hex>' \
+  --candidate-id '<construction-candidate-id>' \
+  --judge-inventory /abs/judge-inventory.json \
+  --judge-inventory-sha256 '<64-hex>' \
+  --ember-revision '<40-hex>' \
+  --model-runtime-image 'ghcr.io/otheru-ai/ember@sha256:<64-hex>' \
+  --judge-runtime-image 'ghcr.io/otheru-ai/ember@sha256:<64-hex>' \
+  --quality-output-root /abs/new-quality-capture \
+  --capture-plan-output /abs/quality-capture-plan.json \
+  --output /abs/quality-phase-descriptor.json
+```
+
+Use `--phase final` only with the canonical
+`final_heldout_unlocked_after_mtp_depth_selection` plan. Both output JSON files
+are create-only. Dispatch the workflow with the printed phase-descriptor path
+and SHA-256; the workflow independently repeats every binding before taking the
+GPU lock.
+
 After the digest-matched stock ROCMI4 control and MTP companion exist, capture
 directions with `scripts/qwen_capture_control.py`. The operator supplies every
 image, build-record, shard, MTP, recipe, contract, and extraction-corpus digest
@@ -192,7 +242,7 @@ corpus directory is `/srv/ember/qwen3.8-otheru-corpus-a3c6a728`.
 Each measured candidate is reduced to a digest-bound assessment, and the
 externally attested ledgers are selected serially as `sweep`, `format`, then
 `mtp-depth`. `unlock-final` accepts only the sealed MTP-depth ledger; it does
-not accept the intermediate format ledger. The checked recipe uses schema v2,
+not accept the intermediate format ledger. The checked recipe uses schema v3,
 result evidence v4, candidate assessments v2, and ledgers v3 so earlier records
 cannot be mistaken for depth-bound evidence.
 
@@ -218,6 +268,12 @@ and measured peak RSS, GTT, and deduplicated accounted UMA bytes from the
 runner sampler, including the exact live TTM `pages_limit`. The hard throughput
 gates are the three-sample prefill peak at 412 tok/s and the three-sample decode
 median at 39.49 tok/s.
+Candidates must first pass differential correctness, audited quality, exact
+measurement-shape/speculation, memory, prefill-peak, and decode-median gates.
+Among only those passing candidates, each selection phase ranks decode median
+descending, then prefill median descending, then audited quality score
+descending, then stable candidate id ascending. The prefill peak remains a
+hard threshold; it is not the prefill performance tie-break statistic.
 Both the static artifact-plus-reserve-plus-companion sum and measured UMA peak
 must fit real host MemTotal, which is stricter than the nominal 128 GiB
 architectural budget. The decision remains non-publishing; release packaging
