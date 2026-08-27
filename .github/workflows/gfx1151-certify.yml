@@ -780,20 +780,31 @@ jobs:
               exit 1
           fi
           mkdir -p "$workspace/tooling" "$workspace/evidence"
+          ple_patch="$GITHUB_WORKSPACE/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch"
+          echo "31fa8637e8c2594a3c3e84811940773f0cef881f2771820aa33f9b198116ad3e  $ple_patch" | sha256sum -c -
           ensure_checkout() {
             local url="$1" revision="$2" destination="$3"
             if [[ ! -d "$destination/.git" ]]; then
               git clone --filter=blob:none "$url" "$destination"
             fi
-            test -z "$(git -C "$destination" status --porcelain --untracked-files=no)"
             git -C "$destination" fetch --filter=blob:none origin "$revision"
+            # This is a disposable cached tool checkout. Restore every tracked
+            # path from the exact requested revision so an interrupted run or
+            # an older version of the audited patch cannot poison a retry.
+            git -C "$destination" restore --source="$revision" --staged --worktree -- .
             git -C "$destination" checkout --detach "$revision"
             test "$(git -C "$destination" rev-parse HEAD)" = "$revision"
+            test -z "$(git -C "$destination" status --porcelain --untracked-files=no)"
           }
           ensure_checkout https://github.com/ggml-org/llama.cpp.git \
             "$LLAMA_REVISION" "$workspace/tooling/llama.cpp"
           ensure_checkout https://github.com/charlie12345/ROCmFPX.git \
             "$ROCMFPX_REVISION" "$workspace/tooling/ROCmFPX"
+          git -c safe.directory="$workspace/tooling/llama.cpp" \
+            -C "$workspace/tooling/llama.cpp" apply --check "$ple_patch"
+          git -c safe.directory="$workspace/tooling/llama.cpp" \
+            -C "$workspace/tooling/llama.cpp" apply "$ple_patch"
+          echo "4f137e8b4b6507a2f02df12ff8f3fcf19e42bca426ff793384a6c43d3ba01b50  $workspace/tooling/llama.cpp/conversion/qwen4exp.py" | sha256sum -c -
           docker run --rm --network host \
             -e LLAMA_REVISION="$LLAMA_REVISION" \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc '
@@ -842,9 +853,33 @@ jobs:
           snapshot="$workspace/snapshots/$QWEN_REVISION"
           output="$workspace/artifacts/stock-rocmi4-${TARGET_SHA:0:12}"
           test ! -e "$output"
+          python3 - "$workspace/artifacts" ".stock-rocmi4-${TARGET_SHA:0:12}.transaction-" \
+            "$workspace/evidence/control-${TARGET_SHA:0:12}.stale-transactions.json" <<'PY'
+          import json, os, pathlib, shutil, stat, sys
+          root = pathlib.Path(sys.argv[1]).resolve(strict=True)
+          prefix = sys.argv[2]
+          evidence = pathlib.Path(sys.argv[3])
+          removed = []
+          for child in root.iterdir():
+              if not child.name.startswith(prefix):
+                  continue
+              info = child.lstat()
+              if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                  raise SystemExit(f"refusing unsafe stale transaction entry: {child}")
+              if child.parent.resolve(strict=True) != root:
+                  raise SystemExit(f"stale transaction escaped artifact root: {child}")
+              removed.append(child.name)
+              shutil.rmtree(child)
+          payload = {"artifact_root": str(root), "prefix": prefix,
+                     "removed": sorted(removed)}
+          temp = evidence.with_suffix(evidence.suffix + ".tmp")
+          temp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+          os.replace(temp, evidence)
+          PY
           name="qwen-control-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           echo "name=$name" >>"$GITHUB_OUTPUT"
           docker run --name "$name" --network none --ipc host \
+            --memory 125g --memory-swap 125g \
             --ulimit memlock=-1:-1 \
             -v "$workspace:/qwen-work" "$QWEN_DEV_IMAGE" bash -lc "
               set -euo pipefail
@@ -865,6 +900,7 @@ jobs:
                   --llama-cpp-dir /qwen-work/tooling/llama.cpp \
                   --gguf-splitter /qwen-work/tooling/llama.cpp/build/bin/llama-gguf-split \
                   --bounded-memory-temp \
+                  --conversion-memory-limit-bytes 134217728000 \
                   --rocmfpx-dir /qwen-work/tooling/ROCmFPX \
                   --ember-dir /ember --ember-revision $TARGET_SHA \
                   --quantizer /ember/build-rocm/ember-gguf-quantize \
@@ -888,10 +924,43 @@ jobs:
           assert record["status"] == "complete", record
           assert record["experiment"]["kind"] == "stock_control", record
           assert record["experiment"]["final_release_eligible"] is False, record
+          measurement = record["conversion_memory"]["measurement"]
+          assert measurement["status"] == "measured_target_cgroup_v2", measurement
+          assert measurement["memory_limit_bytes"] == 134217728000, measurement
+          assert measurement["swap_limit_bytes"] == 0, measurement
+          assert measurement["cgroup_peak_after_conversion_bytes"] <= 134217728000, measurement
+          assert measurement["converter_child_maximum_resident_set_kib"] <= 131072000, measurement
           assert all("Stock-Control" in row["path"] and "Heretic" not in row["path"]
                      for row in record["output"]["shards"]), record
           print(json.dumps({"artifact_bytes": sum(row["size_bytes"] for row in record["output"]["shards"]),
                             "shards": len(record["output"]["shards"])}, sort_keys=True))
+          PY
+          python3 - "$output/qwen-quant-build-record.json" \
+            "$workspace/evidence/control-${TARGET_SHA:0:12}.time.txt" \
+            "$workspace/evidence/control-${TARGET_SHA:0:12}.measurement-attestation.json" <<'PY'
+          import hashlib, json, pathlib, re, sys
+          record_path, time_path, output_path = map(pathlib.Path, sys.argv[1:])
+          time_text = time_path.read_text(encoding="utf-8")
+          match = re.search(r"Maximum resident set size \(kbytes\): ([0-9]+)", time_text)
+          if match is None:
+              raise SystemExit("/usr/bin/time evidence lacks maximum RSS")
+          outer_rss_kib = int(match.group(1))
+          if outer_rss_kib > 131072000:
+              raise SystemExit("successful conversion exceeded the 125 GiB RSS gate")
+          digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          record = json.loads(record_path.read_text(encoding="utf-8"))
+          payload = {
+              "schema": "ember.qwen-conversion-memory-attestation.v1",
+              "build_record_sha256": digest(record_path),
+              "time_evidence_sha256": digest(time_path),
+              "outer_maximum_resident_set_kib": outer_rss_kib,
+              "recorded_cgroup_peak_bytes": record["conversion_memory"]["measurement"][
+                  "cgroup_peak_after_conversion_bytes"],
+              "memory_limit_bytes": 134217728000,
+              "passed": True,
+          }
+          output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
           PY
           mtp_dir="$workspace/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}"
           mtp_artifact="$mtp_dir/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf"

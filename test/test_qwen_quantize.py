@@ -266,6 +266,14 @@ class Fixture:
         )
         self.gguf_splitter.chmod(self.gguf_splitter.stat().st_mode | stat.S_IXUSR)
         self.llama_head = commit_all(self.llama, "rotated kv")
+        qwen_converter = self.llama / "conversion" / "qwen4exp.py"
+        qwen_converter.write_text(
+            qwen_converter.read_text(encoding="utf-8")
+            + "\n# flush dirty PLE mmap pages, then madvise MADV_DONTNEED\n",
+            encoding="utf-8",
+        )
+        ple_patch_text = git(
+            self.llama, "diff", "--binary", "--", "conversion/qwen4exp.py") + "\n"
 
         self.rocmfpx = root / "rocmfpx"
         init_repo(self.rocmfpx)
@@ -277,6 +285,9 @@ class Fixture:
 
         self.ember = root / "ember"
         init_repo(self.ember)
+        self.ple_patch = self.ember / "patches" / "llama.cpp" / "qwen4exp-ple-cgroup-writeback.patch"
+        self.ple_patch.parent.mkdir(parents=True)
+        self.ple_patch.write_text(ple_patch_text, encoding="utf-8")
         self.fail_quantizer = root / "fail-quantizer"
         self.quantizer_started = root / "quantizer-started"
         self.pause_success = root / "pause-success"
@@ -361,6 +372,11 @@ class Fixture:
         base_profile["source"]["license"]["sha256"] = sha256(self.snapshot / "LICENSE")
         base_profile["conversion"]["base_revision"] = self.llama_base
         base_profile["conversion"]["revision"] = self.llama_head
+        base_profile["conversion"]["bounded_memory"].update({
+            "ple_cgroup_writeback_patch": "patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch",
+            "ple_cgroup_writeback_patch_sha256": sha256(self.ple_patch),
+            "patched_qwen4exp_sha256": sha256(qwen_converter),
+        })
         base_profile["quantizer"]["revision"] = self.rocm_revision
         base_profile["quantization"]["source_provenance"] = {
             "qwen4exp": self.llama_head, "rocmi4": self.rocm_revision,
@@ -725,7 +741,7 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertFalse(record["conversion_memory"]["full_in_memory_tensor_registry"])
             self.assertEqual(
                 record["conversion_memory"]["target_measurement_status"],
-                "pending_peak_rss_and_wall_time",
+                "pending_patched_peak_rss_and_wall_time",
             )
             self.assertIn("gguf_splitter_sha256", record["tools"])
 
@@ -749,6 +765,63 @@ class QwenQuantizeTests(unittest.TestCase):
             )
             self.assertEqual(record["conversion_memory"]["mode"], "bounded_temp_file_then_split")
             self.assertEqual(len(record["intermediate"]["shards"]), 2)
+
+    def test_bounded_memory_execute_binds_cgroup_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            memory_max = fixture.root / "memory.max"
+            swap_max = fixture.root / "memory.swap.max"
+            memory_peak = fixture.root / "memory.peak"
+            memory_max.write_text("2147483648\n", encoding="ascii")
+            swap_max.write_text("0\n", encoding="ascii")
+            memory_peak.write_text("536870912\n", encoding="ascii")
+            command = fixture.command() + [
+                "--bounded-memory-temp", "--gguf-splitter", str(fixture.gguf_splitter),
+                "--conversion-memory-limit-bytes", "2147483648",
+                "--cgroup-memory-max-path", str(memory_max),
+                "--cgroup-memory-swap-max-path", str(swap_max),
+                "--cgroup-memory-peak-path", str(memory_peak),
+                "--execute",
+            ]
+            result = subprocess.run(
+                command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(
+                (fixture.work / "qwen-quant-build-record.json").read_text(encoding="utf-8")
+            )
+            measurement = record["conversion_memory"]["measurement"]
+            self.assertEqual(measurement["status"], "measured_target_cgroup_v2")
+            self.assertEqual(measurement["memory_limit_bytes"], 2147483648)
+            self.assertEqual(measurement["swap_limit_bytes"], 0)
+            self.assertEqual(measurement["cgroup_peak_after_conversion_bytes"], 536870912)
+            self.assertEqual(
+                record["conversion_memory"]["target_measurement_status"],
+                "measured_within_pinned_no_swap_cgroup",
+            )
+
+    def test_bounded_memory_cgroup_contract_fails_before_conversion(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            memory_max = fixture.root / "memory.max"
+            swap_max = fixture.root / "memory.swap.max"
+            memory_peak = fixture.root / "memory.peak"
+            memory_max.write_text("1073741824\n", encoding="ascii")
+            swap_max.write_text("1\n", encoding="ascii")
+            memory_peak.write_text("0\n", encoding="ascii")
+            result = subprocess.run(
+                fixture.command() + [
+                    "--bounded-memory-temp", "--gguf-splitter", str(fixture.gguf_splitter),
+                    "--conversion-memory-limit-bytes", "2147483648",
+                    "--cgroup-memory-max-path", str(memory_max),
+                    "--cgroup-memory-swap-max-path", str(swap_max),
+                    "--cgroup-memory-peak-path", str(memory_peak),
+                    "--execute",
+                ], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("memory.max differs", result.stderr)
+            self.assertFalse(fixture.work.exists())
 
     def test_stock_control_verification_rejects_intervention_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -918,6 +991,21 @@ class QwenQuantizeTests(unittest.TestCase):
                 record["snapshot"]["ignored_coordination_files"],
                 [".ember-fetch.lock"],
             )
+
+    def test_tool_provenance_fails_before_large_snapshot_integrity_read(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            (fixture.snapshot / "unexpected-source-file").write_text(
+                "would fail the snapshot inventory\n", encoding="utf-8")
+            (fixture.llama / "dirty-tool-file").write_text(
+                "must fail first\n", encoding="utf-8")
+            result = subprocess.run(
+                fixture.command(), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("llama.cpp must differ from the pinned base only", result.stderr)
+            self.assertNotIn("snapshot file inventory mismatch", result.stderr)
 
     def test_snapshot_rejects_fetch_lock_symlink_and_other_dotfile(self) -> None:
         for kind, expected in (("symlink", "regular non-symlink"),

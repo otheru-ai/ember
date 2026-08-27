@@ -28,9 +28,19 @@ control, not a viable release recipe for this host: artifact plus the required
 enabled. No runtime or throughput claim follows from this inventory check.
 
 Ordinary conversion is not viable on this host: its approximately 204 GB
-intermediate representation exceeds RAM. The bounded path uses the pinned
-llama.cpp converter's `--use-temp-file` mode. That mode cannot split while
-converting, so Ember performs this private lifecycle:
+intermediate representation exceeds RAM. The first supposedly bounded
+`--use-temp-file` control run was also not viable: run `33050472929` was
+cgroup-OOM-killed after reading 300,364,726,272 of 360,000,192,888 source
+bytes, at a measured peak RSS of 127,269,264 KiB. The PLE converter flushed
+only after populating its entire 204.8 GB file-backed F32 map, so dirty mmap
+pages accumulated as cgroup resident memory.
+
+The pinned llama.cpp base is now combined with the digest-pinned
+`qwen4exp-ple-cgroup-writeback.patch`. It flushes and `MADV_DONTNEED`s each
+completed PLE shard and marks the final clean read sequential. The patch is
+part of the tool provenance and llama.cpp may differ from its pinned commit in
+that one exact file only. `--use-temp-file` cannot split while converting, so
+Ember performs this private lifecycle:
 
 1. stream safetensors into one private BF16 GGUF, spilling through `TMPDIR`
    inside the transaction directory;
@@ -43,11 +53,14 @@ converting, so Ember performs this private lifecycle:
 
 The input snapshot, temporary payload, unsplit output, and split output can
 coexist at different points, so the normal 1 TiB free-space gate remains. The
-120 GiB physical-RAM floor merely admits the mechanically bounded route; it is
-not evidence that conversion succeeded within memory. The build record leaves
-peak RSS and wall time pending until the target run measures them.
+120 GiB physical-RAM floor merely admits the patched route; it is not evidence
+that conversion succeeded within memory. The build record retains the failed
+run measurements and leaves patched peak RSS and wall time pending until the
+target rerun measures them.
 
 ```sh
+git -C /root/qwen-work/llama.cpp apply \
+  /root/qwen-work/ember/patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch
 python3 scripts/qwen_quantize.py \
   --snapshot-dir /root/qwen-work/snapshot \
   --snapshot-revision f5d08274bafd880402bd16f5e3e6c514136ec06c \
@@ -55,6 +68,7 @@ python3 scripts/qwen_quantize.py \
   --llama-cpp-dir /root/qwen-work/llama.cpp \
   --gguf-splitter /root/qwen-work/llama.cpp/build/bin/llama-gguf-split \
   --bounded-memory-temp \
+  --conversion-memory-limit-bytes 134217728000 \
   --rocmfpx-dir /root/qwen-work/ROCmFPX \
   --ember-dir /root/qwen-work/ember \
   --ember-revision "$(git rev-parse HEAD)" \
@@ -62,6 +76,13 @@ python3 scripts/qwen_quantize.py \
   --work-dir /root/qwen-work/stock-rocmi4 \
   --execute
 ```
+
+The measured command must itself run in a fresh cgroup-v2 container created
+with `--memory 125g --memory-swap 125g`. The pipeline requires the resulting
+`memory.max` to equal 134,217,728,000 bytes, requires `memory.swap.max` to be
+zero, and binds the observed cgroup peak, converter child RSS, and wall time
+into the build record. The workflow also hashes the outer `/usr/bin/time`
+evidence together with that record.
 
 The stock control carries no `ember.intervention.*` metadata and is always
 final-ineligible. It exists to establish correctness/quality/performance and
@@ -116,6 +137,18 @@ The ROCmFP4 FAST post-encoding audit now dispatches through the actual stored
 destination type and its cross-decoder GPU-free regression passes. The arm is
 still unpromoted until its exact intervened artifact passes the real-weight
 gfx1151 differential, quality, memory, and performance gates below.
+
+Quality evidence is accepted only with the v2 offline judge contract and its
+digest-pinned runtime-capture attestation. That attestation binds the stock,
+candidate, judge, and agentic request/response indexes to the exact OCI image
+reference, OCI config digest, Ember engine revision, hashed server executable,
+hashed capture driver, model inventories, corpus, rubric, and judge artifact.
+The verifier derives rating/severity consistency instead of trusting a
+caller-supplied pass bit. Its release scope is explicitly text-only with
+`multimodal_release_claim=false` and `vision_mmproj_differential_pass=false`;
+the mmproj may be inventoried for memory accounting, but no multimodal quality
+or release claim is permitted until a separate measured vision differential
+passes.
 
 After the digest-matched stock ROCMI4 control and MTP companion exist, capture
 directions with `scripts/qwen_capture_control.py`. The operator supplies every

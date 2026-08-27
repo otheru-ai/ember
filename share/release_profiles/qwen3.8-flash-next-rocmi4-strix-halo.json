@@ -55,7 +55,18 @@
       "lifecycle": "single_private_bf16_then_48g_split_then_remove_single_before_quantize",
       "temporary_filesystem": "runner_root_filesystem_not_/srv/models",
       "full_in_memory_tensor_registry": false,
-      "target_measurement_status": "pending_peak_rss_and_wall_time"
+      "ple_cgroup_writeback_patch": "patches/llama.cpp/qwen4exp-ple-cgroup-writeback.patch",
+      "ple_cgroup_writeback_patch_sha256": "31fa8637e8c2594a3c3e84811940773f0cef881f2771820aa33f9b198116ad3e",
+      "patched_qwen4exp_sha256": "4f137e8b4b6507a2f02df12ff8f3fcf19e42bca426ff793384a6c43d3ba01b50",
+      "failed_control_run": {
+        "github_run_id": 33050472929,
+        "failure": "cgroup_oom_during_dirty_ple_memmap_population",
+        "source_bytes_read": 300364726272,
+        "source_bytes_total": 360000192888,
+        "maximum_resident_set_kib": 127269264,
+        "elapsed_seconds": 1011.61
+      },
+      "target_measurement_status": "pending_patched_peak_rss_and_wall_time"
     },
     "ple_source_dtype": "I64",
     "ple_gguf_metadata_dtype": "ARRAY<UINT64>"
@@ -144,6 +155,7 @@
         {
           "id": "rocmi4-control",
           "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
           "purpose": "loadable_activation_direction_extraction_bootstrap",
           "intervention": "none_control",
           "final_release_eligible": false,
@@ -155,6 +167,7 @@
         {
           "id": "rocmi4-q6k-embedding-head",
           "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
           "per_tensor_overrides": [
             "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
             "^token_embd\\.weight$=Q6_K",
@@ -163,8 +176,24 @@
           "promotion_requires": "quality, native-262k-memory, prefill, and decode gates"
         },
         {
+          "id": "rocmfp4-fast-routed-experts-q6k-embedding-head",
+          "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+          "mtp_selection": "homogeneous FAST companion; target-only pass isolates routed-expert main-model effect",
+          "tensor_class_format": "Q4_0_ROCMFP4_FAST",
+          "selection": "routed expert matrices only; attention and shared experts remain ROCMI4",
+          "per_tensor_overrides": [
+            "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+            "^blk\\.[0-9]+\\.ffn_(gate_up|down)_exps\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^token_embd\\.weight$=Q6_K",
+            "^output\\.weight$=Q6_K"
+          ],
+          "promotion_requires": "matched-artifact end-to-end gfx1151 bakeoff"
+        },
+        {
           "id": "rocmfp4-fast-matrix",
           "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
           "tensor_class_format": "Q4_0_ROCMFP4_FAST",
           "selection": "explicit non-overlapping matrix regexes only",
           "per_tensor_overrides": [
@@ -173,6 +202,21 @@
             "^output_hc_(down|up)\\.weight$=Q4_0_ROCMFP4_FAST"
           ],
           "promotion_requires": "matched-artifact end-to-end gfx1151 bakeoff"
+        },
+        {
+          "id": "rocmfp4-fast-matrix-q6k-embedding-head",
+          "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+          "tensor_class_format": "Q4_0_ROCMFP4_FAST",
+          "selection": "explicit non-overlapping matrix regexes plus Q6_K embedding and output",
+          "per_tensor_overrides": [
+            "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+            "^blk\\.[0-9]+\\.(hc_(attn|ffn)_(down|up|inject)|ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|attn_(q|k|v|output|qkv|gate)|indexer\\.(q_proj|k_proj)|ssm_(alpha|beta|out)|ple_(key|value))\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^output_hc_(down|up)\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^token_embd\\.weight$=Q6_K",
+            "^output\\.weight$=Q6_K"
+          ],
+          "promotion_requires": "quality, native-262k-memory, prefill, and decode gates"
         }
       ],
       "runtime_support": {
@@ -234,8 +278,8 @@
       "preferred_free_disk_gib": 1536,
       "minimum_physical_ram_gib": 256,
       "bounded_memory_minimum_physical_ram_gib": 120,
-      "bounded_memory_mode": "llama_use_temp_file_then_gguf_split",
-      "bounded_memory_status": "mechanically_bounded_unmeasured_on_target",
+      "bounded_memory_mode": "llama_patched_ple_writeback_use_temp_then_gguf_split",
+      "bounded_memory_status": "patched_after_127269264_kib_oom_pending_remeasurement",
       "certification_host_memtotal_bytes": 134297894912,
       "reason": "ordinary conversion needs approximately 204 GB; the 120 GiB path must use --use-temp-file and the pinned splitter and remains unmeasured until its build record captures the OtherU run"
     },

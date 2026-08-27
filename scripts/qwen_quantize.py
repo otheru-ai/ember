@@ -21,6 +21,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
+import resource
 import shlex
 import shutil
 import stat
@@ -28,6 +29,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, BinaryIO
 
 
@@ -87,10 +89,37 @@ ROCMFP4_FAST_MATRIX_PATTERNS = [
      r"ssm_(alpha|beta|out)|ple_(key|value))\.weight$"),
     r"^output_hc_(down|up)\.weight$",
 ]
+ROCMFP4_FAST_ROUTED_EXPERT_PATTERN = (
+    r"^blk\.[0-9]+\.ffn_(gate_up|down)_exps\.weight$"
+)
 
 
 class PipelineError(ValueError):
     pass
+
+
+def read_cgroup_counter(path: Path, label: str) -> int:
+    try:
+        value = path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise PipelineError(f"cannot read {label} cgroup evidence at {path}: {exc}") from exc
+    if not re.fullmatch(r"0|[1-9][0-9]*", value):
+        raise PipelineError(f"{label} cgroup evidence is not a finite byte count: {value!r}")
+    return int(value)
+
+
+def validate_conversion_cgroup(args: argparse.Namespace) -> dict[str, int] | None:
+    """Bind the certification container's real cgroup-v2 memory boundary."""
+    if args.conversion_memory_limit_bytes is None:
+        return None
+    memory_limit = read_cgroup_counter(args.cgroup_memory_max_path, "memory.max")
+    swap_limit = read_cgroup_counter(args.cgroup_memory_swap_max_path, "memory.swap.max")
+    if memory_limit != args.conversion_memory_limit_bytes:
+        raise PipelineError(
+            "conversion cgroup memory.max differs from --conversion-memory-limit-bytes")
+    if swap_limit != 0:
+        raise PipelineError("bounded conversion certification requires memory.swap.max=0")
+    return {"memory_limit_bytes": memory_limit, "swap_limit_bytes": swap_limit}
 
 
 def sha256_file(path: Path) -> str:
@@ -348,11 +377,10 @@ def read_exact_json_file(
 
 
 def expected_mtp_matrix_contract(quantization_arm: dict[str, Any]) -> str:
-    return (
-        "Q4_0_ROCMFP4_FAST"
-        if "Q4_0_ROCMFP4_FAST" in quantization_arm["formats"]
-        else "Q4_0_ROCMI4"
-    )
+    contract = quantization_arm.get("mtp_matrix_quant_contract")
+    if contract not in ("Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST"):
+        raise PipelineError("quantization arm lacks an explicit supported MTP matrix contract")
+    return contract
 
 
 def validate_companion_inventory(
@@ -581,11 +609,31 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
             r"^token_embd\.weight$=Q6_K",
             r"^output\.weight$=Q6_K",
         ],
+        "rocmfp4-fast-routed-experts-q6k-embedding-head": [
+            quantization.get("ple_tensor_override"),
+            ROCMFP4_FAST_ROUTED_EXPERT_PATTERN + "=Q4_0_ROCMFP4_FAST",
+            r"^token_embd\.weight$=Q6_K",
+            r"^output\.weight$=Q6_K",
+        ],
         "rocmfp4-fast-matrix": [
             quantization.get("ple_tensor_override"),
             *[pattern + "=Q4_0_ROCMFP4_FAST"
               for pattern in ROCMFP4_FAST_MATRIX_PATTERNS],
         ],
+        "rocmfp4-fast-matrix-q6k-embedding-head": [
+            quantization.get("ple_tensor_override"),
+            *[pattern + "=Q4_0_ROCMFP4_FAST"
+              for pattern in ROCMFP4_FAST_MATRIX_PATTERNS],
+            r"^token_embd\.weight$=Q6_K",
+            r"^output\.weight$=Q6_K",
+        ],
+    }
+    expected_mtp_contracts = {
+        "rocmi4-control": "Q4_0_ROCMI4",
+        "rocmi4-q6k-embedding-head": "Q4_0_ROCMI4",
+        "rocmfp4-fast-routed-experts-q6k-embedding-head": "Q4_0_ROCMFP4_FAST",
+        "rocmfp4-fast-matrix": "Q4_0_ROCMFP4_FAST",
+        "rocmfp4-fast-matrix-q6k-embedding-head": "Q4_0_ROCMFP4_FAST",
     }
     if [row.get("id") for row in rows if isinstance(row, dict)] != list(expected_overrides):
         raise PipelineError("performance bakeoff arms are missing, duplicated, or reordered")
@@ -597,6 +645,8 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
         overrides = arm.get("per_tensor_overrides")
         if arm.get("default_matrix_format") != "Q4_0_ROCMI4":
             raise PipelineError(f"quantization arm {arm_id} changed the base matrix format")
+        if arm.get("mtp_matrix_quant_contract") != expected_mtp_contracts[arm_id]:
+            raise PipelineError(f"quantization arm {arm_id} has the wrong MTP matrix contract")
         if not isinstance(overrides, list) or overrides != expected_overrides[arm_id]:
             raise PipelineError(
                 f"quantization arm {arm_id} has malformed or unaudited per_tensor_overrides")
@@ -621,6 +671,7 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
             "per_tensor_overrides_sha256": hashlib.sha256(
                 serialized.encode("utf-8")).hexdigest(),
             "formats": list(dict.fromkeys(item["format"] for item in parsed)),
+            "mtp_matrix_quant_contract": expected_mtp_contracts[arm_id],
             "override_precedence": bakeoff["override_precedence"],
         }
     return result
@@ -1119,8 +1170,8 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         or runner.get("minimum_free_disk_gib") != 1024
         or runner.get("minimum_physical_ram_gib") != 256
         or runner.get("bounded_memory_minimum_physical_ram_gib") != 120
-        or runner.get("bounded_memory_mode") != "llama_use_temp_file_then_gguf_split"
-        or runner.get("bounded_memory_status") != "mechanically_bounded_unmeasured_on_target"
+        or runner.get("bounded_memory_mode") != "llama_patched_ple_writeback_use_temp_then_gguf_split"
+        or runner.get("bounded_memory_status") != "patched_after_127269264_kib_oom_pending_remeasurement"
         or runner.get("certification_host_memtotal_bytes") != 134297894912
     ):
         raise PipelineError("release conversion runner must require 1 TiB disk and 256 GiB RAM")
@@ -1308,7 +1359,23 @@ def validate_tools(
         raise PipelineError(f"ROCmFPX checkout must be at {quantizer['revision']}, got {rocmfpx_head}")
     if not HEX40.fullmatch(ember_revision) or ember_head != ember_revision:
         raise PipelineError(f"Ember checkout must be at requested revision {ember_revision}, got {ember_head}")
-    clean_checkouts = [(llama_dir, "llama.cpp"), (rocmfpx_dir, "ROCmFPX")]
+    bounded = conversion.get("bounded_memory")
+    if not isinstance(bounded, dict):
+        raise PipelineError("conversion bounded-memory contract is missing")
+    patch_path = ember_dir / str(bounded.get("ple_cgroup_writeback_patch", ""))
+    if (not patch_path.is_file()
+            or sha256_file(patch_path) != bounded.get("ple_cgroup_writeback_patch_sha256")):
+        raise PipelineError("pinned Qwen PLE cgroup-writeback patch is missing or changed")
+    llama_dirty = run_git_checked(
+        git, llama_dir, ["status", "--porcelain", "--untracked-files=all"])
+    if llama_dirty != "M conversion/qwen4exp.py":
+        raise PipelineError(
+            "llama.cpp must differ from the pinned base only by the audited Qwen PLE patch")
+    run_checked([
+        git, "-c", f"safe.directory={llama_dir}", "-C", str(llama_dir),
+        "apply", "--reverse", "--check", str(patch_path),
+    ])
+    clean_checkouts = [(rocmfpx_dir, "ROCmFPX")]
     if ember_has_git:
         clean_checkouts.append((ember_dir, "Ember"))
     for directory, label in clean_checkouts:
@@ -1322,6 +1389,8 @@ def validate_tools(
     for path in (converter, qwen_converter, quantizer_source):
         if not path.is_file():
             raise PipelineError(f"required tool source is missing: {path}")
+    if sha256_file(qwen_converter) != bounded.get("patched_qwen4exp_sha256"):
+        raise PipelineError("patched Qwen4Exp converter digest differs from the audited cgroup fix")
     qwen_text = qwen_converter.read_text(encoding="utf-8")
     if "Qwen4ExpForConditionalGeneration" not in qwen_text or "_read_hash_constants" not in qwen_text:
         raise PipelineError("pinned converter lacks Qwen4Exp exact PLE metadata handling")
@@ -1352,6 +1421,8 @@ def validate_tools(
         "llama_cpp_revision": llama_head,
         "llama_cpp_base_revision": llama_parent,
         "converter_sha256": sha256_file(converter),
+        "qwen4exp_converter_sha256": sha256_file(qwen_converter),
+        "ple_cgroup_writeback_patch_sha256": sha256_file(patch_path),
         "rocmfpx_revision": rocmfpx_head,
         "ember_revision": ember_head,
         "ember_revision_source": ember_revision_source,
@@ -2021,6 +2092,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             "per_tensor_overrides_sha256": hashlib.sha256(
                 serialized.encode("utf-8")).hexdigest(),
             "formats": ["Q4_0_ROCMI4"],
+            "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
             "override_precedence":
                 "exactly_one_matching_regex; overlap_is_an_error",
             "selection": "validated_top_level_profile_default",
@@ -2063,12 +2135,20 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             if args.bounded_memory_temp else runner["minimum_physical_ram_gib"]
         )
     resources = validate_resources(final_work_dir, args.min_free_gib, minimum_ram_gib)
-    snapshot = validate_snapshot(args.snapshot_dir.resolve(), args.snapshot_revision, profile, inventory)
+    conversion_cgroup = (
+        validate_conversion_cgroup(args)
+        if args.execute and args.bounded_memory_temp else None
+    )
     tools = validate_tools(
         args.llama_cpp_dir.resolve(), args.rocmfpx_dir.resolve(), args.ember_dir.resolve(),
         args.ember_revision, args.quantizer.resolve(), profile,
         args.gguf_splitter.resolve() if args.gguf_splitter is not None else None,
     )
+    # Tool provenance is cheap and deterministic.  Fail it before direct-I/O
+    # validation of the 360 GB source snapshot so a bad image cannot waste a
+    # full model read before reporting its actual error.
+    snapshot = validate_snapshot(
+        args.snapshot_dir.resolve(), args.snapshot_revision, profile, inventory)
     expected_ple = safetensor_ple_constants(args.snapshot_dir.resolve())
     transaction_dir: Path | None = None
     if args.execute:
@@ -2181,8 +2261,10 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
             "full_in_memory_tensor_registry": False if args.bounded_memory_temp else None,
             "temporary_directory": "private_transaction_directory" if args.bounded_memory_temp else None,
             "target_measurement_status": (
-                "pending_peak_rss_and_wall_time" if args.bounded_memory_temp else "not_applicable"
+                profile["conversion"]["bounded_memory"]["target_measurement_status"]
+                if args.bounded_memory_temp else "not_applicable"
             ),
+            "certification_cgroup": conversion_cgroup,
         },
         "status": "planned",
     }
@@ -2194,7 +2276,37 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
         if args.bounded_memory_temp:
             converter_temp = work_dir / ".converter-tmp"
             converter_temp.mkdir(mode=0o700)
+            conversion_started = time.monotonic()
+            child_rss_before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            cgroup_peak_before = (
+                read_cgroup_counter(args.cgroup_memory_peak_path, "memory.peak")
+                if conversion_cgroup is not None else None
+            )
             run_checked(convert, env_overrides={"TMPDIR": str(converter_temp)})
+            converter_child_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            conversion_wall_seconds = time.monotonic() - conversion_started
+            if conversion_cgroup is not None:
+                cgroup_peak_after = read_cgroup_counter(
+                    args.cgroup_memory_peak_path, "memory.peak")
+                memory_limit = conversion_cgroup["memory_limit_bytes"]
+                if cgroup_peak_after > memory_limit:
+                    raise PipelineError("conversion cgroup peak exceeded its pinned memory limit")
+                if converter_child_rss * 1024 > memory_limit:
+                    raise PipelineError("converter child maximum RSS exceeded its pinned memory limit")
+                record["conversion_memory"]["measurement"] = {
+                    "status": "measured_target_cgroup_v2",
+                    "memory_limit_bytes": memory_limit,
+                    "swap_limit_bytes": conversion_cgroup["swap_limit_bytes"],
+                    "cgroup_peak_before_bytes": cgroup_peak_before,
+                    "cgroup_peak_after_conversion_bytes": cgroup_peak_after,
+                    "child_maximum_resident_set_kib_before_conversion": child_rss_before,
+                    "converter_child_maximum_resident_set_kib": converter_child_rss,
+                    "converter_wall_seconds": round(conversion_wall_seconds, 3),
+                }
+                record["conversion_memory"]["target_measurement_status"] = (
+                    "measured_within_pinned_no_swap_cgroup"
+                )
+                write_json_atomic(record_path, record, create=False)
             try:
                 converter_temp.rmdir()
             except OSError as exc:
@@ -2387,6 +2499,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="pinned llama-gguf-split executable; required by bounded mode with split output",
     )
     parser.add_argument(
+        "--conversion-memory-limit-bytes", type=int,
+        help="require this exact cgroup-v2 memory.max and zero swap during bounded execution",
+    )
+    parser.add_argument(
+        "--cgroup-memory-max-path", type=Path,
+        default=Path("/sys/fs/cgroup/memory.max"),
+    )
+    parser.add_argument(
+        "--cgroup-memory-swap-max-path", type=Path,
+        default=Path("/sys/fs/cgroup/memory.swap.max"),
+    )
+    parser.add_argument(
+        "--cgroup-memory-peak-path", type=Path,
+        default=Path("/sys/fs/cgroup/memory.peak"),
+    )
+    parser.add_argument(
         "--min-ram-gib", type=int,
         help="override the profile RAM floor (256 GiB ordinary, 120 GiB bounded)",
     )
@@ -2415,6 +2543,12 @@ def main(argv: list[str] | None = None) -> int:
             raise PipelineError("--bounded-memory-temp with split output requires --gguf-splitter")
         if not args.bounded_memory_temp and args.gguf_splitter is not None:
             raise PipelineError("--gguf-splitter is only valid with --bounded-memory-temp")
+        if args.conversion_memory_limit_bytes is not None:
+            if args.conversion_memory_limit_bytes < GIB:
+                raise PipelineError("--conversion-memory-limit-bytes must be at least 1 GiB")
+            if not args.execute or not args.bounded_memory_temp:
+                raise PipelineError(
+                    "--conversion-memory-limit-bytes requires bounded execute mode")
         if ((args.companion_inventory is None)
                 != (args.companion_inventory_sha256 is None)):
             raise PipelineError(
