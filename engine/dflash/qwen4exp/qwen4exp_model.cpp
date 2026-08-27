@@ -85,19 +85,34 @@ bool get_required_u32_array(const gguf_context * gctx, const char * key,
                             const std::vector<uint32_t> & expected,
                             std::string & error) {
     const int64_t id = gguf_find_key(gctx, key);
+    const gguf_type element_type =
+        id >= 0 && gguf_get_kv_type(gctx, id) == GGUF_TYPE_ARRAY
+            ? gguf_get_arr_type(gctx, id)
+            : GGUF_TYPE_COUNT;
     if (id < 0 || gguf_get_kv_type(gctx, id) != GGUF_TYPE_ARRAY ||
-        gguf_get_arr_type(gctx, id) != GGUF_TYPE_UINT32 ||
+        (element_type != GGUF_TYPE_UINT32 &&
+         element_type != GGUF_TYPE_INT32) ||
         gguf_get_arr_n(gctx, id) != expected.size()) {
         error = std::string("missing or incompatible Qwen4Exp array: ") + key;
         return false;
     }
-    const auto * values = static_cast<const uint32_t *>(gguf_get_arr_data(gctx, id));
-    if (!values) {
+    const void * data = gguf_get_arr_data(gctx, id);
+    if (!data) {
         error = std::string("Qwen4Exp array has no data: ") + key;
         return false;
     }
     for (size_t i = 0; i < expected.size(); ++i) {
-        if (values[i] != expected[i]) {
+        // llama.cpp conversion/qwen4exp.py passes ordinary Python integers to
+        // GGUFWriter.add_array(), which serializes these three architectural
+        // arrays as INT32. Older artifacts may carry UINT32. Accept either
+        // exact 32-bit representation, but never reinterpret a negative value
+        // or relax the architecture contract.
+        const bool matches = element_type == GGUF_TYPE_UINT32
+            ? static_cast<const uint32_t *>(data)[i] == expected[i]
+            : static_cast<const int32_t *>(data)[i] >= 0 &&
+                  static_cast<uint32_t>(
+                      static_cast<const int32_t *>(data)[i]) == expected[i];
+        if (!matches) {
             error = std::string("unsupported Qwen4Exp array value: ") + key +
                     "[" + std::to_string(i) + "]";
             return false;

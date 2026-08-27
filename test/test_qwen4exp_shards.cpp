@@ -61,7 +61,9 @@ void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
                      bool include_tensor_data = true,
                      bool full_metadata = true,
                      bool stock_metadata = false,
-                     bool injected_metadata = false) {
+                     bool injected_metadata = false,
+                     gguf_type canonical_array_type = GGUF_TYPE_COUNT,
+                     int canonical_array_mutation = 0) {
     ggml_init_params model_params{
         /*.mem_size=*/1024 * 1024,
         /*.mem_buffer=*/nullptr,
@@ -84,6 +86,88 @@ void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
     }
     if (injected_metadata) {
         gguf_set_val_str(gguf, "test.injected", "not-authoritative");
+    }
+    if (canonical_array_type != GGUF_TYPE_COUNT) {
+        const struct RequiredU32 { const char * key; uint32_t value; } values[] = {
+            {"qwen4exp.context_length", 262144},
+            {"qwen4exp.embedding_length", 2560},
+            {"qwen4exp.block_count", 48},
+            {"qwen4exp.attention.head_count", 24},
+            {"qwen4exp.attention.head_count_kv", 2},
+            {"qwen4exp.attention.key_length", 256},
+            {"qwen4exp.rope.dimension_count", 64},
+            {"qwen4exp.expert_count", 512},
+            {"qwen4exp.expert_used_count", 10},
+            {"qwen4exp.expert_feed_forward_length", 640},
+            {"qwen4exp.expert_shared_feed_forward_length", 640},
+            {"qwen4exp.ssm.conv_kernel", 4},
+            {"qwen4exp.ssm.inner_size", 6144},
+            {"qwen4exp.ssm.state_size", 128},
+            {"qwen4exp.ssm.time_step_rank", 48},
+            {"qwen4exp.ssm.group_count", 16},
+            {"qwen4exp.hyper_connection.count", 4},
+            {"qwen4exp.hyper_connection.low_rank", 320},
+            {"qwen4exp.attention.indexer.head_count", 4},
+            {"qwen4exp.attention.indexer.key_length", 128},
+            {"qwen4exp.attention.indexer.top_k", 2048},
+            {"qwen4exp.ple.ngram_size", 3},
+            {"qwen4exp.ple.heads_per_ngram", 8},
+            {"qwen4exp.ple.conv_kernel", 4},
+            {"qwen4exp.ple.eos_token_id", 248044},
+            {"qwen4exp.ple.image_token_id", 248056},
+            {"qwen4exp.embedding_length_per_layer_input", 160},
+        };
+        for (const auto & value : values) {
+            gguf_set_val_u32(gguf, value.key, value.value);
+        }
+        gguf_set_val_f32(gguf, "qwen4exp.rope.freq_base", 10000000.0f);
+        gguf_set_val_f32(
+            gguf, "qwen4exp.attention.layer_norm_rms_epsilon", 1.0e-6f);
+
+        int32_t ratios_i32[48] = {};
+        uint32_t ratios_u32[48] = {};
+        for (size_t i = 3; i < 48; i += 4) {
+            ratios_i32[i] = 4;
+            ratios_u32[i] = 4;
+        }
+        if (canonical_array_mutation == 1) ratios_i32[3] = -4;
+        if (canonical_array_mutation == 2) {
+            ratios_i32[3] = 3;
+            ratios_u32[3] = 3;
+        }
+        const int32_t rope_sections[] = {11, 11, 10};
+        const int32_t ple_layers[] = {1};
+        const float ratios_f32[48] = {};
+        const void * ratio_data = ratios_i32;
+        if (canonical_array_type == GGUF_TYPE_UINT32) ratio_data = ratios_u32;
+        if (canonical_array_type == GGUF_TYPE_FLOAT32) ratio_data = ratios_f32;
+        const size_t ratio_count = canonical_array_mutation == 3 ? 47 : 48;
+        gguf_set_arr_data(gguf, "qwen4exp.attention.compress_ratios",
+                          canonical_array_type, ratio_data, ratio_count);
+        gguf_set_arr_data(gguf, "qwen4exp.rope.dimension_sections",
+                          GGUF_TYPE_INT32, rope_sections, 3);
+        gguf_set_arr_data(gguf, "qwen4exp.ple.layers", GGUF_TYPE_INT32,
+                          ple_layers, 1);
+
+        const uint64_t vocab_sizes[] = {
+            20000003, 20000023, 20000033, 20000047,
+            20000059, 20000063, 20000069, 20000077,
+            20000081, 20000093, 20000107, 20000147,
+            20000153, 20000159, 20000161, 20000171,
+        };
+        uint64_t offsets[16] = {};
+        for (size_t i = 1; i < 16; ++i) {
+            offsets[i] = offsets[i - 1] + vocab_sizes[i - 1];
+        }
+        const uint64_t multipliers[] = {
+            23703573157769ULL, 20109073645365ULL, 8052911324071ULL,
+        };
+        gguf_set_arr_data(gguf, "qwen4exp.ple.head_offsets",
+                          GGUF_TYPE_UINT64, offsets, 16);
+        gguf_set_arr_data(gguf, "qwen4exp.ple.head_vocab_sizes",
+                          GGUF_TYPE_UINT64, vocab_sizes, 16);
+        gguf_set_arr_data(gguf, "qwen4exp.ple.layer_multipliers",
+                          GGUF_TYPE_UINT64, multipliers, 3);
     }
     gguf_set_val_u16(gguf, "split.no", split_no);
     gguf_set_val_u16(gguf, "split.count", split_count);
@@ -116,6 +200,68 @@ std::filesystem::path shard(const TempDir & dir, int number, int count) {
 } // namespace
 
 int main() {
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_INT32);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("tokenizer vocabulary") != std::string::npos,
+              "canonical llama.cpp INT32 architecture arrays are accepted");
+    }
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_UINT32);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("tokenizer vocabulary") != std::string::npos,
+              "legacy UINT32 architecture arrays remain accepted");
+    }
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_INT32, 1);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("compress_ratios[3]") != std::string::npos,
+              "negative signed architecture-array values fail closed");
+    }
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_UINT32, 2);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("compress_ratios[3]") != std::string::npos,
+              "wrong unsigned architecture-array values fail closed");
+    }
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_INT32, 3);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("incompatible Qwen4Exp array") !=
+                      std::string::npos,
+              "short architecture arrays fail closed");
+    }
+    {
+        TempDir dir;
+        const auto model = dir.path / "model.gguf";
+        write_tiny_gguf(model, 0, 1, 1, "one.weight", "same", true,
+                        true, false, false, GGUF_TYPE_FLOAT32);
+        std::string error;
+        CHECK(!validate_qwen4exp_gguf(model.c_str(), error) &&
+                  error.find("incompatible Qwen4Exp array") !=
+                      std::string::npos,
+              "wrong architecture-array element types fail closed");
+    }
     {
         TempDir dir;
         const auto first = shard(dir, 1, 3);
