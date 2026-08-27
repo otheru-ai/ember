@@ -286,6 +286,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("--bounded-memory-temp", certify)
         self.assertIn("--stock-control", certify)
         self.assertIn("--gguf-splitter", certify)
+        self.assertIn("scripts/qwen_mtp_export.py", certify)
+        self.assertIn("Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf", certify)
         self.assertIn("--network none", certify)
         self.assertIn("/usr/bin/time -v", certify)
         self.assertIn("final_release_eligible", certify)

@@ -857,6 +857,15 @@ jobs:
                   --quantizer /ember/build-rocm/ember-gguf-quantize \
                   --work-dir /qwen-work/artifacts/stock-rocmi4-${TARGET_SHA:0:12} \
                   --execute
+              mkdir -p /qwen-work/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}
+              /qwen-work/tooling/converter-venv/bin/python \
+                /ember/scripts/qwen_mtp_export.py \
+                  --source-dir /qwen-work/snapshots/$QWEN_REVISION \
+                  --format gguf --matrix-quant Q4_0_ROCMI4 \
+                  --output /qwen-work/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}/Qwen3.8-Flash-Next-MTP-BF16.gguf \
+                  --quantizer /ember/build-rocm/ember-gguf-quantize \
+                  --quantized-output /qwen-work/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf \
+                  --manifest-out /qwen-work/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}/export.json
             " 2>&1 | tee "$workspace/evidence/control-${TARGET_SHA:0:12}.log"
           docker rm "$name" >/dev/null
           test -s "$output/qwen-quant-build-record.json"
@@ -871,7 +880,23 @@ jobs:
           print(json.dumps({"artifact_bytes": sum(row["size_bytes"] for row in record["output"]["shards"]),
                             "shards": len(record["output"]["shards"])}, sort_keys=True))
           PY
+          mtp_dir="$workspace/artifacts/mtp-rocmi4-${TARGET_SHA:0:12}"
+          mtp_artifact="$mtp_dir/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf"
+          python3 - "$mtp_dir/export.json" "$mtp_artifact" <<'PY'
+          import json, os, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["source_revision"] == "f5d08274bafd880402bd16f5e3e6c514136ec06c", manifest
+          assert manifest["matrix_quant_contract"] == "Q4_0_ROCMI4", manifest
+          assert manifest["runtime_status"] == "loadable quantized companion", manifest
+          path = sys.argv[2]
+          assert manifest["quantized_output"].endswith("/" + os.path.basename(path)), manifest
+          assert os.path.isfile(path) and os.path.getsize(path) == manifest["quantized_bytes"], manifest
+          print(json.dumps({"mtp_bytes": manifest["quantized_bytes"],
+                            "mtp_sha256": manifest["quantized_sha256"]}, sort_keys=True))
+          PY
           printf 'QWEN_CONTROL_OUTPUT=%s\n' "$output" >>"$GITHUB_ENV"
+          printf 'QWEN_MTP_OUTPUT=%s\n' \
+            "$mtp_artifact" >>"$GITHUB_ENV"
 
       - name: Remove a failed conversion container
         if: ${{ always() && steps.qwen-control-build.outputs.name != '' }}
@@ -903,6 +928,7 @@ jobs:
             echo
             echo "Ember SHA: \`$TARGET_SHA\`"
             echo "Output: \`$QWEN_CONTROL_OUTPUT\`"
+            echo "Matching MTP: \`$QWEN_MTP_OUTPUT\`"
             echo
             echo 'This artifact is final-ineligible and exists only for activation capture and bakeoff.'
           } >>"$GITHUB_STEP_SUMMARY"
