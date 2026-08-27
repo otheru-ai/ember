@@ -40,9 +40,15 @@ struct Qwen4ExpFrontierMoeWeights {
 
 struct Qwen4ExpFrontierMoeGraph;
 
+constexpr int kQwen4ExpFrontierMoeMaxBatch = 16;
+
 Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
     ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
     const Qwen4ExpFrontierMoeWeights & weights, int layer,
+    std::string & error);
+Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
+    ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
+    const Qwen4ExpFrontierMoeWeights & weights, int layer, int n_tokens,
     std::string & error);
 void qwen4exp_frontier_moe_destroy(Qwen4ExpFrontierMoeGraph * graph);
 bool qwen4exp_frontier_moe_eval(Qwen4ExpFrontierMoeGraph * graph,
@@ -58,5 +64,9 @@ bool qwen4exp_frontier_moe_q1(const Qwen4ExpWeights & weights, int layer,
                               const float * input, size_t input_count,
                               std::vector<float> & output,
                               std::string & error);
+bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
+                                 const float * input, size_t input_count,
+                                 int n_tokens, std::vector<float> & output,
+                                 std::string & error);
 
 } // namespace dflash::common

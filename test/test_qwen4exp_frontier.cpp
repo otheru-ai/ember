@@ -146,7 +146,62 @@ static bool close_vectors(const std::vector<float> & actual,
     return true;
 }
 
+static void test_causal_attention_stateless_ffn_batching() {
+    constexpr size_t kRows = 7;
+    constexpr size_t kLayers = 6;
+    const std::array<float, kRows> seed = {
+        0.2f, -0.7f, 1.1f, 0.4f, -0.3f, 0.8f, 0.05f};
+    const auto attention = [](float input, float & recurrent,
+                              size_t row, size_t layer) {
+        // Represents a causal GDN/QSA update: only the same layer's prior rows
+        // enter recurrent state. Row/layer terms stand in for M-RoPE position.
+        recurrent = 0.73f * recurrent + input +
+            0.01f * static_cast<float>(3 * row + layer);
+        return input + 0.19f * recurrent;
+    };
+    const auto ffn = [](float input, size_t layer) {
+        // Stateless per row, like routed/shared MoE after expert selection.
+        return input + 0.11f * std::tanh(
+            input + 0.03f * static_cast<float>(layer));
+    };
+
+    std::array<float, kLayers> token_state{};
+    std::array<float, kRows> token_rows{};
+    for (size_t row = 0; row < kRows; ++row) {
+        float value = seed[row];
+        for (size_t layer = 0; layer < kLayers; ++layer) {
+            value = ffn(attention(value, token_state[layer], row, layer),
+                        layer);
+        }
+        token_rows[row] = value;
+    }
+
+    std::array<float, kLayers> batch_state{};
+    std::array<float, kRows> batch_rows = seed;
+    for (size_t layer = 0; layer < kLayers; ++layer) {
+        std::array<float, kRows> ffn_boundary{};
+        for (size_t row = 0; row < kRows; ++row) {
+            ffn_boundary[row] = attention(
+                batch_rows[row], batch_state[layer], row, layer);
+        }
+        for (size_t row = 0; row < kRows; ++row) {
+            batch_rows[row] = ffn(ffn_boundary[row], layer);
+        }
+    }
+    CHECK(close_vectors(
+              std::vector<float>(batch_rows.begin(), batch_rows.end()),
+              std::vector<float>(token_rows.begin(), token_rows.end()),
+              1.0e-6f),
+          "batching only stateless FFN rows matches token-major outputs");
+    CHECK(close_vectors(
+              std::vector<float>(batch_state.begin(), batch_state.end()),
+              std::vector<float>(token_state.begin(), token_state.end()),
+              1.0e-6f),
+          "causal layer state matches token-major snapshot frontier");
+}
+
 int main() {
+    test_causal_attention_stateless_ffn_batching();
     const Qwen4ExpFrontierMoeSpec spec{4, 5, 2, 3};
     ggml_backend_t backend = ggml_backend_cpu_init();
     CHECK(backend != nullptr, "CPU backend initializes");
@@ -248,6 +303,96 @@ int main() {
     }
 
     dflash::common::qwen4exp_frontier_moe_destroy(graph);
+
+    Qwen4ExpFrontierMoeGraph * batch_graph =
+        dflash::common::qwen4exp_frontier_moe_create_batch(
+            backend, spec, weights, -1, 3, error);
+    if (!batch_graph)
+        std::fprintf(stderr, "frontier batch build error: %s\n", error.c_str());
+    CHECK(batch_graph != nullptr, "persistent three-row frontier graph builds");
+    if (batch_graph) {
+        const std::array<std::vector<float>, 3> rows = {
+            std::vector<float>{0.5f, -1.25f, 0.75f, 2.0f},
+            std::vector<float>{-0.2f, 0.4f, 1.1f, -0.7f},
+            std::vector<float>{1.25f, 0.1f, -0.3f, 0.8f},
+        };
+        std::vector<float> batch_input;
+        std::vector<float> expected;
+        for (const std::vector<float> & row : rows) {
+            batch_input.insert(batch_input.end(), row.begin(), row.end());
+            const std::vector<float> reference = reference_moe(
+                spec, router, gate_up, down, shared_gate_input, shared_gate,
+                shared_up, shared_down, row);
+            expected.insert(expected.end(), reference.begin(), reference.end());
+        }
+        std::vector<float> actual;
+        const bool first_ok = dflash::common::qwen4exp_frontier_moe_eval(
+            batch_graph, batch_input.data(), batch_input.size(), actual, error);
+        CHECK(first_ok, "three-row frontier evaluation succeeds");
+        CHECK(first_ok && close_vectors(actual, expected),
+              "batched graph matches independent row-wise scalar reference");
+
+        std::rotate(batch_input.begin(), batch_input.begin() + 4,
+                    batch_input.end());
+        expected.clear();
+        for (size_t row = 0; row < rows.size(); ++row) {
+            const std::vector<float> input_row(
+                batch_input.begin() + static_cast<std::ptrdiff_t>(row * 4),
+                batch_input.begin() + static_cast<std::ptrdiff_t>((row + 1) * 4));
+            const std::vector<float> reference = reference_moe(
+                spec, router, gate_up, down, shared_gate_input, shared_gate,
+                shared_up, shared_down, input_row);
+            expected.insert(expected.end(), reference.begin(), reference.end());
+        }
+        const bool reuse_ok = dflash::common::qwen4exp_frontier_moe_eval(
+            batch_graph, batch_input.data(), batch_input.size(), actual, error);
+        CHECK(reuse_ok, "cached three-row frontier evaluation succeeds");
+        CHECK(reuse_ok && close_vectors(actual, expected),
+              "reused batched graph preserves independent row semantics");
+    }
+    dflash::common::qwen4exp_frontier_moe_destroy(batch_graph);
+
+    Qwen4ExpFrontierMoeGraph * wide_graph =
+        dflash::common::qwen4exp_frontier_moe_create_batch(
+            backend, spec, weights, -1,
+            dflash::common::kQwen4ExpFrontierMoeMaxBatch, error);
+    CHECK(wide_graph != nullptr, "maximum-width prefill frontier graph builds");
+    if (wide_graph) {
+        std::vector<float> wide_input;
+        std::vector<float> wide_expected;
+        for (int row = 0;
+             row < dflash::common::kQwen4ExpFrontierMoeMaxBatch; ++row) {
+            const std::vector<float> input_row = {
+                0.1f * static_cast<float>(row + 1),
+                -0.03f * static_cast<float>(row + 2),
+                0.02f * static_cast<float>(row % 5),
+                0.04f * static_cast<float>(7 - row % 7),
+            };
+            wide_input.insert(wide_input.end(), input_row.begin(),
+                              input_row.end());
+            const std::vector<float> reference = reference_moe(
+                spec, router, gate_up, down, shared_gate_input, shared_gate,
+                shared_up, shared_down, input_row);
+            wide_expected.insert(wide_expected.end(), reference.begin(),
+                                 reference.end());
+        }
+        std::vector<float> wide_actual;
+        const bool wide_ok = dflash::common::qwen4exp_frontier_moe_eval(
+            wide_graph, wide_input.data(), wide_input.size(), wide_actual,
+            error);
+        CHECK(wide_ok && close_vectors(wide_actual, wide_expected),
+              "maximum-width graph preserves independent row semantics");
+    }
+    dflash::common::qwen4exp_frontier_moe_destroy(wide_graph);
+
+    Qwen4ExpFrontierMoeGraph * oversized =
+        dflash::common::qwen4exp_frontier_moe_create_batch(
+            backend, spec, weights, -1,
+            dflash::common::kQwen4ExpFrontierMoeMaxBatch + 1, error);
+    CHECK(oversized == nullptr,
+          "frontier rejects a batch wider than its configured bound");
+    dflash::common::qwen4exp_frontier_moe_destroy(oversized);
+
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
     ggml_backend_free(backend);

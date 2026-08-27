@@ -757,45 +757,84 @@ bool qwen4exp_mtp_step_q1(
 }
 
 namespace {
-struct Qwen4ExpBatchLayerContext {
-    const Qwen4ExpWeights & weights;
-    Qwen4ExpState & state;
-    const std::vector<int32_t> & tokens;
-    const std::vector<std::array<int32_t, 3>> & positions;
-    std::vector<std::vector<float>> & hc_rows;
-};
+bool qwen4exp_batch_layer(
+        const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::array<int32_t, 3>> & positions,
+        std::vector<std::vector<float>> & hc_rows, int layer_index,
+        std::string & error) {
+    const size_t rows = tokens.size();
+    const Qwen4ExpLayer & layer =
+        weights.layers[static_cast<size_t>(layer_index)];
+    std::vector<float> ffn_inputs(rows * static_cast<size_t>(kEmbedding));
+    std::vector<std::array<float, kHc>> ffn_inject(rows);
+    // Attention is stateful. Preserve strict row order for PLE, GDN and QSA,
+    // and stop only after the row has reached the stateless FFN boundary.
+    for (size_t row = 0; row < rows; ++row) {
+        state.hc = std::move(hc_rows[row]);
+        if (layer_index == 1 &&
+            !run_ple(weights, state, layer, tokens[row], error)) return false;
+        std::vector<float> mixed, block;
+        std::array<float, kHc> inject{};
+        if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
+                    layer.hc_attn_down, layer.hc_attn_up,
+                    layer.hc_attn_inject, mixed, &inject, error)) return false;
+        const bool qsa = (layer_index + 1) % 4 == 0;
+        if (qsa) {
+            if (!run_qsa(weights,
+                         state.layers[static_cast<size_t>(layer_index)], layer,
+                         mixed, positions[row], state.mrope_positions,
+                         block, error)) return false;
+        } else if (!run_gdn(weights,
+                            state.layers[static_cast<size_t>(layer_index)],
+                            layer, mixed, block, error)) {
+            return false;
+        }
+        hc_combine(state.hc, block, inject);
+        if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
+                    layer.hc_ffn_down, layer.hc_ffn_up,
+                    layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
+            return false;
+        std::copy(mixed.begin(), mixed.end(),
+                  ffn_inputs.begin() +
+                      static_cast<std::ptrdiff_t>(row * kEmbedding));
+        hc_rows[row] = std::move(state.hc);
+    }
 
-bool qwen4exp_batch_layer_step(void * opaque, size_t layer_number,
-                               size_t row, std::string & error) {
-    auto & context = *static_cast<Qwen4ExpBatchLayerContext *>(opaque);
-    const int layer_index = static_cast<int>(layer_number);
-    const Qwen4ExpLayer & layer = context.weights.layers[layer_number];
-    context.state.hc = std::move(context.hc_rows[row]);
-    if (layer_index == 1 && !run_ple(context.weights, context.state, layer,
-                                     context.tokens[row], error)) return false;
-    std::vector<float> mixed, block;
-    std::array<float, kHc> inject{};
-    if (!hc_mix(context.weights, context.state.hc, layer.hc_attn_norm,
-                layer.hc_attn_down, layer.hc_attn_up, layer.hc_attn_inject,
-                mixed, &inject, error)) return false;
-    const bool qsa = (layer_index + 1) % 4 == 0;
-    if (qsa) {
-        if (!run_qsa(context.weights,
-                     context.state.layers[layer_number], layer, mixed,
-                     context.positions[row], context.state.mrope_positions,
-                     block, error)) return false;
-    } else if (!run_gdn(context.weights, context.state.layers[layer_number],
-                        layer, mixed, block, error)) {
+    std::vector<float> ffn_outputs;
+    if (weights.frontier) {
+        if (!qwen4exp_frontier_moe_batch(
+                weights, layer_index, ffn_inputs.data(), ffn_inputs.size(),
+                static_cast<int>(rows), ffn_outputs, error)) return false;
+    } else {
+        ffn_outputs.resize(rows * static_cast<size_t>(kEmbedding));
+        for (size_t row = 0; row < rows; ++row) {
+            std::vector<float> block;
+            const auto begin = ffn_inputs.begin() +
+                static_cast<std::ptrdiff_t>(row * kEmbedding);
+            const std::vector<float> row_input(
+                begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            if (!run_moe(weights, layer_index, layer,
+                         row_input,
+                         block, error)) return false;
+            std::copy(block.begin(), block.end(),
+                      ffn_outputs.begin() +
+                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+        }
+    }
+    if (ffn_outputs.size() != rows * static_cast<size_t>(kEmbedding)) {
+        error = "Qwen4Exp batched MoE returned the wrong output shape";
         return false;
     }
-    hc_combine(context.state.hc, block, inject);
-    if (!hc_mix(context.weights, context.state.hc, layer.hc_ffn_norm,
-                layer.hc_ffn_down, layer.hc_ffn_up, layer.hc_ffn_inject,
-                mixed, &inject, error) ||
-        !run_moe(context.weights, layer_index, layer, mixed, block, error))
-        return false;
-    hc_combine(context.state.hc, block, inject);
-    context.hc_rows[row] = std::move(context.state.hc);
+    for (size_t row = 0; row < rows; ++row) {
+        state.hc = std::move(hc_rows[row]);
+        const auto begin = ffn_outputs.begin() +
+            static_cast<std::ptrdiff_t>(row * kEmbedding);
+        const std::vector<float> block(
+            begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+        hc_combine(state.hc, block, ffn_inject[row]);
+        hc_rows[row] = std::move(state.hc);
+    }
     return true;
 }
 } // namespace
@@ -809,7 +848,9 @@ bool qwen4exp_step_batch_mrope(
     row_logits.clear();
     row_hc.clear();
     const size_t rows = tokens.size();
-    if (rows < 2 || rows > 5 || mrope_positions.size() != rows ||
+    if (rows < 2 || rows >
+            static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch) ||
+        mrope_positions.size() != rows ||
         state.cur_pos < 0 || state.cur_pos > weights.max_ctx ||
         weights.layers.size() != 48 ||
         rows > static_cast<size_t>(weights.max_ctx - state.cur_pos)) {
@@ -845,10 +886,10 @@ bool qwen4exp_step_batch_mrope(
     // execution: a later row at layer L depends only on earlier rows at L and
     // its own output from L-1. The inner row order is never parallelized across
     // PLE/GDN/QSA state mutations.
-    Qwen4ExpBatchLayerContext context{
-        weights, state, tokens, mrope_positions, hc_rows};
-    if (!qwen4exp_run_layer_major(rows, 48, qwen4exp_batch_layer_step,
-                                  &context, error)) return false;
+    for (int layer_index = 0; layer_index < 48; ++layer_index) {
+        if (!qwen4exp_batch_layer(weights, state, tokens, mrope_positions,
+                                  hc_rows, layer_index, error)) return false;
+    }
 
     row_logits.reserve(rows);
     row_hc.reserve(rows);

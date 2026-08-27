@@ -4,6 +4,7 @@
 
 #include "ggml-alloc.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -103,6 +104,7 @@ struct Qwen4ExpFrontierMoeGraph {
     ggml_tensor * input = nullptr;
     ggml_tensor * output = nullptr;
     Qwen4ExpFrontierMoeSpec spec{};
+    int n_tokens = 1;
     int layer = -1;
     uint64_t calls = 0;
     uint64_t compute_us = 0;
@@ -110,7 +112,9 @@ struct Qwen4ExpFrontierMoeGraph {
 };
 
 struct Qwen4ExpFrontierRuntime {
-    std::vector<Qwen4ExpFrontierMoeGraph *> moe;
+    using LayerGraphs = std::array<Qwen4ExpFrontierMoeGraph *,
+        static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch + 1)>;
+    std::vector<LayerGraphs> moe;
     bool stats = false;
 };
 
@@ -118,10 +122,19 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
         ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
         const Qwen4ExpFrontierMoeWeights & weights, int layer,
         std::string & error) {
+    return qwen4exp_frontier_moe_create_batch(
+        backend, spec, weights, layer, 1, error);
+}
+
+Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
+        ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
+        const Qwen4ExpFrontierMoeWeights & weights, int layer, int n_tokens,
+        std::string & error) {
     error.clear();
     if (!backend || spec.n_embd <= 0 || spec.n_expert <= 0 ||
         spec.n_expert_used <= 0 || spec.n_expert_used > spec.n_expert ||
-        spec.n_ff <= 0 ||
+        spec.n_ff <= 0 || n_tokens <= 0 ||
+        n_tokens > kQwen4ExpFrontierMoeMaxBatch ||
         !tensor_shape(weights.router, 2, spec.n_embd, spec.n_expert) ||
         !tensor_shape(weights.experts_gate_up, 3, spec.n_embd,
                       2LL * spec.n_ff, spec.n_expert) ||
@@ -140,8 +153,9 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
     result->backend = backend;
     result->spec = spec;
     result->layer = layer;
+    result->n_tokens = n_tokens;
     std::snprintf(result->profile_label, sizeof(result->profile_label),
-                  "qwen4exp/moe/layer_%02d/q1", layer);
+                  "qwen4exp/moe/layer_%02d/q%d", layer, n_tokens);
 
     ggml_init_params params{};
     params.mem_size = kGraphContextBytes;
@@ -154,7 +168,7 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
 
     ggml_context * ctx = result->ctx;
     result->input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
-                                       spec.n_embd, 1);
+                                       spec.n_embd, n_tokens);
     ggml_set_input(result->input);
     set_layer_name(result->input, layer, "input");
 
@@ -164,11 +178,11 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
     ggml_tensor * selected = ggml_top_k(ctx, logits, spec.n_expert_used);
     set_layer_name(selected, layer, "topk");
     ggml_tensor * probabilities_3d =
-        ggml_reshape_3d(ctx, probabilities, 1, spec.n_expert, 1);
+        ggml_reshape_3d(ctx, probabilities, 1, spec.n_expert, n_tokens);
     ggml_tensor * selected_weights =
         ggml_get_rows(ctx, probabilities_3d, selected);
     selected_weights = ggml_reshape_2d(ctx, selected_weights,
-                                       spec.n_expert_used, 1);
+                                       spec.n_expert_used, n_tokens);
     ggml_tensor * selected_sum = ggml_sum_rows(ctx, selected_weights);
     selected_sum = ggml_clamp(ctx, selected_sum,
                               std::numeric_limits<float>::min(), INFINITY);
@@ -176,7 +190,7 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
     set_layer_name(selected_weights, layer, "weights");
 
     ggml_tensor * input_3d =
-        ggml_reshape_3d(ctx, result->input, spec.n_embd, 1, 1);
+        ggml_reshape_3d(ctx, result->input, spec.n_embd, 1, n_tokens);
     ggml_tensor * gate_up = ggml_mul_mat_id(
         ctx, weights.experts_gate_up, input_3d, selected);
     set_layer_name(gate_up, layer, "gate_up");
@@ -194,13 +208,14 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
         ctx, weights.experts_down, activated, selected);
     set_layer_name(expert_output, layer, "down");
     expert_output = ggml_reshape_3d(
-        ctx, expert_output, spec.n_embd, spec.n_expert_used, 1);
+        ctx, expert_output, spec.n_embd, spec.n_expert_used, n_tokens);
     ggml_tensor * weighted = ggml_mul(
         ctx, expert_output,
-        ggml_reshape_3d(ctx, selected_weights, 1, spec.n_expert_used, 1));
+        ggml_reshape_3d(ctx, selected_weights, 1, spec.n_expert_used,
+                        n_tokens));
     weighted = ggml_cont(ctx, ggml_permute(ctx, weighted, 1, 0, 2, 3));
     ggml_tensor * routed = ggml_sum_rows(ctx, weighted);
-    routed = ggml_reshape_2d(ctx, routed, spec.n_embd, 1);
+    routed = ggml_reshape_2d(ctx, routed, spec.n_embd, n_tokens);
 
     ggml_tensor * shared_gate =
         ggml_mul_mat(ctx, weights.shared_gate, result->input);
@@ -245,7 +260,8 @@ bool qwen4exp_frontier_moe_eval(Qwen4ExpFrontierMoeGraph * graph,
                                 std::vector<float> & output,
                                 std::string & error) {
     if (!graph || !graph->backend || !graph->input || !graph->output ||
-        !input || input_count != static_cast<size_t>(graph->spec.n_embd)) {
+        !input || input_count != static_cast<size_t>(graph->spec.n_embd) *
+                                  static_cast<size_t>(graph->n_tokens)) {
         error = "invalid Qwen4Exp frontier MoE evaluation";
         return false;
     }
@@ -283,7 +299,7 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
     std::unique_ptr<Qwen4ExpFrontierRuntime> runtime(
         new Qwen4ExpFrontierRuntime());
     runtime->stats = env_enabled("EMBER_QWEN_FRONTIER_STATS", false);
-    runtime->moe.reserve(weights.layers.size());
+    runtime->moe.resize(weights.layers.size());
     const Qwen4ExpFrontierMoeSpec spec{2560, 512, 10, 640};
     for (size_t index = 0; index < weights.layers.size(); ++index) {
         const Qwen4ExpLayer & layer = weights.layers[index];
@@ -294,16 +310,19 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
         Qwen4ExpFrontierMoeGraph * graph = qwen4exp_frontier_moe_create(
             weights.backend, spec, graph_weights, static_cast<int>(index), error);
         if (!graph) {
-            for (Qwen4ExpFrontierMoeGraph * built : runtime->moe)
-                qwen4exp_frontier_moe_destroy(built);
+            for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
+                 runtime->moe) {
+                for (Qwen4ExpFrontierMoeGraph * built : layer_graphs)
+                    qwen4exp_frontier_moe_destroy(built);
+            }
             return false;
         }
-        runtime->moe.push_back(graph);
+        runtime->moe[index][1] = graph;
     }
     weights.frontier = runtime.release();
     std::fprintf(stderr,
                  "[qwen-frontier] event=ready component=moe graphs=48 "
-                 "tokens_per_graph=1 graph_replay=off\n");
+                 "tokens_per_graph=1 lazy_batch_max=16 graph_replay=off\n");
     return true;
 }
 
@@ -313,9 +332,13 @@ void qwen4exp_frontier_destroy(Qwen4ExpWeights & weights) {
     if (runtime->stats) {
         uint64_t calls = 0;
         uint64_t compute_us = 0;
-        for (const Qwen4ExpFrontierMoeGraph * graph : runtime->moe) {
-            calls += graph->calls;
-            compute_us += graph->compute_us;
+        for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
+             runtime->moe) {
+            for (const Qwen4ExpFrontierMoeGraph * graph : layer_graphs) {
+                if (!graph) continue;
+                calls += graph->calls;
+                compute_us += graph->compute_us;
+            }
         }
         const double average = calls ? static_cast<double>(compute_us) / calls : 0.0;
         std::fprintf(stderr,
@@ -324,8 +347,11 @@ void qwen4exp_frontier_destroy(Qwen4ExpWeights & weights) {
                      static_cast<unsigned long long>(calls),
                      static_cast<unsigned long long>(compute_us), average);
     }
-    for (Qwen4ExpFrontierMoeGraph * graph : runtime->moe)
-        qwen4exp_frontier_moe_destroy(graph);
+    for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
+         runtime->moe) {
+        for (Qwen4ExpFrontierMoeGraph * graph : layer_graphs)
+            qwen4exp_frontier_moe_destroy(graph);
+    }
     delete runtime;
     weights.frontier = nullptr;
 }
@@ -340,8 +366,39 @@ bool qwen4exp_frontier_moe_q1(const Qwen4ExpWeights & weights, int layer,
         return false;
     }
     return qwen4exp_frontier_moe_eval(
-        weights.frontier->moe[static_cast<size_t>(layer)], input,
+        weights.frontier->moe[static_cast<size_t>(layer)][1], input,
         input_count, output, error);
+}
+
+bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
+                                 const float * input, size_t input_count,
+                                 int n_tokens, std::vector<float> & output,
+                                 std::string & error) {
+    if (!weights.frontier || layer < 0 ||
+        static_cast<size_t>(layer) >= weights.frontier->moe.size() ||
+        n_tokens <= 0 || n_tokens > kQwen4ExpFrontierMoeMaxBatch) {
+        error = "Qwen4Exp frontier batched MoE graph is unavailable";
+        return false;
+    }
+    Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs =
+        weights.frontier->moe[static_cast<size_t>(layer)];
+    Qwen4ExpFrontierMoeGraph *& graph =
+        layer_graphs[static_cast<size_t>(n_tokens)];
+    if (!graph) {
+        const Qwen4ExpLayer & model_layer =
+            weights.layers[static_cast<size_t>(layer)];
+        const Qwen4ExpFrontierMoeSpec spec{2560, 512, 10, 640};
+        const Qwen4ExpFrontierMoeWeights graph_weights{
+            model_layer.router, model_layer.experts_gate_up_tensor,
+            model_layer.experts_down_tensor, model_layer.shared_gate_input,
+            model_layer.shared_gate, model_layer.shared_up,
+            model_layer.shared_down};
+        graph = qwen4exp_frontier_moe_create_batch(
+            weights.backend, spec, graph_weights, layer, n_tokens, error);
+        if (!graph) return false;
+    }
+    return qwen4exp_frontier_moe_eval(
+        graph, input, input_count, output, error);
 }
 
 } // namespace dflash::common
