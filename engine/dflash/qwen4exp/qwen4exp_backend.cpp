@@ -324,7 +324,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         const bool capture_row = prompt_offset == 0 &&
             !activation_dump_path_.empty() && i + 1 == prompt_size;
         size_t batchable_rows = 0;
-        if (weights_.frontier && !request.force_exact_prefill && !mtp_depth_ &&
+        if (weights_.frontier && !request.force_exact_prefill &&
             activation_dump_path_.empty() && !vision) {
             int barrier = prompt_size;
             if (vision_index < request.vision.size()) {
@@ -338,6 +338,8 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             batchable_rows, state_.cur_pos, request.snap_pos,
             request.force_exact_prefill);
         if (chunk_rows >= 2) {
+            const int target_pos_before = state_.cur_pos;
+            const std::vector<float> pre_chunk_target_hc = mtp_target_hc_;
             const auto first = request.prompt.begin() + i;
             std::vector<int32_t> tokens(
                 first, first + static_cast<std::ptrdiff_t>(chunk_rows));
@@ -349,15 +351,58 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                                      prompt_positions[1][absolute],
                                      prompt_positions[2][absolute]});
             }
+            std::vector<std::vector<float>> target_row_hc;
             if (!qwen4exp_step_prefill_batch_mrope(
-                    weights_, state_, tokens, positions, logits_, error)) {
+                    weights_, state_, tokens, positions, logits_,
+                    target_row_hc, error)) {
                 result.fail(GenerateErrorCode::PrefillFailed, error);
                 return result;
+            }
+            if (target_row_hc.size() != chunk_rows) {
+                result.fail(GenerateErrorCode::PrefillFailed,
+                            "Qwen4Exp batched prefill returned incomplete HC rows");
+                return result;
+            }
+            if (mtp_depth_) {
+                std::vector<Qwen4ExpMtpPromptSyncRow> sync_plan;
+                if (!qwen4exp_mtp_prompt_sync_plan(
+                        target_pos_before, mtp_state_.cur_pos, chunk_rows,
+                        sync_plan, error)) {
+                    result.fail(GenerateErrorCode::PrefillFailed, error);
+                    return result;
+                }
+                for (const Qwen4ExpMtpPromptSyncRow & sync : sync_plan) {
+                    const float * preceding_hc = nullptr;
+                    size_t preceding_hc_count = 0;
+                    if (sync.preceding_target_hc_row < 0) {
+                        preceding_hc = pre_chunk_target_hc.data();
+                        preceding_hc_count = pre_chunk_target_hc.size();
+                    } else {
+                        const auto & row_hc = target_row_hc[static_cast<size_t>(
+                            sync.preceding_target_hc_row)];
+                        preceding_hc = row_hc.data();
+                        preceding_hc_count = row_hc.size();
+                    }
+                    if (!qwen4exp_mtp_sync_cache_q1(
+                            weights_, mtp_weights_, mtp_state_,
+                            tokens[sync.token_row], nullptr, 0, preceding_hc,
+                            preceding_hc_count, positions[sync.token_row],
+                            error)) {
+                        result.fail(
+                            GenerateErrorCode::PrefillFailed,
+                            "Qwen4Exp batched MTP cache synchronization failed: " +
+                                error);
+                        return result;
+                    }
+                }
+                mtp_target_hc_ = state_.hc;
             }
             i += static_cast<int>(chunk_rows);
             result.prefill_tokens += static_cast<int>(chunk_rows);
             result.prefill_mode = "exact-batched";
-            result.prefill_reason = "qwen4exp_text_frontier_layer_major";
+            result.prefill_reason = mtp_depth_
+                ? "qwen4exp_text_frontier_plus_mtp_cache_sync"
+                : "qwen4exp_text_frontier_layer_major";
             if (request.snap_pos == state_.cur_pos &&
                 valid_slot(request.snap_slot)) {
                 result.snapshot_saved = snapshot_save(request.snap_slot);
@@ -380,13 +425,11 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             supplied_embedding = vision->embeddings.data() + row * 2560;
         }
         if (mtp_depth_ && !mtp_target_hc_.empty()) {
-            std::vector<float> ignored_logits, ignored_hc;
-            if (!qwen4exp_mtp_step_q1(
+            if (!qwen4exp_mtp_sync_cache_q1(
                     weights_, mtp_weights_, mtp_state_,
                     request.prompt[static_cast<size_t>(i)], supplied_embedding,
                     supplied_embedding ? 2560U : 0U, mtp_target_hc_.data(),
-                    mtp_target_hc_.size(), position, ignored_logits,
-                    ignored_hc, error)) {
+                    mtp_target_hc_.size(), position, error)) {
                 result.fail(GenerateErrorCode::PrefillFailed,
                             "Qwen4Exp MTP prompt synchronization failed: " + error);
                 return result;
@@ -463,8 +506,17 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             return false;
         }
         const int32_t p = static_cast<int32_t>(decode_position);
-        return qwen4exp_step_q1_mrope(weights_, state_, token, {p, p, p},
-                                      logits_, error);
+        if (mtp_depth_) {
+            if (mtp_target_hc_.size() != 10240 ||
+                !qwen4exp_mtp_sync_cache_q1(
+                    weights_, mtp_weights_, mtp_state_, token, nullptr, 0,
+                    mtp_target_hc_.data(), mtp_target_hc_.size(), {p, p, p},
+                    error)) return false;
+        }
+        if (!qwen4exp_step_q1_mrope(weights_, state_, token, {p, p, p},
+                                    logits_, error)) return false;
+        if (mtp_depth_) mtp_target_hc_ = state_.hc;
+        return true;
     };
     while (emitted < request.n_gen && !io.cancelled) {
         const int32_t token = sample(request, history);
@@ -481,7 +533,6 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 result.decode_s = seconds_since(decode_start);
                 return result;
             }
-            if (mtp_depth_) mtp_target_hc_ = state_.hc;
             continue;
         }
         if (mtp_target_hc_.size() != 10240) {
@@ -592,6 +643,13 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             }
         }
         mtp_target_hc_ = state_.hc;
+        if (!qwen4exp_mtp_frontier_valid(
+                state_, mtp_state_, mtp_target_hc_, error)) {
+            result.fail(GenerateErrorCode::DecodeFailed,
+                        "Qwen4Exp MTP committed frontier is invalid: " + error);
+            result.decode_s = seconds_since(decode_start);
+            return result;
+        }
 
         result.tokens.push_back(token);
         history.push_back(token);
@@ -651,8 +709,6 @@ GenerateResult Qwen4ExpBackend::restore_and_generate_impl(
     }
     // Transactional restore copies K/V and raw index-K together; restoring an
     // attention cache with an empty indexer cache is explicitly forbidden.
-    state_ = snapshot.state;
-    logits_ = snapshot.logits;
     if (mtp_depth_) {
         const MtpSnapshot & mtp_snapshot =
             mtp_snapshots_[static_cast<size_t>(slot)];
@@ -661,6 +717,21 @@ GenerateResult Qwen4ExpBackend::restore_and_generate_impl(
                         "Qwen4Exp snapshot has no matching MTP frontier");
             return result;
         }
+        std::string validation_error;
+        if (!qwen4exp_mtp_frontier_valid(
+                snapshot.state, mtp_snapshot.state, mtp_snapshot.target_hc,
+                validation_error)) {
+            result.fail(GenerateErrorCode::InvalidSnapshotSlot,
+                        "Qwen4Exp snapshot MTP frontier is invalid: " +
+                            validation_error);
+            return result;
+        }
+    }
+    state_ = snapshot.state;
+    logits_ = snapshot.logits;
+    if (mtp_depth_) {
+        const MtpSnapshot & mtp_snapshot =
+            mtp_snapshots_[static_cast<size_t>(slot)];
         mtp_state_ = mtp_snapshot.state;
         mtp_target_hc_ = mtp_snapshot.target_hc;
     }
@@ -675,7 +746,9 @@ bool Qwen4ExpBackend::snapshot_save(int slot) {
     snapshot.logits = logits_;
     MtpSnapshot mtp_snapshot;
     if (mtp_depth_) {
-        if (mtp_target_hc_.size() != 10240) return false;
+        std::string error;
+        if (!qwen4exp_mtp_frontier_valid(
+                state_, mtp_state_, mtp_target_hc_, error)) return false;
         mtp_snapshot.used = true;
         mtp_snapshot.state = mtp_state_;
         mtp_snapshot.target_hc = mtp_target_hc_;

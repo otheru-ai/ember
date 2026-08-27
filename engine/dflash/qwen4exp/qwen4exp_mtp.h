@@ -53,6 +53,27 @@ struct Qwen4ExpMtpState {
     uint64_t account_bytes(std::unordered_set<const void *> & seen) const;
 };
 
+// A prompt chunk advances the target over every row, but the draft cache
+// intentionally trails it by one row: token x_(p+1) is paired with target
+// h_p. `preceding_target_hc_row == -1` selects the committed pre-chunk HC;
+// otherwise it selects a row from the target batch output. The pristine first
+// token has no preceding target HC and is the only row omitted from the plan.
+struct Qwen4ExpMtpPromptSyncRow {
+    size_t token_row = 0;
+    int preceding_target_hc_row = -1;
+};
+
+bool qwen4exp_mtp_prompt_sync_plan(
+    int target_pos_before, int mtp_pos_before, size_t target_rows,
+    std::vector<Qwen4ExpMtpPromptSyncRow> & plan, std::string & error);
+
+// Snapshot validity is stronger than a scalar position check. The MTP QSA
+// K/V/raw-index caches and all M-RoPE axes must cover exactly the trailing
+// draft frontier, while target_hc remains the target's authoritative h_p.
+bool qwen4exp_mtp_frontier_valid(
+    const Qwen4ExpState & target, const Qwen4ExpMtpState & mtp,
+    const std::vector<float> & target_hc, std::string & error);
+
 // The MTP companion owns only its trained block. Token embedding and output
 // head remain borrowed from the matching target, exactly as the released
 // `mtp_use_dedicated_embeddings=false` contract requires.
@@ -121,6 +142,22 @@ bool qwen4exp_mtp_step_q1(
     const std::array<int32_t, 3> & mrope_position,
     std::vector<float> & logits,
     std::vector<float> & draft_hc,
+    std::string & error);
+
+// Prompt/AR synchronization needs only the persistent attention inputs for a
+// future draft step. It appends MTP QSA K/V/raw-indexK, M-RoPE history and
+// cur_pos, deliberately skipping query/attention output, FFN/MoE, HC output
+// mixing, and the vocabulary head.
+bool qwen4exp_mtp_sync_cache_q1(
+    const Qwen4ExpWeights & target,
+    const Qwen4ExpMtpWeights & mtp,
+    Qwen4ExpMtpState & state,
+    int32_t token,
+    const float * next_embedding,
+    size_t next_embedding_count,
+    const float * target_hc,
+    size_t target_hc_count,
+    const std::array<int32_t, 3> & mrope_position,
     std::string & error);
 
 struct Qwen4ExpReplayRow {

@@ -367,26 +367,54 @@ bool run_gdn(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
     return matvec(weights.backend, layer.ssm_out, core.data(), 6144, output, error);
 }
 
+bool append_qsa_cache(const Qwen4ExpWeights & weights,
+                      Qwen4ExpLayerState & state,
+                      const Qwen4ExpLayer & layer,
+                      const std::vector<float> & input,
+                      const std::array<int32_t, 3> & position,
+                      std::string & error) {
+    std::vector<float> k, v, ik;
+    if (!matvec(weights.backend, layer.attn_k, input.data(), kEmbedding, k,
+                error) ||
+        !matvec(weights.backend, layer.attn_v, input.data(), kEmbedding, v,
+                error) ||
+        !matvec(weights.backend, layer.index_k, input.data(), kEmbedding, ik,
+                error)) return false;
+    std::vector<float> knorm;
+    if (!tensor_f32(layer.attn_k_norm, knorm, error)) return false;
+    for (int head = 0; head < kQsaKvHeads; ++head) {
+        rms_norm(k.data() + head * kQsaDim, kQsaDim, knorm.data());
+        if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
+                  position.data(), error)) return false;
+    }
+    // PR #27774 (abdc7a0b over #27742 035e2273): cache-side Hadamard
+    // transforms are part of the stored representation, not query output.
+    if (!rotate_optional(weights.backend, layer.self_k_rot, k, error) ||
+        !rotate_optional(weights.backend, layer.self_v_rot, v, error))
+        return false;
+    state.key.append(k.data(), k.size());
+    state.value.append(v.data(), v.size());
+    state.index_key.append(ik.data(), ik.size());
+    return true;
+}
+
 bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
              const Qwen4ExpLayer & layer, const std::vector<float> & input,
              const std::array<int32_t, 3> & position,
              const std::array<std::vector<int32_t>, 3> & position_history,
              std::vector<float> & output, std::string & error) {
-    std::vector<float> qfull, k, v, iq, ik;
+    std::vector<float> qfull, iq;
     const int tokens = static_cast<int>(state.index_key.size() / kIndexerDim) + 1;
     std::vector<int32_t> selected;
     const bool dense_selection =
         qwen4exp_qsa_dense_selection(tokens, selected);
-    if (!matvec(weights.backend, layer.attn_q, input.data(), kEmbedding, qfull, error) ||
-        !matvec(weights.backend, layer.attn_k, input.data(), kEmbedding, k, error) ||
-        !matvec(weights.backend, layer.attn_v, input.data(), kEmbedding, v, error) ||
-        !matvec(weights.backend, layer.index_k, input.data(), kEmbedding, ik, error)) return false;
+    if (!matvec(weights.backend, layer.attn_q, input.data(), kEmbedding, qfull,
+                error)) return false;
     if (!dense_selection &&
         !matvec(weights.backend, layer.index_q, input.data(), kEmbedding,
                 iq, error)) return false;
-    std::vector<float> qnorm, knorm;
-    if (!tensor_f32(layer.attn_q_norm, qnorm, error) ||
-        !tensor_f32(layer.attn_k_norm, knorm, error)) return false;
+    std::vector<float> qnorm;
+    if (!tensor_f32(layer.attn_q_norm, qnorm, error)) return false;
     std::vector<float> iqnorm, iknorm;
     if (!dense_selection &&
         (!tensor_f32(layer.index_q_norm, iqnorm, error) ||
@@ -401,11 +429,6 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         if (!rope(weights, q.data() + head * kQsaDim, kQsaDim,
                   position.data(), error)) return false;
     }
-    for (int head = 0; head < kQsaKvHeads; ++head) {
-        rms_norm(k.data() + head * kQsaDim, kQsaDim, knorm.data());
-        if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
-                  position.data(), error)) return false;
-    }
     if (!dense_selection) {
         for (int head = 0; head < kIndexerHeads; ++head) {
             rms_norm(iq.data() + head * kIndexerDim, kIndexerDim,
@@ -414,14 +437,10 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
                       position.data(), error)) return false;
         }
     }
-    // PR #27774 (abdc7a0b over #27742 035e2273): K-cache Hadamard
-    // applies to Q/K and V-cache Hadamard to V before sparse attention.
+    // Q uses the same self-inverse K transform as the stored K cache.
     if (!rotate_optional(weights.backend, layer.self_k_rot, q, error) ||
-        !rotate_optional(weights.backend, layer.self_k_rot, k, error) ||
-        !rotate_optional(weights.backend, layer.self_v_rot, v, error)) return false;
-    state.key.append(k.data(), k.size());
-    state.value.append(v.data(), v.size());
-    state.index_key.append(ik.data(), ik.size());
+        !append_qsa_cache(weights, state, layer, input, position, error))
+        return false;
     // Score complete four-token blocks from the raw index-K cache. Pooling is
     // deliberately before learned RMSNorm and RoPE, matching #27742/HF. The
     // selection is host-side because the released 2048-token budget means
@@ -683,25 +702,19 @@ bool qwen4exp_step_q1_mrope_capture(
                              logits, &attn_mixed_capture, error);
 }
 
-bool qwen4exp_mtp_step_q1(
-        const Qwen4ExpWeights & target, const Qwen4ExpMtpWeights & mtp,
-        Qwen4ExpMtpState & state, int32_t token,
-        const float * next_embedding, size_t next_embedding_count,
-        const float * target_hc,
-        size_t target_hc_count,
-        const std::array<int32_t, 3> & mrope_position,
-        std::vector<float> & logits, std::vector<float> & draft_hc,
-        std::string & error) {
+namespace {
+bool prepare_mtp_hc(const Qwen4ExpWeights & target,
+                    const Qwen4ExpMtpWeights & mtp, int32_t token,
+                    const float * next_embedding, size_t next_embedding_count,
+                    const float * target_hc, size_t target_hc_count,
+                    std::vector<float> & hc, std::string & error) {
     if (token < 0 || token >= 248320 || !target_hc ||
         target_hc_count != static_cast<size_t>(kHcDim) ||
-        state.cur_pos < 0 || state.cur_pos >= target.max_ctx ||
         !mtp.pre_embedding_norm || !mtp.pre_hc_norm || !mtp.fc_embedding ||
-        !mtp.fc_hc || !mtp.output_hc_norm || !mtp.output_hc_down ||
-        !mtp.output_hc_up) {
+        !mtp.fc_hc) {
         error = "invalid Qwen4Exp MTP token/frontier contract";
         return false;
     }
-
     std::vector<float> embedding(kEmbedding);
     if (next_embedding) {
         if (next_embedding_count != static_cast<size_t>(kEmbedding)) {
@@ -732,7 +745,7 @@ bool qwen4exp_mtp_step_q1(
     // from the stream-local normalization used by ordinary HC mixers.
     std::vector<float> normalized_hc(target_hc, target_hc + kHcDim);
     rms_norm(normalized_hc.data(), kHcDim, hc_norm.data());
-    state.hc.resize(kHcDim);
+    hc.resize(kHcDim);
     for (int stream = 0; stream < kHc; ++stream) {
         std::vector<float> projected_hidden;
         if (!matvec(target.backend, mtp.fc_hc,
@@ -741,11 +754,33 @@ bool qwen4exp_mtp_step_q1(
             projected_hidden.size() != static_cast<size_t>(kEmbedding))
             return false;
         for (int channel = 0; channel < kEmbedding; ++channel) {
-            state.hc[static_cast<size_t>(stream * kEmbedding + channel)] =
+            hc[static_cast<size_t>(stream * kEmbedding + channel)] =
                 projected_hidden[static_cast<size_t>(channel)] +
                 projected_embedding[static_cast<size_t>(channel)];
         }
     }
+    return true;
+}
+} // namespace
+
+bool qwen4exp_mtp_step_q1(
+        const Qwen4ExpWeights & target, const Qwen4ExpMtpWeights & mtp,
+        Qwen4ExpMtpState & state, int32_t token,
+        const float * next_embedding, size_t next_embedding_count,
+        const float * target_hc,
+        size_t target_hc_count,
+        const std::array<int32_t, 3> & mrope_position,
+        std::vector<float> & logits, std::vector<float> & draft_hc,
+        std::string & error) {
+    if (state.cur_pos < 0 || state.cur_pos >= target.max_ctx ||
+        !mtp.output_hc_norm || !mtp.output_hc_down || !mtp.output_hc_up) {
+        error = "invalid Qwen4Exp MTP token/frontier contract";
+        return false;
+    }
+    if (!prepare_mtp_hc(target, mtp, token, next_embedding,
+                        next_embedding_count, target_hc, target_hc_count,
+                        state.hc, error))
+        return false;
 
     for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
         state.mrope_positions[axis].push_back(mrope_position[axis]);
@@ -770,6 +805,33 @@ bool qwen4exp_mtp_step_q1(
                 mtp.output_hc_up, nullptr, final, nullptr, error) ||
         !matvec(target.backend, target.output, final.data(), kEmbedding,
                 logits, error)) return false;
+    ++state.cur_pos;
+    return true;
+}
+
+bool qwen4exp_mtp_sync_cache_q1(
+        const Qwen4ExpWeights & target, const Qwen4ExpMtpWeights & mtp,
+        Qwen4ExpMtpState & state, int32_t token,
+        const float * next_embedding, size_t next_embedding_count,
+        const float * target_hc, size_t target_hc_count,
+        const std::array<int32_t, 3> & mrope_position,
+        std::string & error) {
+    if (state.cur_pos < 0 || state.cur_pos >= target.max_ctx) {
+        error = "invalid Qwen4Exp MTP cache synchronization frontier";
+        return false;
+    }
+    std::vector<float> hc;
+    if (!prepare_mtp_hc(target, mtp, token, next_embedding,
+                        next_embedding_count, target_hc, target_hc_count, hc,
+                        error)) return false;
+    std::vector<float> mixed;
+    if (!hc_mix(target, hc, mtp.layer.hc_attn_norm,
+                mtp.layer.hc_attn_down, mtp.layer.hc_attn_up, nullptr, mixed,
+                nullptr, error)) return false;
+    for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
+        state.mrope_positions[axis].push_back(mrope_position[axis]);
+    if (!append_qsa_cache(target, state.qsa, mtp.layer, mixed,
+                          mrope_position, error)) return false;
     ++state.cur_pos;
     return true;
 }
@@ -912,9 +974,9 @@ bool qwen4exp_step_batch_mrope_impl(
                                   hc_rows, layer_index, error)) return false;
     }
 
-    if (row_logits && row_hc) {
+    if (row_hc) *row_hc = hc_rows;
+    if (row_logits) {
         row_logits->reserve(rows);
-        row_hc->reserve(rows);
         for (size_t row = 0; row < rows; ++row) {
             std::vector<float> final, logits;
             if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
@@ -922,7 +984,6 @@ bool qwen4exp_step_batch_mrope_impl(
                         final, nullptr, error) ||
                 !matvec(weights.backend, weights.output, final.data(),
                         kEmbedding, logits, error)) return false;
-            row_hc->push_back(hc_rows[row]);
             row_logits->push_back(std::move(logits));
         }
     } else if (final_logits) {
@@ -956,9 +1017,10 @@ bool qwen4exp_step_prefill_batch_mrope(
         const Qwen4ExpWeights & weights, Qwen4ExpState & state,
         const std::vector<int32_t> & tokens,
         const std::vector<std::array<int32_t, 3>> & mrope_positions,
-        std::vector<float> & logits, std::string & error) {
+        std::vector<float> & logits, std::vector<std::vector<float>> & row_hc,
+        std::string & error) {
     return qwen4exp_step_batch_mrope_impl(
-        weights, state, tokens, mrope_positions, nullptr, nullptr, &logits,
+        weights, state, tokens, mrope_positions, nullptr, &row_hc, &logits,
         error);
 }
 

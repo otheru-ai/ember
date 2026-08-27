@@ -285,6 +285,120 @@ static void test_depth_and_instrumentation_contract() {
           "impossible MTP acceptance telemetry fails closed");
 }
 
+static void test_prompt_sync_plan_is_causally_exact() {
+    std::vector<Qwen4ExpMtpPromptSyncRow> plan;
+    std::string error;
+    CHECK(qwen4exp_mtp_prompt_sync_plan(0, 0, 16, plan, error),
+          "pristine q16 prompt synchronization plan builds");
+    CHECK(plan.size() == 15 && plan.front().token_row == 1 &&
+              plan.front().preceding_target_hc_row == 0 &&
+              plan.back().token_row == 15 &&
+              plan.back().preceding_target_hc_row == 14,
+          "pristine q16 skips only r0 and pairs each token with preceding HC");
+
+    CHECK(qwen4exp_mtp_prompt_sync_plan(16, 15, 5, plan, error),
+          "continued prompt synchronization plan builds");
+    CHECK(plan.size() == 5 && plan.front().token_row == 0 &&
+              plan.front().preceding_target_hc_row == -1 &&
+              plan.back().token_row == 4 &&
+              plan.back().preceding_target_hc_row == 3,
+          "continued chunk uses pre-chunk HC for r0 then preceding batch rows");
+    CHECK(!qwen4exp_mtp_prompt_sync_plan(16, 14, 2, plan, error) &&
+              error.find("trail") != std::string::npos,
+          "stale MTP prompt frontier fails closed before a target batch");
+
+    // Differential scheduling model: arbitrary q16 remainders must produce
+    // the same (token, preceding target HC) pairs as token-major q=1 sync.
+    std::vector<std::pair<int, int>> batched_pairs;
+    int target_pos = 0;
+    int mtp_pos = 0;
+    for (const size_t rows : {16U, 16U, 5U}) {
+        CHECK(qwen4exp_mtp_prompt_sync_plan(
+                  target_pos, mtp_pos, rows, plan, error),
+              "multi-chunk MTP synchronization plan builds");
+        for (const auto & sync : plan) {
+            const int token = target_pos + static_cast<int>(sync.token_row);
+            const int preceding = sync.preceding_target_hc_row < 0
+                ? target_pos - 1
+                : target_pos + sync.preceding_target_hc_row;
+            batched_pairs.emplace_back(token, preceding);
+            ++mtp_pos;
+        }
+        target_pos += static_cast<int>(rows);
+    }
+    std::vector<std::pair<int, int>> q1_pairs;
+    for (int token = 1; token < 37; ++token)
+        q1_pairs.emplace_back(token, token - 1);
+    CHECK(batched_pairs == q1_pairs && target_pos == 37 && mtp_pos == 36,
+          "q16 MTP synchronization is differential-equivalent to q1 order");
+}
+
+static Qwen4ExpMtpState covered_mtp_state(int rows) {
+    Qwen4ExpMtpState state;
+    state.cur_pos = rows;
+    std::vector<float> key(static_cast<size_t>(rows) * 512U, 1.0f);
+    std::vector<float> value(static_cast<size_t>(rows) * 512U, 2.0f);
+    std::vector<float> index(static_cast<size_t>(rows) * 128U, 3.0f);
+    state.qsa.key.append(key.data(), key.size());
+    state.qsa.value.append(value.data(), value.size());
+    state.qsa.index_key.append(index.data(), index.size());
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int row = 0; row < rows; ++row)
+            state.mrope_positions[static_cast<size_t>(axis)].push_back(row);
+    }
+    return state;
+}
+
+static void test_mtp_snapshot_frontier_invariant() {
+    Qwen4ExpState target;
+    target.cur_pos = 4;
+    target.hc.assign(10240, 7.0f);
+    for (auto & axis : target.mrope_positions) axis.assign(4, 1);
+    const std::vector<float> target_key(4U * 512U, 1.0f);
+    const std::vector<float> target_value(4U * 512U, 2.0f);
+    const std::vector<float> target_index(4U * 128U, 3.0f);
+    for (size_t layer = 3; layer < target.layers.size(); layer += 4) {
+        target.layers[layer].key.append(target_key.data(), target_key.size());
+        target.layers[layer].value.append(
+            target_value.data(), target_value.size());
+        target.layers[layer].index_key.append(
+            target_index.data(), target_index.size());
+    }
+    Qwen4ExpMtpState mtp = covered_mtp_state(3);
+    std::vector<float> target_hc = target.hc;
+    std::string error;
+    CHECK(qwen4exp_mtp_frontier_valid(target, mtp, target_hc, error),
+          "complete one-row-trailing MTP snapshot frontier is valid");
+
+    Qwen4ExpMtpState stale = mtp;
+    stale.cur_pos = 2;
+    CHECK(!qwen4exp_mtp_frontier_valid(target, stale, target_hc, error) &&
+              error.find("trail") != std::string::npos,
+          "AR fallback that leaves stale MTP position cannot snapshot");
+    Qwen4ExpState short_target = target;
+    short_target.layers[3].key.clear();
+    CHECK(!qwen4exp_mtp_frontier_valid(
+              short_target, mtp, target_hc, error) &&
+              error.find("target snapshot QSA") != std::string::npos,
+          "snapshot rejects incomplete target QSA coverage");
+    Qwen4ExpMtpState short_cache = mtp;
+    short_cache.qsa.index_key.clear();
+    CHECK(!qwen4exp_mtp_frontier_valid(
+              target, short_cache, target_hc, error) &&
+              error.find("cache coverage") != std::string::npos,
+          "snapshot rejects missing raw index-K coverage");
+    Qwen4ExpMtpState short_position = mtp;
+    short_position.mrope_positions[2].pop_back();
+    CHECK(!qwen4exp_mtp_frontier_valid(
+              target, short_position, target_hc, error) &&
+              error.find("M-RoPE") != std::string::npos,
+          "snapshot rejects incomplete M-RoPE history");
+    target_hc[0] = 8.0f;
+    CHECK(!qwen4exp_mtp_frontier_valid(target, mtp, target_hc, error) &&
+              error.find("authoritative") != std::string::npos,
+          "snapshot rejects stale target HC even at matching positions");
+}
+
 struct LayerMajorHarness {
     size_t rows = 0;
     size_t layers = 0;
@@ -465,6 +579,8 @@ int main() {
     test_zero_accept_and_failure_are_transactional();
     test_invalid_accept_count_fails_closed();
     test_depth_and_instrumentation_contract();
+    test_prompt_sync_plan_is_causally_exact();
+    test_mtp_snapshot_frontier_invariant();
     test_layer_major_matches_token_major_causality();
     test_bounded_batch_full_and_partial_rejection();
     test_bounded_batch_failure_is_transactional();

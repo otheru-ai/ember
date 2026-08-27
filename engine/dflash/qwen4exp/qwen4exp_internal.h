@@ -260,15 +260,17 @@ bool qwen4exp_step_batch_mrope(
     std::vector<std::vector<float>> & row_hc,
     std::string & error);
 
-// Ordinary prefill variant of the bounded layer-major step. It preserves the
-// raw final HC in `state.hc` and computes only the final row's logits; MTP uses
-// qwen4exp_step_batch_mrope above because verification needs every row.
+// Ordinary prefill variant of the bounded layer-major step. It exposes every
+// raw target HC row for causal MTP cache synchronization, preserves the final
+// one in `state.hc`, and computes only the final row's logits. MTP verification
+// uses qwen4exp_step_batch_mrope above because it needs every logit row too.
 bool qwen4exp_step_prefill_batch_mrope(
     const Qwen4ExpWeights & weights,
     Qwen4ExpState & state,
     const std::vector<int32_t> & tokens,
     const std::vector<std::array<int32_t, 3>> & mrope_positions,
     std::vector<float> & logits,
+    std::vector<std::vector<float>> & row_hc,
     std::string & error);
 
 // Pure scheduling seam shared by the backend and GPU-free deterministic

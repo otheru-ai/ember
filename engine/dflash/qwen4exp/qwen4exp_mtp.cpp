@@ -1,6 +1,7 @@
 #include "qwen4exp_mtp.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace dflash::common {
 
@@ -19,6 +20,77 @@ uint64_t Qwen4ExpMtpState::account_bytes(
     total += qsa.value.account_bytes(seen);
     total += qsa.index_key.account_bytes(seen);
     return total;
+}
+
+bool qwen4exp_mtp_prompt_sync_plan(
+        int target_pos_before, int mtp_pos_before, size_t target_rows,
+        std::vector<Qwen4ExpMtpPromptSyncRow> & plan, std::string & error) {
+    plan.clear();
+    error.clear();
+    if (target_pos_before < 0 || mtp_pos_before < 0 ||
+        target_rows > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        target_pos_before > std::numeric_limits<int>::max() -
+                                static_cast<int>(target_rows)) {
+        error = "invalid Qwen4Exp MTP prompt synchronization range";
+        return false;
+    }
+    const bool pristine = target_pos_before == 0 && mtp_pos_before == 0;
+    if (!pristine && target_pos_before != mtp_pos_before + 1) {
+        error = "Qwen4Exp MTP prompt frontier does not trail target by one row";
+        return false;
+    }
+    const size_t first = pristine && target_rows ? 1U : 0U;
+    plan.reserve(target_rows - first);
+    for (size_t row = first; row < target_rows; ++row) {
+        plan.push_back({row, row == 0 ? -1 : static_cast<int>(row - 1)});
+    }
+    return true;
+}
+
+bool qwen4exp_mtp_frontier_valid(
+        const Qwen4ExpState & target, const Qwen4ExpMtpState & mtp,
+        const std::vector<float> & target_hc, std::string & error) {
+    error.clear();
+    if (target.cur_pos <= 0 || mtp.cur_pos < 0 ||
+        target.cur_pos != mtp.cur_pos + 1) {
+        error = "Qwen4Exp MTP snapshot frontier must trail target by one row";
+        return false;
+    }
+    if (target_hc.size() != 10240 || target.hc.size() != 10240 ||
+        target.hc != target_hc) {
+        error = "Qwen4Exp MTP snapshot target HC is not authoritative";
+        return false;
+    }
+    const size_t target_rows = static_cast<size_t>(target.cur_pos);
+    for (const auto & axis : target.mrope_positions) {
+        if (axis.size() != target_rows) {
+            error = "Qwen4Exp target snapshot M-RoPE coverage is incomplete";
+            return false;
+        }
+    }
+    for (size_t layer = 3; layer < target.layers.size(); layer += 4) {
+        const Qwen4ExpLayerState & qsa = target.layers[layer];
+        if (qsa.key.size() != target_rows * 512U ||
+            qsa.value.size() != target_rows * 512U ||
+            qsa.index_key.size() != target_rows * 128U) {
+            error = "Qwen4Exp target snapshot QSA cache coverage is incomplete";
+            return false;
+        }
+    }
+    const size_t rows = static_cast<size_t>(mtp.cur_pos);
+    if (mtp.qsa.key.size() != rows * 512U ||
+        mtp.qsa.value.size() != rows * 512U ||
+        mtp.qsa.index_key.size() != rows * 128U) {
+        error = "Qwen4Exp MTP snapshot QSA cache coverage is incomplete";
+        return false;
+    }
+    for (const auto & axis : mtp.mrope_positions) {
+        if (axis.size() != rows) {
+            error = "Qwen4Exp MTP snapshot M-RoPE coverage is incomplete";
+            return false;
+        }
+    }
+    return true;
 }
 
 int qwen4exp_mtp_effective_depth(int configured_depth,
