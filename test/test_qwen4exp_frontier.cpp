@@ -334,6 +334,117 @@ static void test_persistent_gdn_q1() {
               "GDN graph rejects an incomplete snapshot state");
     }
     dflash::common::qwen4exp_frontier_gdn_destroy(graph);
+
+    Qwen4ExpFrontierGdnGraph * batch_graph =
+        dflash::common::qwen4exp_frontier_gdn_create_batch(
+            backend, spec, weights, -1, 3, error);
+    if (!batch_graph)
+        std::fprintf(stderr, "GDN batch build error: %s\n", error.c_str());
+    CHECK(batch_graph != nullptr,
+          "persistent fused three-row causal GDN graph builds");
+    CHECK(dflash::common::qwen4exp_frontier_gdn_state_transfer_bytes_batch(
+              spec, 3) == 1728U,
+          "batched GDN transfers one initial and one final recurrent state");
+    if (batch_graph) {
+        const std::array<std::vector<float>, 3> batch_inputs{{
+            {0.35f, -0.28f, 0.17f, 0.42f},
+            {-0.11f, 0.26f, 0.39f, -0.31f},
+            {0.23f, 0.05f, -0.37f, 0.19f},
+        }};
+        std::vector<float> batch_input;
+        std::vector<float> expected_output;
+        std::vector<float> expected_conv =
+            patterned_values(120, 0.009f, 7);
+        std::vector<float> expected_recurrent =
+            patterned_values(96, 0.004f, 9);
+        const std::vector<float> initial_conv = expected_conv;
+        const std::vector<float> initial_recurrent = expected_recurrent;
+        for (const std::vector<float> & row : batch_inputs) {
+            batch_input.insert(batch_input.end(), row.begin(), row.end());
+            const TinyGdnResult expected = reference_gdn_q1(
+                spec, qkv_weight, gate_weight, alpha_weight, beta_weight,
+                conv_weight, a, dt, norm, output_weight, row, expected_conv,
+                expected_recurrent);
+            expected_output.insert(expected_output.end(),
+                                   expected.output.begin(),
+                                   expected.output.end());
+            expected_conv = expected.conv;
+            expected_recurrent = expected.recurrent;
+        }
+        std::vector<float> actual_output, actual_conv, actual_recurrent;
+        const bool batch_ok =
+            dflash::common::qwen4exp_frontier_gdn_eval_batch(
+                batch_graph, batch_input.data(), batch_input.size(),
+                initial_conv.data(), initial_conv.size(),
+                initial_recurrent.data(), initial_recurrent.size(),
+                actual_output, actual_conv, actual_recurrent, error);
+        CHECK(batch_ok &&
+                  close_vectors(actual_output, expected_output, 2.0e-5f),
+              "batched GDN outputs match three sequential scalar rows");
+        CHECK(batch_ok && close_vectors(actual_conv, expected_conv, 2.0e-5f),
+              "batched GDN causal convolution frontier matches scalar rows");
+        CHECK(batch_ok &&
+                  close_vectors(actual_recurrent, expected_recurrent,
+                                2.0e-5f),
+              "batched GDN final recurrent state matches scalar rows");
+        std::vector<float> replay_output, replay_conv, replay_recurrent;
+        const bool replay_ok =
+            dflash::common::qwen4exp_frontier_gdn_eval_batch(
+                batch_graph, batch_input.data(), batch_input.size(),
+                initial_conv.data(), initial_conv.size(),
+                initial_recurrent.data(), initial_recurrent.size(),
+                replay_output, replay_conv, replay_recurrent, error);
+        CHECK(batch_ok && replay_ok &&
+                  close_vectors(actual_output, replay_output, 0.0f) &&
+                  close_vectors(actual_conv, replay_conv, 0.0f) &&
+                  close_vectors(actual_recurrent, replay_recurrent, 0.0f),
+              "saved GDN state replays a whole rejected batch exactly");
+    }
+    dflash::common::qwen4exp_frontier_gdn_destroy(batch_graph);
+
+    Qwen4ExpFrontierGdnGraph * wide_gdn =
+        dflash::common::qwen4exp_frontier_gdn_create_batch(
+            backend, spec, weights, -1, 16, error);
+    CHECK(wide_gdn != nullptr,
+          "persistent q16 GDN graph builds for ordinary prefill chunks");
+    if (wide_gdn) {
+        std::vector<float> wide_input;
+        std::vector<float> wide_expected;
+        std::vector<float> expected_conv =
+            patterned_values(120, 0.009f, 7);
+        std::vector<float> expected_recurrent =
+            patterned_values(96, 0.004f, 9);
+        const std::vector<float> initial_conv = expected_conv;
+        const std::vector<float> initial_recurrent = expected_recurrent;
+        for (int row = 0; row < 16; ++row) {
+            const std::vector<float> input{
+                0.03f * static_cast<float>(row + 1),
+                -0.02f * static_cast<float>(row % 5),
+                0.04f * static_cast<float>(3 - row % 7),
+                0.01f * static_cast<float>(row - 8),
+            };
+            wide_input.insert(wide_input.end(), input.begin(), input.end());
+            const TinyGdnResult expected = reference_gdn_q1(
+                spec, qkv_weight, gate_weight, alpha_weight, beta_weight,
+                conv_weight, a, dt, norm, output_weight, input, expected_conv,
+                expected_recurrent);
+            wide_expected.insert(wide_expected.end(), expected.output.begin(),
+                                 expected.output.end());
+            expected_conv = expected.conv;
+            expected_recurrent = expected.recurrent;
+        }
+        std::vector<float> output, next_conv, next_recurrent;
+        const bool ok = dflash::common::qwen4exp_frontier_gdn_eval_batch(
+            wide_gdn, wide_input.data(), wide_input.size(),
+            initial_conv.data(), initial_conv.size(), initial_recurrent.data(),
+            initial_recurrent.size(), output, next_conv, next_recurrent,
+            error);
+        CHECK(ok && close_vectors(output, wide_expected, 2.0e-5f) &&
+                  close_vectors(next_conv, expected_conv, 2.0e-5f) &&
+                  close_vectors(next_recurrent, expected_recurrent, 2.0e-5f),
+              "q16 GDN matches scalar rows beyond the conv-history width");
+    }
+    dflash::common::qwen4exp_frontier_gdn_destroy(wide_gdn);
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
     ggml_backend_free(backend);

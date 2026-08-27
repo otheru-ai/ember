@@ -370,6 +370,56 @@ bool run_gdn(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
     return true;
 }
 
+bool run_gdn_batch(const Qwen4ExpWeights & weights,
+                   Qwen4ExpLayerState & state,
+                   const Qwen4ExpLayer & layer, int layer_index,
+                   const std::vector<float> & input, int n_tokens,
+                   std::vector<float> & output, std::string & error) {
+    if (n_tokens < 2 || n_tokens > kQwen4ExpFrontierMoeMaxBatch ||
+        input.size() != static_cast<size_t>(n_tokens) * kEmbedding) {
+        error = "invalid Qwen4Exp batched GDN input";
+        return false;
+    }
+    if (!qwen4exp_frontier_gdn_available(weights, layer_index)) {
+        output.resize(input.size());
+        for (int row = 0; row < n_tokens; ++row) {
+            const auto begin = input.begin() +
+                static_cast<std::ptrdiff_t>(row * kEmbedding);
+            const std::vector<float> row_input(
+                begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            std::vector<float> row_output;
+            if (!run_gdn_scalar(weights, state, layer, row_input, row_output,
+                                error)) return false;
+            std::copy(row_output.begin(), row_output.end(),
+                      output.begin() +
+                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+        }
+        return true;
+    }
+    constexpr size_t kConvValues = 3U * 10240U;
+    constexpr size_t kRecurrentValues =
+        static_cast<size_t>(kGdnHeads) * kGdnDim * kGdnDim;
+    const std::vector<float> zero_conv(
+        state.conv ? 0U : kConvValues, 0.0f);
+    const std::vector<float> zero_recurrent(
+        state.recurrent ? 0U : kRecurrentValues, 0.0f);
+    const std::vector<float> & conv = state.conv ? *state.conv : zero_conv;
+    const std::vector<float> & recurrent =
+        state.recurrent ? *state.recurrent : zero_recurrent;
+    std::vector<float> next_conv, next_recurrent;
+    if (!qwen4exp_frontier_gdn_batch(
+            weights, layer_index, input.data(), input.size(), n_tokens,
+            conv.data(), conv.size(), recurrent.data(), recurrent.size(),
+            output, next_conv, next_recurrent, error)) return false;
+    // As with q1, publish only the final causal frontier after graph compute
+    // and all downloads succeed. Saved shared states remain exact rollback
+    // points for a rejected verifier/prefill chunk.
+    state.conv = std::make_shared<std::vector<float>>(std::move(next_conv));
+    state.recurrent =
+        std::make_shared<std::vector<float>>(std::move(next_recurrent));
+    return true;
+}
+
 bool append_qsa_cache(const Qwen4ExpWeights & weights,
                       Qwen4ExpLayerState & state,
                       const Qwen4ExpLayer & layer,
@@ -1271,38 +1321,84 @@ bool qwen4exp_batch_layer(
         weights.layers[static_cast<size_t>(layer_index)];
     std::vector<float> ffn_inputs(rows * static_cast<size_t>(kEmbedding));
     std::vector<std::array<float, kHc>> ffn_inject(rows);
-    // Attention is stateful. Preserve strict row order for PLE, GDN and QSA,
-    // and stop only after the row has reached the stateless FFN boundary.
-    for (size_t row = 0; row < rows; ++row) {
-        state.hc = std::move(hc_rows[row]);
-        if (layer_index == 1 &&
-            !run_ple(weights, state, layer, tokens[row], error)) return false;
-        std::vector<float> mixed, block;
-        std::array<float, kHc> inject{};
-        if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
-                    layer.hc_attn_down, layer.hc_attn_up,
-                    layer.hc_attn_inject, mixed, &inject, error)) return false;
-        const bool qsa = (layer_index + 1) % 4 == 0;
-        if (qsa) {
+    const bool qsa = (layer_index + 1) % 4 == 0;
+    if (qsa) {
+        // QSA selection depends on every newly appended raw index-K row, so it
+        // remains strictly row ordered through the stateless FFN boundary.
+        for (size_t row = 0; row < rows; ++row) {
+            state.hc = std::move(hc_rows[row]);
+            std::vector<float> mixed, block;
+            std::array<float, kHc> inject{};
+            if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
+                        layer.hc_attn_down, layer.hc_attn_up,
+                        layer.hc_attn_inject, mixed, &inject, error))
+                return false;
             if (!run_qsa(weights,
                          state.layers[static_cast<size_t>(layer_index)], layer,
                          layer_index, mixed, positions[row],
                          state.mrope_positions,
                          block, error)) return false;
-        } else if (!run_gdn(weights,
-                            state.layers[static_cast<size_t>(layer_index)],
-                            layer, layer_index, mixed, block, error)) {
+            hc_combine(state.hc, block, inject);
+            if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
+                        layer.hc_ffn_down, layer.hc_ffn_up,
+                        layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
+                return false;
+            std::copy(mixed.begin(), mixed.end(),
+                      ffn_inputs.begin() +
+                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+            hc_rows[row] = std::move(state.hc);
+        }
+    } else {
+        // GDN is causal internally, but its HC inputs are independent rows.
+        // Advance the one PLE layer in row order first, then execute the exact
+        // q2-q16 recurrent sequence in one persistent graph/state boundary.
+        std::vector<float> attention_inputs(
+            rows * static_cast<size_t>(kEmbedding));
+        std::vector<std::array<float, kHc>> attention_inject(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            state.hc = std::move(hc_rows[row]);
+            if (layer_index == 1 &&
+                !run_ple(weights, state, layer, tokens[row], error))
+                return false;
+            std::vector<float> mixed;
+            if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
+                        layer.hc_attn_down, layer.hc_attn_up,
+                        layer.hc_attn_inject, mixed,
+                        &attention_inject[row], error)) return false;
+            std::copy(mixed.begin(), mixed.end(),
+                      attention_inputs.begin() +
+                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+            hc_rows[row] = std::move(state.hc);
+        }
+        std::vector<float> attention_outputs;
+        if (!run_gdn_batch(
+                weights, state.layers[static_cast<size_t>(layer_index)],
+                layer, layer_index, attention_inputs,
+                static_cast<int>(rows), attention_outputs, error))
+            return false;
+        if (attention_outputs.size() !=
+            rows * static_cast<size_t>(kEmbedding)) {
+            error = "Qwen4Exp batched GDN returned the wrong output shape";
             return false;
         }
-        hc_combine(state.hc, block, inject);
-        if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
-                    layer.hc_ffn_down, layer.hc_ffn_up,
-                    layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
-            return false;
-        std::copy(mixed.begin(), mixed.end(),
-                  ffn_inputs.begin() +
-                      static_cast<std::ptrdiff_t>(row * kEmbedding));
-        hc_rows[row] = std::move(state.hc);
+        for (size_t row = 0; row < rows; ++row) {
+            state.hc = std::move(hc_rows[row]);
+            const auto block_begin = attention_outputs.begin() +
+                static_cast<std::ptrdiff_t>(row * kEmbedding);
+            const std::vector<float> block(
+                block_begin,
+                block_begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            hc_combine(state.hc, block, attention_inject[row]);
+            std::vector<float> mixed;
+            if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
+                        layer.hc_ffn_down, layer.hc_ffn_up,
+                        layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
+                return false;
+            std::copy(mixed.begin(), mixed.end(),
+                      ffn_inputs.begin() +
+                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+            hc_rows[row] = std::move(state.hc);
+        }
     }
 
     std::vector<float> ffn_outputs;

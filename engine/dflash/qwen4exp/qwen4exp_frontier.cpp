@@ -140,6 +140,7 @@ struct Qwen4ExpFrontierGdnGraph {
     ggml_tensor * gdn = nullptr;
     ggml_tensor * output = nullptr;
     Qwen4ExpFrontierGdnSpec spec{};
+    int n_tokens = 1;
     int layer = -1;
     size_t arena_bytes = 0;
     std::vector<float> conv_window;
@@ -219,7 +220,9 @@ struct Qwen4ExpFrontierRuntime {
     using LayerGraphs = std::array<Qwen4ExpFrontierMoeGraph *,
         static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch + 1)>;
     std::vector<LayerGraphs> moe;
-    std::vector<Qwen4ExpFrontierGdnGraph *> gdn;
+    using GdnLayerGraphs = std::array<Qwen4ExpFrontierGdnGraph *,
+        static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch + 1)>;
+    std::vector<GdnLayerGraphs> gdn;
     std::vector<Qwen4ExpFrontierQsaGraph *> qsa;
     bool stats = false;
 };
@@ -483,13 +486,22 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
         ggml_backend_t backend, const Qwen4ExpFrontierGdnSpec & spec,
         const Qwen4ExpFrontierGdnWeights & weights, int layer,
         std::string & error) {
+    return qwen4exp_frontier_gdn_create_batch(
+        backend, spec, weights, layer, 1, error);
+}
+
+Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
+        ggml_backend_t backend, const Qwen4ExpFrontierGdnSpec & spec,
+        const Qwen4ExpFrontierGdnWeights & weights, int layer, int n_tokens,
+        std::string & error) {
     error.clear();
     const int64_t conv_channels = gdn_conv_channels(spec);
     const int64_t recurrent_values = static_cast<int64_t>(spec.n_heads) *
                                      spec.head_dim * spec.head_dim;
     const int64_t core_values = static_cast<int64_t>(spec.n_heads) *
                                 spec.head_dim;
-    if (!backend || !gdn_spec_valid(spec) || conv_channels <= 0 ||
+    if (!backend || !gdn_spec_valid(spec) || n_tokens <= 0 ||
+        n_tokens > kQwen4ExpFrontierMoeMaxBatch || conv_channels <= 0 ||
         recurrent_values <= 0 || core_values <= 0 ||
         !gdn_weight_shape(weights.qkv, spec.n_embd, conv_channels) ||
         !gdn_weight_shape(weights.gate, spec.n_embd, core_values) ||
@@ -516,12 +528,13 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
         new Qwen4ExpFrontierGdnGraph());
     result->backend = backend;
     result->spec = spec;
+    result->n_tokens = n_tokens;
     result->layer = layer;
     result->conv_window.resize(
         static_cast<size_t>(spec.conv_width - 1) *
         static_cast<size_t>(conv_channels));
     std::snprintf(result->profile_label, sizeof(result->profile_label),
-                  "qwen4exp/gdn/layer_%02d/q1", layer);
+                  "qwen4exp/gdn/layer_%02d/q%d", layer, n_tokens);
 
     ggml_init_params params{};
     params.mem_size = 1024U * 1024U;
@@ -532,7 +545,8 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
         return nullptr;
     }
     ggml_context * ctx = result->ctx;
-    result->input = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, spec.n_embd);
+    result->input = ggml_new_tensor_2d(
+        ctx, GGML_TYPE_F32, spec.n_embd, n_tokens);
     result->conv_history = ggml_new_tensor_3d(
         ctx, GGML_TYPE_F32, spec.conv_width - 1, conv_channels, 1);
     result->recurrent_state = ggml_new_tensor_3d(
@@ -569,8 +583,10 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
     ggml_tensor * beta = ggml_mul_mat(ctx, weights.beta, result->input);
     set_gdn_name(result->qkv, layer, "qkv");
 
-    ggml_tensor * current = ggml_reshape_3d(
-        ctx, result->qkv, 1, conv_channels, 1);
+    ggml_tensor * current = ggml_cont(
+        ctx, ggml_transpose(ctx, result->qkv));
+    current = ggml_reshape_3d(
+        ctx, current, n_tokens, conv_channels, 1);
     ggml_tensor * conv_input = ggml_concat(
         ctx, result->conv_history, current, 0);
     ggml_tensor * convolved = ggml_silu(
@@ -580,49 +596,63 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
     const size_t element_bytes = sizeof(float);
     const size_t key_values = static_cast<size_t>(spec.n_key_heads) *
                               static_cast<size_t>(spec.head_dim);
-    ggml_tensor * q = ggml_view_2d(
-        ctx, convolved, spec.head_dim, spec.n_key_heads,
-        static_cast<size_t>(spec.head_dim) * element_bytes, 0);
-    ggml_tensor * k = ggml_view_2d(
-        ctx, convolved, spec.head_dim, spec.n_key_heads,
+    ggml_tensor * q = ggml_view_4d(
+        ctx, convolved, spec.head_dim, spec.n_key_heads, n_tokens, 1,
         static_cast<size_t>(spec.head_dim) * element_bytes,
+        static_cast<size_t>(conv_channels) * element_bytes,
+        static_cast<size_t>(conv_channels) *
+            static_cast<size_t>(n_tokens) * element_bytes, 0);
+    ggml_tensor * k = ggml_view_4d(
+        ctx, convolved, spec.head_dim, spec.n_key_heads, n_tokens, 1,
+        static_cast<size_t>(spec.head_dim) * element_bytes,
+        static_cast<size_t>(conv_channels) * element_bytes,
+        static_cast<size_t>(conv_channels) *
+            static_cast<size_t>(n_tokens) * element_bytes,
         key_values * element_bytes);
     ggml_tensor * v = ggml_view_4d(
-        ctx, convolved, spec.head_dim, spec.n_heads, 1, 1,
+        ctx, convolved, spec.head_dim, spec.n_heads, n_tokens, 1,
         static_cast<size_t>(spec.head_dim) * element_bytes,
-        static_cast<size_t>(core_values) * element_bytes,
-        static_cast<size_t>(core_values) * element_bytes,
+        static_cast<size_t>(conv_channels) * element_bytes,
+        static_cast<size_t>(conv_channels) *
+            static_cast<size_t>(n_tokens) * element_bytes,
         2U * key_values * element_bytes);
     q = exact_l2_norm(ctx, q, spec.epsilon);
     k = exact_l2_norm(ctx, k, spec.epsilon);
     const int repeat = spec.n_heads / spec.n_key_heads;
-    q = ggml_reshape_4d(ctx, q, spec.head_dim, 1, spec.n_key_heads, 1);
-    k = ggml_reshape_4d(ctx, k, spec.head_dim, 1, spec.n_key_heads, 1);
+    q = ggml_reshape_4d(
+        ctx, q, spec.head_dim, 1, spec.n_key_heads, n_tokens);
+    k = ggml_reshape_4d(
+        ctx, k, spec.head_dim, 1, spec.n_key_heads, n_tokens);
     q = ggml_repeat_4d(ctx, q, spec.head_dim, repeat,
-                       spec.n_key_heads, 1);
+                       spec.n_key_heads, n_tokens);
     k = ggml_repeat_4d(ctx, k, spec.head_dim, repeat,
-                       spec.n_key_heads, 1);
-    q = ggml_reshape_4d(ctx, q, spec.head_dim, spec.n_heads, 1, 1);
-    k = ggml_reshape_4d(ctx, k, spec.head_dim, spec.n_heads, 1, 1);
+                       spec.n_key_heads, n_tokens);
+    q = ggml_reshape_4d(
+        ctx, q, spec.head_dim, spec.n_heads, n_tokens, 1);
+    k = ggml_reshape_4d(
+        ctx, k, spec.head_dim, spec.n_heads, n_tokens, 1);
 
     ggml_tensor * decay = ggml_mul(
         ctx, ggml_softplus(ctx, ggml_add(ctx, alpha, dt)), a);
-    decay = ggml_reshape_4d(ctx, decay, 1, spec.n_heads, 1, 1);
+    decay = ggml_reshape_4d(
+        ctx, decay, 1, spec.n_heads, n_tokens, 1);
     beta = ggml_reshape_4d(
-        ctx, ggml_sigmoid(ctx, beta), 1, spec.n_heads, 1, 1);
+        ctx, ggml_sigmoid(ctx, beta), 1, spec.n_heads, n_tokens, 1);
     result->gdn = ggml_gated_delta_net(
         ctx, q, k, v, decay, beta, result->recurrent_state);
     ggml_gated_delta_net_set_skip_intermediate(result->gdn, true);
     set_gdn_name(result->gdn, layer, "recurrent");
 
-    ggml_tensor * core = ggml_view_2d(
-        ctx, result->gdn, spec.head_dim, spec.n_heads,
-        static_cast<size_t>(spec.head_dim) * element_bytes, 0);
+    ggml_tensor * core = ggml_view_3d(
+        ctx, result->gdn, spec.head_dim, spec.n_heads, n_tokens,
+        static_cast<size_t>(spec.head_dim) * element_bytes,
+        static_cast<size_t>(core_values) * element_bytes, 0);
     core = ggml_rms_norm(ctx, core, spec.epsilon);
     core = ggml_mul(ctx, core, norm);
-    gate = ggml_reshape_2d(ctx, gate, spec.head_dim, spec.n_heads);
+    gate = ggml_reshape_3d(
+        ctx, gate, spec.head_dim, spec.n_heads, n_tokens);
     core = ggml_mul(ctx, core, ggml_sigmoid(ctx, gate));
-    core = ggml_reshape_1d(ctx, core, core_values);
+    core = ggml_reshape_2d(ctx, core, core_values, n_tokens);
     result->output = ggml_mul_mat(ctx, weights.output, core);
     set_gdn_name(result->output, layer, "output");
 
@@ -671,6 +701,23 @@ bool qwen4exp_frontier_gdn_eval_q1(
         size_t recurrent_state_count, std::vector<float> & output,
         std::vector<float> & next_conv_state,
         std::vector<float> & next_recurrent_state, std::string & error) {
+    if (!graph || graph->n_tokens != 1) {
+        error = "invalid Qwen4Exp persistent q1 GDN graph width";
+        return false;
+    }
+    return qwen4exp_frontier_gdn_eval_batch(
+        graph, input, input_count, conv_state, conv_state_count,
+        recurrent_state, recurrent_state_count, output, next_conv_state,
+        next_recurrent_state, error);
+}
+
+bool qwen4exp_frontier_gdn_eval_batch(
+        Qwen4ExpFrontierGdnGraph * graph, const float * input,
+        size_t input_count, const float * conv_state,
+        size_t conv_state_count, const float * recurrent_state,
+        size_t recurrent_state_count, std::vector<float> & output,
+        std::vector<float> & next_conv_state,
+        std::vector<float> & next_recurrent_state, std::string & error) {
     if (!graph || !graph->backend || !input || !conv_state ||
         !recurrent_state) {
         error = "invalid Qwen4Exp persistent GDN evaluation";
@@ -683,7 +730,8 @@ bool qwen4exp_frontier_gdn_eval_q1(
     const size_t expected_recurrent = static_cast<size_t>(spec.n_heads) *
                                       static_cast<size_t>(spec.head_dim) *
                                       static_cast<size_t>(spec.head_dim);
-    if (input_count != static_cast<size_t>(spec.n_embd) ||
+    const size_t n_tokens = static_cast<size_t>(graph->n_tokens);
+    if (input_count != static_cast<size_t>(spec.n_embd) * n_tokens ||
         conv_state_count != expected_conv ||
         recurrent_state_count != expected_recurrent) {
         error = "invalid Qwen4Exp persistent GDN state shape";
@@ -708,42 +756,54 @@ bool qwen4exp_frontier_gdn_eval_q1(
         return false;
     }
 
-    output.resize(static_cast<size_t>(spec.n_embd));
+    output.resize(static_cast<size_t>(spec.n_embd) * n_tokens);
     ggml_backend_tensor_get(graph->output, output.data(), 0,
                             output.size() * sizeof(float));
-    std::vector<float> qkv(conv_channels);
+    std::vector<float> qkv(conv_channels * n_tokens);
     ggml_backend_tensor_get(graph->qkv, qkv.data(), 0,
                             qkv.size() * sizeof(float));
     next_recurrent_state.resize(expected_recurrent);
     const size_t attention_values = static_cast<size_t>(spec.n_heads) *
-                                    static_cast<size_t>(spec.head_dim);
+                                    static_cast<size_t>(spec.head_dim) *
+                                    n_tokens;
     ggml_backend_tensor_get(graph->gdn, next_recurrent_state.data(),
                             attention_values * sizeof(float),
                             next_recurrent_state.size() * sizeof(float));
 
     next_conv_state.resize(expected_conv);
-    if (history > 1U) {
-        std::copy_n(conv_state + conv_channels,
-                    (history - 1U) * conv_channels,
+    const size_t retained_history = n_tokens >= history
+        ? 0U : history - n_tokens;
+    if (retained_history > 0U) {
+        std::copy_n(conv_state + n_tokens * conv_channels,
+                    retained_history * conv_channels,
                     next_conv_state.data());
     }
-    std::copy(qkv.begin(), qkv.end(),
-              next_conv_state.data() + (history - 1U) * conv_channels);
+    const size_t qkv_rows = std::min(history, n_tokens);
+    std::copy_n(qkv.data() + (n_tokens - qkv_rows) * conv_channels,
+                qkv_rows * conv_channels,
+                next_conv_state.data() + retained_history * conv_channels);
     return true;
 }
 
 uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_q1(
         const Qwen4ExpFrontierGdnSpec & spec) {
-    if (!gdn_spec_valid(spec)) return 0;
+    return qwen4exp_frontier_gdn_state_transfer_bytes_batch(spec, 1);
+}
+
+uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_batch(
+        const Qwen4ExpFrontierGdnSpec & spec, int n_tokens) {
+    if (!gdn_spec_valid(spec) || n_tokens <= 0 ||
+        n_tokens > kQwen4ExpFrontierMoeMaxBatch) return 0;
     const uint64_t conv_channels = static_cast<uint64_t>(
         gdn_conv_channels(spec));
     const uint64_t recurrent = static_cast<uint64_t>(spec.n_heads) *
                                static_cast<uint64_t>(spec.head_dim) *
                                static_cast<uint64_t>(spec.head_dim);
     const uint64_t history = static_cast<uint64_t>(spec.conv_width - 1);
-    // Upload old conv/recurrent state; download the qkv row needed to advance
-    // conv state and the new recurrent state. Activation I/O is not counted.
-    return (history * conv_channels + recurrent + conv_channels + recurrent) *
+    // Upload old conv/recurrent state; download every qkv row needed to advance
+    // conv state and the final recurrent state. Activation I/O is not counted.
+    return (history * conv_channels + recurrent +
+            static_cast<uint64_t>(n_tokens) * conv_channels + recurrent) *
            sizeof(float);
 }
 
@@ -1407,7 +1467,7 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
         new Qwen4ExpFrontierRuntime());
     runtime->stats = env_enabled("EMBER_QWEN_FRONTIER_STATS", false);
     runtime->moe.resize(weights.layers.size());
-    runtime->gdn.resize(weights.layers.size(), nullptr);
+    runtime->gdn.resize(weights.layers.size());
     runtime->qsa.resize(weights.layers.size(), nullptr);
     const Qwen4ExpFrontierMoeSpec moe_spec{2560, 512, 10, 640};
     const Qwen4ExpFrontierGdnSpec gdn_spec{
@@ -1427,8 +1487,10 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
         if (moe_enabled && !runtime->moe[index][1]) {
             for (Qwen4ExpFrontierQsaGraph * built : runtime->qsa)
                 qwen4exp_frontier_qsa_destroy(built);
-            for (Qwen4ExpFrontierGdnGraph * built : runtime->gdn)
-                qwen4exp_frontier_gdn_destroy(built);
+            for (const Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs :
+                 runtime->gdn)
+                for (Qwen4ExpFrontierGdnGraph * built : layer_graphs)
+                    qwen4exp_frontier_gdn_destroy(built);
             for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
                  runtime->moe) {
                 for (Qwen4ExpFrontierMoeGraph * built : layer_graphs)
@@ -1443,14 +1505,16 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
                 layer.attn_qkv, layer.attn_gate, layer.ssm_alpha,
                 layer.ssm_beta, layer.ssm_conv, layer.ssm_a, layer.ssm_dt,
                 layer.ssm_norm, layer.ssm_out};
-            runtime->gdn[index] = qwen4exp_frontier_gdn_create_q1(
+            runtime->gdn[index][1] = qwen4exp_frontier_gdn_create_q1(
                 weights.backend, gdn_spec, graph_weights,
                 static_cast<int>(index), error);
-            if (!runtime->gdn[index]) {
+            if (!runtime->gdn[index][1]) {
                 for (Qwen4ExpFrontierQsaGraph * built : runtime->qsa)
                     qwen4exp_frontier_qsa_destroy(built);
-                for (Qwen4ExpFrontierGdnGraph * built : runtime->gdn)
-                    qwen4exp_frontier_gdn_destroy(built);
+                for (const Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs :
+                     runtime->gdn)
+                    for (Qwen4ExpFrontierGdnGraph * built : layer_graphs)
+                        qwen4exp_frontier_gdn_destroy(built);
                 for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
                      runtime->moe) {
                     for (Qwen4ExpFrontierMoeGraph * built : layer_graphs)
@@ -1472,8 +1536,10 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
             if (!runtime->qsa[index]) {
                 for (Qwen4ExpFrontierQsaGraph * built : runtime->qsa)
                     qwen4exp_frontier_qsa_destroy(built);
-                for (Qwen4ExpFrontierGdnGraph * built : runtime->gdn)
-                    qwen4exp_frontier_gdn_destroy(built);
+                for (const Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs :
+                     runtime->gdn)
+                    for (Qwen4ExpFrontierGdnGraph * built : layer_graphs)
+                        qwen4exp_frontier_gdn_destroy(built);
                 for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
                      runtime->moe) {
                     for (Qwen4ExpFrontierMoeGraph * built : layer_graphs)
@@ -1487,9 +1553,10 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
     }
     weights.frontier = runtime.release();
     size_t gdn_arena_bytes = 0;
-    for (const Qwen4ExpFrontierGdnGraph * graph : weights.frontier->gdn) {
-        if (graph) gdn_arena_bytes += graph->arena_bytes;
-    }
+    for (const Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs :
+         weights.frontier->gdn)
+        for (const Qwen4ExpFrontierGdnGraph * graph : layer_graphs)
+            if (graph) gdn_arena_bytes += graph->arena_bytes;
     size_t qsa_arena_bytes = 0;
     for (const Qwen4ExpFrontierQsaGraph * graph : weights.frontier->qsa)
         qsa_arena_bytes += qwen4exp_frontier_qsa_arena_bytes(graph);
@@ -1497,8 +1564,9 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
                  "[qwen-frontier] event=ready component=moe enabled=%s "
                  "graphs=%d tokens_per_graph=1 lazy_batch_widths=5,16 "
                  "component_gdn_enabled=%s gdn_graphs=%d gdn_width=q1 "
-                 "gdn_arena_bytes=%zu "
+                 "gdn_lazy_exact_batch_widths=2..16 gdn_arena_bytes=%zu "
                  "gdn_state_boundary_bytes_per_layer=%llu "
+                 "gdn_state_boundary_bytes_q16=%llu "
                  "gdn_state_owner=host_snapshot component_qsa_enabled=%s "
                  "qsa_graphs=%d qsa_attention_widths=lazy:16,64,256,1024,2048,2051 "
                  "qsa_base_arena_bytes=%zu qsa_state_owner=host_snapshot "
@@ -1509,6 +1577,9 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
                  gdn_arena_bytes,
                  static_cast<unsigned long long>(
                      qwen4exp_frontier_gdn_state_transfer_bytes_q1(gdn_spec)),
+                 static_cast<unsigned long long>(
+                     qwen4exp_frontier_gdn_state_transfer_bytes_batch(
+                         gdn_spec, 16)),
                  qsa_enabled ? "true" : "false", qsa_enabled ? 12 : 0,
                  qsa_arena_bytes,
                  static_cast<unsigned long long>(
@@ -1544,8 +1615,10 @@ void qwen4exp_frontier_destroy(Qwen4ExpWeights & weights) {
     if (runtime) {
         for (Qwen4ExpFrontierQsaGraph * graph : runtime->qsa)
             qwen4exp_frontier_qsa_destroy(graph);
-        for (Qwen4ExpFrontierGdnGraph * graph : runtime->gdn)
-            qwen4exp_frontier_gdn_destroy(graph);
+        for (const Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs :
+             runtime->gdn)
+            for (Qwen4ExpFrontierGdnGraph * graph : layer_graphs)
+                qwen4exp_frontier_gdn_destroy(graph);
         for (const Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs :
              runtime->moe) {
             for (Qwen4ExpFrontierMoeGraph * graph : layer_graphs)
@@ -1569,7 +1642,7 @@ bool qwen4exp_frontier_gdn_available(const Qwen4ExpWeights & weights,
                                      int layer) {
     return weights.frontier && layer >= 0 &&
            static_cast<size_t>(layer) < weights.frontier->gdn.size() &&
-           weights.frontier->gdn[static_cast<size_t>(layer)] != nullptr;
+           weights.frontier->gdn[static_cast<size_t>(layer)][1] != nullptr;
 }
 
 bool qwen4exp_frontier_qsa_available(const Qwen4ExpWeights & weights,
@@ -1609,9 +1682,58 @@ bool qwen4exp_frontier_gdn_q1(
         return false;
     }
     return qwen4exp_frontier_gdn_eval_q1(
-        weights.frontier->gdn[static_cast<size_t>(layer)], input, input_count,
+        weights.frontier->gdn[static_cast<size_t>(layer)][1], input,
+        input_count,
         conv_state, conv_state_count, recurrent_state, recurrent_state_count,
         output, next_conv_state, next_recurrent_state, error);
+}
+
+bool qwen4exp_frontier_gdn_batch(
+        const Qwen4ExpWeights & weights, int layer, const float * input,
+        size_t input_count, int n_tokens, const float * conv_state,
+        size_t conv_state_count, const float * recurrent_state,
+        size_t recurrent_state_count, std::vector<float> & output,
+        std::vector<float> & next_conv_state,
+        std::vector<float> & next_recurrent_state, std::string & error) {
+    if (!weights.frontier || layer < 0 || n_tokens < 2 ||
+        n_tokens > kQwen4ExpFrontierMoeMaxBatch || !input ||
+        static_cast<size_t>(layer) >= weights.frontier->gdn.size() ||
+        !weights.frontier->gdn[static_cast<size_t>(layer)][1] ||
+        input_count != static_cast<size_t>(n_tokens) * 2560U) {
+        error = "Qwen4Exp frontier batched GDN graph is unavailable";
+        return false;
+    }
+    Qwen4ExpFrontierRuntime::GdnLayerGraphs & layer_graphs =
+        weights.frontier->gdn[static_cast<size_t>(layer)];
+    Qwen4ExpFrontierGdnGraph *& graph =
+        layer_graphs[static_cast<size_t>(n_tokens)];
+    if (!graph) {
+        const Qwen4ExpLayer & model_layer =
+            weights.layers[static_cast<size_t>(layer)];
+        const Qwen4ExpFrontierGdnSpec spec{
+            2560, 48, 16, 128, 4, 1.0e-6f};
+        const Qwen4ExpFrontierGdnWeights graph_weights{
+            model_layer.attn_qkv, model_layer.attn_gate,
+            model_layer.ssm_alpha, model_layer.ssm_beta,
+            model_layer.ssm_conv, model_layer.ssm_a, model_layer.ssm_dt,
+            model_layer.ssm_norm, model_layer.ssm_out};
+        graph = qwen4exp_frontier_gdn_create_batch(
+            weights.backend, spec, graph_weights, layer, n_tokens, error);
+        if (!graph) return false;
+        std::fprintf(
+            stderr,
+            "[qwen-frontier] event=graph_ready component=gdn layer=%d "
+            "tokens=%d arena_bytes=%zu state_boundary_bytes=%llu "
+            "state_owner=host_snapshot graph_replay=off\n",
+            layer, n_tokens, graph->arena_bytes,
+            static_cast<unsigned long long>(
+                qwen4exp_frontier_gdn_state_transfer_bytes_batch(
+                    spec, n_tokens)));
+    }
+    return qwen4exp_frontier_gdn_eval_batch(
+        graph, input, input_count, conv_state, conv_state_count,
+        recurrent_state, recurrent_state_count, output, next_conv_state,
+        next_recurrent_state, error);
 }
 
 bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,

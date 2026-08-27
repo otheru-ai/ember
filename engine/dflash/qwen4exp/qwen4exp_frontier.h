@@ -128,6 +128,10 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_q1(
     ggml_backend_t backend, const Qwen4ExpFrontierGdnSpec & spec,
     const Qwen4ExpFrontierGdnWeights & weights, int layer,
     std::string & error);
+Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
+    ggml_backend_t backend, const Qwen4ExpFrontierGdnSpec & spec,
+    const Qwen4ExpFrontierGdnWeights & weights, int layer, int n_tokens,
+    std::string & error);
 void qwen4exp_frontier_gdn_destroy(Qwen4ExpFrontierGdnGraph * graph);
 bool qwen4exp_frontier_gdn_eval_q1(
     Qwen4ExpFrontierGdnGraph * graph, const float * input,
@@ -135,8 +139,16 @@ bool qwen4exp_frontier_gdn_eval_q1(
     const float * recurrent_state, size_t recurrent_state_count,
     std::vector<float> & output, std::vector<float> & next_conv_state,
     std::vector<float> & next_recurrent_state, std::string & error);
+bool qwen4exp_frontier_gdn_eval_batch(
+    Qwen4ExpFrontierGdnGraph * graph, const float * input,
+    size_t input_count, const float * conv_state, size_t conv_state_count,
+    const float * recurrent_state, size_t recurrent_state_count,
+    std::vector<float> & output, std::vector<float> & next_conv_state,
+    std::vector<float> & next_recurrent_state, std::string & error);
 uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_q1(
     const Qwen4ExpFrontierGdnSpec & spec);
+uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_batch(
+    const Qwen4ExpFrontierGdnSpec & spec, int n_tokens);
 
 // QSA has an unavoidable data-dependent boundary: the current raw index-K
 // projection participates in host top-block selection before attention can be
@@ -206,6 +218,13 @@ bool qwen4exp_frontier_gdn_q1(
     size_t input_count, const float * conv_state, size_t conv_state_count,
     const float * recurrent_state, size_t recurrent_state_count,
     std::vector<float> & output, std::vector<float> & next_conv_state,
+    std::vector<float> & next_recurrent_state, std::string & error);
+bool qwen4exp_frontier_gdn_batch(
+    const Qwen4ExpWeights & weights, int layer, const float * input,
+    size_t input_count, int n_tokens, const float * conv_state,
+    size_t conv_state_count, const float * recurrent_state,
+    size_t recurrent_state_count, std::vector<float> & output,
+    std::vector<float> & next_conv_state,
     std::vector<float> & next_recurrent_state, std::string & error);
 Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_q1(
     const Qwen4ExpWeights & weights, int layer);
