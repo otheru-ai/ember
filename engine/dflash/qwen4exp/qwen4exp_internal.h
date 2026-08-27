@@ -82,8 +82,12 @@ struct Qwen4ExpLayer {
     ggml_tensor * shared_up = nullptr;
     ggml_tensor * shared_down = nullptr;
     ggml_tensor * experts_gate_up_tensor = nullptr;
+    ggml_tensor * experts_gate_tensor = nullptr;
+    ggml_tensor * experts_up_tensor = nullptr;
     ggml_tensor * experts_down_tensor = nullptr;
     Qwen4ExpMappedTensor experts_gate_up;
+    Qwen4ExpMappedTensor experts_gate;
+    Qwen4ExpMappedTensor experts_up;
     Qwen4ExpMappedTensor experts_down;
 };
 

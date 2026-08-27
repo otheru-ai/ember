@@ -1,7 +1,8 @@
 // Persistent Qwen4Exp MoE frontier graph.
 //
 // Qwen's routed FFN is a single mathematical unit: router, top-k selection,
-// selected-probability renormalization, fused gate/up experts, down experts,
+// selected-probability renormalization, fused or separate gate/up experts,
+// down experts,
 // and the gated shared expert.  Keeping those operations in one reusable ggml
 // graph removes the correctness-first runtime's host router round-trip and ten
 // scalar expert evaluations per layer.  The graph is backend-neutral so its
@@ -32,6 +33,8 @@ struct Qwen4ExpFrontierMoeSpec {
 struct Qwen4ExpFrontierMoeWeights {
     ggml_tensor * router = nullptr;
     ggml_tensor * experts_gate_up = nullptr;
+    ggml_tensor * experts_gate = nullptr;
+    ggml_tensor * experts_up = nullptr;
     ggml_tensor * experts_down = nullptr;
     ggml_tensor * shared_gate_input = nullptr;
     ggml_tensor * shared_gate = nullptr;

@@ -1123,6 +1123,10 @@ int main() {
     weights.router = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 5);
     weights.experts_gate_up =
         ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 4, 6, 5);
+    ggml_tensor * experts_gate =
+        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 4, 3, 5);
+    ggml_tensor * experts_up =
+        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 4, 3, 5);
     weights.experts_down =
         ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 3, 4, 5);
     weights.shared_gate_input =
@@ -1141,13 +1145,24 @@ int main() {
         return 1;
     }
 
-    std::vector<float> router(20), gate_up(120), down(60);
+    std::vector<float> router(20), gate_up(120), gate(60), up(60), down(60);
     std::vector<float> shared_gate_input = {0.07f, -0.04f, 0.02f, 0.09f};
     std::vector<float> shared_gate(12), shared_up(12), shared_down(12);
     for (size_t index = 0; index < router.size(); ++index)
         router[index] = 0.013f * static_cast<float>(static_cast<int>(index % 9) - 4);
     for (size_t index = 0; index < gate_up.size(); ++index)
         gate_up[index] = 0.009f * static_cast<float>(static_cast<int>(index % 13) - 6);
+    for (size_t expert = 0; expert < 5; ++expert) {
+        for (size_t channel = 0; channel < 3; ++channel) {
+            const size_t split = (expert * 3U + channel) * 4U;
+            const size_t fused_gate = (expert * 6U + channel) * 4U;
+            const size_t fused_up = (expert * 6U + 3U + channel) * 4U;
+            std::copy_n(gate_up.begin() + static_cast<std::ptrdiff_t>(fused_gate),
+                        4, gate.begin() + static_cast<std::ptrdiff_t>(split));
+            std::copy_n(gate_up.begin() + static_cast<std::ptrdiff_t>(fused_up),
+                        4, up.begin() + static_cast<std::ptrdiff_t>(split));
+        }
+    }
     for (size_t index = 0; index < down.size(); ++index)
         down[index] = 0.011f * static_cast<float>(static_cast<int>(index % 11) - 5);
     for (size_t index = 0; index < shared_gate.size(); ++index) {
@@ -1162,6 +1177,10 @@ int main() {
                             router.size() * sizeof(float));
     ggml_backend_tensor_set(weights.experts_gate_up, gate_up.data(), 0,
                             gate_up.size() * sizeof(float));
+    ggml_backend_tensor_set(experts_gate, gate.data(), 0,
+                            gate.size() * sizeof(float));
+    ggml_backend_tensor_set(experts_up, up.data(), 0,
+                            up.size() * sizeof(float));
     ggml_backend_tensor_set(weights.experts_down, down.data(), 0,
                             down.size() * sizeof(float));
     ggml_backend_tensor_set(weights.shared_gate_input,
@@ -1316,6 +1335,39 @@ int main() {
     }
 
     dflash::common::qwen4exp_frontier_moe_destroy(graph);
+
+    Qwen4ExpFrontierMoeWeights split_weights = weights;
+    split_weights.experts_gate_up = nullptr;
+    split_weights.experts_gate = experts_gate;
+    split_weights.experts_up = experts_up;
+    Qwen4ExpFrontierMoeGraph * split_graph =
+        dflash::common::qwen4exp_frontier_moe_create(
+            backend, spec, split_weights, 0, error);
+    CHECK(split_graph != nullptr,
+          "canonical split gate/up frontier graph builds");
+    if (split_graph) {
+        const std::vector<float> input{0.5f, -1.25f, 0.75f, 2.0f};
+        std::vector<float> actual;
+        const bool ok = dflash::common::qwen4exp_frontier_moe_eval(
+            split_graph, input.data(), input.size(), actual, error);
+        const std::vector<float> expected = reference_moe(
+            spec, router, gate_up, down, shared_gate_input, shared_gate,
+            shared_up, shared_down, input);
+        CHECK(ok && close_vectors(actual, expected),
+              "split gate/up graph matches fused scalar MoE reference");
+    }
+    dflash::common::qwen4exp_frontier_moe_destroy(split_graph);
+
+    Qwen4ExpFrontierMoeWeights incomplete_split = split_weights;
+    incomplete_split.experts_up = nullptr;
+    CHECK(dflash::common::qwen4exp_frontier_moe_create(
+              backend, spec, incomplete_split, 0, error) == nullptr,
+          "frontier rejects an incomplete split expert contract");
+    Qwen4ExpFrontierMoeWeights ambiguous = split_weights;
+    ambiguous.experts_gate_up = weights.experts_gate_up;
+    CHECK(dflash::common::qwen4exp_frontier_moe_create(
+              backend, spec, ambiguous, 0, error) == nullptr,
+          "frontier rejects simultaneous fused and split experts");
 
     Qwen4ExpFrontierMoeGraph * batch_graph =
         dflash::common::qwen4exp_frontier_moe_create_batch(

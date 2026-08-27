@@ -205,7 +205,8 @@ bool validate_tensors(const TensorMap & tensors, std::string & error) {
             !req("hc_ffn_up.weight", {kHcLowRank, kHcDim}) ||
             !req("hc_ffn_inject.weight", {kHcDim, kHc}) ||
             !req("ffn_gate_inp.weight", {kEmbedding, kExperts}) ||
-            !req("ffn_gate_up_exps.weight", {kEmbedding, 2 * kExpertFf, kExperts}) ||
+            !req("ffn_gate_exps.weight", {kEmbedding, kExpertFf, kExperts}) ||
+            !req("ffn_up_exps.weight", {kEmbedding, kExpertFf, kExperts}) ||
             !req("ffn_down_exps.weight", {kExpertFf, kEmbedding, kExperts}) ||
             !req("ffn_gate_inp_shexp.weight", {kEmbedding}) ||
             !req("ffn_gate_shexp.weight", {kEmbedding, kExpertFf}) ||

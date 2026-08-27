@@ -1296,13 +1296,20 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
         const Qwen4ExpFrontierMoeWeights & weights, int layer, int n_tokens,
         std::string & error) {
     error.clear();
+    const bool fused_experts = tensor_shape(
+        weights.experts_gate_up, 3, spec.n_embd,
+        2LL * spec.n_ff, spec.n_expert);
+    const bool split_experts =
+        tensor_shape(weights.experts_gate, 3, spec.n_embd,
+                     spec.n_ff, spec.n_expert) &&
+        tensor_shape(weights.experts_up, 3, spec.n_embd,
+                     spec.n_ff, spec.n_expert);
     if (!backend || spec.n_embd <= 0 || spec.n_expert <= 0 ||
         spec.n_expert_used <= 0 || spec.n_expert_used > spec.n_expert ||
         spec.n_ff <= 0 || n_tokens <= 0 ||
         n_tokens > kQwen4ExpFrontierMoeMaxBatch ||
         !tensor_shape(weights.router, 2, spec.n_embd, spec.n_expert) ||
-        !tensor_shape(weights.experts_gate_up, 3, spec.n_embd,
-                      2LL * spec.n_ff, spec.n_expert) ||
+        fused_experts == split_experts ||
         !tensor_shape(weights.experts_down, 3, spec.n_ff,
                       spec.n_embd, spec.n_expert) ||
         !tensor_shape(weights.shared_gate_input, 2, spec.n_embd, 1) ||
@@ -1356,18 +1363,27 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
 
     ggml_tensor * input_3d =
         ggml_reshape_3d(ctx, result->input, spec.n_embd, 1, n_tokens);
-    ggml_tensor * gate_up = ggml_mul_mat_id(
-        ctx, weights.experts_gate_up, input_3d, selected);
-    set_layer_name(gate_up, layer, "gate_up");
-    ggml_tensor * gate = ggml_view_3d(
-        ctx, gate_up, spec.n_ff, gate_up->ne[1], gate_up->ne[2],
-        gate_up->nb[1], gate_up->nb[2], 0);
-    ggml_tensor * up = ggml_view_3d(
-        ctx, gate_up, spec.n_ff, gate_up->ne[1], gate_up->ne[2],
-        gate_up->nb[1], gate_up->nb[2],
-        static_cast<size_t>(spec.n_ff) * ggml_element_size(gate_up));
-    gate = ggml_cont(ctx, gate);
-    up = ggml_cont(ctx, up);
+    ggml_tensor * gate = nullptr;
+    ggml_tensor * up = nullptr;
+    if (fused_experts) {
+        ggml_tensor * gate_up = ggml_mul_mat_id(
+            ctx, weights.experts_gate_up, input_3d, selected);
+        set_layer_name(gate_up, layer, "gate_up");
+        gate = ggml_view_3d(
+            ctx, gate_up, spec.n_ff, gate_up->ne[1], gate_up->ne[2],
+            gate_up->nb[1], gate_up->nb[2], 0);
+        up = ggml_view_3d(
+            ctx, gate_up, spec.n_ff, gate_up->ne[1], gate_up->ne[2],
+            gate_up->nb[1], gate_up->nb[2],
+            static_cast<size_t>(spec.n_ff) * ggml_element_size(gate_up));
+        gate = ggml_cont(ctx, gate);
+        up = ggml_cont(ctx, up);
+    } else {
+        gate = ggml_mul_mat_id(ctx, weights.experts_gate, input_3d, selected);
+        up = ggml_mul_mat_id(ctx, weights.experts_up, input_3d, selected);
+        set_layer_name(gate, layer, "gate");
+        set_layer_name(up, layer, "up");
+    }
     ggml_tensor * activated = ggml_swiglu_split(ctx, gate, up);
     ggml_tensor * expert_output = ggml_mul_mat_id(
         ctx, weights.experts_down, activated, selected);
@@ -1478,6 +1494,7 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
         if (moe_enabled) {
             const Qwen4ExpFrontierMoeWeights graph_weights{
                 layer.router, layer.experts_gate_up_tensor,
+                layer.experts_gate_tensor, layer.experts_up_tensor,
                 layer.experts_down_tensor, layer.shared_gate_input,
                 layer.shared_gate, layer.shared_up, layer.shared_down};
             runtime->moe[index][1] = qwen4exp_frontier_moe_create(
@@ -1761,6 +1778,7 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
         const Qwen4ExpFrontierMoeSpec spec{2560, 512, 10, 640};
         const Qwen4ExpFrontierMoeWeights graph_weights{
             model_layer.router, model_layer.experts_gate_up_tensor,
+            model_layer.experts_gate_tensor, model_layer.experts_up_tensor,
             model_layer.experts_down_tensor, model_layer.shared_gate_input,
             model_layer.shared_gate, model_layer.shared_up,
             model_layer.shared_down};
@@ -1796,6 +1814,7 @@ bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
     const Qwen4ExpFrontierMoeSpec spec{2560, 512, 10, 640};
     const Qwen4ExpFrontierMoeWeights graph_weights{
         layer.router, layer.experts_gate_up_tensor,
+        layer.experts_gate_tensor, layer.experts_up_tensor,
         layer.experts_down_tensor, layer.shared_gate_input,
         layer.shared_gate, layer.shared_up, layer.shared_down};
     weights.frontier_moe = qwen4exp_frontier_moe_create(

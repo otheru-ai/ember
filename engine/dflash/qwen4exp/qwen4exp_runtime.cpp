@@ -797,14 +797,28 @@ bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
     for (float & value : selected_weight) value /= selected_sum;
     output.assign(kEmbedding, 0.0f);
     for (int i = 0; i < kExpertUsed; ++i) {
-        std::vector<float> gate_up, down;
-        const Qwen4ExpMappedTensor gu = expert_slice(layer.experts_gate_up, ids[i]);
+        std::vector<float> gate, up, down;
         const Qwen4ExpMappedTensor dw = expert_slice(layer.experts_down, ids[i]);
-        if (!mapped_matvec(gu, input.data(), gate_up, error) ||
-            gate_up.size() != 2 * kExpertFf) return false;
+        if (layer.experts_gate.valid() && layer.experts_up.valid()) {
+            const Qwen4ExpMappedTensor gw =
+                expert_slice(layer.experts_gate, ids[i]);
+            const Qwen4ExpMappedTensor uw =
+                expert_slice(layer.experts_up, ids[i]);
+            if (!mapped_matvec(gw, input.data(), gate, error) ||
+                !mapped_matvec(uw, input.data(), up, error) ||
+                gate.size() != kExpertFf || up.size() != kExpertFf) return false;
+        } else {
+            std::vector<float> gate_up;
+            const Qwen4ExpMappedTensor gu =
+                expert_slice(layer.experts_gate_up, ids[i]);
+            if (!mapped_matvec(gu, input.data(), gate_up, error) ||
+                gate_up.size() != 2 * kExpertFf) return false;
+            gate.assign(gate_up.begin(), gate_up.begin() + kExpertFf);
+            up.assign(gate_up.begin() + kExpertFf, gate_up.end());
+        }
         std::vector<float> intermediate(kExpertFf);
         for (int j = 0; j < kExpertFf; ++j)
-            intermediate[j] = silu(gate_up[j]) * gate_up[kExpertFf + j];
+            intermediate[j] = silu(gate[j]) * up[j];
         if (!mapped_matvec(dw, intermediate.data(), down, error) ||
             down.size() != kEmbedding) return false;
         for (int j = 0; j < kEmbedding; ++j)

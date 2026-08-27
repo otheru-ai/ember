@@ -402,6 +402,18 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
                         static_cast<const uint8_t *>(shard.mmap_addr), shard.mmap_size,
                         data_offset, gctx, meta, i, error);
                     if (!layer.experts_gate_up.valid()) goto fail;
+                } else if (suffix == "ffn_gate_exps.weight") {
+                    layer.experts_gate_tensor = find(meta, name);
+                    layer.experts_gate = mapped_tensor(
+                        static_cast<const uint8_t *>(shard.mmap_addr), shard.mmap_size,
+                        data_offset, gctx, meta, i, error);
+                    if (!layer.experts_gate.valid()) goto fail;
+                } else if (suffix == "ffn_up_exps.weight") {
+                    layer.experts_up_tensor = find(meta, name);
+                    layer.experts_up = mapped_tensor(
+                        static_cast<const uint8_t *>(shard.mmap_addr), shard.mmap_size,
+                        data_offset, gctx, meta, i, error);
+                    if (!layer.experts_up.valid()) goto fail;
                 } else if (suffix == "ffn_down_exps.weight") {
                     layer.experts_down_tensor = find(meta, name);
                     layer.experts_down = mapped_tensor(
