@@ -311,10 +311,19 @@ class QuantizerToolTests(unittest.TestCase):
                 ("blk.0.attn_q.weight", TYPE_F32, [32, 2]),
                 ("per_layer_token_embd.weight", TYPE_F16, [32, 3]),
                 ("output.weight", TYPE_F16, [256, 2]),
+                ("output_hc_down.weight", TYPE_F16, [32, 2]),
             ])
+            profile = json.loads((pathlib.Path(__file__).resolve().parents[1] /
+                                  "share" / "release_profiles" /
+                                  "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text())
+            fast_arm = next(
+                arm for arm in profile["quantization"]["performance_bakeoff"]["arms"]
+                if arm["id"] == "rocmfp4-fast-matrix")
+            fast_options = [value for override in fast_arm["per_tensor_overrides"][1:]
+                            for value in ("--tensor-type", override)]
             command = self.command(
                 source, output,
-                "--tensor-type", r"^blk\.0\.attn_q\.weight$=Q4_0_ROCMFP4_FAST",
+                *fast_options,
                 "--tensor-type", r"^output\.weight$=Q6_K",
             )
             completed = subprocess.run(command, check=False, text=True,
@@ -324,6 +333,7 @@ class QuantizerToolTests(unittest.TestCase):
                 "blk.0.attn_q.weight": TYPE_ROCMFP4_FAST,
                 "per_layer_token_embd.weight": TYPE_ROCMI4,
                 "output.weight": TYPE_Q6_K,
+                "output_hc_down.weight": TYPE_ROCMFP4_FAST,
             })
 
             overlap = self.command(

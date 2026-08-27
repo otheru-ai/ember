@@ -167,6 +167,11 @@
           "default_matrix_format": "Q4_0_ROCMI4",
           "tensor_class_format": "Q4_0_ROCMFP4_FAST",
           "selection": "explicit non-overlapping matrix regexes only",
+          "per_tensor_overrides": [
+            "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+            "^blk\\.[0-9]+\\.(hc_(attn|ffn)_(down|up|inject)|ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|attn_(q|k|v|output|qkv|gate)|indexer\\.(q_proj|k_proj)|ssm_(alpha|beta|out)|ple_(key|value))\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^output_hc_(down|up)\\.weight$=Q4_0_ROCMFP4_FAST"
+          ],
           "promotion_requires": "matched-artifact end-to-end gfx1151 bakeoff"
         }
       ],

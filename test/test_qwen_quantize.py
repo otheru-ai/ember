@@ -232,7 +232,9 @@ class Fixture:
             "import hashlib,json,pathlib,shutil,subprocess,sys,time\n"
             "if sys.argv[1:] == ['--build-info-json']:\n"
             f" print(json.dumps({{'tool':'ember-gguf-quantize','ember_revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=pathlib.Path(__file__).parent,text=True).strip(),"
-            f"'rocmfpx_revision':'{self.rocm_revision}','format':'Q4_0_ROCMI4','ggml_tensor_type':108,'intervention_manifest_schema':1}}))\n"
+            f"'rocmfpx_revision':'{self.rocm_revision}','format':'Q4_0_ROCMI4','ggml_tensor_type':108,"
+            "'per_tensor_formats':['Q4_0_ROCMI4','Q6_K','Q4_0_ROCMFP4_FAST'],"
+            "'intervention_manifest_schema':1}))\n"
             "elif '--dry-size-json' in sys.argv:\n"
             " intervention={}\n"
             " if '--intervention-manifest' in sys.argv:\n"
@@ -427,6 +429,21 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertIn("--keep-split", command)
             self.assertEqual(record["commands"]["convert"][-2:], ["--split-max-size", "48G"])
             self.assertTrue(record["commands"]["quantizer_options_precede_positionals"])
+            self.assertEqual(
+                record["quantization_recipe"]["id"], "profile-default-rocmi4")
+            self.assertEqual(
+                record["quantization_recipe"]["selection"],
+                "validated_top_level_profile_default",
+            )
+            self.assertEqual(
+                record["quantization_recipe"]["per_tensor_overrides"],
+                ["^per_layer_token_embd\\.weight$=Q4_0_ROCMI4"],
+            )
+            self.assertTrue(record["quantization_recipe"]["ple_override_preserved"])
+            self.assertRegex(
+                record["quantization_recipe"]["per_tensor_overrides_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
             self.assertEqual(record["ple"]["source_dtype"], "I64")
             self.assertEqual(record["ple"]["gguf_metadata_dtype"], "ARRAY<UINT64>")
             self.assertTrue(record["intervention"]["weight_intervention"])
@@ -456,6 +473,76 @@ class QwenQuantizeTests(unittest.TestCase):
             quantize = record["commands"]["quantize"]
             self.assertNotIn("--intervention-manifest", quantize)
             self.assertIn("--tensor-type", quantize)
+
+    def test_profile_q6_and_rocmfp4_arms_plumb_all_overrides_in_order(self) -> None:
+        expected = {
+            "rocmi4-q6k-embedding-head": [
+                "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+                "^token_embd\\.weight$=Q6_K",
+                "^output\\.weight$=Q6_K",
+            ],
+            "rocmfp4-fast-matrix": [
+                "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+                *[pattern + "=Q4_0_ROCMFP4_FAST"
+                  for pattern in qwen_quantize.ROCMFP4_FAST_MATRIX_PATTERNS],
+            ],
+        }
+        for arm_id, overrides in expected.items():
+            with self.subTest(arm=arm_id), tempfile.TemporaryDirectory() as raw:
+                fixture = Fixture(Path(raw))
+                result = subprocess.run(
+                    [*fixture.command(), "--quantization-arm", arm_id],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                record = json.loads((fixture.root / "work.plan.json").read_text())
+                self.assertEqual(record["quantization_recipe"]["id"], arm_id)
+                self.assertEqual(
+                    record["quantization_recipe"]["per_tensor_overrides"], overrides)
+                command = record["commands"]["quantize"]
+                observed = [command[index + 1] for index, value in enumerate(command[:-1])
+                            if value == "--tensor-type"]
+                self.assertEqual(observed, overrides)
+                self.assertEqual(
+                    record["commands"]["quantize_preflight"].count("--tensor-type"),
+                    len(overrides),
+                )
+
+    def test_profile_arms_fail_closed_on_unsupported_or_unpinned_overrides(self) -> None:
+        mutations = [
+            ("rocmi4-q6k-embedding-head", 1, "^token_embd\\.weight$=Q5_K",
+             "malformed or unaudited"),
+            ("rocmfp4-fast-matrix", 0,
+             "^per_layer_token_embd\\.weight$=Q4_0_ROCMFP4_FAST",
+             "malformed or unaudited"),
+        ]
+        for arm_id, index, replacement, message in mutations:
+            with self.subTest(arm=arm_id), tempfile.TemporaryDirectory() as raw:
+                fixture = Fixture(Path(raw))
+                profile = json.loads(fixture.profile.read_text())
+                arm = next(item for item in profile["quantization"]
+                           ["performance_bakeoff"]["arms"] if item["id"] == arm_id)
+                arm["per_tensor_overrides"][index] = replacement
+                fixture.profile.write_text(json.dumps(profile))
+                result = subprocess.run(
+                    fixture.command(), text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+
+    def test_stock_control_rejects_mixed_quantization_arm(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            command = fixture.command()
+            option = command.index("--intervention-manifest")
+            command[option:option + 2] = ["--stock-control"]
+            result = subprocess.run(
+                [*command, "--quantization-arm", "rocmi4-q6k-embedding-head"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("stock control must use", result.stderr)
 
     def test_bounded_memory_plan_spills_then_splits_without_in_memory_registry(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -534,6 +621,70 @@ class QwenQuantizeTests(unittest.TestCase):
                     [edited], expected, quantized=True, profile=profile,
                     stock_control=True,
                 )
+
+    def test_output_audit_enforces_selected_mixed_tensor_types(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            profile = json.loads(
+                (ROOT / "share" / "release_profiles" /
+                 "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text()
+            )
+            expected_ple = {
+                "ple_embedding.layer_multipliers": [1, 24_000_000_000_001],
+                "ple_embedding.ngram_heads_offsets": [3, 5],
+                "ple_embedding.ngram_heads_vocab_sizes": [7, 11],
+            }
+            q6_overrides = qwen_quantize.validated_quantization_arms(profile)[
+                "rocmi4-q6k-embedding-head"]["per_tensor_overrides"]
+            q6_tensors = [
+                ("per_layer_token_embd.weight", 108),
+                ("token_embd.weight", 14),
+                ("output.weight", 14),
+            ]
+            q6_paths = []
+            for index, (name, tensor_type) in enumerate(q6_tensors):
+                path = root / f"q6-{index + 1:05d}-of-00003.gguf"
+                make_gguf(path, split_no=index, split_count=3,
+                          tensor_name=name, tensor_type=tensor_type)
+                q6_paths.append(path)
+            result = qwen_quantize.verify_gguf_set(
+                q6_paths, expected_ple, quantized=True, profile=profile,
+                stock_control=True, tensor_overrides=q6_overrides)
+            self.assertEqual(result["tensor_type_counts"], {"14": 2, "108": 1})
+            self.assertEqual(
+                [item["matched_tensor_count"]
+                 for item in result["tensor_override_evidence"]],
+                [1, 1, 1],
+            )
+            make_gguf(q6_paths[-1], split_no=2, split_count=3,
+                      tensor_name="output.weight", tensor_type=1)
+            with self.assertRaisesRegex(qwen_quantize.PipelineError, "expected 14"):
+                qwen_quantize.verify_gguf_set(
+                    q6_paths, expected_ple, quantized=True, profile=profile,
+                    stock_control=True, tensor_overrides=q6_overrides)
+
+            fast_overrides = qwen_quantize.validated_quantization_arms(profile)[
+                "rocmfp4-fast-matrix"]["per_tensor_overrides"]
+            fast_tensors = [
+                ("per_layer_token_embd.weight", 108),
+                ("blk.0.attn_q.weight", 101),
+                ("output_hc_down.weight", 101),
+            ]
+            fast_paths = []
+            for index, (name, tensor_type) in enumerate(fast_tensors):
+                path = root / f"fast-{index + 1:05d}-of-00003.gguf"
+                make_gguf(path, split_no=index, split_count=3,
+                          tensor_name=name, tensor_type=tensor_type)
+                fast_paths.append(path)
+            result = qwen_quantize.verify_gguf_set(
+                fast_paths, expected_ple, quantized=True, profile=profile,
+                stock_control=True, tensor_overrides=fast_overrides)
+            self.assertEqual(result["tensor_type_counts"], {"101": 2, "108": 1})
+            self.assertEqual(
+                [item["matched_tensor_count"]
+                 for item in result["tensor_override_evidence"]],
+                [1, 1, 1],
+            )
 
     def test_stock_control_executes_and_commits_clean_shards(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -623,6 +774,16 @@ class QwenQuantizeTests(unittest.TestCase):
                 [item["size_bytes"] for item in record["output"]["shards"]],
             )
             self.assertEqual(record["output"]["tensor_type_counts"], {"108": 2})
+            self.assertEqual(
+                record["output"]["tensor_override_evidence"], [{
+                    "override": "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
+                    "format": "Q4_0_ROCMI4",
+                    "ggml_tensor_type": 108,
+                    "matched_tensor_count": 1,
+                    "matched_tensor_names_sha256": hashlib.sha256(
+                        b"per_layer_token_embd.weight").hexdigest(),
+                }],
+            )
             self.assertEqual(record["intermediate"]["tensor_names_sha256"], record["output"]["tensor_names_sha256"])
             self.assertTrue(record["intervention"]["quantizer_preflight"]["validated"])
             self.assertFalse(record["intervention"]["quantizer_preflight"]["applied"])

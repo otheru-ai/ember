@@ -50,6 +50,19 @@ PLE_SUFFIXES = {
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 QWEN_QSA_LAYERS = {3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47}
 INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.weight$")
+DEFAULT_QUANTIZATION_ARM = "profile-default-rocmi4"
+SUPPORTED_TENSOR_FORMATS = {
+    "Q4_0_ROCMI4": 108,
+    "Q6_K": 14,
+    "Q4_0_ROCMFP4_FAST": 101,
+}
+ROCMFP4_FAST_MATRIX_PATTERNS = [
+    (r"^blk\.[0-9]+\.(hc_(attn|ffn)_(down|up|inject)|"
+     r"ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|"
+     r"attn_(q|k|v|output|qkv|gate)|indexer\.(q_proj|k_proj)|"
+     r"ssm_(alpha|beta|out)|ple_(key|value))\.weight$"),
+    r"^output_hc_(down|up)\.weight$",
+]
 
 
 class PipelineError(ValueError):
@@ -87,6 +100,97 @@ def require_mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError(f"{field} must be a JSON object")
     return value
+
+
+def parse_profile_tensor_override(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, str) or value.count("=") != 1:
+        raise PipelineError(f"{field} must be one REGEX=FORMAT string")
+    pattern, tensor_format = value.rsplit("=", 1)
+    if (not pattern or pattern[0] != "^" or pattern[-1] != "$" or
+            tensor_format not in SUPPORTED_TENSOR_FORMATS):
+        raise PipelineError(
+            f"{field} must be an anchored regex using a kernel-backed format")
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        raise PipelineError(f"{field} contains an invalid regex: {exc}") from exc
+    return {
+        "value": value,
+        "pattern": pattern,
+        "format": tensor_format,
+        "ggml_tensor_type": SUPPORTED_TENSOR_FORMATS[tensor_format],
+        "compiled": compiled,
+    }
+
+
+def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    quantization = require_mapping(profile.get("quantization"), "profile.quantization")
+    bakeoff = require_mapping(
+        quantization.get("performance_bakeoff"),
+        "profile.quantization.performance_bakeoff",
+    )
+    if (bakeoff.get("status") != "experimental_unpromoted" or
+            bakeoff.get("control_unchanged") is not True or
+            bakeoff.get("override_precedence") !=
+            "exactly_one_matching_regex; overlap_is_an_error"):
+        raise PipelineError("performance bakeoff lacks the pinned override contract")
+    runtime_support = bakeoff.get("runtime_support")
+    if (not isinstance(runtime_support, dict) or
+            set(runtime_support) != set(SUPPORTED_TENSOR_FORMATS)):
+        raise PipelineError("performance bakeoff runtime support is incomplete")
+    rows = bakeoff.get("arms")
+    if not isinstance(rows, list):
+        raise PipelineError("performance bakeoff arms must be an array")
+    expected_overrides = {
+        "rocmi4-control": [quantization.get("ple_tensor_override")],
+        "rocmi4-q6k-embedding-head": [
+            quantization.get("ple_tensor_override"),
+            r"^token_embd\.weight$=Q6_K",
+            r"^output\.weight$=Q6_K",
+        ],
+        "rocmfp4-fast-matrix": [
+            quantization.get("ple_tensor_override"),
+            *[pattern + "=Q4_0_ROCMFP4_FAST"
+              for pattern in ROCMFP4_FAST_MATRIX_PATTERNS],
+        ],
+    }
+    if [row.get("id") for row in rows if isinstance(row, dict)] != list(expected_overrides):
+        raise PipelineError("performance bakeoff arms are missing, duplicated, or reordered")
+    result: dict[str, dict[str, Any]] = {}
+    ple_override = quantization.get("ple_tensor_override")
+    for index, row_value in enumerate(rows):
+        arm = require_mapping(row_value, f"performance_bakeoff.arms[{index}]")
+        arm_id = arm.get("id")
+        overrides = arm.get("per_tensor_overrides")
+        if arm.get("default_matrix_format") != "Q4_0_ROCMI4":
+            raise PipelineError(f"quantization arm {arm_id} changed the base matrix format")
+        if not isinstance(overrides, list) or overrides != expected_overrides[arm_id]:
+            raise PipelineError(
+                f"quantization arm {arm_id} has malformed or unaudited per_tensor_overrides")
+        parsed = [
+            parse_profile_tensor_override(
+                value, f"performance_bakeoff.arms[{index}].per_tensor_overrides[{item}]")
+            for item, value in enumerate(overrides)
+        ]
+        if len({item["pattern"] for item in parsed}) != len(parsed):
+            raise PipelineError(f"quantization arm {arm_id} repeats a tensor regex")
+        ple_matches = [item for item in parsed
+                       if item["compiled"].search("per_layer_token_embd.weight")]
+        if (len(ple_matches) != 1 or ple_matches[0]["value"] != ple_override or
+                parsed[0]["value"] != ple_override):
+            raise PipelineError(
+                f"quantization arm {arm_id} does not preserve the pinned PLE override")
+        serialized = json.dumps(overrides, separators=(",", ":"), ensure_ascii=True)
+        result[arm_id] = {
+            "id": arm_id,
+            "default_matrix_format": "Q4_0_ROCMI4",
+            "per_tensor_overrides": list(overrides),
+            "per_tensor_overrides_sha256": hashlib.sha256(
+                serialized.encode("utf-8")).hexdigest(),
+            "formats": list(dict.fromkeys(item["format"] for item in parsed)),
+            "override_precedence": bakeoff["override_precedence"],
+        }
+    return result
 
 
 def validate_intervention_manifest(
@@ -526,6 +630,7 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
             raise PipelineError(f"{label} revision is not a pinned 40-character commit")
     if quantization.get("format") != "Q4_0_ROCMI4" or quantization.get("ggml_tensor_type") != 108:
         raise PipelineError("release profile must select Q4_0_ROCMI4 / GGML tensor type 108")
+    validated_quantization_arms(profile)
     if (
         intervention.get("required") is not True
         or intervention.get("kind") != "directional_ablation"
@@ -735,6 +840,7 @@ def validate_tools(
         "format": profile["quantization"]["format"],
         "ggml_tensor_type": profile["quantization"]["ggml_tensor_type"],
         "intervention_manifest_schema": profile["intervention"]["manifest_schema_version"],
+        "per_tensor_formats": list(SUPPORTED_TENSOR_FORMATS),
     }
     if not isinstance(build_info, dict) or any(build_info.get(key) != value for key, value in expected_info.items()):
         raise PipelineError(f"quantizer build provenance mismatch; required fields are {expected_info}")
@@ -749,7 +855,10 @@ def validate_tools(
         "quantizer_binary": str(quantizer_binary),
         "quantizer_sha256": sha256_file(quantizer_binary),
         "quantizer_build_info": build_info,
-        "composite_support": ["qwen4exp-converter", "architecture-agnostic-streaming", "Q4_0_ROCMI4"],
+        "composite_support": [
+            "qwen4exp-converter", "architecture-agnostic-streaming",
+            *SUPPORTED_TENSOR_FORMATS,
+        ],
     }
     if gguf_splitter is not None:
         splitter = gguf_splitter.resolve()
@@ -921,6 +1030,7 @@ def verify_gguf_set(
     paths: list[Path], expected_ple: dict[str, list[int]], *, quantized: bool,
     profile: dict[str, Any], intervention: dict[str, Any] | None = None,
     stock_control: bool = False,
+    tensor_overrides: list[str] | None = None,
 ) -> dict[str, Any]:
     inspected = [inspect_gguf(path) for path in paths]
     all_tensors = [tensor for item in inspected for tensor in item["tensors"]]
@@ -995,6 +1105,7 @@ def verify_gguf_set(
             if metadata.get("split.tensors.count", {}).get("value") != len(all_tensors):
                 raise PipelineError("GGUF split.tensors.count does not match tensor inventory")
     type_counts = Counter(tensor["type"] for tensor in all_tensors)
+    override_evidence: list[dict[str, Any]] | None = None
     if quantized:
         ple_name = profile["quantization"]["ple_tensor_name"]
         ple = next((tensor for tensor in all_tensors if tensor["name"] == ple_name), None)
@@ -1003,7 +1114,47 @@ def verify_gguf_set(
             raise PipelineError(f"{ple_name} must use GGML tensor type {expected_type}")
         if type_counts[expected_type] == 0:
             raise PipelineError(f"quantized GGUF contains no tensor type {expected_type}")
-    return {
+        selected_overrides = tensor_overrides or [
+            profile["quantization"]["ple_tensor_override"]
+        ]
+        parsed_overrides = [
+            parse_profile_tensor_override(value, f"output tensor override {index}")
+            for index, value in enumerate(selected_overrides)
+        ]
+        matched = [False] * len(parsed_overrides)
+        matched_names: list[list[str]] = [[] for _ in parsed_overrides]
+        for tensor in all_tensors:
+            matches = [index for index, override in enumerate(parsed_overrides)
+                       if override["compiled"].search(tensor["name"])]
+            if len(matches) > 1:
+                raise PipelineError(
+                    f"multiple selected tensor overrides match output tensor {tensor['name']}")
+            if matches:
+                index = matches[0]
+                matched[index] = True
+                matched_names[index].append(tensor["name"])
+                expected_override_type = parsed_overrides[index]["ggml_tensor_type"]
+                if tensor["type"] != expected_override_type:
+                    raise PipelineError(
+                        f"output tensor {tensor['name']} has type {tensor['type']}, "
+                        f"expected {expected_override_type} from selected override")
+        if not all(matched):
+            missing = [selected_overrides[index] for index, value in enumerate(matched)
+                       if not value]
+            raise PipelineError(f"selected tensor overrides matched no output tensor: {missing}")
+        override_evidence = []
+        for override, names_for_override in zip(
+                parsed_overrides, matched_names, strict=True):
+            ordered_names = sorted(names_for_override)
+            override_evidence.append({
+                "override": override["value"],
+                "format": override["format"],
+                "ggml_tensor_type": override["ggml_tensor_type"],
+                "matched_tensor_count": len(ordered_names),
+                "matched_tensor_names_sha256": hashlib.sha256(
+                    "\n".join(ordered_names).encode("utf-8")).hexdigest(),
+            })
+    result = {
         "shards": [
             {"path": str(path), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
             for path in paths
@@ -1012,11 +1163,14 @@ def verify_gguf_set(
         "tensor_names_sha256": hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest(),
         "tensor_type_counts": {str(key): value for key, value in sorted(type_counts.items())},
     }
+    if override_evidence is not None:
+        result["tensor_override_evidence"] = override_evidence
+    return result
 
 
 def planned_commands(
     args: argparse.Namespace, profile: dict[str, Any], work_dir: Path,
-    intervention_manifest: Path | None,
+    intervention_manifest: Path | None, quantization_arm: dict[str, Any],
 ) -> tuple[list[str], list[str] | None, list[str], list[str], Path, Path, Path | None]:
     intermediate = work_dir / "Qwen3.8-Flash-Next-BF16.gguf"
     unsplit = (
@@ -1045,9 +1199,9 @@ def planned_commands(
         convert.extend(["--split-max-size", args.split_max_size])
     elif args.bounded_memory_temp:
         convert.append("--use-temp-file")
-    quantize_options = [
-        "--tensor-type", profile["quantization"]["ple_tensor_override"],
-    ]
+    quantize_options = []
+    for override in quantization_arm["per_tensor_overrides"]:
+        quantize_options.extend(["--tensor-type", override])
     if intervention_manifest is not None:
         quantize_options.extend(["--intervention-manifest", str(intervention_manifest)])
     if args.split_max_size != "0":
@@ -1189,7 +1343,34 @@ def validate_intervention_report(
 def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
     profile_path = args.profile.resolve()
     profile, inventory, inventory_path = validate_profile(profile_path)
+    quantization_arms = validated_quantization_arms(profile)
+    if args.quantization_arm == DEFAULT_QUANTIZATION_ARM:
+        overrides = [profile["quantization"]["ple_tensor_override"]]
+        serialized = json.dumps(overrides, separators=(",", ":"), ensure_ascii=True)
+        quantization_arm = {
+            "id": DEFAULT_QUANTIZATION_ARM,
+            "default_matrix_format": "Q4_0_ROCMI4",
+            "per_tensor_overrides": overrides,
+            "per_tensor_overrides_sha256": hashlib.sha256(
+                serialized.encode("utf-8")).hexdigest(),
+            "formats": ["Q4_0_ROCMI4"],
+            "override_precedence":
+                "exactly_one_matching_regex; overlap_is_an_error",
+            "selection": "validated_top_level_profile_default",
+        }
+    else:
+        quantization_arm = quantization_arms.get(args.quantization_arm)
+    if quantization_arm is None:
+        raise PipelineError(
+            f"--quantization-arm must name one of "
+            f"{[DEFAULT_QUANTIZATION_ARM, *quantization_arms]}")
     stock_control = bool(args.stock_control)
+    if stock_control and args.quantization_arm not in {
+            DEFAULT_QUANTIZATION_ARM, "rocmi4-control"}:
+        raise PipelineError(
+            "stock control must use the unchanged default or rocmi4-control arm")
+    if not stock_control and args.quantization_arm == "rocmi4-control":
+        raise PipelineError("rocmi4-control is reserved for unchanged stock weights")
     intervention_source = (
         args.intervention_manifest.resolve()
         if args.intervention_manifest is not None else None
@@ -1260,7 +1441,7 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
             raise PipelineError(f"refusing to overwrite existing build record: {record_path}")
         intervention_command_path = intervention_source
     convert, split, preflight, quantize, intermediate, output, unsplit = planned_commands(
-        args, profile, work_dir, intervention_command_path
+        args, profile, work_dir, intervention_command_path, quantization_arm
     )
     record: dict[str, Any] = {
         "schema_version": 1,
@@ -1289,6 +1470,13 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         "credentials_accessed": False,
         "compute_mode": "exact_dequant",
         "w4a4_enabled": False,
+        "quantization_recipe": {
+            **quantization_arm,
+            "selection": quantization_arm.get("selection", "validated_profile_arm"),
+            "ple_tensor_override": profile["quantization"]["ple_tensor_override"],
+            "ple_override_preserved": True,
+            "quantizer_supported_formats": list(SUPPORTED_TENSOR_FORMATS),
+        },
         "commands": {
             "convert": convert,
             "convert_shell": shlex.join(convert),
@@ -1385,6 +1573,7 @@ def orchestrate(args: argparse.Namespace) -> dict[str, Any]:
         final = verify_gguf_set(
             staged_paths, expected_ple, quantized=True, profile=profile,
             intervention=intervention, stock_control=stock_control,
+            tensor_overrides=quantization_arm["per_tensor_overrides"],
         )
         if final["tensor_names_sha256"] != record["intermediate"]["tensor_names_sha256"]:
             raise PipelineError("quantization changed the GGUF tensor inventory")
@@ -1467,6 +1656,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--build-record", type=Path,
                         help="dry-run record path; execute mode only accepts WORK_DIR/qwen-quant-build-record.json")
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
+    parser.add_argument(
+        "--quantization-arm", default=DEFAULT_QUANTIZATION_ARM,
+        help="validated profile performance_bakeoff arm (default: profile ROCMI4)",
+    )
     parser.add_argument("--split-max-size", default="48G", help="llama.cpp split size; release default is 48G, 0 writes one GGUF")
     parser.add_argument("--min-free-gib", type=int, default=1024)
     parser.add_argument(
