@@ -19,6 +19,14 @@ The live gfx1151 mapping ceiling is slightly smaller than physical memory:
 global pool. Certification therefore rejects a measured GTT peak above that
 cap even when total UMA remains below `MemTotal`.
 
+The pinned external `kingjones777` ROCmFP4 STRIX_LEAN comparison artifact
+(`dec9c5c1053ef814cfaa39b342efd4cdd721ef0b`) was downloaded as three
+hash-verified shards totaling 105,753,530,752 bytes. It is a loader and speed
+control, not a viable release recipe for this host: artifact plus the required
+34,359,738,368-byte runtime reserve is 140,113,269,120 bytes, already
+5,815,374,208 bytes above the measured `MemTotal` before MTP or vision is
+enabled. No runtime or throughput claim follows from this inventory check.
+
 Ordinary conversion is not viable on this host: its approximately 204 GB
 intermediate representation exceeds RAM. The bounded path uses the pinned
 llama.cpp converter's `--use-temp-file` mode. That mode cannot split while
