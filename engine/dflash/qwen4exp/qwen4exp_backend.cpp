@@ -185,7 +185,7 @@ bool Qwen4ExpBackend::init() {
                  "[qwen4exp] text AR initialized: layers=48 ctx=%d yarn=%s; "
                  "vision=lazy mtp=%s mtp_depth=%d "
                  "mtp_verify=native-layer-major "
-                 "batching=unsupported "
+                 "prefill_batch=causal-q16 cache_variants=3 "
                  "activation_dump=%s\n",
                  max_ctx, weights_.yarn.enabled ? "factor-4" : "off",
                  mtp_depth_ ? "opt-in" : "off", mtp_depth_,
@@ -301,7 +301,9 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
     }
     const auto prefill_start = Clock::now();
     size_t vision_index = 0;
-    for (int i = prompt_offset; i < static_cast<int>(request.prompt.size()); ++i) {
+    int i = prompt_offset;
+    const int prompt_size = static_cast<int>(request.prompt.size());
+    while (i < prompt_size) {
         if (!step_memory_available(error)) {
             result.fail(GenerateErrorCode::ContextOverflow, error);
             return result;
@@ -314,6 +316,54 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             vision_index < request.vision.size() &&
             request.vision[vision_index].prompt_offset <= i
                 ? &request.vision[vision_index] : nullptr;
+        const bool capture_row = prompt_offset == 0 &&
+            !activation_dump_path_.empty() && i + 1 == prompt_size;
+        size_t batchable_rows = 0;
+        if (weights_.frontier && !request.force_exact_prefill && !mtp_depth_ &&
+            activation_dump_path_.empty() && !vision) {
+            int barrier = prompt_size;
+            if (vision_index < request.vision.size()) {
+                barrier = std::min(
+                    barrier, request.vision[vision_index].prompt_offset);
+            }
+            if (barrier > i)
+                batchable_rows = static_cast<size_t>(barrier - i);
+        }
+        const size_t chunk_rows = qwen4exp_prefill_chunk_rows(
+            batchable_rows, state_.cur_pos, request.snap_pos,
+            request.force_exact_prefill);
+        if (chunk_rows >= 2) {
+            const auto first = request.prompt.begin() + i;
+            std::vector<int32_t> tokens(
+                first, first + static_cast<std::ptrdiff_t>(chunk_rows));
+            std::vector<std::array<int32_t, 3>> positions;
+            positions.reserve(chunk_rows);
+            for (size_t row = 0; row < chunk_rows; ++row) {
+                const size_t absolute = static_cast<size_t>(i) + row;
+                positions.push_back({prompt_positions[0][absolute],
+                                     prompt_positions[1][absolute],
+                                     prompt_positions[2][absolute]});
+            }
+            if (!qwen4exp_step_prefill_batch_mrope(
+                    weights_, state_, tokens, positions, logits_, error)) {
+                result.fail(GenerateErrorCode::PrefillFailed, error);
+                return result;
+            }
+            i += static_cast<int>(chunk_rows);
+            result.prefill_tokens += static_cast<int>(chunk_rows);
+            result.prefill_mode = "exact-batched";
+            result.prefill_reason = "qwen4exp_text_frontier_layer_major";
+            if (request.snap_pos == state_.cur_pos &&
+                valid_slot(request.snap_slot)) {
+                result.snapshot_saved = snapshot_save(request.snap_slot);
+            }
+            if (io.on_prefill_keepalive && !io.on_prefill_keepalive()) {
+                result.fail(GenerateErrorCode::Incomplete,
+                            "client disconnected during prefill");
+                return result;
+            }
+            continue;
+        }
         const std::array<int32_t, 3> position = {
             prompt_positions[0][static_cast<size_t>(i)],
             prompt_positions[1][static_cast<size_t>(i)],
@@ -345,8 +395,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 weights_, state_, request.prompt[static_cast<size_t>(i)],
                 vision->embeddings.data() + row * 2560, 2560,
                 position, logits_, error);
-        } else if (prompt_offset == 0 && !activation_dump_path_.empty() &&
-                   i + 1 == static_cast<int>(request.prompt.size())) {
+        } else if (capture_row) {
             std::vector<float> capture;
             stepped = qwen4exp_step_q1_mrope_capture(
                 weights_, state_, request.prompt[static_cast<size_t>(i)],
@@ -384,6 +433,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
             result.fail(GenerateErrorCode::Incomplete, "client disconnected during prefill");
             return result;
         }
+        ++i;
     }
     result.prefill_s = seconds_since(prefill_start);
     if (logits_.empty() && request.n_gen > 0) {

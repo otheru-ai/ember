@@ -4,6 +4,7 @@
 
 #include "ggml-alloc.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -117,6 +118,16 @@ struct Qwen4ExpFrontierRuntime {
     std::vector<LayerGraphs> moe;
     bool stats = false;
 };
+
+int qwen4exp_frontier_moe_cached_width(int n_tokens) {
+    if (n_tokens == 1) return 1;
+    if (n_tokens >= 2 && n_tokens <= kQwen4ExpFrontierMoeMtpBatch)
+        return kQwen4ExpFrontierMoeMtpBatch;
+    if (n_tokens > kQwen4ExpFrontierMoeMtpBatch &&
+        n_tokens <= kQwen4ExpFrontierMoeMaxBatch)
+        return kQwen4ExpFrontierMoeMaxBatch;
+    return 0;
+}
 
 Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
         ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
@@ -322,7 +333,8 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
     weights.frontier = runtime.release();
     std::fprintf(stderr,
                  "[qwen-frontier] event=ready component=moe graphs=48 "
-                 "tokens_per_graph=1 lazy_batch_max=16 graph_replay=off\n");
+                 "tokens_per_graph=1 lazy_batch_widths=5,16 "
+                 "cached_graphs_per_layer=3 graph_replay=off\n");
     return true;
 }
 
@@ -375,15 +387,20 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
                                  int n_tokens, std::vector<float> & output,
                                  std::string & error) {
     if (!weights.frontier || layer < 0 ||
-        static_cast<size_t>(layer) >= weights.frontier->moe.size() ||
-        n_tokens <= 0 || n_tokens > kQwen4ExpFrontierMoeMaxBatch) {
+        static_cast<size_t>(layer) >= weights.frontier->moe.size() || !input ||
+        input_count != static_cast<size_t>(n_tokens) * 2560U) {
         error = "Qwen4Exp frontier batched MoE graph is unavailable";
+        return false;
+    }
+    const int graph_width = qwen4exp_frontier_moe_cached_width(n_tokens);
+    if (graph_width == 0) {
+        error = "Qwen4Exp frontier batched MoE width is unsupported";
         return false;
     }
     Qwen4ExpFrontierRuntime::LayerGraphs & layer_graphs =
         weights.frontier->moe[static_cast<size_t>(layer)];
     Qwen4ExpFrontierMoeGraph *& graph =
-        layer_graphs[static_cast<size_t>(n_tokens)];
+        layer_graphs[static_cast<size_t>(graph_width)];
     if (!graph) {
         const Qwen4ExpLayer & model_layer =
             weights.layers[static_cast<size_t>(layer)];
@@ -394,11 +411,19 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
             model_layer.shared_gate, model_layer.shared_up,
             model_layer.shared_down};
         graph = qwen4exp_frontier_moe_create_batch(
-            weights.backend, spec, graph_weights, layer, n_tokens, error);
+            weights.backend, spec, graph_weights, layer, graph_width, error);
         if (!graph) return false;
     }
-    return qwen4exp_frontier_moe_eval(
-        graph, input, input_count, output, error);
+    if (graph_width == n_tokens)
+        return qwen4exp_frontier_moe_eval(
+            graph, input, input_count, output, error);
+    std::vector<float> padded(
+        static_cast<size_t>(graph_width) * 2560U, 0.0f);
+    std::copy_n(input, input_count, padded.data());
+    if (!qwen4exp_frontier_moe_eval(
+            graph, padded.data(), padded.size(), output, error)) return false;
+    output.resize(input_count);
+    return true;
 }
 
 } // namespace dflash::common

@@ -1,4 +1,5 @@
 #include "qwen4exp_frontier.h"
+#include "qwen4exp_internal.h"
 
 #include "ggml-cpu.h"
 
@@ -200,8 +201,146 @@ static void test_causal_attention_stateless_ffn_batching() {
           "causal layer state matches token-major snapshot frontier");
 }
 
+static void test_bounded_cache_and_prefill_policy() {
+    using dflash::common::kQwen4ExpFrontierMoeCachedGraphsPerLayer;
+    using dflash::common::kQwen4ExpFrontierMoeMaxBatch;
+    using dflash::common::kQwen4ExpFrontierMoeMtpBatch;
+    using dflash::common::qwen4exp_frontier_moe_cached_width;
+    using dflash::common::qwen4exp_prefill_chunk_rows;
+
+    CHECK(kQwen4ExpFrontierMoeCachedGraphsPerLayer == 3,
+          "frontier cache has a fixed q1, MTP and prefill arena bound");
+    CHECK(qwen4exp_frontier_moe_cached_width(1) == 1,
+          "q1 retains its exact graph");
+    bool bounded_remainders = true;
+    for (int width = 2; width <= kQwen4ExpFrontierMoeMaxBatch; ++width) {
+        const int expected = width <= kQwen4ExpFrontierMoeMtpBatch
+            ? kQwen4ExpFrontierMoeMtpBatch
+            : kQwen4ExpFrontierMoeMaxBatch;
+        bounded_remainders = bounded_remainders &&
+            qwen4exp_frontier_moe_cached_width(width) == expected;
+    }
+    CHECK(bounded_remainders,
+          "every bounded remainder reuses q5 or q16 instead of a new arena");
+    CHECK(qwen4exp_frontier_moe_cached_width(0) == 0 &&
+              qwen4exp_frontier_moe_cached_width(17) == 0,
+          "cache policy rejects widths outside the bounded contract");
+
+    CHECK(qwen4exp_prefill_chunk_rows(40, 0, -1, false) == 16,
+          "ordinary text prefill uses the maximum causal chunk");
+    CHECK(qwen4exp_prefill_chunk_rows(16, 20, 25, false) == 5,
+          "snapshot frontier is a hard chunk boundary");
+    CHECK(qwen4exp_prefill_chunk_rows(16, 20, 21, false) == 1,
+          "one-row snapshot frontier falls back to q1");
+    CHECK(qwen4exp_prefill_chunk_rows(16, 20, -1, true) == 1,
+          "force-exact prefill remains q1");
+    CHECK(qwen4exp_prefill_chunk_rows(1, 20, -1, false) == 1 &&
+              qwen4exp_prefill_chunk_rows(0, 20, -1, false) == 0,
+          "vision and activation barriers cannot be crossed");
+
+    // Deterministic miniature of the production schedule. The reference runs
+    // every row q1. Ordinary prefill stops at a snapshot and batches only
+    // stateless FFNs layer-major. Activation extraction remains wholly q1.
+    constexpr size_t kRows = 7;
+    constexpr size_t kLayers = 6;
+    const std::array<float, kRows> seed = {
+        0.2f, -0.7f, 1.1f, 0.4f, -0.3f, 0.8f, 0.05f};
+    const auto attention = [](float input, float & recurrent,
+                              size_t row, size_t layer) {
+        recurrent = 0.73f * recurrent + input +
+            0.01f * static_cast<float>(3 * row + layer);
+        return input + 0.19f * recurrent;
+    };
+    const auto ffn = [](float input, size_t layer) {
+        return input + 0.11f * std::tanh(
+            input + 0.03f * static_cast<float>(layer));
+    };
+    const auto q1 = [&](float input, size_t row,
+                        std::array<float, kLayers> & state,
+                        std::vector<float> * capture) {
+        float value = input;
+        for (size_t layer = 0; layer < kLayers; ++layer) {
+            if (capture) capture->push_back(value);
+            value = ffn(attention(value, state[layer], row, layer), layer);
+        }
+        return value;
+    };
+    const auto batch = [&](std::array<float, kRows> & values, size_t first,
+                           size_t count,
+                           std::array<float, kLayers> & state) {
+        for (size_t layer = 0; layer < kLayers; ++layer) {
+            std::array<float, kRows> boundary{};
+            for (size_t row = first; row < first + count; ++row) {
+                boundary[row] = attention(values[row], state[layer], row,
+                                          layer);
+            }
+            for (size_t row = first; row < first + count; ++row)
+                values[row] = ffn(boundary[row], layer);
+        }
+    };
+
+    std::array<float, kLayers> reference_state{};
+    std::array<float, kLayers> reference_snapshot{};
+    std::array<float, kRows> reference_rows{};
+    std::vector<float> reference_capture;
+    for (size_t row = 0; row < kRows; ++row) {
+        reference_rows[row] = q1(seed[row], row, reference_state,
+                                 row + 1 == kRows ? &reference_capture
+                                                  : nullptr);
+        if (row == 2) reference_snapshot = reference_state;
+    }
+
+    std::array<float, kLayers> candidate_state{};
+    std::array<float, kRows> candidate_rows = seed;
+    const size_t first_chunk = qwen4exp_prefill_chunk_rows(
+        kRows, 0, 3, false);
+    batch(candidate_rows, 0, first_chunk, candidate_state);
+    const std::array<float, kLayers> candidate_snapshot = candidate_state;
+    const size_t second_chunk = qwen4exp_prefill_chunk_rows(
+        kRows - first_chunk, static_cast<int>(first_chunk), 3, false);
+    batch(candidate_rows, first_chunk, second_chunk, candidate_state);
+
+    std::array<float, kLayers> capture_state{};
+    std::array<float, kRows> capture_rows{};
+    std::vector<float> candidate_capture;
+    for (size_t row = 0; row < kRows; ++row) {
+        capture_rows[row] = q1(seed[row], row, capture_state,
+                               row + 1 == kRows ? &candidate_capture
+                                                : nullptr);
+    }
+
+    CHECK(close_vectors(
+              std::vector<float>(candidate_rows.begin(), candidate_rows.end()),
+              std::vector<float>(reference_rows.begin(), reference_rows.end()),
+              1.0e-6f),
+          "chunked prefill logits and raw HC match deterministic q1");
+    CHECK(close_vectors(
+              std::vector<float>(candidate_state.begin(),
+                                 candidate_state.end()),
+              std::vector<float>(reference_state.begin(),
+                                 reference_state.end()),
+              1.0e-6f),
+          "chunked prefill final recurrent state matches deterministic q1");
+    CHECK(close_vectors(
+              std::vector<float>(candidate_snapshot.begin(),
+                                 candidate_snapshot.end()),
+              std::vector<float>(reference_snapshot.begin(),
+                                 reference_snapshot.end()),
+              1.0e-6f),
+          "chunk boundary snapshot matches the q1 frontier");
+    CHECK(candidate_capture.size() == kLayers &&
+              close_vectors(candidate_capture, reference_capture, 1.0e-6f) &&
+              close_vectors(
+                  std::vector<float>(capture_rows.begin(), capture_rows.end()),
+                  std::vector<float>(reference_rows.begin(),
+                                     reference_rows.end()),
+                  1.0e-6f),
+          "activation extraction keeps the stock all-q1 layer records");
+}
+
 int main() {
     test_causal_attention_stateless_ffn_batching();
+    test_bounded_cache_and_prefill_policy();
     const Qwen4ExpFrontierMoeSpec spec{4, 5, 2, 3};
     ggml_backend_t backend = ggml_backend_cpu_init();
     CHECK(backend != nullptr, "CPU backend initializes");
@@ -382,6 +521,35 @@ int main() {
             error);
         CHECK(wide_ok && close_vectors(wide_actual, wide_expected),
               "maximum-width graph preserves independent row semantics");
+
+        std::vector<float> padded_input(
+            static_cast<size_t>(dflash::common::kQwen4ExpFrontierMoeMaxBatch) *
+                static_cast<size_t>(spec.n_embd),
+            0.0f);
+        std::vector<float> padded_expected;
+        for (int row = 0; row < 3; ++row) {
+            const std::vector<float> input_row = {
+                0.17f * static_cast<float>(row + 1),
+                -0.09f * static_cast<float>(row + 2),
+                0.05f * static_cast<float>(row),
+                0.11f * static_cast<float>(3 - row),
+            };
+            std::copy(input_row.begin(), input_row.end(),
+                      padded_input.begin() +
+                          static_cast<std::ptrdiff_t>(row * spec.n_embd));
+            const std::vector<float> reference = reference_moe(
+                spec, router, gate_up, down, shared_gate_input, shared_gate,
+                shared_up, shared_down, input_row);
+            padded_expected.insert(padded_expected.end(), reference.begin(),
+                                   reference.end());
+        }
+        std::vector<float> padded_actual;
+        const bool padded_ok = dflash::common::qwen4exp_frontier_moe_eval(
+            wide_graph, padded_input.data(), padded_input.size(),
+            padded_actual, error);
+        padded_actual.resize(padded_expected.size());
+        CHECK(padded_ok && close_vectors(padded_actual, padded_expected),
+              "q16 zero padding preserves every real remainder row");
     }
     dflash::common::qwen4exp_frontier_moe_destroy(wide_graph);
 

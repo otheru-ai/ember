@@ -244,4 +244,20 @@ bool qwen4exp_step_batch_mrope(
     std::vector<std::vector<float>> & row_hc,
     std::string & error);
 
+// Ordinary prefill variant of the bounded layer-major step. It preserves the
+// raw final HC in `state.hc` and computes only the final row's logits; MTP uses
+// qwen4exp_step_batch_mrope above because verification needs every row.
+bool qwen4exp_step_prefill_batch_mrope(
+    const Qwen4ExpWeights & weights,
+    Qwen4ExpState & state,
+    const std::vector<int32_t> & tokens,
+    const std::vector<std::array<int32_t, 3>> & mrope_positions,
+    std::vector<float> & logits,
+    std::string & error);
+
+// Pure scheduling seam shared by the backend and GPU-free deterministic
+// tests. `batchable_rows` stops at the next vision/capture/MTP barrier.
+size_t qwen4exp_prefill_chunk_rows(size_t batchable_rows, int current_pos,
+                                   int snapshot_pos, bool force_q1);
+
 } // namespace dflash::common

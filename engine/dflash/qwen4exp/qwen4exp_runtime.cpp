@@ -839,14 +839,17 @@ bool qwen4exp_batch_layer(
 }
 } // namespace
 
-bool qwen4exp_step_batch_mrope(
+namespace {
+bool qwen4exp_step_batch_mrope_impl(
         const Qwen4ExpWeights & weights, Qwen4ExpState & state,
         const std::vector<int32_t> & tokens,
         const std::vector<std::array<int32_t, 3>> & mrope_positions,
-        std::vector<std::vector<float>> & row_logits,
-        std::vector<std::vector<float>> & row_hc, std::string & error) {
-    row_logits.clear();
-    row_hc.clear();
+        std::vector<std::vector<float>> * row_logits,
+        std::vector<std::vector<float>> * row_hc,
+        std::vector<float> * final_logits, std::string & error) {
+    if (row_logits) row_logits->clear();
+    if (row_hc) row_hc->clear();
+    if (final_logits) final_logits->clear();
     const size_t rows = tokens.size();
     if (rows < 2 || rows >
             static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch) ||
@@ -891,22 +894,68 @@ bool qwen4exp_step_batch_mrope(
                                   hc_rows, layer_index, error)) return false;
     }
 
-    row_logits.reserve(rows);
-    row_hc.reserve(rows);
-    for (size_t row = 0; row < rows; ++row) {
+    if (row_logits && row_hc) {
+        row_logits->reserve(rows);
+        row_hc->reserve(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            std::vector<float> final, logits;
+            if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
+                        weights.output_hc_down, weights.output_hc_up, nullptr,
+                        final, nullptr, error) ||
+                !matvec(weights.backend, weights.output, final.data(),
+                        kEmbedding, logits, error)) return false;
+            row_hc->push_back(hc_rows[row]);
+            row_logits->push_back(std::move(logits));
+        }
+    } else if (final_logits) {
         std::vector<float> final, logits;
-        if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
+        if (!hc_mix(weights, hc_rows.back(), weights.output_hc_norm,
                     weights.output_hc_down, weights.output_hc_up, nullptr,
                     final, nullptr, error) ||
             !matvec(weights.backend, weights.output, final.data(), kEmbedding,
                     logits, error)) return false;
-        row_hc.push_back(hc_rows[row]);
-        row_logits.push_back(std::move(logits));
+        *final_logits = std::move(logits);
     }
-    state.hc = row_hc.back();
+    state.hc = hc_rows.back();
     state.cur_pos += static_cast<int>(rows);
     state.last_token = tokens.back();
     return true;
+}
+} // namespace
+
+bool qwen4exp_step_batch_mrope(
+        const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::array<int32_t, 3>> & mrope_positions,
+        std::vector<std::vector<float>> & row_logits,
+        std::vector<std::vector<float>> & row_hc, std::string & error) {
+    return qwen4exp_step_batch_mrope_impl(
+        weights, state, tokens, mrope_positions, &row_logits, &row_hc,
+        nullptr, error);
+}
+
+bool qwen4exp_step_prefill_batch_mrope(
+        const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::array<int32_t, 3>> & mrope_positions,
+        std::vector<float> & logits, std::string & error) {
+    return qwen4exp_step_batch_mrope_impl(
+        weights, state, tokens, mrope_positions, nullptr, nullptr, &logits,
+        error);
+}
+
+size_t qwen4exp_prefill_chunk_rows(size_t batchable_rows, int current_pos,
+                                   int snapshot_pos, bool force_q1) {
+    if (batchable_rows == 0) return 0;
+    if (force_q1) return 1;
+    size_t rows = std::min(
+        batchable_rows,
+        static_cast<size_t>(kQwen4ExpFrontierMoeMaxBatch));
+    if (snapshot_pos > current_pos) {
+        const int distance = snapshot_pos - current_pos;
+        rows = std::min(rows, static_cast<size_t>(distance));
+    }
+    return rows < 2 ? 1 : rows;
 }
 
 } // namespace dflash::common

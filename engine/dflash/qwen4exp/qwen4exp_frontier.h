@@ -41,6 +41,15 @@ struct Qwen4ExpFrontierMoeWeights {
 struct Qwen4ExpFrontierMoeGraph;
 
 constexpr int kQwen4ExpFrontierMoeMaxBatch = 16;
+constexpr int kQwen4ExpFrontierMoeMtpBatch = 5;
+constexpr int kQwen4ExpFrontierMoeCachedGraphsPerLayer = 3;
+
+// The runtime permanently owns only q=1, q=5 (the maximum native MTP verify
+// window), and q=16 arenas. Short bounded batches are zero-padded to the next
+// cached width and their padding rows are discarded. MoE rows are independent,
+// so padding cannot change a real row, and arbitrary prompt/MTP remainders
+// cannot grow 48 separate sets of graph arenas.
+int qwen4exp_frontier_moe_cached_width(int n_tokens);
 
 Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create(
     ggml_backend_t backend, const Qwen4ExpFrontierMoeSpec & spec,
