@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import tempfile
 import unittest
@@ -107,6 +108,113 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(words, 2043)
         self.assertEqual(fake.words, [2048, 2043])
         self.assertEqual(attempts[-1]["prompt_tokens"], 2074)
+
+    def test_quant_build_record_binds_complete_ordered_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            shards = []
+            for index, data in enumerate((b"one", b"two"), 1):
+                name = f"qwen-rocmi4-{index:05d}-of-00002.gguf"
+                path = root / name
+                path.write_bytes(data)
+                shards.append({
+                    "path": f"/qwen-work/final/{name}",
+                    "size_bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                })
+            record = {
+                "status": "complete", "mode": "execute",
+                "output": {"shards": shards},
+                "memory_preflight": {
+                    "shard_count": 2, "shard_bytes": [3, 3],
+                    "artifact_bytes": 6,
+                },
+            }
+            record_path = root / "qwen-quant-build-record.json"
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            record_sha = hashlib.sha256(record_path.read_bytes()).hexdigest()
+            inventory, copied = benchmark.model_inventory_from_build_record(
+                record_path, record_sha, root / shards[0]["path"].split("/")[-1],
+                shards[0]["sha256"])
+            self.assertEqual(copied, record_path.read_bytes())
+            self.assertEqual(inventory["shard_count"], 2)
+            self.assertEqual(inventory["aggregate_bytes"], 6)
+            self.assertEqual(
+                [row["filename"] for row in inventory["shards"]],
+                [Path(row["path"]).name for row in shards])
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                benchmark.model_inventory_from_build_record(
+                    record_path, "0" * 64,
+                    root / shards[0]["path"].split("/")[-1],
+                    shards[0]["sha256"])
+
+            record["output"]["shards"].reverse()
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "complete ordered"):
+                benchmark.model_inventory_from_build_record(
+                    record_path,
+                    hashlib.sha256(record_path.read_bytes()).hexdigest(),
+                    root / shards[0]["path"].split("/")[-1],
+                    shards[0]["sha256"])
+
+    def test_runner_sampler_records_live_rss_gtt_uma_and_pages_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            status = root / "proc" / "123" / "status"
+            status.parent.mkdir(parents=True)
+            status.write_text("VmRSS:\t1024 kB\nVmHWM:\t2048 kB\n")
+            meminfo = root / "meminfo"
+            meminfo.write_text(
+                "MemTotal:       131150288 kB\n"
+                "MemAvailable:    10485760 kB\n")
+            pages = root / "pages_limit"
+            pages.write_text("32505856\n")
+            gtt = root / "gtt"
+            gtt.write_text("3145728\n")
+            sampler = benchmark.ResourceSampler(
+                123, proc_root=root / "proc", meminfo_path=meminfo,
+                pages_limit_path=pages, gtt_paths=[gtt])
+            sampler.samples.append(sampler._sample())
+            resources = sampler.summary()
+            self.assertEqual(
+                resources["peak_memory_measurement_method"],
+                "runner_rss_gtt_sampler_v1")
+            self.assertEqual(resources["server_host_pid"], 123)
+            self.assertEqual(resources["runner_memtotal_bytes"], 134297894912)
+            self.assertEqual(resources["runner_gtt_pages_limit"], 32505856)
+            self.assertEqual(resources["runner_gtt_cap_bytes"], 133143986176)
+            self.assertEqual(resources["measured_peak_rss_bytes"], 2048 * 1024)
+            self.assertEqual(resources["measured_peak_gtt_bytes"], 3145728)
+            gate = benchmark.evaluate_memory_gate(
+                resources, gtt_cap_bytes=133143986176)
+            self.assertTrue(gate["passed"], gate)
+
+    def test_memory_gate_rejects_gtt_or_uma_over_live_limits(self) -> None:
+        resources = {
+            "peak_memory_measurement_method": "runner_rss_gtt_sampler_v1",
+            "samples": 10,
+            "server_host_pid": 123,
+            "runner_memtotal_bytes": 134297894912,
+            "runner_gtt_pages_limit": 32505856,
+            "runner_gtt_cap_bytes": 133143986176,
+            "measured_peak_rss_bytes": 100_000_000_000,
+            "measured_peak_gtt_bytes": 100_000_000_000,
+            "measured_peak_uma_bytes": 110_000_000_000,
+        }
+        self.assertTrue(benchmark.evaluate_memory_gate(
+            resources, gtt_cap_bytes=133143986176)["passed"])
+        resources["measured_peak_gtt_bytes"] = 133143986177
+        resources["measured_peak_uma_bytes"] = 133143986177
+        gate = benchmark.evaluate_memory_gate(
+            resources, gtt_cap_bytes=133143986176)
+        self.assertFalse(gate["passed"])
+        self.assertFalse(gate["gtt_fits_required_cap"])
+        resources["measured_peak_gtt_bytes"] = 100_000_000_000
+        resources["measured_peak_uma_bytes"] = 134297894913
+        gate = benchmark.evaluate_memory_gate(
+            resources, gtt_cap_bytes=133143986176)
+        self.assertFalse(gate["passed"])
+        self.assertFalse(gate["uma_fits_host_memtotal"])
 
 
 if __name__ == "__main__":

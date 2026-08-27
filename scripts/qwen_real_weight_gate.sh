@@ -14,7 +14,7 @@ PROFILE_SCRIPT="$REPO/scripts/profile_gpu.sh"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
 
 IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
-MODEL=""; MODEL_SHA256=""
+MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
 MTP=""; MTP_SHA256=""; OUT_DIR=""
 BINARY=/usr/local/bin/ember-dflash
 PORT=18086; MTP_DEPTH=4; DRY_RUN=0
@@ -33,7 +33,9 @@ required:
   --profile-image REF         exact matching-revision ROCm dev image
   --profile-image-digest      exact profiler image ID or RepoDigest suffix
   --model ABS_PATH            exact Qwen target GGUF
-  --model-sha256 HEX          expected target SHA-256
+  --model-sha256 HEX          expected first target-shard SHA-256
+  --model-build-record PATH   completed quant build record for all target shards
+  --model-build-record-sha256 expected quant build-record SHA-256
   --mtp ABS_PATH              exact matching-quant MTP GGUF
   --mtp-sha256 HEX            expected MTP SHA-256
   --out-dir ABS_PATH          new evidence directory (must not exist)
@@ -54,6 +56,8 @@ while (( $# )); do
     --profile-image-digest) PROFILE_IMAGE_DIGEST="${2:?--profile-image-digest needs a value}"; shift 2 ;;
     --model) MODEL="${2:?--model needs a path}"; shift 2 ;;
     --model-sha256) MODEL_SHA256="${2:?--model-sha256 needs a value}"; shift 2 ;;
+    --model-build-record) MODEL_BUILD_RECORD="${2:?--model-build-record needs a path}"; shift 2 ;;
+    --model-build-record-sha256) MODEL_BUILD_RECORD_SHA256="${2:?--model-build-record-sha256 needs a value}"; shift 2 ;;
     --mtp) MTP="${2:?--mtp needs a path}"; shift 2 ;;
     --mtp-sha256) MTP_SHA256="${2:?--mtp-sha256 needs a value}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a path}"; shift 2 ;;
@@ -68,7 +72,8 @@ done
 
 [[ -n "$IMAGE" && -n "$IMAGE_DIGEST" && -n "$PROFILE_IMAGE" &&
    -n "$PROFILE_IMAGE_DIGEST" && -n "$MODEL" &&
-   -n "$MODEL_SHA256" && -n "$MTP" && -n "$MTP_SHA256" &&
+   -n "$MODEL_SHA256" && -n "$MODEL_BUILD_RECORD" &&
+   -n "$MODEL_BUILD_RECORD_SHA256" && -n "$MTP" && -n "$MTP_SHA256" &&
    -n "$OUT_DIR" ]] || die "all image/model/MTP paths and digests plus --out-dir are required"
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] ||
   die "--image-digest must be sha256: plus 64 lowercase hex characters"
@@ -76,10 +81,12 @@ done
   die "--profile-image-digest must be sha256: plus 64 lowercase hex characters"
 [[ "$MODEL_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   die "--model-sha256 must be 64 lowercase hex characters"
+[[ "$MODEL_BUILD_RECORD_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+  die "--model-build-record-sha256 must be 64 lowercase hex characters"
 [[ "$MTP_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   die "--mtp-sha256 must be 64 lowercase hex characters"
-[[ "$MODEL" = /* && "$MTP" = /* && "$OUT_DIR" = /* ]] ||
-  die "--model, --mtp and --out-dir must be absolute paths"
+[[ "$MODEL" = /* && "$MODEL_BUILD_RECORD" = /* && "$MTP" = /* && "$OUT_DIR" = /* ]] ||
+  die "--model, --model-build-record, --mtp and --out-dir must be absolute paths"
 [[ "$BINARY" = /* ]] || die "--binary must be an absolute in-image path"
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )) ||
   die "--port must be 1024..65535"
@@ -94,7 +101,9 @@ plan:
   profiler image      $PROFILE_IMAGE
   profiler digest     $PROFILE_IMAGE_DIGEST
   target model        $MODEL
-  target sha256       $MODEL_SHA256
+  target shard-1 sha  $MODEL_SHA256
+  quant build record  $MODEL_BUILD_RECORD
+  build record sha    $MODEL_BUILD_RECORD_SHA256
   MTP companion       $MTP
   MTP sha256          $MTP_SHA256
   MTP depth           $MTP_DEPTH
@@ -122,7 +131,8 @@ command -v dd >/dev/null || die "dd is required for O_DIRECT integrity reads"
 [[ -x "$GPU_LOCK" ]] || die "missing fixed-purpose GPU lock wrapper: $GPU_LOCK"
 [[ -x "$PRODUCTION" ]] || die "missing production wrapper: $PRODUCTION"
 [[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" ]] || die "gate dependencies are missing"
-[[ -f "$MODEL" && -f "$MTP" ]] || die "model or MTP companion does not exist"
+[[ -f "$MODEL" && -f "$MODEL_BUILD_RECORD" && -f "$MTP" ]] ||
+  die "model, quant build record, or MTP companion does not exist"
 [[ -r /dev/kfd && -d /dev/dri ]] || die "this gate must run on the gfx1151 host"
 [[ ! -e "$OUT_DIR" ]] || die "--out-dir must not already exist (prevents stale approval reuse)"
 if grep -Eq '(^| )(iommu|amd_iommu)=off( |$)' /proc/cmdline; then
@@ -133,6 +143,27 @@ if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 
 fi
 
 mkdir -p "$OUT_DIR"
+python3 - "$MODEL_BUILD_RECORD" "$MODEL_BUILD_RECORD_SHA256" \
+  "$MODEL" "$MODEL_SHA256" "$OUT_DIR/model-inventory.json" \
+  "$OUT_DIR/qwen-quant-build-record.json" "$BENCHMARK" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+record_path, record_sha, model, model_sha, inventory_out, record_out, module_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("ember_benchmark_gate", module_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("cannot load benchmark inventory verifier")
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+try:
+    inventory, raw = module.model_inventory_from_build_record(
+        Path(record_path), record_sha, Path(model), model_sha)
+except (OSError, ValueError) as exc:
+    raise SystemExit(str(exc)) from exc
+with open(inventory_out, "x", encoding="utf-8") as stream:
+    json.dump(inventory, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+with open(record_out, "xb") as stream:
+    stream.write(raw)
+PY
 docker image inspect "$IMAGE" >"$OUT_DIR/image-inspect.json"
 docker image inspect "$PROFILE_IMAGE" >"$OUT_DIR/profile-image-inspect.json"
 python3 - "$OUT_DIR/image-inspect.json" "$IMAGE_DIGEST" \
@@ -290,8 +321,21 @@ print(digest.hexdigest())
 PY
 }
 
-log "verifying target and MTP with O_DIRECT reads"
-[[ "$(direct_sha256 "$MODEL")" == "$MODEL_SHA256" ]] || die "target model digest mismatch"
+log "verifying every ordered target shard and MTP with O_DIRECT reads"
+python3 - "$OUT_DIR/model-inventory.json" <<'PY'
+import hashlib, json, subprocess, sys
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+for row in inventory["shards"]:
+    digest = hashlib.sha256()
+    process = subprocess.Popen(
+        ["dd", f"if={row['path']}", "iflag=direct", "bs=8M", "status=none"],
+        stdout=subprocess.PIPE)
+    assert process.stdout is not None
+    while chunk := process.stdout.read(8 * 1024 * 1024):
+        digest.update(chunk)
+    if process.wait() != 0 or digest.hexdigest() != row["sha256"]:
+        raise SystemExit(f"O_DIRECT shard integrity failed: {row['path']}")
+PY
 [[ "$(direct_sha256 "$MTP")" == "$MTP_SHA256" ]] || die "MTP companion digest mismatch"
 
 for _ in $(seq 1 60); do
@@ -316,13 +360,13 @@ PY
 log "running q=1/native-batch snapshot differential"
 CONTAINER="qwen-real-gate-validate-$$"
 docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
-  -v "$MODEL:/gate/model.gguf:ro" \
+  -v "$(dirname "$MODEL"):/gate/model:ro" \
   -v "$MTP:/gate/mtp.gguf:ro" \
   -v "$OUT_DIR/validation-prompt.txt:/gate/prompt.txt:ro" \
   -e DFLASH_QWEN_MTP=/gate/mtp.gguf \
   -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH" \
   --entrypoint "$BINARY" "$IMAGE" \
-  -m /gate/model.gguf --max-ctx 8192 \
+  -m "/gate/model/$(basename "$MODEL")" --max-ctx 8192 \
   --validate-prompt /gate/prompt.txt --validate-tokens 64 \
   >"$OUT_DIR/differential.json"
 docker rm "$CONTAINER" >/dev/null
@@ -344,32 +388,29 @@ PY
 log "starting exact candidate for clean hard-gate timing"
 CONTAINER="qwen-real-gate-timing-$$"
 docker run -d --name "$CONTAINER" --network host "${GPU_ARGS[@]}" \
-  -v "$MODEL:/gate/model.gguf:ro" -v "$MTP:/gate/mtp.gguf:ro" \
+  -v "$(dirname "$MODEL"):/gate/model:ro" -v "$MTP:/gate/mtp.gguf:ro" \
   -e DFLASH_QWEN_MTP=/gate/mtp.gguf \
   -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH" \
   -e EMBER_IDLE_RECLAIM_SECS=0 \
   --entrypoint "$BINARY" "$IMAGE" \
-  -m /gate/model.gguf --host 127.0.0.1 --port "$PORT" --max-ctx 8192 \
+  -m "/gate/model/$(basename "$MODEL")" --host 127.0.0.1 --port "$PORT" --max-ctx 8192 \
   >/dev/null
-for _ in $(seq 1 360); do
-  if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-    break
-  fi
-  docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true || {
-    docker logs --tail 80 "$CONTAINER" >"$OUT_DIR/timing-server-failure.log" 2>&1 || true
-    die "timing server exited during load"
-  }
-  sleep 5
-done
-curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null ||
-  die "timing server did not become healthy within 30 minutes"
+TIMING_HOST_PID="$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")"
+[[ "$TIMING_HOST_PID" =~ ^[0-9]+$ && "$TIMING_HOST_PID" -gt 1 &&
+   -r "/proc/$TIMING_HOST_PID/status" ]] ||
+  die "timing container host PID is missing or not readable"
 
-python3 "$BENCHMARK" \
-  --endpoint "http://127.0.0.1:$PORT/v1/chat/completions" \
-  --model qwen3.8-flash-next --output "$OUT_DIR/timing.jsonl" \
-  --protocol hard-gate --prefill-target 412.0 --decode-target 39.49 \
-  --require-gate
-python3 - "$OUT_DIR/timing.jsonl" <<'PY'
+if ! python3 "$BENCHMARK" \
+    --endpoint "http://127.0.0.1:$PORT/v1/chat/completions" \
+    --health-endpoint "http://127.0.0.1:$PORT/health" --health-timeout 1800 \
+    --model qwen3.8-flash-next --output "$OUT_DIR/timing.jsonl" \
+    --protocol hard-gate --prefill-target 412.0 --decode-target 39.49 \
+    --server-pid "$TIMING_HOST_PID" --gtt-cap-bytes 133143986176 \
+    --require-gate --require-memory-gate; then
+  docker logs --tail 80 "$CONTAINER" >"$OUT_DIR/timing-server-failure.log" 2>&1 || true
+  die "timing, performance, or memory gate failed"
+fi
+python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 decode = [row for row in rows if row.get("kind") == "request" and
@@ -379,6 +420,23 @@ if len(decode) != 3 or not all(row.get("spec_ran") is True for row in decode):
 summaries = [row for row in rows if row.get("kind") == "summary"]
 if len(summaries) != 1 or not (summaries[0].get("hard_gate") or {}).get("passed"):
     raise SystemExit("machine-readable hard gate is absent or failed")
+summary = summaries[0]
+memory = summary.get("memory_gate") or {}
+resources = summary.get("resources") or {}
+metadata = [row for row in rows if row.get("kind") == "metadata"]
+if (len(metadata) != 1 or metadata[0].get("server_pid_source") != "explicit" or
+        metadata[0].get("container_pid") != resources.get("server_host_pid")):
+    raise SystemExit("timing evidence is not bound to one explicit container host PID")
+if not memory.get("passed"):
+    raise SystemExit(f"runner RSS/GTT/UMA hard fit failed: {memory}")
+if (resources.get("peak_memory_measurement_method") !=
+        "runner_rss_gtt_sampler_v1"):
+    raise SystemExit("timing run lacks runner_rss_gtt_sampler_v1 evidence")
+with open(sys.argv[2], "x", encoding="utf-8") as stream:
+    json.dump({"resources": resources, "hard_fit": memory,
+               "performance": summary["hard_gate"]}, stream,
+              indent=2, sort_keys=True)
+    stream.write("\n")
 PY
 remove_container
 
@@ -411,8 +469,10 @@ def sha(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+inventory = json.load(open(os.path.join(out, "model-inventory.json"), encoding="utf-8"))
+memory = json.load(open(os.path.join(out, "memory-evidence.json"), encoding="utf-8"))
 record = {
-    "schema": "ember.qwen3.8.real-weight-gate.v1",
+    "schema": "ember.qwen3.8.real-weight-gate.v2",
     "passed": True,
     "publish_approved": True,
     "completed_unix": time.time(),
@@ -421,15 +481,25 @@ record = {
                       "ember_revision": revision,
                       "candidate_binary_sha256": binary_sha,
                       "candidate_binary_byte_identical": True},
-    "model": {"path": model, "sha256": model_sha},
+    "model": {"path": model, "sha256": model_sha,
+              "ordered_inventory": inventory},
     "mtp": {"path": mtp, "sha256": mtp_sha, "depth": int(depth)},
     "hard_gates": {"prefill_2074_median_tps": 412.0,
-                   "decode_256_median_tps": 39.49, "samples": 3},
+                   "decode_256_median_tps": 39.49, "samples": 3,
+                   "performance": memory["performance"],
+                   "memory": memory["hard_fit"]},
+    "resources": memory["resources"],
     "evidence": {
         "differential": {"path": "differential.json",
                          "sha256": sha(os.path.join(out, "differential.json"))},
         "timing": {"path": "timing.jsonl",
                    "sha256": sha(os.path.join(out, "timing.jsonl"))},
+        "memory": {"path": "memory-evidence.json",
+                   "sha256": sha(os.path.join(out, "memory-evidence.json"))},
+        "model_inventory": {"path": "model-inventory.json",
+                   "sha256": sha(os.path.join(out, "model-inventory.json"))},
+        "quant_build_record": {"path": "qwen-quant-build-record.json",
+                   "sha256": sha(os.path.join(out, "qwen-quant-build-record.json"))},
         "profile": {"path": "profile/manifest.json",
                     "sha256": sha(os.path.join(out, "profile/manifest.json"))},
     },

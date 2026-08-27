@@ -23,6 +23,8 @@ def dry_args(out: str = "/tmp/qwen-real-gate-never-created") -> list[str]:
         "--profile-image", "candidate-dev:exact",
         "--profile-image-digest", f"sha256:{HEX}",
         "--model", "/models/qwen.gguf", "--model-sha256", HEX,
+        "--model-build-record", "/models/qwen-quant-build-record.json",
+        "--model-build-record-sha256", HEX,
         "--mtp", "/models/qwen-mtp.gguf", "--mtp-sha256", HEX,
         "--out-dir", out,
     ]
@@ -59,6 +61,7 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("candidate-dev:exact", result.stdout)
         self.assertIn(f"sha256:{HEX}", result.stdout)
         self.assertIn("/models/qwen.gguf", result.stdout)
+        self.assertIn("/models/qwen-quant-build-record.json", result.stdout)
         self.assertIn("/models/qwen-mtp.gguf", result.stdout)
         self.assertIn("no files, GPU, docker, sudo", result.stdout)
         self.assertNotIn("FORBIDDEN", result.stderr)
@@ -106,6 +109,10 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertLess(timing, profile)
         self.assertIn("never timing evidence", body)
         self.assertIn('--image "$PROFILE_IMAGE"', body)
+        self.assertIn('--server-pid "$TIMING_HOST_PID"', body)
+        self.assertIn("--health-endpoint", body)
+        self.assertIn("--require-memory-gate", body)
+        self.assertIn("runner_rss_gtt_sampler_v1", body)
 
     def test_candidate_and_profiler_images_are_exactly_bound(self) -> None:
         body = GATE.read_text(encoding="utf-8")
@@ -122,11 +129,22 @@ class QwenRealWeightGateTest(unittest.TestCase):
         gate = GATE.read_text(encoding="utf-8")
         profile = PROFILE.read_text(encoding="utf-8")
         self.assertIn('"iflag=direct"', gate)
+        self.assertIn('inventory["shards"]', gate)
+        self.assertIn("model-inventory.json", gate)
+        self.assertIn("qwen-quant-build-record.json", gate)
         self.assertIn("DFLASH_QWEN_MTP=/gate/mtp.gguf", gate)
         self.assertIn("--mtp PATH", profile)
         self.assertIn("DFLASH_QWEN_MTP=/pmtp/", profile)
         self.assertIn("--draft and --mtp are mutually exclusive", profile)
         self.assertIn('--pmc "$counter"', profile)
+
+    def test_approval_embeds_measured_memory_and_hard_fit(self) -> None:
+        body = GATE.read_text(encoding="utf-8")
+        self.assertIn('"memory": memory["hard_fit"]', body)
+        self.assertIn('"resources": memory["resources"]', body)
+        self.assertIn('"memory-evidence.json"', body)
+        self.assertIn('"model_inventory":', body)
+        self.assertIn('"quant_build_record":', body)
 
     def test_profile_mtp_dry_run_is_gpu_free_and_rejects_two_drafters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
