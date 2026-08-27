@@ -11,7 +11,8 @@
  *     q = low_u4 + 16 * high_i4
  *
  * Source: AMD GPUOpen machine-readable ISA archive, amdgpu_isa_rdna3_5.xml
- * dated 2026-08-04, downloaded from
+ * (archive-entry timestamp 2026-08-04, internal release date 2026-02-20),
+ * downloaded from
  * https://gpuopen.com/download/machine-readable-isa/latest/
  *
  * This helper only exposes that integer identity.  It does not quantize an

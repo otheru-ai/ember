@@ -37,7 +37,9 @@ until device differential tests and alternating A/B timing pass.
 The instruction and fragment contract is pinned to AMD GPUOpen's
 `machine-readable-isa/latest` archive downloaded 2026-08-27 (SHA-256
 `82404f1126761b7877595b622afa7e1f311f2f41e89a3abe9aaf8ad045c082e2`),
-specifically `amdgpu_isa_rdna3_5.xml` dated 2026-08-04. It defines
+specifically `amdgpu_isa_rdna3_5.xml` (archive-entry timestamp 2026-08-04;
+internal release date 2026-02-20; schema 1.1.1; RDNA 3.5 architecture ID 9).
+It defines
 `V_WMMA_I32_16X16X16_IU4` as a VOP3P WMMA instruction with 64-bit A/B lane
 operands and a 256-bit I32 accumulator, and requires two replicated A/B copies
 in wave32. Do not substitute the RDNA4 fragment layout on gfx1151.

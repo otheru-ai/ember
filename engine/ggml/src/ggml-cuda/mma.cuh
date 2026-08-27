@@ -1336,7 +1336,8 @@ namespace ggml_cuda_mma {
     static __device__ __forceinline__ void mma_iu4(
             tile<16, 16, int, dl_d> & D, const tile<16, 4, int, dl_ab> & A, const tile<16, 4, int, dl_ab> & B) {
 #if defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
-        // AMD machine-readable ISA, amdgpu_isa_rdna3_5.xml (2026-08-04):
+        // AMD machine-readable ISA, amdgpu_isa_rdna3_5.xml (internal release
+        // 2026-02-20; archive-entry timestamp 2026-08-04):
         // V_WMMA_I32_16X16X16_IU4 consumes one 64-bit A and B fragment per
         // lane, produces one 256-bit I32 accumulator, and requires two A/B
         // copies across a wave32.  DATA_LAYOUT_I_MAJOR_MIRRORED supplies the
