@@ -136,10 +136,22 @@ python3 scripts/qwen_bakeoff.py \
 The sweep uses positive projection-removal strengths 0.25, 0.5, 0.75, and
 1.0 over all 48 layers, upper 24, upper 12, and the 36 non-QSA layers. It first
 selects an intervention configuration using only sweep-validation. That fixed
-configuration is then compared as ROCMI4 exact-dequant, ROCmFP4 FAST
-exact-dequant, and ROCMI4 W4A4. W4A4 and the stock model are performance
-controls and are final-ineligible. Exactly one already-selected eligible arm
-is evaluated on final-heldout.
+configuration then runs a six-arm exact-runtime cross-pair: each of the
+ROCMI4+Q6_K, routed-expert ROCmFP4 FAST+Q6_K, and broad-matrix ROCmFP4
+FAST+Q6_K main artifacts is measured with both the homogeneous ROCMI4 and
+homogeneous ROCmFP4 FAST MTP companions at depth 3. Main format and MTP format
+are independent experiment variables; the release profile's per-arm MTP field
+is only the companion build default.
+
+After the winning main/MTP pair is externally attested, the same exact main
+and companion inventories are reused to sweep MTP depths 1, 2, 3, and 4. The
+assessment, artifact/runtime identity, phase ledger, and final confirmation
+all bind both MTP matrix contract and depth. Only the sealed depth winner can
+unlock final-heldout. ROCMI4 W4A4 remains a separately inventoried auxiliary
+performance control: it is lossy, final-ineligible, and never participates in
+the exact-runtime winner ledger. The stock model is likewise final-ineligible.
+Exactly one already-selected exact-runtime pair/depth is evaluated on
+final-heldout.
 
 The ROCmFP4 FAST post-encoding audit now dispatches through the actual stored
 destination type and its cross-decoder GPU-free regression passes. The arm is
@@ -169,13 +181,26 @@ JSONL files and never quantizes or publishes anything. Use `--dry-run` first;
 the printed plan is side-effect free. On the certification host the pinned
 corpus directory is `/srv/ember/qwen3.8-otheru-corpus-a3c6a728`.
 
-After every required row is measured, adjudicate it with:
+Each measured candidate is reduced to a digest-bound assessment, and the
+externally attested ledgers are selected serially as `sweep`, `format`, then
+`mtp-depth`. `unlock-final` accepts only the sealed MTP-depth ledger; it does
+not accept the intermediate format ledger. The checked recipe uses schema v2,
+result evidence v4, candidate assessments v2, and ledgers v3 so earlier records
+cannot be mistaken for depth-bound evidence.
+
+The stage commands follow this shape (each later command also supplies the
+exact prior-ledger and attestation-bundle paths and SHA-256 values):
 
 ```sh
 python3 scripts/qwen_bakeoff.py \
   --plan /root/qwen-work/qwen-bakeoff-plan.json \
-  --results /root/qwen-work/qwen-bakeoff-results.json \
-  --output /root/qwen-work/qwen-bakeoff-decision.json
+  --stage mtp-depth \
+  --results /root/qwen-work/qwen-mtp-depth-assessments.json \
+  --prior-ledger /root/qwen-work/format-ledger.json \
+  --prior-ledger-sha256 '<SHA256>' \
+  --prior-attestation-bundle /root/qwen-work/format-ledger.bundle.json \
+  --prior-attestation-bundle-sha256 '<SHA256>' \
+  --output /root/qwen-work/mtp-depth-ledger.json
 ```
 
 Every row must include at least three prefill and decode samples, audited

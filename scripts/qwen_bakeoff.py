@@ -27,6 +27,14 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RECIPE = ROOT / "share" / "quant_eval" / "qwen3.8-flash-next-bakeoff.json"
 DEFAULT_PROFILE = (ROOT / "share" / "release_profiles" /
                    "qwen3.8-flash-next-rocmi4-strix-halo.json")
+RECIPE_SCHEMA_VERSION = 2
+PLAN_SCHEMA_VERSION = 2
+RESULT_SCHEMA = "ember.qwen3.8.sequential-bakeoff-result.v4"
+ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment.v2"
+LEDGER_SCHEMA = "ember.qwen3.8.sequential-bakeoff-ledger.v3"
+SUPPORTED_MTP_MATRIX_CONTRACTS = {
+    "Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST",
+}
 QUALITY_SPEC = importlib.util.spec_from_file_location(
     "ember_qwen_quality_judge", ROOT / "scripts" / "qwen_quality_judge.py")
 if QUALITY_SPEC is None or QUALITY_SPEC.loader is None:
@@ -146,7 +154,7 @@ def make_plan(
     recipe_path: Path, corpus_dir: Path, profile_path: Path = DEFAULT_PROFILE,
 ) -> dict[str, Any]:
     recipe = read_object(recipe_path, "bakeoff recipe")
-    if recipe.get("schema_version") != 1:
+    if recipe.get("schema_version") != RECIPE_SCHEMA_VERSION:
         raise BakeoffError("unsupported bakeoff recipe")
     profile = read_object(profile_path, "release profile")
     profile_rows = profile.get("quantization", {}).get("performance_bakeoff", {}).get("arms")
@@ -157,25 +165,74 @@ def make_plan(
         if isinstance(row, dict) and isinstance(row.get("id"), str)
     }
     profile_sha = sha256(profile_path)
-    format_arms: list[dict[str, Any]] = []
-    for recipe_arm in recipe.get("format_arms", []):
+    pairing = recipe.get("mtp_depth_sweep")
+    if (not isinstance(pairing, dict)
+            or pairing.get("pairing_reference_depth") != 3
+            or pairing.get("depths") != [1, 2, 3, 4]
+            or pairing.get("selected_exact_runtime_pair_only") is not True
+            or pairing.get("reuse_exact_main_and_companion_artifacts") is not True
+            or pairing.get("runtime_mode") != "exact_dequant"
+            or pairing.get("final_release_eligible") is not True):
+        raise BakeoffError("MTP depth sweep must pin exact-runtime depths 1..4 after depth-3 pairing")
+    supported_mtp = set(profile.get("quantization", {}).get(
+        "performance_bakeoff", {}).get("supported_mtp_matrix_contracts", []))
+    if supported_mtp != SUPPORTED_MTP_MATRIX_CONTRACTS:
+        raise BakeoffError("release profile does not declare both supported MTP contracts")
+
+    def normalized_arm(recipe_arm: Any, *, auxiliary: bool) -> dict[str, Any]:
         if not isinstance(recipe_arm, dict):
-            raise BakeoffError("bakeoff format arm must be an object")
+            raise BakeoffError("bakeoff arm must be an object")
         quantization_arm = recipe_arm.get("quantization_arm")
         profile_arm = profile_arms.get(quantization_arm)
         overrides = profile_arm.get("per_tensor_overrides") if profile_arm else None
+        mtp_contract = recipe_arm.get("mtp_matrix_quant_contract")
+        mtp_depth = recipe_arm.get("mtp_depth")
         if (not isinstance(overrides, list)
-                or recipe_arm.get("mtp_matrix_quant_contract") !=
-                profile_arm.get("mtp_matrix_quant_contract")):
+                or mtp_contract not in SUPPORTED_MTP_MATRIX_CONTRACTS
+                or isinstance(mtp_depth, bool) or not isinstance(mtp_depth, int)
+                or not 1 <= mtp_depth <= 4):
             raise BakeoffError(
-                f"recipe arm {recipe_arm.get('id')} is not bound to one matching profile arm")
+                f"recipe arm {recipe_arm.get('id')} is not bound to one supported main/MTP pair")
+        if auxiliary:
+            if (recipe_arm.get("id") != "rocmi4-w4a4"
+                    or recipe_arm.get("runtime_mode") != "w4a4_opt_in"
+                    or recipe_arm.get("classification") != "auxiliary_performance_control_only"
+                    or recipe_arm.get("included_in_exact_runtime_winner_ledger") is not False
+                    or recipe_arm.get("final_release_eligible") is not False):
+                raise BakeoffError("auxiliary control could enter the exact-runtime winner ledger")
+        elif (recipe_arm.get("runtime_mode") != "exact_dequant"
+              or recipe_arm.get("final_release_eligible") is not True
+              or mtp_depth != pairing["pairing_reference_depth"]):
+            raise BakeoffError("selectable format arms must be exact-runtime depth-3 pairs")
         serialized = json.dumps(overrides, separators=(",", ":"), ensure_ascii=True)
-        format_arms.append({
+        return {
             **recipe_arm,
             "profile_sha256": profile_sha,
             "quantization_overrides_sha256": hashlib.sha256(
                 serialized.encode("utf-8")).hexdigest(),
-        })
+        }
+
+    format_rows = recipe.get("format_arms")
+    if not isinstance(format_rows, list) or not format_rows:
+        raise BakeoffError("bakeoff recipe has no exact-runtime format arms")
+    format_arms = [normalized_arm(row, auxiliary=False) for row in format_rows]
+    if len({row.get("id") for row in format_arms}) != len(format_arms):
+        raise BakeoffError("exact-runtime format arm ids must be unique")
+    expected_pairs = {
+        (main, mtp) for main in {
+            "rocmi4-q6k-embedding-head",
+            "rocmfp4-fast-routed-experts-q6k-embedding-head",
+            "rocmfp4-fast-matrix-q6k-embedding-head",
+        } for mtp in SUPPORTED_MTP_MATRIX_CONTRACTS
+    }
+    actual_pairs = {(row["quantization_arm"], row["mtp_matrix_quant_contract"])
+                    for row in format_arms}
+    if actual_pairs != expected_pairs or len(format_arms) != len(expected_pairs):
+        raise BakeoffError("exact-runtime format arms must cover the full main/MTP cross-pair")
+    auxiliary_rows = recipe.get("auxiliary_controls")
+    if not isinstance(auxiliary_rows, list) or len(auxiliary_rows) != 1:
+        raise BakeoffError("bakeoff recipe must declare exactly one auxiliary W4A4 control")
+    auxiliary_controls = [normalized_arm(auxiliary_rows[0], auxiliary=True)]
     manifest_names = recipe.get("corpus_manifests") or {}
     selection_name = manifest_names.get("selection")
     if not isinstance(selection_name, str):
@@ -242,7 +299,7 @@ def make_plan(
                 ],
             })
     return {
-        "schema_version": 1,
+        "schema_version": PLAN_SCHEMA_VERSION,
         "phase_scope": "selection",
         "status": "planned_unmeasured",
         "recipe": {"path": str(recipe_path.resolve()), "sha256": sha256(recipe_path),
@@ -256,21 +313,32 @@ def make_plan(
         "direction_basis": direction_basis,
         "sweep_configurations": configurations,
         "format_arms": format_arms,
-        "required_result_stages": ["stock", "sweep", "format"],
+        "mtp_depth_configurations": [
+            {
+                "id": f"mtp-depth-{depth}",
+                "mtp_depth": depth,
+                "selected_pair_source": "sealed_format_ledger",
+                "runtime_mode": pairing["runtime_mode"],
+                "final_release_eligible": pairing["final_release_eligible"],
+            }
+            for depth in pairing["depths"]
+        ],
+        "auxiliary_controls": auxiliary_controls,
+        "required_result_stages": ["stock", "sweep", "format", "mtp-depth"],
         "publication_allowed": False,
     }
 
 
 def make_final_plan(selection: dict[str, Any], corpus_dir: Path,
-                    format_descriptor: dict[str, Any]) -> dict[str, Any]:
-    """Unlock final-heldout only after the format winner is sealed.
+                    depth_descriptor: dict[str, Any]) -> dict[str, Any]:
+    """Unlock final-heldout only after the main/MTP pair and depth are sealed.
 
     ``selection`` contains no final corpus pathname or digest.  The caller must
-    first supply a pinned, externally-attested format ledger; only then is the
-    final-only manifest opened and incorporated into a new plan.
+    first supply a pinned, externally-attested MTP-depth ledger; only then is
+    the final-only manifest opened and incorporated into a new plan.
     """
     selection = verify_plan(selection)
-    prior, prior_digest = read_prior_ledger(format_descriptor, "format", selection)
+    prior, prior_digest = read_prior_ledger(depth_descriptor, "mtp-depth", selection)
     recipe = selection["recipe"]["value"]
     final_name = (recipe.get("corpus_manifests") or {}).get("final")
     if not isinstance(final_name, str):
@@ -282,16 +350,19 @@ def make_final_plan(selection: dict[str, Any], corpus_dir: Path,
     if final["sha256"] == sweep["sha256"]:
         raise BakeoffError("sweep and final corpora must differ")
     return {
-        "schema_version": 1,
+        "schema_version": PLAN_SCHEMA_VERSION,
         "phase_scope": "final_confirmation",
-        "status": "final_heldout_unlocked_after_format_selection",
+        "status": "final_heldout_unlocked_after_mtp_depth_selection",
         "selection_plan": selection,
         "selection_plan_sha256": canonical_sha256(selection),
-        "sealed_format_ledger": {
-            "descriptor": format_descriptor,
+        "sealed_recipe_ledger": {
+            "descriptor": depth_descriptor,
             "sha256": prior_digest,
-            "selected_artifact_identity_sha256": canonical_sha256(
-                prior["selected_artifact_identity"]),
+            "selected_runtime_identity_sha256": canonical_sha256({
+                "artifact_identity": prior["selected_artifact_identity"],
+                "mtp_matrix_quant_contract": prior["selected_mtp_matrix_quant_contract"],
+                "mtp_depth": prior["selected_mtp_depth"],
+            }),
         },
         "final_corpus_manifest": {
             "path": str(manifest_path.resolve()), "sha256": sha256(manifest_path)},
@@ -309,9 +380,9 @@ def verify_plan(plan: dict[str, Any]) -> dict[str, Any]:
         selection = verify_plan(selection)
         if plan.get("selection_plan_sha256") != canonical_sha256(selection):
             raise BakeoffError("final plan selection-plan commitment differs")
-        sealed = plan.get("sealed_format_ledger") or {}
+        sealed = plan.get("sealed_recipe_ledger") or {}
         final_manifest = plan.get("final_corpus_manifest") or {}
-        if (set(sealed) != {"descriptor", "sha256", "selected_artifact_identity_sha256"}
+        if (set(sealed) != {"descriptor", "sha256", "selected_runtime_identity_sha256"}
                 or set(final_manifest) != {"path", "sha256"}):
             raise BakeoffError("final plan descriptors are malformed")
         if sha256(Path(final_manifest["path"])) != final_manifest["sha256"]:
@@ -493,8 +564,8 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
     descriptor = row.get("evidence_manifest")
     if (not isinstance(descriptor, dict)
             or set(descriptor) != {"path", "sha256", "schema"}
-            or descriptor.get("schema") != "ember.qwen3.8.sequential-bakeoff-result.v3"):
-        raise BakeoffError("measurement lacks a v3 evidence-manifest descriptor")
+            or descriptor.get("schema") != RESULT_SCHEMA):
+        raise BakeoffError("measurement lacks a v4 evidence-manifest descriptor")
     manifest, digest = pinned_json(
         {"path": descriptor["path"], "sha256": descriptor["sha256"]},
         "measurement evidence manifest")
@@ -509,6 +580,8 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "intervention_manifest_sha256": row.get("intervention_manifest_sha256"),
         "build_record_sha256": row.get("build_record_sha256"),
         "companion_inventory_sha256": row.get("companion_inventory_sha256"),
+        "mtp_matrix_quant_contract": row.get("mtp_matrix_quant_contract"),
+        "mtp_depth": row.get("mtp_depth"),
         "profile_sha256": row.get("profile_sha256"),
         "builder_identity": row.get("builder_identity"),
         "runtime_identity": row.get("runtime_identity"),
@@ -616,7 +689,8 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
         companion_bytes[role] = size
     hardware_mtp = hardware.get("mtp") or {}
     if (hardware_mtp.get("path") != (artifacts.get("mtp") or {}).get("path")
-            or hardware_mtp.get("sha256") != (artifacts.get("mtp") or {}).get("sha256")):
+            or hardware_mtp.get("sha256") != (artifacts.get("mtp") or {}).get("sha256")
+            or hardware_mtp.get("depth") != row.get("mtp_depth")):
         raise BakeoffError("hardware run used a different MTP companion")
 
     derived = {**facts, "differential_correctness_pass": True,
@@ -642,6 +716,7 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
         "evaluated_prefill_tokens": facts["evaluated_prefill_tokens"],
         "completion_tokens": facts["completion_tokens"],
         "mtp_spec_ran": facts["mtp_spec_ran"],
+        "mtp_depth": row.get("mtp_depth"),
     }:
         raise BakeoffError("measurement manifest contract differs from pinned timing")
     if row.get("stage") == "stock":
@@ -887,7 +962,7 @@ def assess(row: dict[str, Any], gates: dict[str, Any], corpus_sha: str) -> dict[
 
 def candidate_artifact_identity(row: dict[str, Any],
                                 metrics: dict[str, Any]) -> dict[str, Any]:
-    """Identity of the bytes measured, independent of the measurement phase."""
+    """Identity of the bytes plus the exact MTP runtime pairing measured."""
     builder, _runtime = validate_revision_identities(row)
     identity = {
         "candidate_id": row.get("candidate_id"),
@@ -897,6 +972,8 @@ def candidate_artifact_identity(row: dict[str, Any],
         "quantization_overrides_sha256": row.get("quantization_overrides_sha256"),
         "model_inventory_sha256": row.get("model_inventory_sha256"),
         "companion_inventory_sha256": row.get("companion_inventory_sha256"),
+        "mtp_matrix_quant_contract": row.get("mtp_matrix_quant_contract"),
+        "mtp_depth": row.get("mtp_depth"),
         "artifact_bytes": metrics.get("artifact_bytes"),
         "companion_artifact_bytes": (metrics.get("measurement_evidence") or {}).get(
             "derived", {}).get("companion_artifact_bytes"),
@@ -917,7 +994,11 @@ def candidate_artifact_identity(row: dict[str, Any],
                    for key in hex_keys)
             or not isinstance(identity["artifact_bytes"], int)
             or not isinstance(identity["companion_artifact_bytes"], dict)
-            or not isinstance(identity["quantization_arm"], str)):
+            or not isinstance(identity["quantization_arm"], str)
+            or identity["mtp_matrix_quant_contract"] not in SUPPORTED_MTP_MATRIX_CONTRACTS
+            or isinstance(identity["mtp_depth"], bool)
+            or not isinstance(identity["mtp_depth"], int)
+            or not 1 <= identity["mtp_depth"] <= 4):
         raise BakeoffError("candidate lacks exact artifact/build/inventory provenance")
     return identity
 
@@ -938,6 +1019,8 @@ def decision_inputs(row: dict[str, Any], metrics: dict[str, Any]) -> dict[str, A
         "completion_tokens": derived.get("completion_tokens"),
         "mtp_spec_ran": derived.get("mtp_spec_ran"),
         "mtp_accept_rates": derived.get("mtp_accept_rates"),
+        "mtp_matrix_quant_contract": row.get("mtp_matrix_quant_contract"),
+        "mtp_depth": row.get("mtp_depth"),
         "artifact_bytes": derived.get("artifact_bytes"),
         "companion_artifact_bytes": derived.get("companion_artifact_bytes"),
         "enabled_companions": row.get("enabled_companions"),
@@ -952,7 +1035,7 @@ def derive_assessment(inputs: dict[str, Any], gates: dict[str, Any]) -> dict[str
     prefill = inputs.get("prefill_tps_samples")
     decode = inputs.get("decode_tps_samples")
     accepts = inputs.get("mtp_accept_rates")
-    if (stage not in {"stock", "sweep", "format", "final"}
+    if (stage not in {"stock", "sweep", "format", "mtp-depth", "final"}
             or inputs.get("differential_correctness_pass") is not True
             or inputs.get("audited_quality_pass") is not True
             or not isinstance(prefill, list) or len(prefill) != count
@@ -964,6 +1047,11 @@ def derive_assessment(inputs: dict[str, Any], gates: dict[str, Any]) -> dict[str
             or any(isinstance(rate, bool) or not isinstance(rate, (int, float))
                    or not 0.0 < float(rate) < 1.0 for rate in accepts)):
         raise BakeoffError("assessment decision inputs violate exact correctness/shape/spec gates")
+    if (inputs.get("mtp_matrix_quant_contract") not in SUPPORTED_MTP_MATRIX_CONTRACTS
+            or isinstance(inputs.get("mtp_depth"), bool)
+            or not isinstance(inputs.get("mtp_depth"), int)
+            or not 1 <= inputs["mtp_depth"] <= 4):
+        raise BakeoffError("assessment decision inputs lack an exact supported MTP pairing")
     prefill_values = [finite_number(value, "attested prefill sample") for value in prefill]
     decode_values = [finite_number(value, "attested decode sample") for value in decode]
     quality = finite_number(inputs.get("quality_score"), "attested quality score")
@@ -1060,7 +1148,7 @@ def make_candidate_assessment(plan: dict[str, Any], row: dict[str, Any]) -> dict
         if not isinstance(quality_stock, dict):
             raise BakeoffError("quality contract lacks its stock-control identity")
     return {
-        "schema": "ember.qwen3.8.candidate-assessment.v1",
+        "schema": ASSESSMENT_SCHEMA,
         "status": "complete",
         "phase_plan_sha256": canonical_sha256(verified),
         "selection_plan_sha256": canonical_sha256(selection),
@@ -1071,6 +1159,7 @@ def make_candidate_assessment(plan: dict[str, Any], row: dict[str, Any]) -> dict
         "final_release_eligible": row.get("final_release_eligible"),
         "runtime_mode": row.get("runtime_mode"),
         "mtp_matrix_quant_contract": row.get("mtp_matrix_quant_contract"),
+        "mtp_depth": row.get("mtp_depth"),
         "corpus_sha256": corpus["sha256"],
         "measurement_manifest_sha256": row["evidence_manifest"]["sha256"],
         "quality_contract_sha256": None if stage == "stock" else
@@ -1140,7 +1229,7 @@ def assessment_rows(results: dict[str, Any], stages: set[str], plan: dict[str, A
     rows, digests = [], []
     for descriptor in descriptors:
         row, digest = read_attested_json(
-            descriptor, "candidate assessment", "ember.qwen3.8.candidate-assessment.v1",
+            descriptor, "candidate assessment", ASSESSMENT_SCHEMA,
             recipe)
         if row.get("stage") not in stages:
             raise BakeoffError("phase assessments contain a candidate from another stage")
@@ -1159,9 +1248,9 @@ def assessment_rows(results: dict[str, Any], stages: set[str], plan: dict[str, A
 def ledger_base(phase: str, plan: dict[str, Any], rows: list[dict[str, Any]],
                 digests: list[str]) -> dict[str, Any]:
     return {
-        "schema": "ember.qwen3.8.sequential-bakeoff-ledger.v2",
+        "schema": LEDGER_SCHEMA,
         "phase": phase,
-        "status": f"{phase}_selection_complete",
+        "status": f"{phase.replace('-', '_')}_selection_complete",
         "plan_sha256": canonical_sha256(plan),
         "assessments": rows,
         "assessment_sha256": digests,
@@ -1174,7 +1263,7 @@ def ledger_base(phase: str, plan: dict[str, Any], rows: list[dict[str, Any]],
 def read_prior_ledger(descriptor: dict[str, Any], phase: str,
                       plan: dict[str, Any]) -> tuple[dict[str, Any], str]:
     ledger, digest = read_attested_json(
-        descriptor, f"{phase} prior ledger", "ember.qwen3.8.sequential-bakeoff-ledger.v2",
+        descriptor, f"{phase} prior ledger", LEDGER_SCHEMA,
         plan["recipe"]["value"])
     if (ledger.get("phase") != phase or ledger.get("plan_sha256") != canonical_sha256(plan)
             or ledger.get("publication_allowed") is not False
@@ -1217,8 +1306,14 @@ def verify_ledger_semantics(plan: dict[str, Any], ledger: dict[str, Any]) -> Non
             raise BakeoffError("format ledger does not embed its compact sweep ledger")
         verify_ledger_semantics(plan, prior)
         expected = select_format_from_assessments(plan, rows, digests, prior)
+    elif phase == "mtp-depth":
+        prior = ledger.get("prior_format_ledger")
+        if not isinstance(prior, dict):
+            raise BakeoffError("MTP-depth ledger does not embed its compact format ledger")
+        verify_ledger_semantics(plan, prior)
+        expected = select_mtp_depth_from_assessments(plan, rows, digests, prior)
     else:
-        raise BakeoffError("only completed sweep/format ledgers may select a later phase")
+        raise BakeoffError("only completed sweep/format/MTP-depth ledgers may select a later phase")
     if ledger != expected:
         raise BakeoffError("prior ledger semantics do not reproduce from compact assessments")
 
@@ -1307,6 +1402,7 @@ def select_format_from_assessments(plan: dict[str, Any], rows: list[dict[str, An
                 or artifact.get("quantization_overrides_sha256") != arm["quantization_overrides_sha256"]
                 or artifact.get("profile_sha256") != arm["profile_sha256"]
                 or row.get("mtp_matrix_quant_contract") != arm["mtp_matrix_quant_contract"]
+                or row.get("mtp_depth") != arm["mtp_depth"]
                 or row.get("final_release_eligible") != arm["final_release_eligible"]
                 or row.get("quality_stock_identity") != prior["stock_identity"]):
             raise BakeoffError("format assessment provenance differs from the selected intervention/arm")
@@ -1341,18 +1437,97 @@ def select_format(plan: dict[str, Any], results: dict[str, Any],
     return select_format_from_assessments(plan, rows, digests, prior)
 
 
+def _artifact_without_depth(identity: dict[str, Any]) -> dict[str, Any]:
+    """Return reusable byte identity, excluding measurement label and runtime depth."""
+    return {key: value for key, value in identity.items()
+            if key not in {"candidate_id", "mtp_depth"}}
+
+
+def select_mtp_depth_from_assessments(
+    plan: dict[str, Any], rows: list[dict[str, Any]], digests: list[str],
+    prior: dict[str, Any],
+) -> dict[str, Any]:
+    configurations = {item["id"]: item for item in plan["mtp_depth_configurations"]}
+    if ({row.get("row_id") for row in rows} != set(configurations)
+            or len(rows) != len(configurations)):
+        raise BakeoffError("MTP-depth selection requires depths 1 through 4 exactly once")
+    selected_arm = prior.get("selected_arm")
+    selected_artifact = prior.get("selected_artifact_identity")
+    if not isinstance(selected_arm, dict) or not isinstance(selected_artifact, dict):
+        raise BakeoffError("format ledger lacks its selected exact-runtime pair")
+    common_direction = _same_direction(rows, prior.get("direction_identity"))
+    if any(row.get("runtime_identity") != prior.get("runtime_identity") for row in rows):
+        raise BakeoffError("MTP-depth assessments changed the format-selected runtime engine")
+    assessed = []
+    for row in rows:
+        configuration = configurations[row["row_id"]]
+        artifact = row.get("artifact_identity") or {}
+        if (row.get("stage") != "mtp-depth"
+                or row.get("configuration_id") != prior.get("selected_configuration_id")
+                or row.get("arm_id") != prior.get("selected_arm_id")
+                or row.get("runtime_mode") != configuration["runtime_mode"]
+                or row.get("final_release_eligible") is not
+                configuration["final_release_eligible"]
+                or row.get("mtp_matrix_quant_contract") !=
+                selected_arm.get("mtp_matrix_quant_contract")
+                or row.get("mtp_depth") != configuration["mtp_depth"]
+                or artifact.get("mtp_matrix_quant_contract") !=
+                selected_arm.get("mtp_matrix_quant_contract")
+                or artifact.get("mtp_depth") != configuration["mtp_depth"]
+                or _artifact_without_depth(artifact) !=
+                _artifact_without_depth(selected_artifact)
+                or row.get("quality_stock_identity") != prior.get("stock_identity")):
+            raise BakeoffError(
+                "MTP-depth assessment changed the selected main/companion artifacts or pairing")
+        assessed.append((row, configuration, _metrics(row, plan)))
+    eligible = [(row, configuration, metrics)
+                for row, configuration, metrics in assessed
+                if configuration["final_release_eligible"] and metrics["passes"]]
+    if not eligible:
+        raise BakeoffError("no MTP depth passed all measured gates")
+    winner, configuration, metrics = sorted(
+        eligible, key=lambda item: (-item[2]["quality_score"],
+                                    -item[2]["decode_median_tps"],
+                                    -item[2]["prefill_median_tps"],
+                                    item[1]["mtp_depth"]))[0]
+    return {**ledger_base("mtp-depth", plan, rows, digests),
+            "prior_format_ledger": prior,
+            "prior_format_ledger_sha256": canonical_sha256(prior),
+            "stock_identity": prior["stock_identity"],
+            "direction_identity": common_direction,
+            "runtime_identity": prior["runtime_identity"],
+            "selected_configuration_id": prior["selected_configuration_id"],
+            "selected_configuration": prior["selected_configuration"],
+            "selected_arm_id": prior["selected_arm_id"],
+            "selected_arm": selected_arm,
+            "selected_depth_id": winner["row_id"],
+            "selected_mtp_matrix_quant_contract": selected_arm[
+                "mtp_matrix_quant_contract"],
+            "selected_mtp_depth": configuration["mtp_depth"],
+            "selected_artifact_identity": winner["artifact_identity"],
+            "selected_metrics": metrics}
+
+
+def select_mtp_depth(plan: dict[str, Any], results: dict[str, Any],
+                     format_descriptor: dict[str, Any]) -> dict[str, Any]:
+    plan = verify_plan(plan)
+    prior, _ = read_prior_ledger(format_descriptor, "format", plan)
+    rows, digests = assessment_rows(results, {"mtp-depth"}, plan)
+    return select_mtp_depth_from_assessments(plan, rows, digests, prior)
+
+
 def confirm_final(plan: dict[str, Any], results: dict[str, Any],
-                  format_descriptor: dict[str, Any]) -> dict[str, Any]:
+                  depth_descriptor: dict[str, Any]) -> dict[str, Any]:
     final_plan = verify_plan(plan)
     if final_plan.get("phase_scope") != "final_confirmation":
         raise BakeoffError("final confirmation requires a separately unlocked final plan")
     selection = final_plan["selection_plan"]
-    sealed = final_plan["sealed_format_ledger"]
-    supplied = format_descriptor.get("subject", {}) if isinstance(format_descriptor, dict) else {}
+    sealed = final_plan["sealed_recipe_ledger"]
+    supplied = depth_descriptor.get("subject", {}) if isinstance(depth_descriptor, dict) else {}
     if (supplied.get("sha256") != sealed["sha256"]
-            or format_descriptor != sealed["descriptor"]):
+            or depth_descriptor != sealed["descriptor"]):
         raise BakeoffError("final confirmation did not use the ledger that unlocked final-heldout")
-    prior, _ = read_prior_ledger(format_descriptor, "format", selection)
+    prior, _ = read_prior_ledger(depth_descriptor, "mtp-depth", selection)
     rows, digests = assessment_rows(results, {"final"}, selection)
     if len(rows) != 1:
         raise BakeoffError("final requires exactly one preselected assessment")
@@ -1361,10 +1536,13 @@ def confirm_final(plan: dict[str, Any], results: dict[str, Any],
         raise BakeoffError("final assessment is not bound to the unlocked final plan")
     if (row.get("row_id") != "final-confirmation"
             or row.get("configuration_id") != prior.get("selected_configuration_id")
-            or row.get("arm_id") != prior.get("selected_arm_id")):
+            or row.get("arm_id") != prior.get("selected_arm_id")
+            or row.get("mtp_matrix_quant_contract") !=
+            prior.get("selected_mtp_matrix_quant_contract")
+            or row.get("mtp_depth") != prior.get("selected_mtp_depth")):
         raise BakeoffError("final assessment attempted to change the preselected recipe")
     if row.get("artifact_identity") != prior.get("selected_artifact_identity"):
-        raise BakeoffError("final assessment is not the exact format-winning artifact/build/inventory")
+        raise BakeoffError("final assessment is not the exact pair/depth-winning runtime identity")
     if (row.get("direction_identity") != prior.get("direction_identity")
             or row.get("quality_stock_identity") != prior.get("stock_identity")
             or row.get("runtime_identity") != prior.get("runtime_identity")):
@@ -1373,149 +1551,27 @@ def confirm_final(plan: dict[str, Any], results: dict[str, Any],
     if not metrics["passes"]:
         raise BakeoffError("preselected winner failed final-heldout confirmation")
     return {**ledger_base("final", final_plan, rows, digests),
-            "prior_format_ledger_sha256": canonical_sha256(prior),
+            "prior_mtp_depth_ledger_sha256": canonical_sha256(prior),
             "selected_configuration_id": prior["selected_configuration_id"],
             "selected_arm_id": prior["selected_arm_id"],
+            "selected_mtp_matrix_quant_contract": prior[
+                "selected_mtp_matrix_quant_contract"],
+            "selected_mtp_depth": prior["selected_mtp_depth"],
             "selected_artifact_identity": prior["selected_artifact_identity"],
             "final_metrics": metrics,
             "final_heldout_used_for_selection": False}
 
 
 def decide(plan: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
-    plan = verify_plan(plan)
-    recipe = plan["recipe"]["value"]
-    gates = recipe["hard_gates"]
-    sweep_sha = plan["corpora"]["sweep-validation.jsonl"]["sha256"]
-    final_sha = plan["corpora"]["final-heldout.jsonl"]["sha256"]
-    rows = results.get("results")
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise BakeoffError("results must be an array of objects")
-    by_stage: dict[str, list[dict[str, Any]]] = {
-        stage: [row for row in rows if row.get("stage") == stage]
-        for stage in ("stock", "sweep", "format", "final")
-    }
-    if len(by_stage["stock"]) != 1 or by_stage["stock"][0].get("id") != recipe["stock_control"]["id"]:
-        raise BakeoffError("exactly one pinned stock control measurement is required")
-    stock_assessment = assess(by_stage["stock"][0], gates, sweep_sha)
-    stock_row = by_stage["stock"][0]
-    stock_identity = {
-        "candidate_id": stock_row.get("candidate_id"),
-        "build_record_sha256": stock_row.get("build_record_sha256"),
-        "intervention_manifest_sha256": stock_row.get("intervention_manifest_sha256"),
-        "profile_sha256": stock_row.get("profile_sha256"),
-        "quantization_overrides_sha256": stock_row.get("quantization_overrides_sha256"),
-        "inventory_sha256": stock_row.get("model_inventory_sha256"),
-        "artifact_bytes": stock_row.get("artifact_bytes"),
-    }
-    if (not all(isinstance(value, str) and value for key, value in stock_identity.items()
-                if key != "artifact_bytes")
-            or not isinstance(stock_identity["artifact_bytes"], int)):
-        raise BakeoffError("stock control lacks complete model/build provenance")
+    """Reject the removed monolithic selector.
 
-    def bind_quality_stock(assessment: dict[str, Any]) -> None:
-        evidence = assessment.get("quality_evidence")
-        if not isinstance(evidence, dict):
-            raise BakeoffError("candidate assessment lacks derived quality evidence")
-        actual = evidence.get("evidence", {}).get("models", {}).get("stock", {})
-        if any(actual.get(key) != value for key, value in stock_identity.items()):
-            raise BakeoffError("quality evidence stock model differs from the measured stock control")
-    if by_stage["stock"][0].get("final_release_eligible") is not False:
-        raise BakeoffError("stock control must remain final-ineligible")
-    # The unchanged stock artifact is the activation/quality baseline, not a
-    # release candidate.  It must be real, correct, quality-valid, and fit the
-    # host, but requiring it to meet the *new engine* performance target would
-    # prevent the very intervention/kernel bakeoff intended to close that gap.
-    if (stock_assessment.get("correctness_quality_pass") is not True
-            or stock_assessment.get("memory_fits") is not True):
-        raise BakeoffError("stock control failed a measured correctness, quality, or memory gate")
-
-    expected_sweep = {item["id"] for item in plan["sweep_configurations"]}
-    if {row.get("id") for row in by_stage["sweep"]} != expected_sweep or len(by_stage["sweep"]) != len(expected_sweep):
-        raise BakeoffError("sweep results must cover every lambda/layer configuration exactly once")
-    assessed_sweep = [(row, assess(row, gates, sweep_sha)) for row in by_stage["sweep"]]
-    configurations = {item["id"]: item for item in plan["sweep_configurations"]}
-    for row in by_stage["sweep"]:
-        configuration = configurations.get(row.get("id"))
-        if configuration is None:
-            raise BakeoffError("sweep row is not a planned lambda/layer configuration")
-        INTERVENTION_VALIDATOR(row, configuration, sweep_sha)
-        if any(row.get(key) != configuration[key] for key in (
-                "quantization_arm", "quantization_overrides_sha256", "profile_sha256",
-                "runtime_mode", "final_release_eligible")):
-            raise BakeoffError("sweep result provenance differs from its canonical configuration")
-    for _, assessment in assessed_sweep:
-        if assessment.get("correctness_quality_pass") is True:
-            bind_quality_stock(assessment)
-    passing_sweep = [(row, value) for row, value in assessed_sweep if value["passes"]]
-    if not passing_sweep:
-        raise BakeoffError("no measured intervention sweep configuration passed all gates")
-    sweep_winner, sweep_metrics = sorted(
-        passing_sweep,
-        key=lambda pair: (-pair[1]["quality_score"], -pair[1]["decode_median_tps"],
-                          -pair[1]["prefill_median_tps"], pair[0]["id"]),
-    )[0]
-
-    arms = {item["id"]: item for item in plan["format_arms"]}
-    if {row.get("arm_id") for row in by_stage["format"]} != set(arms) or len(by_stage["format"]) != len(arms):
-        raise BakeoffError("format results must cover ROCMI4, ROCmFP4 FAST, and W4A4 exactly once")
-    assessed_formats = []
-    for row in by_stage["format"]:
-        if row.get("configuration_id") != sweep_winner["id"]:
-            raise BakeoffError("format crosscheck must use the selected sweep configuration")
-        INTERVENTION_VALIDATOR(row, configurations[sweep_winner["id"]], sweep_sha)
-        arm = arms[row["arm_id"]]
-        if row.get("final_release_eligible") is not arm["final_release_eligible"]:
-            raise BakeoffError("result eligibility differs from the pinned arm")
-        if (row.get("quantization_arm") != arm["quantization_arm"]
-                or row.get("quantization_overrides_sha256") !=
-                arm["quantization_overrides_sha256"]
-                or row.get("profile_sha256") != arm["profile_sha256"]
-                or row.get("mtp_matrix_quant_contract") !=
-                arm["mtp_matrix_quant_contract"]):
-            raise BakeoffError("format result provenance differs from its profile-bound arm")
-        assessed_formats.append((row, arm, assess(row, gates, sweep_sha)))
-    for _, _, assessment in assessed_formats:
-        if assessment.get("correctness_quality_pass") is True:
-            bind_quality_stock(assessment)
-    eligible_formats = [(row, value) for row, arm, value in assessed_formats
-                        if arm["final_release_eligible"] and value["passes"]]
-    if not eligible_formats:
-        raise BakeoffError("no final-eligible format passed all measured gates")
-    format_winner, format_metrics = sorted(
-        eligible_formats,
-        key=lambda pair: (-pair[1]["quality_score"], -pair[1]["decode_median_tps"],
-                          -pair[1]["prefill_median_tps"], pair[0]["arm_id"]),
-    )[0]
-
-    if len(by_stage["final"]) != 1:
-        raise BakeoffError("final-heldout must contain exactly one preselected winner result")
-    final_row = by_stage["final"][0]
-    if (final_row.get("configuration_id") != sweep_winner["id"]
-            or final_row.get("arm_id") != format_winner["arm_id"]):
-        raise BakeoffError("final-heldout result attempted to change the selected recipe")
-    selected_arm = arms[format_winner["arm_id"]]
-    if any(final_row.get(key) != selected_arm[key] for key in (
-            "quantization_arm", "quantization_overrides_sha256", "profile_sha256",
-            "mtp_matrix_quant_contract")):
-        raise BakeoffError("final-heldout provenance differs from the preselected profile arm")
-    INTERVENTION_VALIDATOR(final_row, configurations[sweep_winner["id"]], sweep_sha)
-    final_metrics = assess(final_row, gates, final_sha)
-    if final_metrics.get("correctness_quality_pass") is True:
-        bind_quality_stock(final_metrics)
-    if not final_metrics["passes"]:
-        raise BakeoffError("preselected winner failed final-heldout confirmation")
-    return {
-        "schema_version": 1, "status": "confirmed_from_measured_results",
-        "stock_control": {"id": by_stage["stock"][0]["id"], "metrics": stock_assessment,
-                          "final_release_eligible": False},
-        "selected_configuration_id": sweep_winner["id"],
-        "selected_arm_id": format_winner["arm_id"],
-        "sweep_metrics": sweep_metrics, "format_metrics": format_metrics,
-        "final_metrics": final_metrics,
-        "final_heldout_used_for_selection": False,
-        "publication_allowed": False,
-    }
-
+    Schema v2 has two externally attested selection boundaries after format:
+    MTP depth selection and final-data unlock. A one-shot decision could bypass
+    those capabilities, so callers must use the staged selectors.
+    """
+    del plan, results
+    raise BakeoffError(
+        "schema-v2 bakeoff requires staged sweep, format, MTP-depth, and final ledgers")
 
 def prior_descriptor(args: argparse.Namespace, schema: str) -> dict[str, Any]:
     if (args.prior_ledger is None or not isinstance(args.prior_ledger_sha256, str)
@@ -1543,7 +1599,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--results", type=Path)
     parser.add_argument("--stage", choices=(
-        "verify", "assess", "sweep", "format", "unlock-final", "final"),
+        "verify", "assess", "sweep", "format", "mtp-depth", "unlock-final", "final"),
         default="verify")
     parser.add_argument("--prior-ledger", type=Path)
     parser.add_argument("--prior-ledger-sha256")
@@ -1560,7 +1616,8 @@ def main(argv: list[str] | None = None) -> int:
             plan = read_object(args.plan, "bakeoff plan")
             if args.stage == "verify" and args.results is None and args.prior_ledger is None:
                 verify_plan(plan)
-                output = {"schema_version": 1, "status": "canonical_plan_verified",
+                output = {"schema_version": PLAN_SCHEMA_VERSION,
+                          "status": "canonical_plan_verified",
                           "plan_sha256": canonical_sha256(plan), "publication_allowed": False}
             elif args.stage == "assess" and args.results is not None:
                 raw = read_object(args.results, "candidate measurement")
@@ -1570,18 +1627,21 @@ def main(argv: list[str] | None = None) -> int:
                 output = make_candidate_assessment(plan, row)
             elif args.stage == "unlock-final" and args.corpus_dir is not None:
                 if args.prior_ledger is None:
-                    raise BakeoffError("unlock-final requires the sealed format ledger")
-                prior = prior_descriptor(args, "ember.qwen3.8.sequential-bakeoff-ledger.v2")
+                    raise BakeoffError("unlock-final requires the sealed MTP-depth ledger")
+                prior = prior_descriptor(args, LEDGER_SCHEMA)
                 output = make_final_plan(plan, args.corpus_dir.resolve(), prior)
             elif args.results is not None:
                 results = read_object(args.results, "bakeoff results")
                 if args.stage == "sweep" and args.prior_ledger is None:
                     output = select_sweep(plan, results)
-                elif args.stage in {"format", "final"} and args.prior_ledger is not None:
-                    prior = prior_descriptor(
-                        args, "ember.qwen3.8.sequential-bakeoff-ledger.v2")
-                    output = (select_format(plan, results, prior) if args.stage == "format"
-                              else confirm_final(plan, results, prior))
+                elif args.stage in {"format", "mtp-depth", "final"} and args.prior_ledger is not None:
+                    prior = prior_descriptor(args, LEDGER_SCHEMA)
+                    if args.stage == "format":
+                        output = select_format(plan, results, prior)
+                    elif args.stage == "mtp-depth":
+                        output = select_mtp_depth(plan, results, prior)
+                    else:
+                        output = confirm_final(plan, results, prior)
                 else:
                     raise BakeoffError("invalid stage/prior-ledger combination")
             else:

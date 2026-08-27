@@ -159,6 +159,11 @@
       "status": "experimental_unpromoted",
       "control_unchanged": true,
       "override_precedence": "exactly_one_matching_regex; overlap_is_an_error",
+      "mtp_pairing_policy": "arm mtp_matrix_quant_contract is the build default only; the release bakeoff independently cross-pairs exact ROCMI4 and ROCmFP4 FAST companions",
+      "supported_mtp_matrix_contracts": [
+        "Q4_0_ROCMI4",
+        "Q4_0_ROCMFP4_FAST"
+      ],
       "arms": [
         {
           "id": "rocmi4-control",

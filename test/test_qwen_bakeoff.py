@@ -117,13 +117,15 @@ class BakeoffTest(unittest.TestCase):
         row.setdefault("build_record_sha256", seed)
         row.setdefault("intervention_manifest_sha256", "2" * 64)
         row.setdefault("companion_inventory_sha256", "6" * 64)
+        row.setdefault("mtp_matrix_quant_contract", "Q4_0_ROCMI4")
+        row.setdefault("mtp_depth", 3)
         row.setdefault("profile_sha256", "3" * 64)
         row.setdefault("quantization_overrides_sha256", "4" * 64)
         row.setdefault("model_inventory_sha256", hashlib.sha256(
             f"inventory:{stage}:{identifier}".encode()).hexdigest())
         row.setdefault("evidence_manifest", {"path": f"/evidence/{seed}.json",
                                                "sha256": seed,
-                                               "schema": "ember.qwen3.8.sequential-bakeoff-result.v3"})
+                                               "schema": qb.RESULT_SCHEMA})
         contract = "9" * 64
         row.setdefault("builder_identity", {
             "ember_revision": "1" * 40, "quantizer_tool_sha256": "2" * 64,
@@ -153,6 +155,8 @@ class BakeoffTest(unittest.TestCase):
             "quantization_overrides_sha256": row["quantization_overrides_sha256"],
             "model_inventory_sha256": row["model_inventory_sha256"],
             "companion_inventory_sha256": row["companion_inventory_sha256"],
+            "mtp_matrix_quant_contract": row["mtp_matrix_quant_contract"],
+            "mtp_depth": row["mtp_depth"],
             "artifact_bytes": row["artifact_bytes"],
             "companion_artifact_bytes": row["companion_artifact_bytes"],
             "quantization_arm": row["quantization_arm"],
@@ -207,13 +211,10 @@ class BakeoffTest(unittest.TestCase):
                 quantization_overrides_sha256=arm["quantization_overrides_sha256"],
                 profile_sha256=arm["profile_sha256"],
                 mtp_matrix_quant_contract=arm["mtp_matrix_quant_contract"],
+                mtp_depth=arm["mtp_depth"],
                 quality_score=(1.0 if arm["id"] ==
-                               "rocmi4-q6k-embedding-head" else 0.8),
+                               "rocmi4-q6k-main-rocmi4-mtp-d3" else 0.8),
             ))
-        selected_arm = next(
-            arm for arm in plan["format_arms"]
-            if arm["id"] == "rocmi4-q6k-embedding-head")
-        del selected_arm
         return {"results": rows}
 
     def persist_attested(self, root: Path, name: str, value: dict,
@@ -236,25 +237,62 @@ class BakeoffTest(unittest.TestCase):
             assessment = qb.make_candidate_assessment(plan, row)
             descriptors.append(self.persist_attested(
                 root, f"{prefix}-{index}", assessment,
-                "ember.qwen3.8.candidate-assessment.v1"))
+                qb.ASSESSMENT_SCHEMA))
         return {"assessments": descriptors}
 
     def staged_selection(self, root: Path, plan: dict, corpora: Path,
-                         tamper_final_build: bool = False) -> tuple[dict, dict, dict]:
+                         tamper_final_build: bool = False,
+                         tamper_final_depth: bool = False) -> tuple[dict, dict, dict, dict]:
         raw = self.complete_results(plan)["results"]
         sweep_rows = [row for row in raw if row["stage"] in {"stock", "sweep"}]
         format_rows = [row for row in raw if row["stage"] == "format"]
         sweep = qb.select_sweep(plan, self.assessment_input(root, plan, sweep_rows, "sweep"))
         sweep_desc = self.persist_attested(
-            root, "sweep-ledger", sweep, "ember.qwen3.8.sequential-bakeoff-ledger.v2")
+            root, "sweep-ledger", sweep, qb.LEDGER_SCHEMA)
         selected_format = qb.select_format(
             plan, self.assessment_input(root, plan, format_rows, "format"), sweep_desc)
         format_desc = self.persist_attested(
-            root, "format-ledger", selected_format,
-            "ember.qwen3.8.sequential-bakeoff-ledger.v2")
-        final_plan = qb.make_final_plan(plan, corpora, format_desc)
+            root, "format-ledger", selected_format, qb.LEDGER_SCHEMA)
         winner_raw = next(row for row in format_rows
                           if row["arm_id"] == selected_format["selected_arm_id"])
+        depth_rows = []
+        for configuration in plan["mtp_depth_configurations"]:
+            depth_rows.append(self.measured(
+                configuration["id"], "mtp-depth",
+                plan["corpora"]["sweep-validation.jsonl"]["sha256"],
+                candidate_id=winner_raw["candidate_id"],
+                configuration_id=winner_raw["configuration_id"],
+                arm_id=winner_raw["arm_id"],
+                quantization_arm=winner_raw["quantization_arm"],
+                quantization_overrides_sha256=winner_raw[
+                    "quantization_overrides_sha256"],
+                profile_sha256=winner_raw["profile_sha256"],
+                mtp_matrix_quant_contract=winner_raw["mtp_matrix_quant_contract"],
+                mtp_depth=configuration["mtp_depth"],
+                final_release_eligible=configuration["final_release_eligible"],
+                runtime_mode=configuration["runtime_mode"],
+                intervention_configuration_id=winner_raw[
+                    "intervention_configuration_id"],
+                intervention_manifest_sha256=winner_raw[
+                    "intervention_manifest_sha256"],
+                build_record_sha256=winner_raw["build_record_sha256"],
+                companion_inventory_sha256=winner_raw[
+                    "companion_inventory_sha256"],
+                model_inventory_sha256=winner_raw["model_inventory_sha256"],
+                builder_identity=winner_raw["builder_identity"],
+                runtime_identity=winner_raw["runtime_identity"],
+                tensor_format_compatibility_sha256=winner_raw[
+                    "tensor_format_compatibility_sha256"],
+                quality_score=1.0 if configuration["mtp_depth"] == 3 else 0.9,
+            ))
+        selected_depth = qb.select_mtp_depth(
+            plan, self.assessment_input(root, plan, depth_rows, "mtp-depth"),
+            format_desc)
+        depth_desc = self.persist_attested(
+            root, "mtp-depth-ledger", selected_depth, qb.LEDGER_SCHEMA)
+        final_plan = qb.make_final_plan(plan, corpora, depth_desc)
+        winner_raw = next(row for row in depth_rows
+                          if row["id"] == selected_depth["selected_depth_id"])
         final_sha = final_plan["corpora"]["final-heldout.jsonl"]["sha256"]
         final = self.measured(
             "final-confirmation", "final", final_sha,
@@ -265,6 +303,8 @@ class BakeoffTest(unittest.TestCase):
             quantization_overrides_sha256=winner_raw["quantization_overrides_sha256"],
             profile_sha256=winner_raw["profile_sha256"],
             mtp_matrix_quant_contract=winner_raw["mtp_matrix_quant_contract"],
+            mtp_depth=(4 if tamper_final_depth and winner_raw["mtp_depth"] != 4
+                       else 1 if tamper_final_depth else winner_raw["mtp_depth"]),
             final_release_eligible=winner_raw["final_release_eligible"],
             runtime_mode=winner_raw["runtime_mode"],
             intervention_configuration_id=winner_raw["intervention_configuration_id"],
@@ -278,8 +318,8 @@ class BakeoffTest(unittest.TestCase):
             tensor_format_compatibility_sha256=winner_raw["tensor_format_compatibility_sha256"],
         )
         final_result = qb.confirm_final(
-            final_plan, self.assessment_input(root, final_plan, [final], "final"), format_desc)
-        return sweep, selected_format, final_result
+            final_plan, self.assessment_input(root, final_plan, [final], "final"), depth_desc)
+        return sweep, selected_format, selected_depth, final_result
 
     def test_plan_is_complete_and_final_partition_cannot_select(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -294,10 +334,12 @@ class BakeoffTest(unittest.TestCase):
             }
             self.assertEqual(len(plan["sweep_configurations"]), 16)
             self.assertEqual({arm["id"] for arm in plan["format_arms"]}, {
-                "rocmi4-q6k-embedding-head",
-                "rocmfp4-fast-routed-experts-q6k-embedding-head",
-                "rocmfp4-fast-matrix-q6k-embedding-head",
-                "rocmi4-w4a4",
+                "rocmi4-q6k-main-rocmi4-mtp-d3",
+                "rocmi4-q6k-main-rocmfp4-fast-mtp-d3",
+                "rocmfp4-fast-routed-main-rocmi4-mtp-d3",
+                "rocmfp4-fast-routed-main-rocmfp4-fast-mtp-d3",
+                "rocmfp4-fast-matrix-main-rocmi4-mtp-d3",
+                "rocmfp4-fast-matrix-main-rocmfp4-fast-mtp-d3",
             })
             self.assertEqual(
                 {arm["quantization_arm"] for arm in plan["format_arms"]},
@@ -311,19 +353,55 @@ class BakeoffTest(unittest.TestCase):
                 arm["quantization_arm"] in profile_arms
                 for arm in plan["format_arms"]
             ))
+            self.assertEqual(
+                {(arm["quantization_arm"], arm["mtp_matrix_quant_contract"])
+                 for arm in plan["format_arms"]},
+                {(main, mtp) for main in {
+                    "rocmi4-q6k-embedding-head",
+                    "rocmfp4-fast-routed-experts-q6k-embedding-head",
+                    "rocmfp4-fast-matrix-q6k-embedding-head",
+                } for mtp in qb.SUPPORTED_MTP_MATRIX_CONTRACTS},
+            )
+            self.assertEqual(
+                [row["mtp_depth"] for row in plan["mtp_depth_configurations"]],
+                [1, 2, 3, 4])
+            self.assertEqual([row["id"] for row in plan["auxiliary_controls"]],
+                             ["rocmi4-w4a4"])
+            self.assertFalse(plan["auxiliary_controls"][0][
+                "included_in_exact_runtime_winner_ledger"])
             self.assertFalse(plan["publication_allowed"])
             self.assertEqual(plan["phase_scope"], "selection")
             self.assertNotIn("final-heldout.jsonl", plan["corpora"])
             for configuration in plan["sweep_configurations"]:
                 self.assertEqual(len(configuration["layer_scales"]), 48)
-            sweep, selected_format, decision = self.staged_selection(
+            sweep, selected_format, selected_depth, decision = self.staged_selection(
                 Path(temporary), plan, corpora)
             self.assertEqual(sweep["selected_configuration_id"],
                              plan["sweep_configurations"][0]["id"])
             self.assertEqual(selected_format["selected_arm_id"],
-                             "rocmi4-q6k-embedding-head")
+                             "rocmi4-q6k-main-rocmi4-mtp-d3")
+            self.assertEqual(selected_depth["selected_mtp_depth"], 3)
             self.assertFalse(decision["final_heldout_used_for_selection"])
             self.assertFalse(decision["publication_allowed"])
+
+    def test_cross_pair_and_auxiliary_control_inventory_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpora = self.make_corpora(root)
+            recipe = json.loads(qb.DEFAULT_RECIPE.read_text(encoding="utf-8"))
+            recipe["format_arms"][1]["mtp_matrix_quant_contract"] = "Q4_0_ROCMI4"
+            duplicate = root / "duplicate-pair.json"
+            duplicate.write_text(json.dumps(recipe), encoding="utf-8")
+            with self.assertRaisesRegex(qb.BakeoffError, "full main/MTP cross-pair"):
+                qb.make_plan(duplicate, corpora)
+
+            recipe = json.loads(qb.DEFAULT_RECIPE.read_text(encoding="utf-8"))
+            recipe["format_arms"].append(recipe["auxiliary_controls"][0])
+            injected = root / "w4a4-injected.json"
+            injected.write_text(json.dumps(recipe), encoding="utf-8")
+            with self.assertRaisesRegex(qb.BakeoffError,
+                                        "selectable format arms must be exact-runtime"):
+                qb.make_plan(injected, corpora)
 
     def test_missing_estimated_or_final_reselection_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -332,6 +410,8 @@ class BakeoffTest(unittest.TestCase):
             results[1]["measurement_kind"] = "estimated"
             with self.assertRaisesRegex(qb.BakeoffError, "complete measured"):
                 qb.make_candidate_assessment(plan, results[1])
+            with self.assertRaisesRegex(qb.BakeoffError, "staged sweep, format, MTP-depth"):
+                qb.decide(plan, {"results": results})
 
     def test_staged_ledgers_bind_prior_selection_and_canonical_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -348,21 +428,21 @@ class BakeoffTest(unittest.TestCase):
             self.assertEqual(sweep["phase"], "sweep")
             sweep_descriptor = self.persist_attested(
                 root, "staged-sweep-ledger", sweep,
-                "ember.qwen3.8.sequential-bakeoff-ledger.v2")
+                qb.LEDGER_SCHEMA)
             selected_format = qb.select_format(plan, format_results, sweep_descriptor)
             self.assertEqual(selected_format["prior_sweep_ledger_sha256"],
                              qb.canonical_sha256(sweep))
             format_descriptor = self.persist_attested(
                 root, "staged-format-ledger", selected_format,
-                "ember.qwen3.8.sequential-bakeoff-ledger.v2")
-            final_plan = qb.make_final_plan(plan, root / "corpora", format_descriptor)
-            self.assertIn("final-heldout.jsonl", final_plan["corpora"])
+                qb.LEDGER_SCHEMA)
+            with self.assertRaisesRegex(qb.BakeoffError, "mtp-depth prior ledger"):
+                qb.make_final_plan(plan, root / "corpora", format_descriptor)
 
             forged = json.loads(json.dumps(sweep))
             forged["selected_configuration_id"] = plan["sweep_configurations"][1]["id"]
             forged_descriptor = self.persist_attested(
                 root, "forged-sweep-ledger", forged,
-                "ember.qwen3.8.sequential-bakeoff-ledger.v2")
+                qb.LEDGER_SCHEMA)
             with self.assertRaisesRegex(qb.BakeoffError, "do not reproduce|semantics"):
                 qb.select_format(plan, format_results, forged_descriptor)
 
@@ -458,8 +538,10 @@ class BakeoffTest(unittest.TestCase):
             plan = qb.make_plan(qb.DEFAULT_RECIPE, corpora)
             self.assertNotIn(str(hidden), json.dumps(plan))
             hidden.rename(final_path)
-            with self.assertRaisesRegex(qb.BakeoffError, "exact format-winning artifact"):
+            with self.assertRaisesRegex(qb.BakeoffError, "exact pair/depth-winning runtime"):
                 self.staged_selection(root, plan, corpora, tamper_final_build=True)
+            with self.assertRaisesRegex(qb.BakeoffError, "preselected recipe"):
+                self.staged_selection(root, plan, corpora, tamper_final_depth=True)
 
     def test_compact_assessments_survive_artifact_deletion_and_rederive_scalars(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -479,7 +561,7 @@ class BakeoffTest(unittest.TestCase):
             assessment["observed_decision"]["decode_median_tps"] += 1.0
             forged = self.persist_attested(
                 root, "scalar-forgery", assessment,
-                "ember.qwen3.8.candidate-assessment.v1")
+                qb.ASSESSMENT_SCHEMA)
             tampered = json.loads(json.dumps(inputs))
             tampered["assessments"][1] = forged
             with self.assertRaisesRegex(qb.BakeoffError, "do not rederive"):
@@ -497,7 +579,7 @@ class BakeoffTest(unittest.TestCase):
             changed["direction_identity"]["directions"][0]["sha256"] = "f" * 64
             inputs["assessments"][2] = self.persist_attested(
                 root, "direction-forgery", changed,
-                "ember.qwen3.8.candidate-assessment.v1")
+                qb.ASSESSMENT_SCHEMA)
             with self.assertRaisesRegex(qb.BakeoffError, "common direction"):
                 qb.select_sweep(plan, inputs)
 
@@ -620,7 +702,8 @@ class BakeoffTest(unittest.TestCase):
                 "schema": "ember.qwen3.8.real-weight-gate.v2", "publish_approved": False,
                 "certification_scope": "measurement_only_not_certified",
                 "model": {"ordered_inventory": {"shards": [shard]}},
-                "mtp": {"path": str(mtp_path), "sha256": "7" * 64},
+                "mtp": {"path": str(mtp_path), "sha256": "7" * 64,
+                        "depth": row["mtp_depth"]},
                 "resources": resources,
                 "hard_gates": {"performance": hard_gate, "memory": memory_gate},
                 "evidence": {"quant_build_record": {
@@ -629,7 +712,7 @@ class BakeoffTest(unittest.TestCase):
                     "memory": memory},
             })
             manifest = {
-                "schema": "ember.qwen3.8.sequential-bakeoff-result.v3",
+                "schema": qb.RESULT_SCHEMA,
                 "candidate_id": row["candidate_id"], "status": "complete", "publishes": False,
                 "provenance": {
                     "quantization_arm": row["quantization_arm"],
@@ -638,6 +721,8 @@ class BakeoffTest(unittest.TestCase):
                     "intervention_manifest_sha256": row["intervention_manifest_sha256"],
                     "build_record_sha256": row["build_record_sha256"],
                     "companion_inventory_sha256": row["companion_inventory_sha256"],
+                    "mtp_matrix_quant_contract": row["mtp_matrix_quant_contract"],
+                    "mtp_depth": row["mtp_depth"],
                     "profile_sha256": row["profile_sha256"],
                     "builder_identity": row["builder_identity"],
                     "runtime_identity": row["runtime_identity"],
@@ -656,6 +741,7 @@ class BakeoffTest(unittest.TestCase):
                     "prefill_statistic": "peak", "decode_statistic": "median",
                     "evaluated_prefill_tokens": row["evaluated_prefill_tokens"],
                     "completion_tokens": row["completion_tokens"], "mtp_spec_ran": row["mtp_spec_ran"],
+                    "mtp_depth": row["mtp_depth"],
                 },
                 "performance": {"prefill_tps_samples": row["prefill_tps_samples"],
                                 "decode_tps_samples": row["decode_tps_samples"],
@@ -668,6 +754,10 @@ class BakeoffTest(unittest.TestCase):
             row["evidence_manifest"] = {**manifest_desc, "schema": manifest["schema"]}
             actual = qb.validate_measurement_evidence(row)
             self.assertEqual(actual["manifest_sha256"], manifest_desc["sha256"])
+            row["mtp_depth"] = 4
+            with self.assertRaisesRegex(qb.BakeoffError, "provenance differs|different MTP"):
+                qb.validate_measurement_evidence(row)
+            row["mtp_depth"] = 3
             row["prefill_tps_samples"][0] += 1.0
             with self.assertRaisesRegex(qb.BakeoffError, "independently derived"):
                 qb.validate_measurement_evidence(row)
