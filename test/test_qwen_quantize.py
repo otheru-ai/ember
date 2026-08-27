@@ -858,7 +858,7 @@ class QwenQuantizeTests(unittest.TestCase):
             )
             self.assertEqual(record["conversion_memory"]["mode"], "bounded_temp_file_then_split")
             self.assertEqual(record["conversion_memory"]["gguf_writer_temp_cleanup"], {
-                "policy": "exact_python_spooled_temporary_file_residue_v1",
+                "policy": "exact_converter_private_tmp_residue_v2",
                 "removed": [],
             })
             self.assertEqual(len(record["intermediate"]["shards"]), 2)
@@ -875,6 +875,30 @@ class QwenQuantizeTests(unittest.TestCase):
                 "name": residue.name, "size_bytes": 29, "mode": 0o600,
             }])
             self.assertFalse(directory.exists())
+
+    def test_cleanup_accepts_only_empty_owner_torchinductor_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "private-tmp"
+            directory.mkdir(mode=0o700)
+            cache = directory / "torchinductor_root"
+            cache.mkdir(mode=0o700)
+            rows = qwen_quantize.cleanup_gguf_writer_temp(directory)
+            self.assertEqual(rows, [{
+                "name": "torchinductor_root",
+                "kind": "empty_torchinductor_cache_directory",
+                "mode": stat.S_IMODE(cache.stat().st_mode) if cache.exists() else 0o700,
+            }])
+            self.assertFalse(directory.exists())
+
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "private-tmp"
+            directory.mkdir(mode=0o700)
+            cache = directory / "torchinductor_root"
+            cache.mkdir(mode=0o700)
+            (cache / "foreign.bin").write_bytes(b"must survive rejection")
+            with self.assertRaisesRegex(qwen_quantize.PipelineError, "not empty"):
+                qwen_quantize.cleanup_gguf_writer_temp(directory)
+            self.assertTrue((cache / "foreign.bin").is_file())
 
     def test_cleanup_rejects_unexpected_or_unsafe_temp_entries(self) -> None:
         cases = ("unexpected-name", "symlink", "directory", "hardlink", "mode")

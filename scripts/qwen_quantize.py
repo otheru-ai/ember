@@ -460,7 +460,7 @@ def validate_bf16_cache_manifest(
         raise PipelineError("BF16 cache conversion recipe is not canonical")
     if (not isinstance(cleanup, dict)
             or set(cleanup) != {"policy", "main_removed", "mmproj_removed"}
-            or cleanup.get("policy") != "exact_python_spooled_temporary_file_residue_v1"):
+            or cleanup.get("policy") != "exact_converter_private_tmp_residue_v2"):
         raise PipelineError("BF16 cache lacks its exact GGUFWriter temp cleanup evidence")
     for label in ("main_removed", "mmproj_removed"):
         rows = cleanup.get(label)
@@ -1253,14 +1253,20 @@ def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
     llama.cpp's pinned ``GGUFWriter`` uses ``SpooledTemporaryFile``.  Once its
     256 MiB threshold is crossed, Python creates a mode-0600 ``tmpXXXXXXXX``
     file in TMPDIR.  A successful converter can leave that already-consumed
-    spool inode behind at process teardown.  Treating every nonempty TMPDIR as
-    a conversion failure discarded a completed 9e44 control conversion.
+    spool inode behind at process teardown.  Importing the pinned converter's
+    torch stack can also create one empty ``torchinductor_root`` cache directory
+    even though conversion never compiles an Inductor kernel.  Treating every
+    nonempty TMPDIR as a conversion failure discarded completed control
+    conversions.
 
     The directory is private and the converter process has exited, but deletion
     still fails closed: names must match Python's exact eight-character random
     tempfile convention, entries must be owner-only regular single-link files,
-    and lstat/fstat identities must agree.  No directory, symlink, hardlink, or
-    conveniently named foreign artifact is removed.
+    and lstat/fstat identities must agree.  The one allowed directory must have
+    the exact torch name, be empty, owner-controlled, and identity-bound through
+    a no-follow directory descriptor before a non-recursive ``rmdir``.  No
+    symlink, hardlink, nonempty directory, or conveniently named foreign
+    artifact is removed.
     """
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1271,6 +1277,42 @@ def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
     try:
         names = sorted(os.listdir(directory_fd))
         for name in names:
+            if name == "torchinductor_root":
+                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid()
+                        or before.st_nlink != 2
+                        or stat.S_IMODE(before.st_mode) not in {0o700, 0o755}):
+                    raise PipelineError(
+                        "converter torchinductor cache is not an empty owner-controlled directory")
+                cache_flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                               | getattr(os, "O_DIRECTORY", 0)
+                               | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    cache_fd = os.open(name, cache_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise PipelineError(
+                        f"cannot identity-bind converter torchinductor cache: {exc}") from exc
+                try:
+                    opened = os.fstat(cache_fd)
+                    if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid,
+                         opened.st_nlink) !=
+                            (before.st_dev, before.st_ino, before.st_mode, before.st_uid,
+                             before.st_nlink)):
+                        raise PipelineError(
+                            "converter torchinductor cache changed during cleanup validation")
+                    if os.listdir(cache_fd):
+                        raise PipelineError("converter torchinductor cache is not empty")
+                    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise PipelineError(
+                            "converter torchinductor cache pathname changed before removal")
+                    os.rmdir(name, dir_fd=directory_fd)
+                    removed.append({"name": name,
+                                    "kind": "empty_torchinductor_cache_directory",
+                                    "mode": stat.S_IMODE(opened.st_mode)})
+                finally:
+                    os.close(cache_fd)
+                continue
             if GGUF_WRITER_TEMP_NAME_RE.fullmatch(name) is None:
                 raise PipelineError(
                     f"converter TMPDIR contains an unexpected entry: {name!r}")
@@ -1312,8 +1354,9 @@ def cleanup_gguf_writer_temp(directory: Path) -> list[dict[str, Any]]:
         raise PipelineError(f"cannot remove validated empty converter TMPDIR: {exc}") from exc
     for row in removed:
         print(
-            "qwen_quantize.py: removed expected GGUFWriter spool residue "
-            f"{row['name']} ({row['size_bytes']} bytes)",
+            "qwen_quantize.py: removed expected converter TMPDIR residue "
+            f"{row['name']}"
+            + (f" ({row['size_bytes']} bytes)" if "size_bytes" in row else ""),
             file=sys.stderr,
         )
     return removed
@@ -2730,7 +2773,7 @@ def orchestrate_with_snapshot_lease(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 write_json_atomic(record_path, record, create=False)
             record["conversion_memory"]["gguf_writer_temp_cleanup"] = {
-                "policy": "exact_python_spooled_temporary_file_residue_v1",
+                "policy": "exact_converter_private_tmp_residue_v2",
                 "removed": cleanup_gguf_writer_temp(converter_temp),
             }
             write_json_atomic(record_path, record, create=False)

@@ -15,7 +15,7 @@ requires and records the one F32 PLE tensor; the final quantizer still proves
 that the PLE override emits the selected quant type (ROCMI4 in every declared
 arm). The separate vision mmproj remains BF16.
 
-`scripts/qwen_candidate_builder.py` has four lifecycle boundaries:
+`scripts/qwen_candidate_builder.py` has five lifecycle boundaries:
 
 1. `prepare-cache` performs the pinned, patched llama.cpp conversion with
    `--use-temp-file`, splits the main GGUF at 48G, and separately runs the
@@ -28,14 +28,21 @@ arm). The separate vision mmproj remains BF16.
    `scripts/qwen_mtp_export.py` once for each actually tested MTP matrix
    contract. An undeclared or unsupported arm is rejected rather than mapped
    to a convenient format.
-3. `build-candidate` revalidates the full cached shard hashes, mmproj, pinned
+3. `retire-captured-stock` can free the direct-conversion stock shards after
+   activation capture.  It first fsyncs an exact authorization outside the
+   stock directory, verifies every shard against both the stock build record
+   and capture manifest, deletes only those inventoried shard inodes, retains
+   the build record, and fsyncs a completion tombstone.  The stock control is
+   then rebuilt from the immutable cache and must reproduce the captured shard
+   sizes and hashes exactly.
+4. `build-candidate` revalidates the full cached shard hashes, mmproj, pinned
    converter/patch/splitter identities, intervention, MTP inventory, quantizer
    build information, and the live TTM cap. It then creates exactly one
    candidate under the exclusive workset lock. The command records the builder
    image digest and builder revision separately from runtime-engine identity;
    graph/kernel-only runtime revisions can reuse identical model bytes when
    their tensor-format compatibility contract matches.
-4. `record-assessment` fsyncs an exact build-record, assessment, and shard
+5. `record-assessment` fsyncs an exact build-record, assessment, and shard
    inventory outside the candidate directory. Only a bundle marked unselected
    authorizes `delete-loser --execute`. Deletion removes only the inventoried
    quant shards and retains the build/intervention evidence plus an external
@@ -46,7 +53,10 @@ Both conversion and candidate encoding require a cgroup-v2 boundary with
 `memory.peak` and child maximum RSS and fails closed above the limit. Run each
 operation in a fresh `docker --memory 125g --memory-swap 125g` container so
 `memory.peak` describes that operation. Cache conversion additionally requires
-at least 1152 GiB free disk. The workset lock prevents a second
+at least 1152 GiB free disk. On the certification host the direct stock control
+does not fit beside that preflight margin, so it must be activation-captured
+and retired through the durable lifecycle above before cache preparation; an
+ad-hoc `rm` is not equivalent evidence. The workset lock prevents a second
 BF16 conversion, intervention, quantization, or deletion process from running
 concurrently.
 

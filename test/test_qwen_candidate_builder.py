@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -30,6 +32,80 @@ def write_json(path: Path, value: dict) -> None:
 
 
 class CandidateBuilderTests(unittest.TestCase):
+    def test_build_source_is_exactly_intervention_or_stock_capture(self) -> None:
+        parser = builder.parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["build-candidate"])
+        help_text = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "qwen_candidate_builder.py"),
+             "build-candidate", "--help"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        ).stdout
+        self.assertIn("--intervention-manifest", help_text)
+        self.assertIn("--stock-control", help_text)
+        self.assertIn("--stock-capture-manifest", help_text)
+
+    def test_cache_built_stock_must_match_captured_shard_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            capture = root / "capture-manifest.json"
+            rows = [{"filename": "captured-00001.gguf", "size_bytes": 11,
+                     "sha256": "1" * 64}]
+            write_json(capture, {
+                "schema": "ember.qwen3.8.stock-control-activation-capture.v1",
+                "status": "complete", "stock_rocmi4_only": True,
+                "model": {"build_record_sha256": "2" * 64, "shards": rows},
+            })
+            record = {"output": {"shards": [
+                {"path": "/different/name.gguf", "size_bytes": 11,
+                 "sha256": "1" * 64},
+            ]}}
+            evidence = builder.validate_stock_capture_match(capture, digest(capture), record)
+            self.assertTrue(evidence["byte_identical"])
+            record["output"]["shards"][0]["sha256"] = "3" * 64
+            with self.assertRaisesRegex(builder.BuilderError, "differ"):
+                builder.validate_stock_capture_match(capture, digest(capture), record)
+
+    def test_captured_stock_retirement_is_durable_and_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            stock = root / "stock"
+            evidence = root / "evidence"
+            workset = root / "workset"
+            stock.mkdir()
+            shard = stock / "stock-00001.gguf"
+            shard.write_bytes(b"captured-stock")
+            record = stock / "qwen-quant-build-record.json"
+            write_json(record, {
+                "status": "complete",
+                "experiment": {"kind": "stock_control", "stock_weights_unchanged": True},
+                "output": {"shards": [{"path": str(shard),
+                                          "size_bytes": shard.stat().st_size,
+                                          "sha256": digest(shard)}]},
+            })
+            capture = root / "capture.json"
+            write_json(capture, {
+                "schema": "ember.qwen3.8.stock-control-activation-capture.v1",
+                "status": "complete", "stock_rocmi4_only": True,
+                "model": {"build_record_sha256": digest(record), "shards": [{
+                    "filename": shard.name, "size_bytes": shard.stat().st_size,
+                    "sha256": digest(shard),
+                }]},
+            })
+            authorization = evidence / "retire-stock.json"
+            result = builder.retire_captured_stock(argparse.Namespace(
+                stock_dir=stock, build_record_sha256=digest(record),
+                stock_capture_manifest=capture,
+                stock_capture_manifest_sha256=digest(capture),
+                workset_root=workset, output=authorization,
+            ))
+            self.assertEqual(result["deleted_bytes"], len(b"captured-stock"))
+            self.assertTrue(result["recoverable"])
+            self.assertFalse(shard.exists())
+            self.assertTrue(record.exists())
+            self.assertTrue(authorization.exists())
+            self.assertTrue(Path(result["completion"]).exists())
+
     def test_cache_address_binds_main_and_mmproj(self) -> None:
         main = [{"name": "m-00001-of-00002.gguf", "size_bytes": 11,
                  "sha256": "1" * 64}]
@@ -161,7 +237,7 @@ class CandidateBuilderTests(unittest.TestCase):
                                "mmproj": {"outtype": "bf16",
                                           "converter_option": "--mmproj"},
                                "gguf_writer_temp_cleanup": {
-                                   "policy": "exact_python_spooled_temporary_file_residue_v1",
+                                   "policy": "exact_converter_private_tmp_residue_v2",
                                    "main_removed": [], "mmproj_removed": []}},
                 "resources": {"free_bytes": 1152 * quant.GIB,
                               "physical_ram_bytes": 120 * quant.GIB},

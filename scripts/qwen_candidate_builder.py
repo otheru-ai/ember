@@ -34,6 +34,8 @@ CACHE_BASENAME = "Qwen3.8-Flash-Next-BF16.gguf"
 MMPROJ_BASENAME = "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment-bundle.v1"
 TOMBSTONE_SCHEMA = "ember.qwen3.8.deleted-loser.v1"
+STOCK_RETIRE_AUTH_SCHEMA = "ember.qwen3.8.stock-retirement-authorization.v1"
+STOCK_RETIRE_COMPLETE_SCHEMA = "ember.qwen3.8.stock-retirement-complete.v1"
 CONTAINER_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -275,7 +277,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                         "ple_ggml_tensor_type": 0,
                         "mmproj": {"outtype": "bf16", "converter_option": "--mmproj"},
                         "gguf_writer_temp_cleanup": {
-                            "policy": "exact_python_spooled_temporary_file_residue_v1",
+                            "policy": "exact_converter_private_tmp_residue_v2",
                             "main_removed": main_temp_cleanup,
                             "mmproj_removed": mmproj_temp_cleanup,
                         },
@@ -372,12 +374,59 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
             "bf16_cache_manifest": evidence}
 
 
+def validate_stock_capture_match(
+    capture_path: Path,
+    capture_sha256: str,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove a cache-built stock control reproduces the captured control bytes."""
+    capture, evidence = quant.read_exact_json_file(
+        capture_path.absolute(), capture_sha256, "stock activation capture manifest")
+    if (capture.get("schema") != "ember.qwen3.8.stock-control-activation-capture.v1"
+            or capture.get("status") != "complete"
+            or capture.get("stock_rocmi4_only") is not True):
+        raise BuilderError("stock activation capture manifest is not a completed stock control")
+    captured_model = capture.get("model")
+    captured_rows = captured_model.get("shards") if isinstance(captured_model, dict) else None
+    output = record.get("output")
+    built_rows = output.get("shards") if isinstance(output, dict) else None
+    if not isinstance(captured_rows, list) or not captured_rows:
+        raise BuilderError("stock activation capture manifest has no shard inventory")
+    if not isinstance(built_rows, list) or len(built_rows) != len(captured_rows):
+        raise BuilderError("cache-built stock shard count differs from the captured control")
+    expected = [(row.get("size_bytes"), row.get("sha256")) for row in captured_rows
+                if isinstance(row, dict)]
+    actual = [(row.get("size_bytes"), row.get("sha256")) for row in built_rows
+              if isinstance(row, dict)]
+    if len(expected) != len(captured_rows) or len(actual) != len(built_rows):
+        raise BuilderError("stock shard inventory row is malformed")
+    if actual != expected:
+        raise BuilderError("cache-built stock bytes differ from the activation-captured control")
+    return {
+        **evidence,
+        "captured_build_record_sha256": captured_model.get("build_record_sha256"),
+        "captured_shards": len(expected),
+        "byte_identical": True,
+    }
+
+
 def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
     output = args.output.absolute()
     if output.exists() or output.is_symlink():
         raise BuilderError(f"refusing to overwrite candidate output: {output}")
     if CONTAINER_DIGEST_RE.fullmatch(args.builder_container_digest) is None:
         raise BuilderError("--builder-container-digest must be one exact sha256: digest")
+    capture_pair = (args.stock_capture_manifest is not None,
+                    args.stock_capture_manifest_sha256 is not None)
+    if capture_pair[0] != capture_pair[1]:
+        raise BuilderError(
+            "--stock-capture-manifest and --stock-capture-manifest-sha256 are required together")
+    if args.stock_control and not capture_pair[0]:
+        raise BuilderError("cache-built stock control requires its activation capture manifest")
+    if not args.stock_control and capture_pair[0]:
+        raise BuilderError("stock capture evidence applies only to --stock-control")
+    if args.stock_control and args.bakeoff_plan is not None:
+        raise BuilderError("stock control cannot consume directional sweep authorization")
     cache_root = args.bf16_cache_manifest.absolute().parent.parent
     if args.workset_root.absolute() != cache_root:
         raise BuilderError("--workset-root must be the BF16 cache root owning the shared lock")
@@ -388,7 +437,6 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             "--profile", str(args.profile),
             "--snapshot-dir", str(args.snapshot_dir),
             "--snapshot-revision", args.snapshot_revision,
-            "--intervention-manifest", str(args.intervention_manifest),
             "--llama-cpp-dir", str(args.llama_cpp_dir),
             "--rocmfpx-dir", str(args.rocmfpx_dir),
             "--ember-dir", str(args.ember_dir), "--ember-revision", args.ember_revision,
@@ -401,6 +449,9 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             "--quantization-arm", args.quantization_arm,
             "--threads", str(args.threads), "--min-free-gib", str(args.min_free_gib),
             "--work-dir", str(output), "--execute",
+            *(["--stock-control"] if args.stock_control else [
+                "--intervention-manifest", str(args.intervention_manifest),
+            ]),
             *([] if args.bakeoff_plan is None else [
                 "--bakeoff-plan", str(args.bakeoff_plan),
                 "--bakeoff-plan-sha256", str(args.bakeoff_plan_sha256),
@@ -428,13 +479,23 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             }
             output_rows = [{key: row[key] for key in ("path", "size_bytes", "sha256")}
                            for row in record["output"]["shards"]]
+            stock_capture = None
+            if args.stock_control:
+                stock_capture = validate_stock_capture_match(
+                    args.stock_capture_manifest,
+                    args.stock_capture_manifest_sha256,
+                    record,
+                )
             attestation = {
                 "schema": "ember.qwen3.8.candidate-workset-attestation.v1",
                 "candidate_id": safe_id(args.candidate_id, "candidate id"),
                 "build_record_sha256": quant.sha256_file(record_path),
                 "bf16_cache_id": record["bf16_cache"]["cache_id"],
                 "bf16_cache_manifest_sha256": args.bf16_cache_manifest_sha256,
-                "intervention_manifest_sha256": record["intervention"]["manifest_sha256"],
+                "intervention_manifest_sha256": (
+                    stock_capture["sha256"]
+                    if args.stock_control else record["intervention"]["manifest_sha256"]),
+                "stock_capture": stock_capture,
                 "quantization_arm": record["quantization_recipe"]["id"],
                 "builder_identity": builder_identity,
                 "artifact_builder_detail": {
@@ -502,6 +563,70 @@ def exact_candidate_shards(candidate_dir: Path, record: dict[str, Any]) -> list[
         rows.append({"path": evidence["path"], "size_bytes": evidence["size_bytes"],
                      "sha256": evidence["sha256"]})
     return rows
+
+
+def retire_captured_stock(args: argparse.Namespace) -> dict[str, Any]:
+    """Free stock shard space only after durable activation-capture evidence."""
+    stock_dir = args.stock_dir.absolute()
+    if stock_dir.is_symlink() or not stock_dir.is_dir():
+        raise BuilderError("stock directory must be one existing non-symlink directory")
+    record_path = stock_dir / "qwen-quant-build-record.json"
+    record, record_evidence = quant.read_exact_json_file(
+        record_path, args.build_record_sha256, "captured stock build record")
+    experiment = record.get("experiment")
+    if (record.get("status") != "complete" or not isinstance(experiment, dict)
+            or experiment.get("kind") != "stock_control"
+            or experiment.get("stock_weights_unchanged") is not True):
+        raise BuilderError("only a completed unchanged stock control can be retired")
+    shards = exact_candidate_shards(stock_dir, record)
+    capture = validate_stock_capture_match(
+        args.stock_capture_manifest, args.stock_capture_manifest_sha256, record)
+    manifest, _ = quant.read_exact_json_file(
+        args.stock_capture_manifest.absolute(), args.stock_capture_manifest_sha256,
+        "stock activation capture manifest")
+    captured_rows = manifest["model"]["shards"]
+    if [Path(row["path"]).name for row in shards] != [row.get("filename") for row in captured_rows]:
+        raise BuilderError("captured stock filenames differ from the retirement target")
+    if manifest["model"].get("build_record_sha256") != args.build_record_sha256:
+        raise BuilderError("activation capture used a different stock build record")
+    authorization = args.output.absolute()
+    completion = authorization.with_name(authorization.name + ".complete.json")
+    if completion.exists() or completion.is_symlink():
+        raise BuilderError(f"refusing to overwrite stock retirement completion: {completion}")
+    workset_root = args.workset_root.absolute()
+    with WorksetLease(workset_root):
+        payload = {
+            "schema": STOCK_RETIRE_AUTH_SCHEMA,
+            "status": "authorized_before_deletion",
+            "stock_dir": str(stock_dir),
+            "workset_root": str(workset_root),
+            "build_record": record_evidence,
+            "stock_capture": capture,
+            "shards": shards,
+            "total_bytes": sum(row["size_bytes"] for row in shards),
+            "recovery": "pinned_snapshot_then_content_addressed_bf16_cache",
+            "publishes": False,
+        }
+        write_json_fsync(authorization, payload)
+        authorization_sha256 = quant.sha256_file(authorization)
+        for shard in shards:
+            Path(shard["path"]).unlink()
+        quant.fsync_directory(stock_dir)
+        result = {
+            "schema": STOCK_RETIRE_COMPLETE_SCHEMA,
+            "status": "complete",
+            "authorization": {"path": str(authorization),
+                              "sha256": authorization_sha256},
+            "deleted_shards": shards,
+            "deleted_bytes": payload["total_bytes"],
+            "build_record_retained": record_evidence,
+            "stock_capture": capture,
+            "recoverable": True,
+        }
+        write_json_fsync(completion, result)
+        return {"status": "complete", "completion": str(completion),
+                "completion_sha256": quant.sha256_file(completion),
+                "deleted_bytes": result["deleted_bytes"], "recoverable": True}
 
 
 def record_assessment(args: argparse.Namespace) -> dict[str, Any]:
@@ -645,7 +770,11 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--profile", type=Path, required=True)
     build.add_argument("--snapshot-dir", type=Path, required=True)
     build.add_argument("--snapshot-revision", required=True)
-    build.add_argument("--intervention-manifest", type=Path, required=True)
+    source = build.add_mutually_exclusive_group(required=True)
+    source.add_argument("--intervention-manifest", type=Path)
+    source.add_argument("--stock-control", action="store_true")
+    build.add_argument("--stock-capture-manifest", type=Path)
+    build.add_argument("--stock-capture-manifest-sha256")
     build.add_argument("--llama-cpp-dir", type=Path, required=True)
     build.add_argument("--rocmfpx-dir", type=Path, required=True)
     build.add_argument("--ember-dir", type=Path, required=True)
@@ -677,6 +806,14 @@ def parser() -> argparse.ArgumentParser:
                             required=True)
     assessment.add_argument("--output", type=Path, required=True)
 
+    retire = commands.add_parser("retire-captured-stock")
+    retire.add_argument("--stock-dir", type=Path, required=True)
+    retire.add_argument("--build-record-sha256", required=True)
+    retire.add_argument("--stock-capture-manifest", type=Path, required=True)
+    retire.add_argument("--stock-capture-manifest-sha256", required=True)
+    retire.add_argument("--workset-root", type=Path, required=True)
+    retire.add_argument("--output", type=Path, required=True)
+
     delete = commands.add_parser("delete-loser")
     delete.add_argument("--assessment-bundle", type=Path, required=True)
     delete.add_argument("--assessment-bundle-sha256", required=True)
@@ -695,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
             value = build_candidate(args)
         elif args.command == "record-assessment":
             value = record_assessment(args)
+        elif args.command == "retire-captured-stock":
+            value = retire_captured_stock(args)
         elif args.command == "delete-loser":
             value = delete_loser(args)
         else:
