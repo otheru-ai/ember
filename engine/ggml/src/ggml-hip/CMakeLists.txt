@@ -174,6 +174,18 @@ if (GGML_HIP_ROCMI4_W4A8_IU4)
         "selection additionally requires DFLASH_ROCMI4_W4A8_IU4=1")
 endif()
 
+if (GGML_HIP_ROCMI4_W4A8_IU4_PREPACK)
+    if (NOT GGML_HIP_ROCMI4_W4A8_IU4)
+        message(FATAL_ERROR
+            "GGML_HIP_ROCMI4_W4A8_IU4_PREPACK requires the exact "
+            "GGML_HIP_ROCMI4_W4A8_IU4 experiment")
+    endif()
+    add_compile_definitions(GGML_ROCMI4_W4A8_IU4_PREPACK=1)
+    message(STATUS
+        "Compiling cooperative activation prepack for the exact gfx1151 "
+        "ROCmI4 W4A8 IU4 experiment")
+endif()
+
 if (GGML_HIP_ROCWMMA_FATTN)
     add_compile_definitions(GGML_HIP_ROCWMMA_FATTN)
 endif()

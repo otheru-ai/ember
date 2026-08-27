@@ -32,6 +32,17 @@ typedef struct {
     int8_t high_i4;
 } rocmi4_q8_i4_parts;
 
+/*
+ * In-place LDS representation for sixteen consecutive q8 values.  Two such
+ * records form a K32 activation fragment.  Keeping the signed-high words
+ * first lets the consumer load one contiguous 64-bit IU4 operand per half;
+ * the unsigned-low words follow at a fixed four-word offset in the K32 row.
+ */
+typedef struct {
+    uint32_t high_i4[2];
+    uint32_t low_u4[2];
+} rocmi4_q8x16_i4_prepack;
+
 static ROCMI4_EXACT_HD inline rocmi4_q8_i4_parts
 rocmi4_q8_decompose_i4(int8_t value) {
     const uint8_t bits = (uint8_t) value;
@@ -90,6 +101,22 @@ rocmi4_pack_q8x8_low_u4(uint32_t first4, uint32_t next4) {
 static ROCMI4_EXACT_HD inline uint32_t
 rocmi4_pack_q8x8_high_i4(uint32_t first4, uint32_t next4) {
     return rocmi4_pack_split_half_high_i4(first4, next4);
+}
+
+static ROCMI4_EXACT_HD inline rocmi4_q8x16_i4_prepack
+rocmi4_prepack_q8x16_i4(
+        uint32_t q0_3, uint32_t q4_7, uint32_t q8_11, uint32_t q12_15) {
+    const rocmi4_q8x16_i4_prepack packed = {
+        {
+            rocmi4_pack_q8x8_high_i4(q0_3, q4_7),
+            rocmi4_pack_q8x8_high_i4(q8_11, q12_15),
+        },
+        {
+            rocmi4_pack_q8x8_low_u4(q0_3, q4_7),
+            rocmi4_pack_q8x8_low_u4(q8_11, q12_15),
+        },
+    };
+    return packed;
 }
 
 /* The runtime experiment is selected only by the exact, documented value. */

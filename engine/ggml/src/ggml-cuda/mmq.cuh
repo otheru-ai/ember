@@ -17,6 +17,9 @@ using namespace ggml_cuda_mma;
 #ifndef GGML_ROCMI4_W4A8_IU4
 #define GGML_ROCMI4_W4A8_IU4 0
 #endif
+#ifndef GGML_ROCMI4_W4A8_IU4_PREPACK
+#define GGML_ROCMI4_W4A8_IU4_PREPACK 0
+#endif
 #define MMQ_ITER_K 256
 #define MMQ_ITER_K_MXFP4_FP4    512
 #define MMQ_NWARPS 8
@@ -3931,6 +3934,56 @@ struct mmq_kernel_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_ROCMI4, true> 
 };
 #endif
 
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+template <int mmq_x>
+static __device__ __forceinline__ void load_tile_y_rocmi4_w4a8_prepacked(
+        const int * __restrict__ src, int * __restrict__ dst) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int blocks_per_row = MMQ_TILE_NE_K/QI8_1;
+    constexpr int halves_per_block = 2;
+    constexpr int tasks = mmq_x*blocks_per_row*halves_per_block;
+    constexpr int nthreads = nwarps*warp_size;
+    static_assert(mmq_x == 32, "activation prepack requires the screened W4A8 width");
+    static_assert(blocks_per_row == 4 && QI8_1 == 8,
+                  "activation prepack requires four contiguous K32 q8 blocks");
+    static_assert(sizeof(rocmi4_q8x16_i4_prepack) == 4*sizeof(uint32_t),
+                  "activation prepack must preserve the q8 payload byte count");
+    static_assert(tasks == nthreads,
+                  "activation prepack maps one q8x16 half-block to each thread");
+
+    // block_q8_1_mmq publishes four scales followed by four K32 q8 blocks.
+    // Each thread transforms sixteen consecutive bytes.  The output occupies
+    // the same eight words per K32: four signed-high I4 words, then four
+    // unsigned-low I4 words.  The following barrier ends the source-register
+    // lifetime before any consumer wave loads its WMMA fragments.
+#pragma unroll
+    for (int task0 = 0; task0 < tasks; task0 += nthreads) {
+        const int task = task0 + threadIdx.y*warp_size + threadIdx.x;
+        if (task >= tasks) {
+            continue;
+        }
+        const int group = task/halves_per_block;
+        const int half = task % halves_per_block;
+        const int row = group/blocks_per_row;
+        const int block = group % blocks_per_row;
+        const int row_base = row*MMQ_TILE_Y_K;
+        const int qs_base = row_base + blocks_per_row + block*QI8_1;
+        const int4 q = *(const int4 *) (src + qs_base + 4*half);
+        const rocmi4_q8x16_i4_prepack packed = rocmi4_prepack_q8x16_i4(
+            (uint32_t) q.x, (uint32_t) q.y, (uint32_t) q.z, (uint32_t) q.w);
+
+        *(int2 *) (dst + qs_base + 2*half) =
+            make_int2((int) packed.high_i4[0], (int) packed.high_i4[1]);
+        *(int2 *) (dst + qs_base + QI8_1/2 + 2*half) =
+            make_int2((int) packed.low_u4[0], (int) packed.low_u4[1]);
+        if (half == 0) {
+            dst[row_base + block] = src[row_base + block];
+        }
+    }
+}
+#endif
+
 template <ggml_type type, int mmq_x, bool need_check, bool fixup, bool rocmi4_w4a8_iu4>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
         const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
@@ -3981,17 +4034,24 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
         {
             const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
-            if constexpr (ytile_use_int2) {
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+            if constexpr (rocmi4_w4a8_iu4) {
+                load_tile_y_rocmi4_w4a8_prepacked<mmq_x>(by0, tile_y);
+            } else
+#endif
+            {
+                if constexpr (ytile_use_int2) {
 #pragma unroll
-                for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
-                    int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-                    ((int2 *) tile_y)[l] = ((const int2 *) by0)[l];
-                }
-            } else {
+                    for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
+                        int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                        ((int2 *) tile_y)[l] = ((const int2 *) by0)[l];
+                    }
+                } else {
 #pragma unroll
-                for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                    int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-                    tile_y[l] = by0[l];
+                    for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                        int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                        tile_y[l] = by0[l];
+                    }
                 }
             }
         }
@@ -4004,17 +4064,24 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         {
             const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
-            if constexpr (ytile_use_int2) {
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+            if constexpr (rocmi4_w4a8_iu4) {
+                load_tile_y_rocmi4_w4a8_prepacked<mmq_x>(by0, tile_y);
+            } else
+#endif
+            {
+                if constexpr (ytile_use_int2) {
 #pragma unroll
-                for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
-                    int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-                    ((int2 *) tile_y)[l] = ((const int2 *) by0)[l];
-                }
-            } else {
+                    for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K / 2; l0 += nwarps * warp_size) {
+                        int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                        ((int2 *) tile_y)[l] = ((const int2 *) by0)[l];
+                    }
+                } else {
 #pragma unroll
-                for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
-                    int l = l0 + threadIdx.y*warp_size + threadIdx.x;
-                    tile_y[l] = by0[l];
+                    for (int l0 = 0; l0 < mmq_x * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
+                        int l = l0 + threadIdx.y*warp_size + threadIdx.x;
+                        tile_y[l] = by0[l];
+                    }
                 }
             }
         }
@@ -4702,12 +4769,23 @@ static __device__ __forceinline__ void vec_dot_rocmi4_w4a8_iu4_wmma(
         }
 #pragma unroll
         for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+            tile_B_i4 B_high;
+            tile_B_i4 B_low;
+            load_generic(B_high, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
+            load_generic(B_low, y_qs + j0*MMQ_TILE_Y_K + k01 + QI8_1/2, MMQ_TILE_Y_K);
+#else
             tile_B_q8 B_q8;
             load_generic(B_q8, y_qs + j0*MMQ_TILE_Y_K + k01, MMQ_TILE_Y_K);
+#endif
             const int j = j0 + tile_C::get_j(0);
             const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
 #pragma unroll
             for (int n = 0; n < ntx; ++n) {
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+                tile_C C;
+                mma_iu4<true>(C, A[n], B_high);
+#else
                 tile_B_i4 B;
 #pragma unroll
                 for (int p = 0; p < tile_B_i4::ne; ++p) {
@@ -4716,16 +4794,21 @@ static __device__ __forceinline__ void vec_dot_rocmi4_w4a8_iu4_wmma(
                 }
                 tile_C C;
                 mma_iu4<true>(C, A[n], B);
+#endif
 #pragma unroll
                 for (int l = 0; l < tile_C::ne; ++l) {
                     C.x[l] *= 16;
                 }
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+                mma_iu4<false>(C, A[n], B_low);
+#else
 #pragma unroll
                 for (int p = 0; p < tile_B_i4::ne; ++p) {
                     B.x[p] = (int) rocmi4_pack_q8x8_low_u4(
                         (uint32_t) B_q8.x[2*p], (uint32_t) B_q8.x[2*p + 1]);
                 }
                 mma_iu4<false>(C, A[n], B);
+#endif
 #pragma unroll
                 for (int l = 0; l < tile_C::ne; ++l) {
                     const int i = i0 + n*tile_A::I + tile_C::get_i(l);

@@ -113,6 +113,35 @@ int decomposed_dot_k32(const std::array<std::int8_t, kTileK> & weights,
     return sum;
 }
 
+int prepacked_dot_k32(const std::array<std::int8_t, kTileK> & weights,
+                      const std::array<std::int8_t, kTileK> & activations) {
+    std::array<std::uint32_t, kTileK/4> q8_words{};
+    for (std::size_t k = 0; k < kTileK; ++k) {
+        q8_words[k/4] |= static_cast<std::uint32_t>(
+                             static_cast<std::uint8_t>(activations[k]))
+                         << (8*(k % 4));
+    }
+    const rocmi4_q8x16_i4_prepack first = rocmi4_prepack_q8x16_i4(
+        q8_words[0], q8_words[1], q8_words[2], q8_words[3]);
+    const rocmi4_q8x16_i4_prepack second = rocmi4_prepack_q8x16_i4(
+        q8_words[4], q8_words[5], q8_words[6], q8_words[7]);
+    const std::array<std::uint32_t, 8> lds = {
+        first.high_i4[0], first.high_i4[1],
+        second.high_i4[0], second.high_i4[1],
+        first.low_u4[0], first.low_u4[1],
+        second.low_u4[0], second.low_u4[1],
+    };
+
+    int sum = 0;
+    for (std::size_t base = 0; base < kTileK; base += kPackedValues) {
+        const std::size_t word = base/kPackedValues;
+        const std::uint32_t packed_weights = pack_signed_i4(weights, base);
+        sum += dot8_signed_unsigned_i4(packed_weights, lds[4 + word]) +
+               16*dot8_signed_signed_i4(packed_weights, lds[word]);
+    }
+    return sum;
+}
+
 std::uint32_t next_random(std::uint32_t & state) {
     state ^= state << 13;
     state ^= state >> 17;
@@ -171,6 +200,44 @@ void check_fragment_packing() {
              rocmi4_pack_q8x8_high_i4(word, word) == high;
     }
     CHECK(ok, "q8 fragment packing preserves all low/high nibble bit patterns");
+}
+
+void check_activation_prepack_layout() {
+    std::array<std::int8_t, kTileK> activations{};
+    std::array<std::uint32_t, kTileK/4> q8_words{};
+    constexpr std::array<int, 8> seeds = {
+        -128, -97, -17, -1, 0, 23, 106, 127,
+    };
+    for (std::size_t k = 0; k < kTileK; ++k) {
+        activations[k] = static_cast<std::int8_t>(
+            seeds[k % seeds.size()] + static_cast<int>(k/seeds.size()));
+        q8_words[k/4] |= static_cast<std::uint32_t>(
+                             static_cast<std::uint8_t>(activations[k]))
+                         << (8*(k % 4));
+    }
+
+    const rocmi4_q8x16_i4_prepack first = rocmi4_prepack_q8x16_i4(
+        q8_words[0], q8_words[1], q8_words[2], q8_words[3]);
+    const rocmi4_q8x16_i4_prepack second = rocmi4_prepack_q8x16_i4(
+        q8_words[4], q8_words[5], q8_words[6], q8_words[7]);
+    const std::array<std::uint32_t, 8> lds = {
+        first.high_i4[0], first.high_i4[1],
+        second.high_i4[0], second.high_i4[1],
+        first.low_u4[0], first.low_u4[1],
+        second.low_u4[0], second.low_u4[1],
+    };
+
+    bool ok = true;
+    for (std::size_t k = 0; k < kTileK; ++k) {
+        const std::size_t word = k/kPackedValues;
+        const std::size_t nibble = k % kPackedValues;
+        const int high = sign_extend_i4(lds[word] >> (4*nibble));
+        const int low = static_cast<int>(
+            (lds[4 + word] >> (4*nibble)) & 0x0fu);
+        ok = ok && low + 16*high == static_cast<int>(activations[k]);
+    }
+    CHECK(ok,
+          "cooperative K32 activation prepack stores contiguous high then low fragments");
 }
 
 void check_split_half_weight_fragment_order() {
@@ -240,12 +307,14 @@ void check_adversarial_tiles() {
     weights.fill(-8);
     activations.fill(-128);
     CHECK(direct_dot_k32(weights, activations) == 32768 &&
-          decomposed_dot_k32(weights, activations) == 32768,
+          decomposed_dot_k32(weights, activations) == 32768 &&
+          prepacked_dot_k32(weights, activations) == 32768,
           "maximum positive K32 tile is exact and fits int32");
 
     activations.fill(127);
     CHECK(direct_dot_k32(weights, activations) == -32512 &&
-          decomposed_dot_k32(weights, activations) == -32512,
+          decomposed_dot_k32(weights, activations) == -32512 &&
+          prepacked_dot_k32(weights, activations) == -32512,
           "large negative K32 tile is exact and fits int32");
 
     for (std::size_t i = 0; i < kTileK; ++i) {
@@ -256,7 +325,9 @@ void check_adversarial_tiles() {
                          : (i % 4u == 1u ? -1 : (i % 4u == 2u ? 0 : 127)));
     }
     CHECK(direct_dot_k32(weights, activations) ==
-              decomposed_dot_k32(weights, activations),
+              decomposed_dot_k32(weights, activations) &&
+          direct_dot_k32(weights, activations) ==
+              prepacked_dot_k32(weights, activations),
           "alternating endpoint K32 tile is exact through packed DOT8 oracles");
 }
 
@@ -274,7 +345,9 @@ void check_random_tiles() {
                 next_random(state) & 0xffu);
         }
         if (direct_dot_k32(weights, activations) !=
-            decomposed_dot_k32(weights, activations)) {
+                decomposed_dot_k32(weights, activations) ||
+            direct_dot_k32(weights, activations) !=
+                prepacked_dot_k32(weights, activations)) {
             ok = false;
             break;
         }
@@ -288,6 +361,7 @@ int main() {
     check_endpoints();
     check_all_q8_values();
     check_fragment_packing();
+    check_activation_prepack_layout();
     check_split_half_weight_fragment_order();
     check_runtime_opt_in();
     check_exhaustive_scalar_products();

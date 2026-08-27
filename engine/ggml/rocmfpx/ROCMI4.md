@@ -34,6 +34,19 @@ gfx1151 kernels both compile without scratch or spills; wider schedules are not
 eligible A/B inputs. It is off by default and carries no performance claim
 until device differential tests and alternating A/B timing pass.
 
+`GGML_HIP_ROCMI4_W4A8_IU4_PREPACK=ON` is a second, compile-time-only
+experiment and requires `GGML_HIP_ROCMI4_W4A8_IU4=ON`. During cooperative
+global-to-LDS publication it replaces each K32 q8 payload in place with four
+signed-high I4 words followed by four unsigned-low I4 words. The four D4 scale
+words, LDS footprint, row stride, global bytes, and consumer LDS bytes remain
+unchanged. Consumer waves load the two ready-made IU4 fragments instead of
+each repeating the register-local nibble packing. The integer and float
+accumulation order remains `high_i4*16 + low_u4` at the same scale boundary.
+The option defaults OFF, so it changes neither the ordinary exact-int8 path
+nor the screened W4A8 control build. It carries no performance claim until it
+independently passes the saved-ISA resource gate, device differential
+validation, and alternating A/B timing.
+
 The instruction and fragment contract is pinned to AMD GPUOpen's
 `machine-readable-isa/latest` archive downloaded 2026-08-27 (SHA-256
 `82404f1126761b7877595b622afa7e1f311f2f41e89a3abe9aaf8ad045c082e2`),
