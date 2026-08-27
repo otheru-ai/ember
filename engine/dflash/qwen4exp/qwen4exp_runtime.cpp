@@ -850,15 +850,15 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
                               const float * supplied_embedding,
                               const std::array<int32_t, 3> & position,
                               std::vector<float> & logits,
-                              std::vector<float> * attn_mixed_capture,
+                              std::vector<float> * writer_output_capture,
                               std::string & error) {
     if (token < 0 || token >= 248320 || state.cur_pos < 0 ||
         state.cur_pos >= weights.max_ctx || weights.layers.size() != 48) {
         error = "invalid Qwen4Exp q=1 token/frontier"; return false;
     }
-    if (attn_mixed_capture) {
-        attn_mixed_capture->clear();
-        attn_mixed_capture->reserve(48 * kEmbedding);
+    if (writer_output_capture) {
+        writer_output_capture->clear();
+        writer_output_capture->reserve(48 * kEmbedding);
     }
     std::vector<float> embedding(kEmbedding);
     if (supplied_embedding) {
@@ -888,9 +888,6 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
         if (!hc_mix(weights, state.hc, layer.hc_attn_norm, layer.hc_attn_down,
                     layer.hc_attn_up, layer.hc_attn_inject, mixed, &inject,
                     error)) return false;
-        if (attn_mixed_capture)
-            attn_mixed_capture->insert(attn_mixed_capture->end(),
-                                       mixed.begin(), mixed.end());
         const bool qsa = (layer_index + 1) % 4 == 0;
         if (qsa) {
             if (!run_qsa(weights, state.layers[static_cast<size_t>(layer_index)],
@@ -901,6 +898,14 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
                        weights,
                        state.layers[static_cast<size_t>(layer_index)], layer,
                        layer_index, mixed, block, error)) return false;
+        // Heretic applies each direction to this layer's residual writer
+        // (linear_attn.out_proj/ssm_out or self_attn.o_proj/attn_output).
+        // Capture that writer's 2560-wide output, before HC injection, rather
+        // than the same-width attention input.  The output already contains
+        // GDN/QSA context, including at layer zero.
+        if (writer_output_capture)
+            writer_output_capture->insert(writer_output_capture->end(),
+                                           block.begin(), block.end());
         hc_combine(state.hc, block, inject);
         if (!hc_mix(weights, state.hc, layer.hc_ffn_norm, layer.hc_ffn_down,
                     layer.hc_ffn_up, layer.hc_ffn_inject, mixed, &inject,
@@ -951,10 +956,10 @@ bool qwen4exp_step_q1_mrope(
 bool qwen4exp_step_q1_mrope_capture(
         const Qwen4ExpWeights & weights, Qwen4ExpState & state, int32_t token,
         const std::array<int32_t, 3> & mrope_position,
-        std::vector<float> & logits, std::vector<float> & attn_mixed_capture,
+        std::vector<float> & logits, std::vector<float> & writer_output_capture,
         std::string & error) {
     return step_q1_embedding(weights, state, token, nullptr, mrope_position,
-                             logits, &attn_mixed_capture, error);
+                             logits, &writer_output_capture, error);
 }
 
 namespace {

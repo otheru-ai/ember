@@ -511,7 +511,7 @@ def intervention_grid(recipe: dict[str, Any]) -> list[tuple[str, float, str, lis
     lambdas = recipe.get("intervention_sweep", {}).get("lambdas")
     policies = recipe.get("intervention_sweep", {}).get("layer_policies")
     if lambdas != [0.25, 0.5, 0.75, 1.0] or list(policies or {}) != [
-        "all-48", "upper-24", "upper-12", "non-qsa"
+        "band-10-42", "upper-24", "upper-12", "non-qsa-band-10-42"
     ]:
         raise CaptureError("recipe does not define the exact 4x4 intervention policy grid")
     result: list[tuple[str, float, str, list[float]]] = []
@@ -567,7 +567,7 @@ def generate_manifests(
     )
     activation_evidence = {
         "backend": "ember_qwen_runtime_f32_dump",
-        "format": "48x2560-little-endian-f32-records-v1",
+        "format": "48x2560-little-endian-f32-writer-output-records-v2",
         "record_order": "corpus_jsonl_order",
         "stock_rocmi4_artifact_sha256": model_sha,
         "artifact_sha256_verification": "supplied_not_locally_rehashed",
@@ -589,6 +589,7 @@ def generate_manifests(
             orthogonalize_control_mean=True, winsorization_quantile=1.0,
             max_input_tokens=0, batch_size=1,
             load_mode="stock_rocmi4_runtime_f32_dump",
+            layer_policy=policy,
             activation_evidence=activation_evidence,
         )
         manifest["selection_partition_policy"] = {
@@ -681,7 +682,7 @@ def print_plan(args: argparse.Namespace) -> None:
     print(f"  corpus contract   {args.corpus_contract_sha256}")
     print("  extraction        exact pinned OtherU 32 good + 32 bad rows")
     print("  sweep/final       digest metadata only; selection/confirmation, never direction inputs")
-    print("  output            48x2560 directions; deterministic 4 lambdas x 4 policies")
+    print("  output            48x2560 writer-output directions; deterministic 4 lambdas x 4 policies")
     print(f"  exclusive GPU     {GPU_LOCK} + {PRODUCTION} stop/mask/restore")
     print("  publication       none")
 
@@ -841,7 +842,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
             "final_usage": "single_winner_confirmation_only_not_read",
         },
         "activations": {
-            "format": "48x2560-little-endian-f32-records-v1",
+            "format": "48x2560-little-endian-f32-writer-output-records-v2",
             "combined_sha256": sha256(combined),
             "good_sha256": sha256(good_dump), "bad_sha256": sha256(bad_dump),
             "direction_shape": [48, 2560],

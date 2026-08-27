@@ -52,6 +52,19 @@ PLE_SUFFIXES = {
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 QWEN_QSA_LAYERS = {3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47}
+QWEN_INTERVENTION_POLICY_LAYERS = {
+    "band-10-42": frozenset(range(10, 43)),
+    "upper-24": frozenset(range(24, 48)),
+    "upper-12": frozenset(range(36, 48)),
+    "non-qsa-band-10-42": frozenset(
+        layer for layer in range(10, 43) if layer not in QWEN_QSA_LAYERS
+    ),
+}
+QWEN_INTERVENTION_POLICY_EVIDENCE = {
+    "source_revision": "a3c6a728510f91394e991504951ac316cd3a89af",
+    "deepseek_reference_band": "10-42",
+    "qwen_status": "exploratory_transfer_hypothesis",
+}
 INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.weight$")
 DEFAULT_QUANTIZATION_ARM = "profile-default-rocmi4"
 COMPANION_INVENTORY_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
@@ -1024,34 +1037,47 @@ def validate_intervention_manifest(
             raise PipelineError("intervention direction SHA-256 does not match its packed little-endian F32 values")
         direction_dimensions[direction_id] = len(values)
 
-    # The release model's ordinary Transformers hidden-state API mixes the
-    # 10240-wide HC state with the final 2560-wide state and cannot be used to
-    # construct these left-projection directions.  Require evidence from the
-    # Qwen-specific mixed-input extractor.  Fixture profiles use another repo
-    # id and intentionally retain small synthetic direction dimensions.
+    # The release model's ordinary Transformers hidden-state API exposes a
+    # 10240-wide HC state and cannot construct directions for 2560-row writer
+    # matrices. Require the architecture-specific hybrid output-projection
+    # hooks instead. Fixture profiles use another repo id and intentionally
+    # retain small synthetic direction dimensions.
     if expected_source.get("repo_id") == "Qwen/Qwen3.8-Flash-Next":
         extraction = require_mapping(manifest.get("extraction"), "intervention.extraction")
+        extractor = require_mapping(tooling.get("extractor"), "intervention.tooling.extractor")
+        policy_evidence = require_mapping(
+            extraction.get("policy_evidence"),
+            "intervention.extraction.policy_evidence",
+        )
         if (
             extraction.get("direction_scope") != "per_layer"
             or extraction.get("layer_count") != 48
             or extraction.get("activation_width") != 2560
             or extraction.get("semantic_capture_point")
-            != "decoder_layer.attn_hyper_connection.mixed_input"
+            != "decoder_layer.residual_writer.output"
+            or extraction.get("transformers_hook_module")
+            != "model.language_model.layers.N.{linear_attn.out_proj|self_attn.o_proj}"
+            or extraction.get("transformers_hook_value") != "forward_output[:,-1,:]"
+            or extraction.get("layer_policy") not in QWEN_INTERVENTION_POLICY_LAYERS
+            or policy_evidence != QWEN_INTERVENTION_POLICY_EVIDENCE
             or extraction.get("hidden_states_api_used") is not False
             or extraction.get("streaming") is not True
             or extraction.get("efficacy_evaluated") is not False
+            or extractor.get("implementation")
+            != "ember-qwen-residual-writer-activation-extractor"
+            or extractor.get("schema_version") != 2
         ):
             raise PipelineError(
-                "Qwen intervention extraction must use streamed 2560-wide per-layer HC mixed inputs"
+                "Qwen intervention extraction must use streamed 2560-wide per-layer residual-writer outputs"
             )
         expected_direction_ids = {
-            f"layer-{layer:02d}-attn-mixed-input-r1" for layer in range(48)
+            f"layer-{layer:02d}-residual-writer-output-r1" for layer in range(48)
         }
         if direction_ids != expected_direction_ids or any(
             direction_dimensions[direction_id] != 2560
             for direction_id in expected_direction_ids
         ):
-            raise PipelineError("Qwen intervention must carry all 48 per-layer 2560-wide directions")
+            raise PipelineError("Qwen intervention must carry all 48 per-layer 2560-wide writer-output directions")
         classes = {corpus.get("class"): corpus for corpus in corpora}
         if set(classes) != {"good_control", "bad_target"}:
             raise PipelineError("Qwen intervention requires distinct good and bad extraction corpora")
@@ -1080,7 +1106,8 @@ def validate_intervention_manifest(
         backend = activation.get("backend")
         if backend == "ember_qwen_runtime_f32_dump":
             if (
-                activation.get("format") != "48x2560-little-endian-f32-records-v1"
+                activation.get("format")
+                != "48x2560-little-endian-f32-writer-output-records-v2"
                 or activation.get("record_order") != "corpus_jsonl_order"
                 or activation.get("artifact_sha256_verification")
                 != "supplied_not_locally_rehashed"
@@ -1146,7 +1173,7 @@ def validate_intervention_manifest(
             )
         if expected_source.get("repo_id") == "Qwen/Qwen3.8-Flash-Next" and (
             shape != [6144, 2560]
-            or direction_id != f"layer-{layer:02d}-attn-mixed-input-r1"
+            or direction_id != f"layer-{layer:02d}-residual-writer-output-r1"
         ):
             raise PipelineError(
                 f"intervention target {name} must use its same-layer 2560-wide direction and [6144, 2560] GGUF shape"
@@ -1155,11 +1182,24 @@ def validate_intervention_manifest(
     tensor_map = require_mapping(manifest.get("tensor_map"), "intervention.tensor_map")
     if target_names != sorted(target_names):
         raise PipelineError("intervention targets must be lexicographically ordered")
+    if expected_source.get("repo_id") == "Qwen/Qwen3.8-Flash-Next":
+        extraction = require_mapping(manifest.get("extraction"), "intervention.extraction")
+        policy = extraction.get("layer_policy")
+        target_layers = frozenset(
+            int(INTERVENTION_TARGET_RE.fullmatch(name).group(1))
+            for name in target_names
+        )
+        if target_layers != QWEN_INTERVENTION_POLICY_LAYERS.get(policy):
+            raise PipelineError(
+                "Qwen intervention targets do not match the exact exploratory layer policy"
+            )
     names_digest = hashlib.sha256("\n".join(sorted(target_names)).encode("utf-8")).hexdigest()
     if (
         tensor_map.get("kind") != "exact_tensor_names"
         or tensor_map.get("target_count") != len(target_names)
         or tensor_map.get("target_names_sha256") != names_digest
+        or (expected_source.get("repo_id") == "Qwen/Qwen3.8-Flash-Next"
+            and tensor_map.get("candidate_writer_count") != 48)
     ):
         raise PipelineError("intervention tensor-map evidence does not match the exact target list")
 

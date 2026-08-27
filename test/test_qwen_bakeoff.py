@@ -542,10 +542,14 @@ class BakeoffTest(unittest.TestCase):
                 "source": configuration["direction_basis"]["source"],
                 "tooling": configuration["direction_basis"]["tooling"],
                 "corpora": configuration["direction_basis"]["corpora"],
-                "extraction": {"activation_evidence": {"sha256": "a" * 64}},
+                "extraction": {
+                    **configuration["direction_basis"]["extraction"],
+                    "layer_policy": configuration["layer_policy"],
+                    "activation_evidence": {"sha256": "a" * 64},
+                },
                 "directions": [{"id": f"layer-{layer:02d}", "dtype": "F32",
                                 "layer": layer,
-                                "activation": "attn_hyper_connection.mixed_input",
+                                "activation": "residual_writer.output",
                                 "sha256": f"{layer:064x}"} for layer in range(48)],
                 "targets": targets,
             }
@@ -557,6 +561,35 @@ class BakeoffTest(unittest.TestCase):
                    "configuration_id": configuration["id"]}
             qb.validate_intervention_binding(
                 row, configuration, plan["corpora"]["sweep-validation.jsonl"]["sha256"])
+            base_manifest["extraction"]["semantic_capture_point"] = (
+                "decoder_layer.attn_hyper_connection.mixed_input"
+            )
+            manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")
+            row["intervention_manifest"]["sha256"] = digest(manifest_path)
+            row["intervention_manifest_sha256"] = digest(manifest_path)
+            with self.assertRaisesRegex(qb.BakeoffError, "extraction semantics"):
+                qb.validate_intervention_binding(
+                    row, configuration,
+                    plan["corpora"]["sweep-validation.jsonl"]["sha256"],
+                )
+            base_manifest["extraction"] = {
+                **configuration["direction_basis"]["extraction"],
+                "layer_policy": "upper-24",
+                "activation_evidence": {"sha256": "a" * 64},
+            }
+            manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")
+            row["intervention_manifest"]["sha256"] = digest(manifest_path)
+            row["intervention_manifest_sha256"] = digest(manifest_path)
+            with self.assertRaisesRegex(qb.BakeoffError, "extraction semantics"):
+                qb.validate_intervention_binding(
+                    row, configuration,
+                    plan["corpora"]["sweep-validation.jsonl"]["sha256"],
+                )
+            base_manifest["extraction"] = {
+                **configuration["direction_basis"]["extraction"],
+                "layer_policy": configuration["layer_policy"],
+                "activation_evidence": {"sha256": "a" * 64},
+            }
             targets[0]["scale"] = 9.0
             base_manifest["targets"] = targets
             manifest_path.write_text(json.dumps(base_manifest), encoding="utf-8")

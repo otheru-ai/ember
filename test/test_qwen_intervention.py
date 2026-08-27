@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for Qwen mixed-input direction extraction."""
+"""Offline tests for Qwen residual-writer direction extraction."""
 
 from __future__ import annotations
 
@@ -47,18 +47,21 @@ class FakeHookPoint:
         self.hooks.append(hook)
         return FakeHandle(self, hook)
 
-    def emit(self, mixed_input) -> None:
-        output = (mixed_input, "10240-wide-state-must-not-be-used", "inject")
+    def emit(self, writer_output) -> None:
         for hook in list(self.hooks):
-            hook(self, (), output)
+            hook(self, (), writer_output)
 
 
 class FakeQwen:
-    def __init__(self, layer_count: int):
+    def __init__(self, layer_count: int, qsa_layers: frozenset[int]):
         self.layers = [
-            SimpleNamespace(attn_hyper_connection=FakeHookPoint())
+            SimpleNamespace(
+                linear_attn=SimpleNamespace(out_proj=FakeHookPoint()),
+                self_attn=SimpleNamespace(o_proj=FakeHookPoint()),
+            )
             for _ in range(layer_count)
         ]
+        self.qsa_layers = qsa_layers
         self.model = SimpleNamespace(
             language_model=SimpleNamespace(layers=self.layers)
         )
@@ -68,21 +71,45 @@ class FakeQwen:
         self.saw_output_hidden_states = "output_hidden_states" in kwargs
         if use_cache is not False or return_dict is not True:
             raise AssertionError("extractor forward contract changed")
-        for layer, output in zip(self.layers, layer_outputs, strict=True):
-            layer.attn_hyper_connection.emit(output)
+        for index, (layer, output) in enumerate(
+                zip(self.layers, layer_outputs, strict=True)):
+            writer = (layer.self_attn.o_proj if index in self.qsa_layers
+                      else layer.linear_attn.out_proj)
+            writer.emit(output)
         return {"ignored": True}
 
 
 class QwenInterventionTests(unittest.TestCase):
-    def test_mock_hooks_capture_only_2560_analogue_mixed_input(self) -> None:
+    def test_writer_output_directions_require_every_layer(self) -> None:
+        spec = qi.ArchitectureSpec(
+            layer_count=2, hidden_size=3, writer_input_size=6,
+            qsa_layers=frozenset(),
+        )
+        good = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+        bad = [[1.0, 1.0, 0.0], [1.0, 2.0, 0.0]]
+        directions = qi.build_directions(
+            good, bad, orthogonalize_control_mean=True, spec=spec,
+        )
+        self.assertEqual(len(directions), 2)
+        self.assertTrue(all(row is not None for row in directions))
+
+        degenerate_layer_zero = [list(row) for row in bad]
+        degenerate_layer_zero[0] = list(good[0])
+        with self.assertRaisesRegex(qi.InterventionError, "layer 0 bad-good direction"):
+            qi.build_directions(
+                good, degenerate_layer_zero,
+                orthogonalize_control_mean=True, spec=spec,
+            )
+
+    def test_mock_hooks_capture_hybrid_residual_writer_outputs(self) -> None:
         spec = qi.ArchitectureSpec(
             layer_count=4, hidden_size=3, writer_input_size=6,
             qsa_layers=frozenset({3}),
         )
-        model = FakeQwen(spec.layer_count)
+        model = FakeQwen(spec.layer_count, spec.qsa_layers)
         # Each layer contains batch x position x hidden.  The first position is
         # deliberately huge: selecting ordinary/initial state instead of the
-        # final mixed_input frontier would make every assertion fail.
+        # final writer-output frontier would make every assertion fail.
         layer_outputs = []
         for layer in range(spec.layer_count):
             layer_outputs.append([
@@ -96,7 +123,8 @@ class QwenInterventionTests(unittest.TestCase):
         self.assertEqual(count, 2)
         for layer in range(spec.layer_count):
             self.assertEqual(means[layer], [layer + 2.0, 3.0, 4.0])
-            self.assertEqual(model.layers[layer].attn_hyper_connection.hooks, [])
+            self.assertEqual(model.layers[layer].linear_attn.out_proj.hooks, [])
+            self.assertEqual(model.layers[layer].self_attn.o_proj.hooks, [])
         self.assertFalse(model.saw_output_hidden_states)
 
     def test_raw_dump_is_streamed_strictly_and_averaged(self) -> None:
@@ -178,7 +206,21 @@ class QwenInterventionTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             manifest = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["directions"]), 48)
-            self.assertEqual(len(manifest["targets"]), 48)
+            self.assertEqual(len(manifest["targets"]), 33)
+            self.assertEqual(
+                manifest["extraction"]["semantic_capture_point"],
+                "decoder_layer.residual_writer.output",
+            )
+            self.assertEqual(manifest["extraction"]["layer_policy"], "band-10-42")
+            self.assertEqual(manifest["extraction"]["policy_evidence"], {
+                "source_revision": "a3c6a728510f91394e991504951ac316cd3a89af",
+                "deepseek_reference_band": "10-42",
+                "qwen_status": "exploratory_transfer_hypothesis",
+            })
+            self.assertIn(
+                "layer-00-residual-writer-output-r1",
+                {row["id"] for row in manifest["directions"]},
+            )
             self.assertTrue(all(len(row["values"]) == 2560 for row in manifest["directions"]))
             self.assertEqual(
                 manifest["extraction"]["activation_evidence"]["backend"],
@@ -190,7 +232,24 @@ class QwenInterventionTests(unittest.TestCase):
                 output, release_profile
             )
             self.assertEqual(evidence["direction_count"], 48)
-            self.assertEqual(evidence["target_count"], 48)
+            self.assertEqual(evidence["target_count"], 33)
+
+            for field, value, expected in (
+                ("qwen_status", "established_qwen_policy", "residual-writer outputs"),
+                ("layer_policy", "upper-24", "exact exploratory layer policy"),
+            ):
+                with self.subTest(field=field):
+                    tampered = json.loads(json.dumps(manifest))
+                    if field == "layer_policy":
+                        tampered["extraction"][field] = value
+                    else:
+                        tampered["extraction"]["policy_evidence"][field] = value
+                    tampered_path = root / f"tampered-{field}.json"
+                    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+                    with self.assertRaisesRegex(qwen_quantize.PipelineError, expected):
+                        qwen_quantize.validate_intervention_manifest(
+                            tampered_path, release_profile
+                        )
 
 
 if __name__ == "__main__":

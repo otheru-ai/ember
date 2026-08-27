@@ -472,8 +472,10 @@ class Fixture:
             "tooling": {
                 "otheru_quant_pipeline": base_profile["intervention"]["otheru_pipeline"],
                 "upstream_heretic": base_profile["intervention"]["upstream_heretic"],
-                "extractor": {"implementation": "ember-qwen-hc-activation-extractor",
-                              "schema_version": 1},
+                "extractor": {
+                    "implementation": "ember-qwen-residual-writer-activation-extractor",
+                    "schema_version": 2,
+                },
             },
             "corpora": [{
                 "id": "fixture-refusal-pairs",

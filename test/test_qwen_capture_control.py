@@ -162,8 +162,8 @@ class QwenCaptureControlTest(unittest.TestCase):
         counts = {policy: sum(value != 0.0 for value in scales)
                   for _identifier, _scale, policy, scales in grid}
         self.assertEqual(counts,
-                         {"all-48": 48, "upper-24": 24,
-                          "upper-12": 12, "non-qsa": 36})
+                         {"band-10-42": 33, "upper-24": 24,
+                          "upper-12": 12, "non-qsa-band-10-42": 25})
         self.assertNotIn("results", capture.intervention_grid.__code__.co_names)
 
     def test_dump_split_fails_closed_on_missing_row(self) -> None:

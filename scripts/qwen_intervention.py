@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Extract Qwen3.8 per-layer directions and write a quantizer manifest.
 
-This is an offline, non-publishing stage.  It deliberately captures the
-2560-wide ``mixed_input`` returned by every decoder layer's
-``attn_hyper_connection``.  Qwen4Exp's ordinary decoder hidden states are
-10240-wide hyper-connection state and are not valid left-projection directions
-for the 2560-row attention output matrices.
+This is an offline, non-publishing stage.  It deliberately captures every
+decoder layer's 2560-wide residual-writer output: ``linear_attn.out_proj`` on
+GDN layers and ``self_attn.o_proj`` on QSA layers.  Qwen4Exp's ordinary decoder
+hidden states are 10240-wide hyper-connection state and are not valid
+left-projection directions for these 2560-row output matrices.
 
 The primary backend consumes the raw F32 activation dumps produced by Ember's
 Qwen runtime, matching the pinned OtherU architecture-change workflow.  Each
@@ -60,6 +60,20 @@ QWEN_SPEC = ArchitectureSpec(
     writer_input_size=6144,
     qsa_layers=frozenset(range(3, 48, 4)),
 )
+
+QWEN_POLICY_LAYERS = {
+    "band-10-42": frozenset(range(10, 43)),
+    "upper-24": frozenset(range(24, 48)),
+    "upper-12": frozenset(range(36, 48)),
+    "non-qsa-band-10-42": frozenset(
+        layer for layer in range(10, 43) if layer not in QWEN_SPEC.qsa_layers
+    ),
+}
+QWEN_POLICY_EVIDENCE = {
+    "source_revision": "a3c6a728510f91394e991504951ac316cd3a89af",
+    "deepseek_reference_band": "10-42",
+    "qwen_status": "exploratory_transfer_hypothesis",
+}
 
 
 @dataclass(frozen=True)
@@ -277,29 +291,38 @@ def locate_qwen_layers(model: Any, spec: ArchitectureSpec) -> Sequence[Any]:
                 raise InterventionError(
                     f"Qwen decoder has {count} layers, expected {spec.layer_count}"
                 )
-            for index, layer in enumerate(layers):
-                if not hasattr(layer, "attn_hyper_connection"):
-                    raise InterventionError(
-                        f"Qwen decoder layer {index} lacks attn_hyper_connection"
-                    )
             return layers
     raise InterventionError("cannot locate Qwen language-model decoder layers")
+
+
+def residual_writer(layer: Any, layer_index: int, spec: ArchitectureSpec) -> Any:
+    if layer_index in spec.qsa_layers:
+        component = getattr(layer, "self_attn", None)
+        writer = getattr(component, "o_proj", None)
+        label = "self_attn.o_proj"
+    else:
+        component = getattr(layer, "linear_attn", None)
+        writer = getattr(component, "out_proj", None)
+        label = "linear_attn.out_proj"
+    if writer is None:
+        raise InterventionError(f"Qwen decoder layer {layer_index} lacks {label}")
+    return writer
 
 
 class PythonTensorOps:
     """Small dependency-free tensor adapter used by deterministic tests."""
 
     @staticmethod
-    def last_token_batch_sum(mixed_input: Any, dimension: int, quantile: float) -> list[float]:
-        if not isinstance(mixed_input, list) or not mixed_input:
-            raise InterventionError("mock mixed_input must be a nonempty batch list")
+    def last_token_batch_sum(writer_output: Any, dimension: int, quantile: float) -> list[float]:
+        if not isinstance(writer_output, list) or not writer_output:
+            raise InterventionError("mock writer output must be a nonempty batch list")
         result = [0.0] * dimension
-        for sample in mixed_input:
+        for sample in writer_output:
             if not isinstance(sample, list) or not sample:
-                raise InterventionError("mock mixed_input sample must contain positions")
+                raise InterventionError("mock writer output sample must contain positions")
             row = [float(value) for value in sample[-1]]
             if len(row) != dimension or any(not math.isfinite(value) for value in row):
-                raise InterventionError("mock mixed_input has the wrong final dimension")
+                raise InterventionError("mock writer output has the wrong final dimension")
             if quantile < 1.0:
                 ordered = sorted(abs(value) for value in row)
                 position = quantile * (len(ordered) - 1)
@@ -317,14 +340,14 @@ class TorchTensorOps:
     def __init__(self, torch_module: Any):
         self.torch = torch_module
 
-    def last_token_batch_sum(self, mixed_input: Any, dimension: int, quantile: float) -> list[float]:
-        if getattr(mixed_input, "ndim", None) != 3 or mixed_input.shape[-1] != dimension:
+    def last_token_batch_sum(self, writer_output: Any, dimension: int, quantile: float) -> list[float]:
+        if getattr(writer_output, "ndim", None) != 3 or writer_output.shape[-1] != dimension:
             raise InterventionError(
-                f"attn_hyper_connection mixed_input must have final dimension {dimension}"
+                f"residual-writer output must have final dimension {dimension}"
             )
-        # This exact slice is the Qwen-specific contract: output[0] is the
-        # learned HC mixed_input, and left padding makes -1 the prompt frontier.
-        frontier = mixed_input[:, -1, :].detach().to(dtype=self.torch.float32)
+        # Left padding makes -1 the prompt frontier. Hooking the output
+        # projection itself keeps this vector in the writer's 2560-row space.
+        frontier = writer_output[:, -1, :].detach().to(dtype=self.torch.float32)
         if quantile < 1.0:
             threshold = self.torch.quantile(
                 frontier.abs(), quantile, dim=1, keepdim=True
@@ -332,7 +355,7 @@ class TorchTensorOps:
             frontier = self.torch.clamp(frontier, min=-threshold, max=threshold)
         values = frontier.to(device="cpu", dtype=self.torch.float64).sum(dim=0)
         if not bool(self.torch.isfinite(values).all()):
-            raise InterventionError("non-finite Qwen mixed_input activation")
+            raise InterventionError("non-finite Qwen residual-writer activation")
         return [float(value) for value in values.tolist()]
 
 
@@ -363,7 +386,7 @@ def accumulate_activation_means(
     winsorization_quantile: float,
     inference_context: Callable[[], Any] = nullcontext,
 ) -> tuple[list[list[float]], int]:
-    """Stream batches through Qwen and return one mean mixed_input per layer."""
+    """Stream batches through Qwen and return one mean writer output per layer."""
     if not 0.0 <= winsorization_quantile <= 1.0:
         raise InterventionError("winsorization quantile must be in [0, 1]")
     layers = locate_qwen_layers(model, spec)
@@ -373,12 +396,8 @@ def accumulate_activation_means(
 
     def make_hook(layer_index: int) -> Callable[..., None]:
         def hook(_module: Any, _args: Any, output: Any) -> None:
-            if not isinstance(output, (tuple, list)) or not output:
-                raise InterventionError(
-                    f"layer {layer_index} attn_hyper_connection did not return mixed_input tuple"
-                )
             batch_sum = tensor_ops.last_token_batch_sum(
-                output[0], spec.hidden_size, winsorization_quantile
+                output, spec.hidden_size, winsorization_quantile
             )
             if len(batch_sum) != spec.hidden_size:
                 raise InterventionError(f"layer {layer_index} activation sum has wrong width")
@@ -389,9 +408,12 @@ def accumulate_activation_means(
         return hook
 
     for index, layer in enumerate(layers):
-        register = getattr(layer.attn_hyper_connection, "register_forward_hook", None)
+        writer = residual_writer(layer, index, spec)
+        register = getattr(writer, "register_forward_hook", None)
         if not callable(register):
-            raise InterventionError(f"layer {index} hyper-connection cannot register a hook")
+            raise InterventionError(
+                f"layer {index} residual writer cannot register a hook"
+            )
         handles.append(register(make_hook(index)))
 
     total = 0
@@ -404,12 +426,13 @@ def accumulate_activation_means(
                 before = list(calls)
                 forwarded = move_batch(batch, input_device)
                 # output_hidden_states is intentionally absent: those states are
-                # 10240-wide on Qwen4Exp and the pinned Heretic stack path breaks.
+                # 10240-wide on Qwen4Exp. The hybrid writer hooks above preserve
+                # Heretic's post-writer output-space contract at width 2560.
                 model(**forwarded, use_cache=False, return_dict=True)
                 for index in range(spec.layer_count):
                     if calls[index] != before[index] + 1:
                         raise InterventionError(
-                            f"layer {index} hyper-connection hook fired {calls[index] - before[index]} times"
+                            f"layer {index} residual-writer hook fired {calls[index] - before[index]} times"
                         )
                 total += record_count
     finally:
@@ -513,7 +536,14 @@ def writer_name(layer: int, spec: ArchitectureSpec) -> str:
 
 def read_layer_scales(args: argparse.Namespace, spec: ArchitectureSpec) -> list[float]:
     if args.scale is not None:
-        values = [float(args.scale)] * spec.layer_count
+        # Pinned OtherU revision a3c6a728 found 10..42 coherence-preserving
+        # for DeepSeek and found that editing 0..9 broke agentic coherence.
+        # Treat that band as an exploratory transfer hypothesis for Qwen; the
+        # held-out Qwen gates remain authoritative.
+        values = [
+            float(args.scale) if 10 <= layer <= 42 else 0.0
+            for layer in range(spec.layer_count)
+        ]
     else:
         try:
             raw = json.loads(args.layer_scales.read_text(encoding="utf-8"))
@@ -536,6 +566,38 @@ def read_layer_scales(args: argparse.Namespace, spec: ArchitectureSpec) -> list[
     return values
 
 
+def validate_layer_policy(
+    layer_policy: str, layer_scales: Sequence[float], spec: ArchitectureSpec,
+) -> None:
+    if spec != QWEN_SPEC:
+        return
+    expected = QWEN_POLICY_LAYERS.get(layer_policy)
+    if expected is None:
+        raise InterventionError(f"unknown Qwen layer policy: {layer_policy}")
+    actual = frozenset(
+        layer for layer, scale in enumerate(layer_scales) if float(scale) != 0.0
+    )
+    if actual != expected:
+        raise InterventionError(
+            f"Qwen layer policy {layer_policy} does not match its exact target layers"
+        )
+
+
+def infer_layer_policy(layer_scales: Sequence[float], spec: ArchitectureSpec) -> str:
+    if spec != QWEN_SPEC:
+        return "explicit-layer-scales"
+    actual = frozenset(
+        layer for layer, scale in enumerate(layer_scales) if float(scale) != 0.0
+    )
+    matches = [name for name, expected in QWEN_POLICY_LAYERS.items()
+               if actual == expected]
+    if len(matches) != 1:
+        raise InterventionError(
+            "Qwen layer scales must match one exact exploratory bakeoff policy"
+        )
+    return matches[0]
+
+
 def build_manifest(
     *,
     profile: dict[str, Any],
@@ -551,22 +613,24 @@ def build_manifest(
     max_input_tokens: int,
     batch_size: int,
     load_mode: str,
+    layer_policy: str,
     activation_evidence: dict[str, Any] | None = None,
     spec: ArchitectureSpec = QWEN_SPEC,
 ) -> dict[str, Any]:
     if len(directions) != spec.layer_count or len(layer_scales) != spec.layer_count:
         raise InterventionError("manifest inputs do not cover every Qwen layer")
+    validate_layer_policy(layer_policy, layer_scales, spec)
     direction_rows = []
     for layer, values in enumerate(directions):
         if len(values) != spec.hidden_size:
             raise InterventionError(f"direction {layer} has wrong width")
         direction_rows.append({
-            "id": f"layer-{layer:02d}-attn-mixed-input-r1",
+            "id": f"layer-{layer:02d}-residual-writer-output-r1",
             "dtype": "F32",
             "values": list(values),
             "sha256": packed_f32_sha256(values),
             "layer": layer,
-            "activation": "attn_hyper_connection.mixed_input",
+            "activation": "residual_writer.output",
         })
     targets = []
     for layer, scale in enumerate(layer_scales):
@@ -574,7 +638,7 @@ def build_manifest(
             continue
         targets.append({
             "tensor_name": writer_name(layer, spec),
-            "direction_id": f"layer-{layer:02d}-attn-mixed-input-r1",
+            "direction_id": f"layer-{layer:02d}-residual-writer-output-r1",
             "scale": scale,
             "normalization": "row_norm_preserve",
             "expected_shape": [spec.writer_input_size, spec.hidden_size],
@@ -600,8 +664,8 @@ def build_manifest(
             "otheru_quant_pipeline": contract["otheru_pipeline"],
             "upstream_heretic": contract["upstream_heretic"],
             "extractor": {
-                "implementation": "ember-qwen-hc-activation-extractor",
-                "schema_version": 1,
+                "implementation": "ember-qwen-residual-writer-activation-extractor",
+                "schema_version": 2,
             },
         },
         "corpora": [
@@ -633,9 +697,13 @@ def build_manifest(
             "direction_scope": "per_layer",
             "layer_count": spec.layer_count,
             "activation_width": spec.hidden_size,
-            "semantic_capture_point": "decoder_layer.attn_hyper_connection.mixed_input",
-            "transformers_hook_module": "model.language_model.layers.N.attn_hyper_connection",
-            "transformers_hook_value": "forward_output[0][:,-1,:]",
+            "semantic_capture_point": "decoder_layer.residual_writer.output",
+            "transformers_hook_module": (
+                "model.language_model.layers.N.{linear_attn.out_proj|self_attn.o_proj}"
+            ),
+            "transformers_hook_value": "forward_output[:,-1,:]",
+            "layer_policy": layer_policy,
+            "policy_evidence": dict(QWEN_POLICY_EVIDENCE),
             "hidden_states_api_used": False,
             "good_records_processed": good_count,
             "bad_records_processed": bad_count,
@@ -786,7 +854,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     scales = parser.add_mutually_exclusive_group(required=True)
     scales.add_argument(
         "--scale", type=float,
-        help="explicit non-zero projection strength for all 48 writers; no efficacy is implied",
+        help="projection strength for the exploratory layers 10..42 band",
     )
     scales.add_argument(
         "--layer-scales", type=Path,
@@ -857,7 +925,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         good_count, bad_count = good.record_count, bad.record_count
         activation_evidence = {
             "backend": "ember_qwen_runtime_f32_dump",
-            "format": "48x2560-little-endian-f32-records-v1",
+            "format": "48x2560-little-endian-f32-writer-output-records-v2",
             "record_order": "corpus_jsonl_order",
             "stock_rocmi4_artifact_sha256": artifact_sha,
             "artifact_sha256_verification": "supplied_not_locally_rehashed",
@@ -931,6 +999,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         max_input_tokens=args.max_input_tokens,
         batch_size=args.batch_size,
         load_mode=load_mode,
+        layer_policy=infer_layer_policy(layer_scales, QWEN_SPEC),
         activation_evidence=activation_evidence,
     )
     write_manifest_noreplace(args.output.resolve(), manifest, profile)

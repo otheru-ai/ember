@@ -113,14 +113,14 @@ def artifact_by_name(manifest: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def layers(policy: str) -> list[int]:
-    if policy == "all-48":
-        return list(range(48))
+    if policy == "band-10-42":
+        return list(range(10, 43))
     if policy == "upper-24":
         return list(range(24, 48))
     if policy == "upper-12":
         return list(range(36, 48))
-    if policy == "non-qsa":
-        return [layer for layer in range(48) if layer % 4 != 3]
+    if policy == "non-qsa-band-10-42":
+        return [layer for layer in range(10, 43) if layer % 4 != 3]
     raise BakeoffError(f"unknown layer policy: {policy}")
 
 
@@ -264,8 +264,23 @@ def make_plan(
         "tooling": {
             "otheru_quant_pipeline": intervention.get("otheru_pipeline"),
             "upstream_heretic": intervention.get("upstream_heretic"),
-            "extractor": {"implementation": "ember-qwen-hc-activation-extractor",
-                          "schema_version": 1},
+            "extractor": {
+                "implementation": "ember-qwen-residual-writer-activation-extractor",
+                "schema_version": 2,
+            },
+        },
+        "extraction": {
+            "semantic_capture_point": "decoder_layer.residual_writer.output",
+            "transformers_hook_module": (
+                "model.language_model.layers.N.{linear_attn.out_proj|self_attn.o_proj}"
+            ),
+            "transformers_hook_value": "forward_output[:,-1,:]",
+            "hidden_states_api_used": False,
+            "policy_evidence": {
+                "source_revision": "a3c6a728510f91394e991504951ac316cd3a89af",
+                "deepseek_reference_band": "10-42",
+                "qwen_status": "exploratory_transfer_hypothesis",
+            },
         },
         "corpora": [
             {"class": "good_control", "role": "direction_extraction",
@@ -856,10 +871,17 @@ def validate_intervention_binding(row: dict[str, Any],
     compact_corpora = [{key: item.get(key) for key in (
         "class", "role", "sha256", "record_count")}
         for item in identity["corpora"] if isinstance(item, dict)]
+    extraction = identity.get("extraction") or {}
+    expected_extraction = basis.get("extraction") or {}
     if (identity.get("source") != basis.get("source")
             or identity.get("tooling") != basis.get("tooling")
-            or compact_corpora != basis.get("corpora")):
-        raise BakeoffError("intervention direction source/tool/extraction corpora differ from the plan")
+            or compact_corpora != basis.get("corpora")
+            or any(extraction.get(key) != value
+                   for key, value in expected_extraction.items())
+            or extraction.get("layer_policy") != configuration.get("layer_policy")):
+        raise BakeoffError(
+            "intervention direction source/tool/extraction semantics differ from the plan"
+        )
     return identity
 
 

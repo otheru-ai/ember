@@ -246,13 +246,14 @@ bool qwen4exp_step_q1_mrope(
     std::vector<float> & logits, std::string & error);
 
 // Direction-extraction seam used only for a prompt frontier. The returned
-// record contains the 2560-wide attention hyper-connection mixed input for
-// all 48 layers in numeric order. It is deliberately separate from ordinary
-// generation so a capture can never become an accidental decode hot-path cost.
+// record contains the 2560-wide residual-writer output for all 48 layers in
+// numeric order: ssm_out on GDN layers and attn_output on QSA layers. It is
+// deliberately separate from ordinary generation so a capture can never
+// become an accidental decode hot-path cost.
 bool qwen4exp_step_q1_mrope_capture(
     const Qwen4ExpWeights & weights, Qwen4ExpState & state, int32_t token,
     const std::array<int32_t, 3> & mrope_position,
-    std::vector<float> & logits, std::vector<float> & attn_mixed_capture,
+    std::vector<float> & logits, std::vector<float> & writer_output_capture,
     std::string & error);
 
 // Native bounded verifier entry. Rows are evaluated layer-major so target

@@ -104,7 +104,10 @@ The stock control carries explicit `none_control` and
 `control_only_requires_manifest_for_release` metadata on every shard and is
 always final-ineligible. Those labels are negative control evidence, not proof
 of a weight intervention. It exists to establish correctness, quality, and
-performance and to capture the 48×2560 per-prompt mixed-input activations. A
+performance and to capture the 48×2560 per-prompt residual-writer outputs. The
+capture point is the output of each GDN ``ssm_out`` or QSA ``attn_output``
+projection, before hyper-connection injection, so every direction inhabits the
+same 2560-row space as the weight matrix it modifies. A
 release package still requires a separately measured intervention artifact.
 
 ## Pinned and disjoint corpora
@@ -144,7 +147,11 @@ python3 scripts/qwen_bakeoff.py \
 ```
 
 The sweep uses positive projection-removal strengths 0.25, 0.5, 0.75, and
-1.0 over all 48 layers, upper 24, upper 12, and the 36 non-QSA layers. It first
+1.0 over layers 10–42, upper 24, upper 12, and the non-QSA subset of layers
+10–42. The 10–42 band is an exploratory transfer hypothesis from the pinned
+OtherU DeepSeek result, where editing early layers broke coherence; it is not a
+proven Qwen policy. All four policies must pass Qwen's held-out quality gates.
+The sweep first
 selects an intervention configuration using only sweep-validation. That fixed
 configuration then runs a six-arm exact-runtime cross-pair: each of the
 ROCMI4+Q6_K, routed-expert ROCmFP4 FAST+Q6_K, and broad-matrix ROCmFP4
