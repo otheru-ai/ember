@@ -356,6 +356,39 @@ static void test_mtp_cache_batch_shape_contract() {
           "MTP cache batch cannot exceed the target q16 frontier");
 }
 
+static void test_mtp_matrix_quant_loader_contract() {
+    std::string error;
+    CHECK(qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMI4", "mtp.attn_q.weight", 2,
+              GGML_TYPE_Q4_0_ROCMI4, error) &&
+          qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMFP4_FAST", "mtp.attn_q.weight", 2,
+              GGML_TYPE_Q4_0_ROCMFP4_FAST, error),
+          "loader accepts both controlled Ember MTP matrix contracts");
+    CHECK(!qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMFP4_FAST", "mtp.attn_q.weight", 2,
+              GGML_TYPE_Q4_0_ROCMI4, error) &&
+              error.find("mismatches") != std::string::npos,
+          "loader rejects a ROCMI4 matrix under the ROCmFP4 FAST contract");
+    CHECK(qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMFP4_FAST", "mtp.ffn_gate_inp.weight", 2,
+              GGML_TYPE_BF16, error) &&
+          qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMI4", "mtp.attn_q_norm.weight", 1,
+              GGML_TYPE_F32, error),
+          "loader keeps routers and vector/norm tensors floating-point");
+    CHECK(!qwen4exp_mtp_matrix_quant_type_valid(
+              "Q4_0_ROCMI4", "mtp.ffn_gate_inp.weight", 2,
+              GGML_TYPE_Q4_0_ROCMI4, error) &&
+              error.find("floating-point") != std::string::npos,
+          "loader rejects quantized MTP routers despite a supported contract");
+    CHECK(!qwen4exp_mtp_matrix_quant_type_valid(
+              "inherit-main", "mtp.attn_q.weight", 2,
+              GGML_TYPE_Q4_0_ROCMI4, error) &&
+              error.find("unsupported") != std::string::npos,
+          "loader rejects ambiguous or unsupported matrix quant metadata");
+}
+
 static Qwen4ExpMtpState covered_mtp_state(int rows) {
     Qwen4ExpMtpState state;
     state.cur_pos = rows;
@@ -604,6 +637,7 @@ int main() {
     test_depth_and_instrumentation_contract();
     test_prompt_sync_plan_is_causally_exact();
     test_mtp_cache_batch_shape_contract();
+    test_mtp_matrix_quant_loader_contract();
     test_mtp_snapshot_frontier_invariant();
     test_layer_major_matches_token_major_causality();
     test_bounded_batch_full_and_partial_rejection();

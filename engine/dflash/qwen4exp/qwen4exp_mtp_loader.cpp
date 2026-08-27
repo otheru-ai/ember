@@ -112,6 +112,16 @@ bool validate_contract(gguf_context * gctx, ggml_context * meta,
         error = "Qwen4Exp MTP companion must share the target embedding/head";
         return false;
     }
+    const int64_t quant_id =
+        gguf_find_key(gctx, "ember.mtp.matrix_quant_contract");
+    const char * matrix_quant =
+        quant_id >= 0 && gguf_get_kv_type(gctx, quant_id) == GGUF_TYPE_STRING
+            ? gguf_get_val_str(gctx, quant_id) : nullptr;
+    if (!matrix_quant) {
+        error = "invalid Qwen4Exp MTP metadata: "
+                "ember.mtp.matrix_quant_contract";
+        return false;
+    }
     if (gguf_get_n_tensors(gctx) !=
         static_cast<int64_t>(sizeof(kRequired) / sizeof(kRequired[0]))) {
         error = "Qwen4Exp MTP companion tensor count is not exact";
@@ -133,10 +143,9 @@ bool validate_contract(gguf_context * gctx, ggml_context * meta,
                 return false;
             }
         }
-        const bool vector = required.shape.size() == 1;
-        if (!qwen4exp_weight_type_supported(tensor->type, vector)) {
-            error = std::string("unsupported Qwen4Exp MTP tensor type: ") +
-                    required.name;
+        if (!qwen4exp_mtp_matrix_quant_type_valid(
+                matrix_quant, required.name, ggml_n_dims(tensor),
+                tensor->type, error)) {
             return false;
         }
     }

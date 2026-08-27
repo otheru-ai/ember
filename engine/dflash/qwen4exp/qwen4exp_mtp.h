@@ -83,6 +83,13 @@ struct Qwen4ExpMtpCacheBatchShape {
 bool qwen4exp_mtp_cache_batch_shape(
     size_t rows, Qwen4ExpMtpCacheBatchShape & shape, std::string & error);
 
+// Companion metadata is authoritative: controlled matrix tensors must match
+// its exact Ember storage type while vectors and routers stay floating-point.
+// Unknown contracts and mixed encodings fail closed before backend upload.
+bool qwen4exp_mtp_matrix_quant_type_valid(
+    const char * contract, const char * tensor_name, int dimensions,
+    ggml_type type, std::string & error);
+
 // Snapshot validity is stronger than a scalar position check. The MTP QSA
 // K/V/raw-index caches and all M-RoPE axes must cover exactly the trailing
 // draft frontier, while target_hc remains the target's authoritative h_p.

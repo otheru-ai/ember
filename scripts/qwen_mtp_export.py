@@ -4,10 +4,11 @@
 The official checkpoint interleaves the one-layer MTP tensors across the main
 131 safetensor shards.  Transformers 36deb0 ignores them and llama.cpp Qwen4Exp
 PRs #27742/#27774 explicitly disable MTP export.  This tool creates one
-MTP-only safetensors file while using O(header) memory.  It deliberately does
-not claim to quantize or execute the head: the emitted manifest binds the
-requested matrix quant to the main artifact so the later GGUF quantizer/loader
-can fail closed rather than silently mixing formats.
+MTP-only safetensors file while using O(header) memory.  Its GGUF path can
+optionally run Ember's audited quantizer for either of the two matrix formats
+the MTP runtime supports.  The emitted manifest binds the selected format and
+exact quantizer build to the artifact so the loader can fail closed rather
+than silently mixing formats.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -149,6 +151,16 @@ MTP_GGUF_TENSORS = (
     _gguf("mtp_pre_hc_norm.weight", (10240,), "mtp.pre_fc_norm_hidden.weight", add_one=True),
     _gguf("mtp_fc_emb.weight", (2560, 2560), "mtp.fc_embedding.weight"),
     _gguf("mtp_fc_hc.weight", (2560, 2560), "mtp.fc_hidden.weight"),
+)
+
+SUPPORTED_MATRIX_QUANTS = {
+    "Q4_0_ROCMI4": 108,
+    "Q4_0_ROCMFP4_FAST": 101,
+}
+_QUANTIZED_CLASSES = frozenset(("matrix", "fusion", "experts"))
+MTP_QUANTIZED_MATRIX_NAMES = tuple(
+    tensor.name for tensor in MTP_GGUF_TENSORS
+    if MTP_BY_NAME[tensor.source_name].quant_class in _QUANTIZED_CLASSES
 )
 
 
@@ -456,6 +468,65 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _quantizer_command(quantizer: Path, source: Path, output: Path,
+                       matrix_quant: str, threads: int) -> list[str]:
+    if matrix_quant not in SUPPORTED_MATRIX_QUANTS:
+        raise ExportError(
+            "quantized companion matrix contract must be "
+            "Q4_0_ROCMI4 or Q4_0_ROCMFP4_FAST"
+        )
+    command = [str(quantizer)]
+    for name in MTP_QUANTIZED_MATRIX_NAMES:
+        command.extend((
+            "--tensor-type",
+            f"^{re.escape(name)}$={matrix_quant}",
+        ))
+    # The audited quantizer's positional default remains ROCMI4. Exact FAST
+    # selection is expressed by the exhaustive overrides above; routers and
+    # vector/norm tensors deliberately remain BF16.
+    command.extend((str(source), str(output), "Q4_0_ROCMI4", str(threads)))
+    return command
+
+
+def _quantizer_build_evidence(quantizer: Path) -> dict:
+    try:
+        completed = subprocess.run(
+            [str(quantizer), "--build-info-json"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        build_info = json.loads(completed.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        raise ExportError(f"cannot verify companion quantizer build: {exc}") from exc
+    expected_formats = [
+        "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+    ]
+    revision = re.compile(r"[0-9a-f]{40}")
+    ember_revision = build_info.get("ember_revision") if isinstance(
+        build_info, dict
+    ) else None
+    rocmfpx_revision = build_info.get("rocmfpx_revision") if isinstance(
+        build_info, dict
+    ) else None
+    if (not isinstance(build_info, dict) or
+            build_info.get("tool") != "ember-gguf-quantize" or
+            build_info.get("format") != "Q4_0_ROCMI4" or
+            build_info.get("ggml_tensor_type") != 108 or
+            build_info.get("per_tensor_formats") != expected_formats or
+            not isinstance(ember_revision, str) or
+            revision.fullmatch(ember_revision) is None or
+            not isinstance(rocmfpx_revision, str) or
+            revision.fullmatch(rocmfpx_revision) is None):
+        raise ExportError("companion quantizer build-info contract mismatch")
+    return {
+        "quantizer_binary": str(quantizer.resolve()),
+        "quantizer_sha256": _sha256_file(quantizer),
+        "quantizer_build_info": build_info,
+    }
+
+
 def export(source_dir: Path, output: Path, matrix_quant: str,
            force: bool) -> dict:
     config = _read_json(source_dir / "config.json")
@@ -586,22 +657,17 @@ def main(argv: list[str] | None = None) -> int:
             manifest = export(args.source_dir, args.output, args.matrix_quant,
                               args.force)
         if args.quantizer:
-            if args.matrix_quant not in ("inherit-main", "Q4_0_ROCMI4"):
-                raise ExportError(
-                    "the companion quantizer currently supports the ROCMI4 main recipe only"
-                )
             quantized = args.quantized_output
             assert quantized is not None
             if quantized.exists() and not args.force:
                 raise ExportError(
                     f"quantized output exists (pass --force to replace): {quantized}"
                 )
-            command = [
-                str(args.quantizer),
-                "--tensor-type", "^mtp_fc_emb\\.weight$=Q4_0_ROCMI4",
-                str(args.output), str(quantized), "Q4_0_ROCMI4",
-                str(args.threads),
-            ]
+            evidence = _quantizer_build_evidence(args.quantizer)
+            command = _quantizer_command(
+                args.quantizer, args.output, quantized,
+                args.matrix_quant, args.threads,
+            )
             try:
                 subprocess.run(command, check=True)
             except (OSError, subprocess.CalledProcessError) as exc:
@@ -609,6 +675,18 @@ def main(argv: list[str] | None = None) -> int:
             manifest["quantized_output"] = str(quantized)
             manifest["quantized_bytes"] = quantized.stat().st_size
             manifest["quantized_sha256"] = _sha256_file(quantized)
+            manifest["quantized_matrix_contract"] = args.matrix_quant
+            manifest["quantized_matrix_ggml_type"] = (
+                SUPPORTED_MATRIX_QUANTS[args.matrix_quant]
+            )
+            manifest["quantized_matrix_tensor_count"] = len(
+                MTP_QUANTIZED_MATRIX_NAMES
+            )
+            manifest["quantized_matrix_tensors"] = list(
+                MTP_QUANTIZED_MATRIX_NAMES
+            )
+            manifest["quantize_command"] = command
+            manifest.update(evidence)
             manifest["runtime_status"] = "loadable quantized companion"
         if args.manifest_out:
             _write_manifest(args.manifest_out, manifest, args.force)

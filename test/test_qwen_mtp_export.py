@@ -7,8 +7,10 @@ import importlib.util
 import json
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +142,94 @@ class MtpExportTests(unittest.TestCase):
         self.assertEqual(
             extents[19][1] - extents[19][0], 128 * 2560 * 2
         )
+
+    def test_rocmfp4_fast_quantizer_command_is_exhaustive(self) -> None:
+        command = mtp._quantizer_command(
+            Path("/tool/quantizer"), Path("source.gguf"),
+            Path("fast.gguf"), "Q4_0_ROCMFP4_FAST", 7,
+        )
+        overrides = command[1:-4]
+        self.assertEqual(len(mtp.MTP_QUANTIZED_MATRIX_NAMES), 21)
+        self.assertEqual(len(overrides), 42)
+        self.assertEqual(command[-4:], [
+            "source.gguf", "fast.gguf", "Q4_0_ROCMI4", "7",
+        ])
+        emitted = {
+            overrides[index + 1]
+            for index in range(0, len(overrides), 2)
+        }
+        expected = {
+            f"^{mtp.re.escape(name)}$=Q4_0_ROCMFP4_FAST"
+            for name in mtp.MTP_QUANTIZED_MATRIX_NAMES
+        }
+        self.assertEqual(emitted, expected)
+        self.assertTrue(all(
+            overrides[index] == "--tensor-type"
+            for index in range(0, len(overrides), 2)
+        ))
+
+    def test_quantizer_command_rejects_uncontrolled_contract(self) -> None:
+        with self.assertRaisesRegex(
+            mtp.ExportError, "Q4_0_ROCMI4 or Q4_0_ROCMFP4",
+        ):
+            mtp._quantizer_command(
+                Path("quantizer"), Path("source"), Path("output"),
+                "inherit-main", 1,
+            )
+
+    def test_quantizer_build_evidence_is_exact(self) -> None:
+        build_info = {
+            "tool": "ember-gguf-quantize",
+            "ember_revision": "a" * 40,
+            "rocmfpx_revision": "b" * 40,
+            "format": "Q4_0_ROCMI4",
+            "ggml_tensor_type": 108,
+            "per_tensor_formats": [
+                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+            ],
+            "intervention_manifest_schema": 1,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            quantizer = Path(directory) / "ember-gguf-quantize"
+            quantizer.write_bytes(b"pinned quantizer binary")
+            completed = mock.Mock(
+                stdout=json.dumps(build_info), stderr="", returncode=0,
+            )
+            with mock.patch.object(
+                mtp.subprocess, "run", return_value=completed,
+            ) as run:
+                evidence = mtp._quantizer_build_evidence(quantizer)
+            run.assert_called_once_with(
+                [str(quantizer), "--build-info-json"], check=True,
+                stdout=mtp.subprocess.PIPE, stderr=mtp.subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(evidence["quantizer_build_info"], build_info)
+            self.assertEqual(evidence["quantizer_binary"], str(quantizer.resolve()))
+            self.assertEqual(len(evidence["quantizer_sha256"]), 64)
+
+    def test_quantizer_build_evidence_rejects_unpinned_revision(self) -> None:
+        build_info = {
+            "tool": "ember-gguf-quantize",
+            "ember_revision": "unknown",
+            "rocmfpx_revision": "b" * 40,
+            "format": "Q4_0_ROCMI4",
+            "ggml_tensor_type": 108,
+            "per_tensor_formats": [
+                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+            ],
+        }
+        completed = mock.Mock(
+            stdout=json.dumps(build_info), stderr="", returncode=0,
+        )
+        with mock.patch.object(mtp.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(mtp.ExportError, "build-info contract"):
+                mtp._quantizer_build_evidence(Path("ember-gguf-quantize"))
+
+    def test_fast_gguf_header_carries_loader_contract(self) -> None:
+        raw, _ = mtp._gguf_header("Q4_0_ROCMFP4_FAST")
+        self.assertIn(b"ember.mtp.matrix_quant_contract", raw)
+        self.assertIn(b"Q4_0_ROCMFP4_FAST", raw)
 
     def test_zero_centered_norm_is_baked_to_one_plus_weight(self) -> None:
         values = (0.0, -0.5, 1.0, 2.0)

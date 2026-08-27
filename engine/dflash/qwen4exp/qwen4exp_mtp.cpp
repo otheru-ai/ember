@@ -1,6 +1,7 @@
 #include "qwen4exp_mtp.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 namespace dflash::common {
@@ -64,6 +65,42 @@ bool qwen4exp_mtp_cache_batch_shape(
     shape.key_values = rows * 512U;
     shape.value_values = rows * 512U;
     shape.index_key_values = rows * 128U;
+    return true;
+}
+
+bool qwen4exp_mtp_matrix_quant_type_valid(
+        const char * contract, const char * tensor_name, int dimensions,
+        ggml_type type, std::string & error) {
+    error.clear();
+    if (!contract || !tensor_name || dimensions <= 0) {
+        error = "invalid Qwen4Exp MTP matrix quant validation input";
+        return false;
+    }
+    ggml_type expected = GGML_TYPE_COUNT;
+    if (std::strcmp(contract, "Q4_0_ROCMI4") == 0) {
+        expected = GGML_TYPE_Q4_0_ROCMI4;
+    } else if (std::strcmp(contract, "Q4_0_ROCMFP4_FAST") == 0) {
+        expected = GGML_TYPE_Q4_0_ROCMFP4_FAST;
+    } else {
+        error = std::string("unsupported Qwen4Exp MTP matrix quant contract: ") +
+                contract;
+        return false;
+    }
+    const bool router =
+        std::strcmp(tensor_name, "mtp.ffn_gate_inp.weight") == 0 ||
+        std::strcmp(tensor_name, "mtp.ffn_gate_inp_shexp.weight") == 0;
+    const bool controlled_matrix = dimensions >= 2 && !router;
+    if (controlled_matrix && type != expected) {
+        error = std::string("Qwen4Exp MTP tensor type mismatches ") + contract +
+                " contract: " + tensor_name;
+        return false;
+    }
+    if (!controlled_matrix && type != GGML_TYPE_F32 &&
+        type != GGML_TYPE_F16 && type != GGML_TYPE_BF16) {
+        error = std::string("Qwen4Exp MTP vector/router must remain floating-point: ") +
+                tensor_name;
+        return false;
+    }
     return true;
 }
 
