@@ -25,6 +25,30 @@ gfx1151 speculative-decode measurements. Before updating it, diff the candidate
 upstream revision against `8fd9584`, preserve the license notices above, and
 record the new upstream commit and any local divergence in this file.
 
+The Qwen3.8-Flash-Next text runtime also carries an Ember-owned C static-YaRN
+policy/reference implementation. Its arithmetic follows Transformers revision
+`36deb0b53ed0863f4b4dfdea23dcaec7f3df3701`; the exact factor-4, 262144-to-1M
+recipe is pinned to the official model README revision
+`f5d08274bafd880402bd16f5e3e6c514136ec06c`. This is an explicit operator
+override because the checkpoint metadata remains ordinary RoPE. The local q=1
+runtime uses the C reference for its QSA and indexer positions; future graph
+paths should pass the same resolved parameters through ggml's existing
+`ggml_rope_multi`/`GGML_ROPE_TYPE_IMROPE` implementation rather than adding a
+new kernel. The 128-GiB memory planner remains authoritative and may reject the
+official 1M recipe for otherwise valid released weights.
+
+The ROCMI4 storage/runtime and optional gfx1151 W4A4 path are manually ported
+from the MIT-licensed `radicalgeek/ROCmFPX` lineage: exact format commit
+`16d05b80f70b06b008da26bc1be7d36f116c61e4`, lossless int8 MMQ commit
+`fef417b287240a573082bccf01705af67441e9be`, IU4 experiment commit
+`659456f7a2e4bfc54657b5a91692c5ac05fa259c`, and the narrowed/off-by-default
+gfx1151 gate `cef686ca09c1a9f276897b31b93bb621128b85fb` (documentation follow-up
+`928ccb3eb6feedaa5c26c7e6a723852c14e44115`). The port is surgical because
+Ember's engine is pruned and locally optimized; it intentionally keeps exact
+int8 MMQ as the default. Canonical ROCMI4 owns GGUF file type 118. Ember's older
+Q2 recipe metadata moved to 119/120 while its on-disk tensor type 107 remains
+unchanged, preserving tensor-dispatched loading of already-published files.
+
 ## Pruned deployment scope
 
 Ember preserves the upstream provenance above, but intentionally does not carry
@@ -35,9 +59,31 @@ non-x86 CPU implementations, NVIDIA-only sampling, remote execution, layer
 splitting, and multi-GPU peer/shard placement have been removed. The remaining
 `ggml-cuda` directory name is an upstream compatibility detail: ROCm's HIP build
 compiles those shared `.cu`/`.cuh` kernels directly, and they are load-bearing
-for the gfx1151 path. The public split/peer-copy surface and RCCL integration
-are removed; a compile-time guard also excludes the shared substrate's internal
-peer-copy branch.
+for the gfx1151 path. Its RDNA4/gfx12 WMMA implementations, dispatch cases, and
+tuning tables are removed: gfx1151 uses the distinct RDNA 3.5 fragment layout,
+and retaining both made an unsupported architecture look testable. The public
+split/peer-copy surface and RCCL integration are removed; a compile-time guard
+also excludes the shared substrate's internal peer-copy branch.
+
+The retained dflash source closure contains only the DeepSeek4 target. The
+legacy Qwen3.5 target loader, draft/DeltaNet object graph, platform mmap shim,
+and Qwen pre-tokenizers are removed. DeepSeek4 keeps a narrow CPU-embedding
+helper and accepts only the checkpoint's required `tokenizer.ggml.pre` value,
+`joyai-llm`. Legacy Laguna expert-remap/cache code, its custom CUDA combine op,
+generic chat-family probing, and unused placement/load helpers are also absent.
+The unused C++ prefix-cache policy, routing-statistics collector, and DDTree
+prototype are removed as well; Ember owns prefix policy above the backend ABI,
+and the shipped DeepSeek target implements chain verification only. The shared
+SSM and gated-delta-net HIP kernels therefore retain only their live chain-mode
+forms.
+The allocation-free thinking-budget state machine is maintained as a
+C-compatible header and exercised by a C test. Crash-breadcrumb storage and the
+thread-safe loader diagnostic channel are also compiled as C. The C++ DeepSeek
+backend consumes these APIs directly; these are the first low-risk orchestration
+components migrated toward C without changing the tokenizer, graph builder, or
+HIP kernels.
+Runtime file and plugin paths are Linux/POSIX-only, matching the top-level
+configure guard rather than carrying unreachable Windows fallbacks.
 
 When importing a future engine fix, diff against upstream commit `8fd9584` and
 port only files reachable by this retained HIP/x86-64 build. A broad vendor

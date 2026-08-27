@@ -1,8 +1,8 @@
-// Ember's fixed DeepSeek-V4-Flash backend construction contract.
+// Ember model-backend construction contract.
 //
-// The vendored upstream factory supported multiple architectures, remote
-// drafters, and GPU layer splitting. Ember is a single-gfx1151 appliance, so
-// this header exposes only the arguments consumed by ember_create_backend.cpp.
+// Architecture selection happens from `general.architecture`; model-specific
+// options remain explicit below.  A recognized architecture whose runtime is
+// not implemented must fail closed after structural validation.
 
 #pragma once
 
@@ -32,10 +32,18 @@ struct BackendArgs {
     int             ds4_expert_top_k = 0;  // 0 = model default
     bool            ds4_fused_decode = false;
 
+    // Qwen3.8-Flash-Next operator override. The factory rejects this for
+    // non-Qwen architectures; the Qwen loader resolves the exact factor-4,
+    // 1,000,000-token recipe and still applies the 128-GiB residency gate.
+    bool            qwen_yarn = false;
+
 };
 
 // ─── Factory function ───────────────────────────────────────────────────
-// Constructs DeepSeek4Backend and calls init().
+// Inspects `general.architecture`, validates the selected model contract, then
+// constructs the implemented backend. Qwen4Exp currently supports ordinary
+// single-session autoregressive text generation; vision, MTP, and resident
+// batching remain explicit unsupported capabilities.
 std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args);
 
 }  // namespace dflash::common

@@ -120,8 +120,28 @@ struct BudgetHook {
     int                  hard_limit_remaining = 0;
 };
 
+// Optional image rows already projected to the language-model width.  The
+// projector remains a separate, lazily loaded mmproj artifact; generation owns
+// only these request-scoped rows.  `prompt_offset` points at the first repeated
+// image placeholder token, which remains in `prompt` for PLE hashing.
+struct VisionEmbeddingRun {
+    int prompt_offset = 0;
+    int grid_t = 0;
+    int grid_h = 0;
+    int grid_w = 0;
+    std::vector<float> embeddings; // [merged image tokens, model embedding]
+};
+
+struct EncodedVisionImage {
+    int grid_t = 0;
+    int grid_h = 0;
+    int grid_w = 0;
+    std::vector<float> embeddings;
+};
+
 struct GenerateRequest {
     std::vector<int32_t>       prompt;
+    std::vector<VisionEmbeddingRun> vision;
     int                        n_gen       = 0;
     SamplerCfg                 sampler;
     bool                       do_sample   = false;
@@ -326,7 +346,7 @@ struct ModelBackend {
 
     // ── Generation ───────────────────────────────────────────────────
     // Run a full prefill + decode cycle. Backend owns the strategy
-    // (autoregressive, speculative, DDTree, …).
+    // (autoregressive, speculative, batched, …).
     GenerateResult generate(const GenerateRequest & req, const DaemonIO & io) {
         GenerateResult result = generate_impl(req, io);
         if (!should_retry_empty_spec_decode(req, result)) return result;
@@ -342,6 +362,16 @@ struct ModelBackend {
 
     virtual GenerateResult generate_impl(const GenerateRequest & req,
                                          const DaemonIO & io) = 0;
+
+    // Decode, preprocess, and project one encoded still image. Architectures
+    // without a vision tower fail closed. Qwen loads its separate BF16 mmproj
+    // provider on the first call, so text-only startup/residency is unchanged.
+    virtual bool encode_vision_image(const uint8_t *, size_t,
+                                     EncodedVisionImage &,
+                                     std::string & error) {
+        error = "vision input is not supported by this backend";
+        return false;
+    }
 
     // ── Snapshots ────────────────────────────────────────────────────
     // With right-sized CPU-resident snapshots, each slot costs only
@@ -450,24 +480,6 @@ struct ModelBackend {
     virtual void release_scratch() {}
 
     // ── Routing data collection ──────────────────────────────────────
-    // Set an external routing collector that the backend will call for each
-    // token/layer during decode (hidden state + expert IDs). Used by
-    // --collect-routing for predictor training data.
-    //
-    // Lifetime: the collector pointer is borrowed, not owned. The caller must
-    // keep it alive until set_routing_collector(nullptr) is called (or the
-    // backend is destroyed), and must not pass a collector to a backend that
-    // decodes on another thread without outliving that decode.
-    //
-    // Returns true if the backend supports routing collection (MoE backends).
-    // The default returns false so the server can detect unsupported backends
-    // and warn instead of silently collecting nothing.
-    virtual bool set_routing_collector(class MoeRoutingCollector *) { return false; }
-
-    // Get the current routing stats (if tracked). Returns nullptr if the
-    // backend does not support routing stats or they are not enabled.
-    virtual const struct MoeHybridRoutingStats * get_routing_stats() const { return nullptr; }
-
     // ── Cleanup ──────────────────────────────────────────────────────
     // Release all resources (weights, cache, snapshots, drafter).
     // Spark day-one bootstrap: when true, the server feeds local agent history

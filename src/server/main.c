@@ -22,12 +22,15 @@
 #include "../common/json_util.h"  // ember_json_escape (error-path JSON)
 #include "../model/chat_template.h"
 #include "../model/model_card.h"
+#include "../model/model_profile.h"
 #include "../model/kv_cache.h"
+#include "../model/image_input.h"
 #include "../model/tool_memory.h"
 #include "../model/continuation.h"
 #include "../model/dsml_decode.h"
 #include "../model/tool_schema.h"
 #include "../model/tool_grammar.h"
+#include "../model/tool_parser_qwen4.h"
 #include "chat_api.h"
 #include "api_adapters.h"
 #include "background_gate.h"
@@ -99,6 +102,7 @@ typedef struct {
 typedef struct ember_server {
     ember_backend    *be;
     ember_model_card  card;
+    ember_prompt_profile prompt_profile; // loaded GGUF, never client-selected
     ember_kv_cache    kv;         // prefix KV cache (guarded by state_lock)
     ember_tool_memory tool_mem;   // B3 exact tool-call bytes (guarded)
     ember_continuation_store continuations; // call-id set -> sampled KV frontier
@@ -424,16 +428,17 @@ static bool on_token(int32_t tok, void *ud) {
     // earlier in the VISIBLE output (after any </think>): an orphan </tool_calls>
     // must not truncate a normal answer, a mismatched closer must not terminate
     // the wrong family, and a marker inside unclosed <think> is not executable.
-    // B#7: the native ds_engine format is one block per call and the model may
-    // emit several — don't stop at the first native closer; run to EOS so every
-    // block is generated (the parser handles multiple ds_engine blocks).
+    // B#7: native ds_engine and Qwen qwen3_coder use one sibling block per
+    // call and may emit several — don't stop at the first closer; run to EOS so
+    // the buffered parser sees the complete call set.
     if (g->has_tools && g->acc.ptr &&
         !inside_unclosed_think(g->acc.ptr, g->started_thinking)) {
         const char *vis   = visible_after_think(g->acc.ptr);
         const char *start = ember_find_tool_start(vis);
         const char *end   = start ? ember_find_tool_end(start) : NULL;
         bool native = start && strncmp(start, "<ds_engine_tool_use>", 20) == 0;
-        if (start && end && !native) {
+        bool qwen = start && strncmp(start, "<tool_call>", 11) == 0;
+        if (start && end && !native && !qwen) {
             g->acc.len = (size_t)(end - g->acc.ptr);
             g->acc.ptr[g->acc.len] = '\0';
             if (!g->collect_only) {
@@ -802,6 +807,7 @@ static void remember_continuation(ember_server *srv,
 // the tool-memory substitution — matches this snapshot and continues from here,
 // prefilling only the new tool-result suffix instead of re-prefilling the call.
 static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
+                                   const ember_chat_request *req,
                                    const int32_t *prompt_ids, int n_prompt,
                                    gen_ctx *g) {
     if (!g->has_tools || !g->acc.ptr || g->n_gen_ids <= 0) return;
@@ -821,7 +827,13 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
         return;
     }
     ember_tool_calls parsed = {0};
-    ember_parse_dsml_tool_calls(st, &parsed);
+    if (req && req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
+        ember_qwen_tool_parse_report report = {0};
+        (void)ember_parse_qwen_tool_calls(st, req->tools_json,
+                                          &parsed, &report);
+    } else {
+        ember_parse_dsml_tool_calls(st, &parsed);
+    }
     bool executable = parsed.len > 0;
     ember_tool_calls_free(&parsed);
     if (!executable) {
@@ -940,14 +952,24 @@ static void remember_tool_block(ember_server *srv, ember_backend *be,
     // turn must still resolve to the same exact sampled surface, otherwise a
     // later multi-call replay compares call 2+ against a copy of call 1 only.
     static const char native_open[] = "<ds_engine_tool_use>";
+    static const char qwen_open[] = "<tool_call>";
+    const char *sibling_open = NULL;
+    size_t sibling_open_len = 0;
     if (!strncmp(start, native_open, sizeof(native_open) - 1)) {
+        sibling_open = native_open;
+        sibling_open_len = sizeof(native_open) - 1;
+    } else if (!strncmp(start, qwen_open, sizeof(qwen_open) - 1)) {
+        sibling_open = qwen_open;
+        sibling_open_len = sizeof(qwen_open) - 1;
+    }
+    if (sibling_open) {
         const char *cursor = end;
         for (;;) {
             while (cursor < g->acc.ptr + g->acc.len &&
                    isspace((unsigned char)*cursor))
                 ++cursor;
             if (cursor >= g->acc.ptr + g->acc.len ||
-                strncmp(cursor, native_open, sizeof(native_open) - 1) != 0)
+                strncmp(cursor, sibling_open, sibling_open_len) != 0)
                 break;
             const char *next_end = ember_find_tool_end(cursor);
             if (!next_end || next_end > g->acc.ptr + g->acc.len) return;
@@ -995,7 +1017,7 @@ static void persist_atomic_tool_frontier(
     if (!srv || !be || !req || !g || !calls || calls->len <= 0 ||
         g->disconnected)
         return;
-    snapshot_post_toolcall(srv, be, prompt_ids, n_prompt, g);
+    snapshot_post_toolcall(srv, be, req, prompt_ids, n_prompt, g);
     for (int i = 0; i < calls->len; ++i)
         remember_tool_block(srv, be, calls->calls[i].id, g);
     size_t n_calls = (size_t)(unsigned int)calls->len;
@@ -1249,6 +1271,36 @@ static bool parse_executable_tool_calls(const ember_chat_request *req,
                                         ember_tool_calls *out,
                                         const char **detail_out) {
     if (detail_out) *detail_out = NULL;
+    if (req && req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
+        ember_qwen_tool_parse_report report = {0};
+        ember_parse_qwen_tool_calls(text, req->tools_json, out, &report);
+        if (!report.found) {
+            if (!req->tool_choice_required) return true;
+            if (detail_out)
+                *detail_out = "tool_choice required at least one tool call";
+            return false;
+        }
+        const char *detail = NULL;
+        if (report.contaminated)
+            detail = "nested Qwen tool markup appeared inside an argument";
+        else if (report.malformed)
+            detail = "nested or malformed Qwen tool-call tags were generated";
+        else if (report.trailing)
+            detail = "non-whitespace followed the Qwen tool-call wrapper";
+        else if (!report.complete)
+            detail = "the generated Qwen tool-call block was truncated";
+        else if (out->len == 0)
+            detail = "the generated Qwen tool-call block could not be parsed";
+        else if (out->len != report.wrappers)
+            detail = "nested or mismatched Qwen function wrappers were generated";
+        else if (!req->parallel_tool_calls && out->len > 1)
+            detail = "parallel tool calls were disabled for this request";
+        if (!detail) detail = validate_tool_call_schemas(req, out);
+        if (!detail) return true;
+        ember_tool_calls_free(out);
+        if (detail_out) *detail_out = detail;
+        return false;
+    }
     ember_tool_parse_report report = {0};
     ember_parse_dsml_tool_calls_ex(text, out, &report);
     if (!report.found) {
@@ -2106,8 +2158,117 @@ static void log_generation_performance(const ember_gen_result *res) {
             res->spec_decode_ran ? "yes" : "no", res->accept_rate);
 }
 
+static void free_vision_runs(ember_vision_run *runs, int count) {
+    if (!runs) return;
+    for (int i = 0; i < count; ++i) free((void *)runs[i].embeddings);
+    free(runs);
+}
+
+// Encode images in message/part order, then expand each single image_pad token
+// to exactly the projector's merged row count. The repeated ids are retained
+// for PLE; only their embedding rows are replaced below the backend ABI.
+static bool prepare_vision_prompt(
+        ember_backend *be, const ember_chat_request *req,
+        int32_t **ids_io, int *count_io,
+        ember_vision_run **runs_out, int *run_count_out,
+        char *error, size_t error_cap) {
+    *runs_out = NULL;
+    *run_count_out = 0;
+    int images = 0;
+    for (int m = 0; m < req->n_messages; ++m)
+        for (int p = 0; p < req->messages[m].n_parts; ++p)
+            if (req->messages[m].parts[p].kind == EMBER_CONTENT_IMAGE_URL)
+                ++images;
+    if (images <= 0) {
+        snprintf(error, error_cap, "image content was not preserved in the request");
+        return false;
+    }
+    ember_vision_image *encoded = calloc((size_t)images, sizeof(*encoded));
+    ember_vision_run *runs = calloc((size_t)images, sizeof(*runs));
+    if (!encoded || !runs) abort();
+    int image_index = 0;
+    bool ok = true;
+    for (int m = 0; m < req->n_messages && ok; ++m) {
+        for (int p = 0; p < req->messages[m].n_parts && ok; ++p) {
+            const ember_content_part *part = &req->messages[m].parts[p];
+            if (part->kind != EMBER_CONTENT_IMAGE_URL) continue;
+            ember_image_bytes bytes = {0};
+            ok = ember_image_data_url_decode(part->text, &bytes, error, error_cap);
+            if (ok) ok = ember_backend_vision_encode(
+                be, bytes.data, bytes.size, &encoded[image_index],
+                error, error_cap);
+            ember_image_bytes_free(&bytes);
+            if (ok && (encoded[image_index].grid_t != 1 ||
+                       encoded[image_index].n_tokens <= 0 ||
+                       !encoded[image_index].embeddings)) {
+                snprintf(error, error_cap, "vision provider returned an invalid still-image result");
+                ok = false;
+            }
+            ++image_index;
+        }
+    }
+    if (!ok) goto cleanup;
+
+    size_t expanded_count = (size_t)*count_io;
+    for (int i = 0; i < images; ++i) {
+        const size_t extra = (size_t)(encoded[i].n_tokens - 1);
+        if (expanded_count > (size_t)INT_MAX - extra) {
+            snprintf(error, error_cap, "expanded vision prompt is too large");
+            ok = false;
+            goto cleanup;
+        }
+        expanded_count += extra;
+    }
+    int32_t *expanded = malloc((expanded_count ? expanded_count : 1) * sizeof(*expanded));
+    if (!expanded) abort();
+    size_t src = 0, dst = 0;
+    for (int i = 0; i < images; ++i) {
+        while (src < (size_t)*count_io && (*ids_io)[src] != 248056)
+            expanded[dst++] = (*ids_io)[src++];
+        if (src == (size_t)*count_io) {
+            snprintf(error, error_cap, "rendered prompt has fewer image_pad tokens than images");
+            free(expanded);
+            ok = false;
+            goto cleanup;
+        }
+        runs[i].prompt_offset = (int)dst;
+        runs[i].grid_t = encoded[i].grid_t;
+        runs[i].grid_h = encoded[i].grid_h;
+        runs[i].grid_w = encoded[i].grid_w;
+        runs[i].n_tokens = encoded[i].n_tokens;
+        runs[i].embeddings = encoded[i].embeddings;
+        encoded[i].embeddings = NULL;
+        for (int row = 0; row < runs[i].n_tokens; ++row)
+            expanded[dst++] = 248056;
+        ++src;
+    }
+    while (src < (size_t)*count_io) {
+        if ((*ids_io)[src] == 248056) {
+            snprintf(error, error_cap, "rendered prompt has more image_pad tokens than images");
+            free(expanded);
+            ok = false;
+            goto cleanup;
+        }
+        expanded[dst++] = (*ids_io)[src++];
+    }
+    free(*ids_io);
+    *ids_io = expanded;
+    *count_io = (int)dst;
+    *runs_out = runs;
+    *run_count_out = images;
+    runs = NULL;
+
+cleanup:
+    for (int i = 0; i < images; ++i)
+        ember_backend_vision_image_free(&encoded[i]);
+    free(encoded);
+    free_vision_runs(runs, images);
+    return ok;
+}
+
 static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     ember_backend *be = srv->be;
+    req->prompt_profile = srv->prompt_profile;
     // NO ENGINE-SIDE TOOL-LOOP CEILING (deliberate ds4 parity). ds4 caps tool
     // rounds nowhere — ds4_agent.c:8448 is explicit ("deliberately no artificial
     // 'too many tool calls' ceiling here") and ds4_server.c does one generation
@@ -2240,6 +2401,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
     bool enable_thinking = req->thinking_enabled;
     int32_t *ids = NULL;
+    ember_vision_run *vision_runs = NULL;
+    int n_vision_runs = 0;
     bool started_thinking = false;
     int n_prompt;
     if (req->continuation_only) {
@@ -2285,7 +2448,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // Client-visible prompt size, captured BEFORE compaction so usage keeps
     // reporting what the client actually sent. Same convention the malformed
     // tool-call retry already follows when it grows the internal prompt.
-    const int client_prompt_tokens_pre = n_prompt;
+    int client_prompt_tokens_pre = n_prompt;
 
     // ds4-style context compaction (compaction.c). Deliberately ahead of the
     // context guard below: a history that would otherwise be rejected with a 400
@@ -2298,7 +2461,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // Rendered lazily by the streaming branch only; freed at the common exit.
     // Zero-initialized here so the early returns below need no cleanup.
     ember_buf compaction_json = {0};
-    if (srv->auto_compact && !req->raw_prompt && !req->continuation_only &&
+    if (srv->auto_compact && !req->has_images && !req->raw_prompt &&
+        !req->continuation_only &&
         ember_compaction_needed(n_prompt, n_ctx)) {
         const char *why = n_prompt >= n_ctx ? "prompt exceeds context"
                                            : "soft limit before user turn";
@@ -2349,6 +2513,26 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         }
     }
 
+    if (req->has_images) {
+        char vision_error[512] = {0};
+        if (!prepare_vision_prompt(be, req, &ids, &n_prompt,
+                                   &vision_runs, &n_vision_runs,
+                                   vision_error, sizeof(vision_error))) {
+            respond_api_error(fd, req->api, 400,
+                              vision_error[0] ? vision_error :
+                                  "image preparation failed",
+                              "invalid_request_error", "vision_not_available");
+            free(ids);
+            atomic_fetch_sub(&srv->busy, 1);
+            ember_backend_generation_release(be);
+            if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+            return;
+        }
+        // The processor-expanded image rows are model input tokens and are the
+        // meaningful prompt-token count for usage/context accounting.
+        client_prompt_tokens_pre = n_prompt;
+    }
+
     // Context-length guard (ds4 http_error_context_length_exceeded): reject a
     // prompt that already fills the window, with the OpenAI-shaped 400.
     if (n_prompt >= n_ctx) {
@@ -2368,6 +2552,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         else
             respond(fd, 400, "application/json", e.ptr);
         ember_buf_free(&e);
+        free_vision_runs(vision_runs, n_vision_runs);
         free(ids);
         atomic_fetch_sub(&srv->busy, 1);
         ember_backend_generation_release(be);
@@ -2414,6 +2599,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
     greq.prompt = ids;
     greq.n_prompt = n_prompt;
+    greq.vision = vision_runs;
+    greq.n_vision = n_vision_runs;
     greq.max_tokens = want;
     // An immediate tool result is evidence that the previous action already
     // happened. Keep only that next decision on the target's autoregressive
@@ -2500,7 +2687,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int restore_slot = -1, restore_len = 0;
     bool restore_pinned = false;
     pthread_mutex_lock(&srv->state_lock);
-    ember_kv_lookup(&srv->kv, ids, n_prompt, &restore_slot, &restore_len);
+    if (!req->has_images)
+        ember_kv_lookup(&srv->kv, ids, n_prompt, &restore_slot, &restore_len);
     if (restore_slot >= 0) {
         restore_pinned = ember_kv_pin(&srv->kv, restore_slot);
         if (!restore_pinned) {
@@ -2509,7 +2697,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         }
     }
     int snap_is_anchor = 0;
-    int snap_cut = ember_kv_snap_cut(&srv->kv, ids, n_prompt, &snap_is_anchor);
+    int snap_cut = req->has_images ? -1 :
+        ember_kv_snap_cut(&srv->kv, ids, n_prompt, &snap_is_anchor);
     // A cold-prompt anchor (shared system-prefix, no completed turn yet) is
     // expensive to rebuild, so tag it COLD for eviction protection; a completed
     // turn boundary is a routine waypoint.
@@ -2522,7 +2711,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // Keep the resident snapshot pinned until the longer disk checkpoint has
     // loaded and committed successfully, so an I/O failure still has a safe
     // fallback.
-    if (ember_backend_disk_enabled(be)) {
+    if (!req->has_images && ember_backend_disk_enabled(be)) {
         int dl = ember_backend_disk_prefix(be, ids, n_prompt);
         int disk_slot = -1;
         if (dl > restore_len) {
@@ -2595,6 +2784,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_sse_stream st;
         ember_sse_init(&st, id, req->model, created, req->has_tools,
                        started_thinking, false);
+        if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML)
+            ember_sse_set_qwen_tools(&st, req->tools_json);
         ember_sse_set_reasoning_filter(
             &st, srv->card.thinking_terminator_hint);
         st.include_usage = req->stream_include_usage;
@@ -2795,7 +2986,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         if (res.ok && !g.disconnected && !generation_stalled(&res) &&
             !unclosed_think_tool && stream_tools_valid &&
             !res.budget_forced_close && !res.degenerate_decode_close)
-            snapshot_post_toolcall(srv, be, ids, n_prompt, &g);  // B3 L2
+            snapshot_post_toolcall(srv, be, req, ids, n_prompt, &g);  // B3 L2
 
         // B3: store only the exact sampled DSML block under each streamed call
         // id. Reasoning/content are always re-rendered canonically.
@@ -2831,6 +3022,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_sse_stream splitter;
         ember_sse_init(&splitter, id, req->model, created, req->has_tools,
                        started_thinking, false);
+        if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML)
+            ember_sse_set_qwen_tools(&splitter, req->tools_json);
         ember_sse_set_reasoning_filter(
             &splitter, srv->card.thinking_terminator_hint);
         splitter.stops = req->stop;
@@ -3037,7 +3230,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             !res.budget_forced_close &&
             !res.degenerate_decode_close) {
             if (tc.len > 0)
-                snapshot_post_toolcall(srv, be, ids, n_prompt, &g);
+                snapshot_post_toolcall(srv, be, req, ids, n_prompt, &g);
             for (int i = 0; i < splitter.n_tool_ids; ++i) {
                 remember_tool_block(
                     srv, be, splitter.tool_ids[i], &g);
@@ -3450,6 +3643,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
 run_done:
     free(tool_grammar);
+    free_vision_runs(vision_runs, n_vision_runs);
     atomic_fetch_sub(&srv->busy, 1);
     atomic_fetch_add(&srv->served, 1);
     ember_backend_generation_release(be);
@@ -3952,7 +4146,11 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --prefix-cache-slots N      resident prefix snapshots (default 8)\n"
         "  --batch-sessions N          resident concurrent sessions (default 1,\n"
         "                              max 64; >1 enables continuous batching)\n"
-        "  --max-ctx N                 context length (default 131072)\n"
+        "  --max-ctx N                 context length (Qwen default 262144;\n"
+        "                              DeepSeek default 131072)\n"
+        "  --qwen-yarn                opt in to the official static factor-4\n"
+        "                              Qwen recipe; requires --max-ctx 1000000\n"
+        "                              and may not fit the 128-GiB UMA budget\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
         "  --validate-gemm-batch N     sweep HIP strided-batched GEMM counts 2..N\n"
         "                              against the one-row baseline, then exit\n"
@@ -4186,7 +4384,10 @@ int main(int argc, char **argv) {
     // load at 131072 was verified on the 128 GB box: GTT 11.2 GiB, 24 GiB host
     // free. Raising further is mostly a prefix-slot budgeting question (each
     // snapshot scales with this value), not a KV or model one.
-    int max_ctx = 131072;  // KV cache context; each snapshot is a full-KV buffer
+    // Resolve after architecture detection: Qwen's native text limit is
+    // 262144 while DeepSeek keeps Ember's measured 131072 deployment default.
+    int max_ctx = 0;
+    bool qwen_yarn = false;
     double bg_idle_secs = 5.0, bg_max_wait_secs = 60.0;
     bool options_ok = true;
     for (int i = 1; i < argc; i++) {
@@ -4294,6 +4495,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(opt, "--max-ctx") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1, INT_MAX, &max_ctx);
+        } else if (strcmp(opt, "--qwen-yarn") == 0) {
+            qwen_yarn = true;
         } else if (strcmp(opt, "--validate-gemm-batch") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
@@ -4325,6 +4528,36 @@ int main(int argc, char **argv) {
         print_usage(stderr, argv[0]);
         return 2;
     }
+    ember_prompt_profile prompt_profile = EMBER_PROMPT_DEEPSEEK_DSML;
+    char *profile_err = NULL;
+    // The GPU-free backend's documented model path is the literal "stub"; it
+    // has no GGUF header and intentionally exercises the release-default DSML
+    // pipeline. Every real model is metadata-routed.
+    if (strcmp(model_path, "stub") != 0 &&
+        !ember_prompt_profile_detect(model_path, &prompt_profile, &profile_err)) {
+        fprintf(stderr, "[ember] model profile detection failed: %s\n",
+                profile_err ? profile_err : "unknown error");
+        free(profile_err);
+        return 1;
+    }
+    free(profile_err);
+    const int resolved_max_ctx = max_ctx > 0 ? max_ctx
+        : prompt_profile == EMBER_PROMPT_QWEN4_CHATML ? 262144
+        : 131072;
+    if (qwen_yarn && prompt_profile != EMBER_PROMPT_QWEN4_CHATML) {
+        fprintf(stderr,
+                "[ember] --qwen-yarn is valid only for Qwen3.8-Flash-Next\n");
+        return 2;
+    }
+    if (qwen_yarn && resolved_max_ctx != 1000000) {
+        fprintf(stderr,
+                "[ember] --qwen-yarn requires the official --max-ctx 1000000 recipe\n");
+        return 2;
+    }
+    if (qwen_yarn)
+        fprintf(stderr,
+                "[ember] WARNING: Qwen static factor-4 YaRN is enabled; "
+                "the loader will reject any plan exceeding 128-GiB UMA\n");
     if (strcmp(host, "127.0.0.1") != 0)
         fprintf(stderr,
                 "[ember] WARNING: listening beyond loopback; Ember has no "
@@ -4338,12 +4571,13 @@ int main(int argc, char **argv) {
     ember_backend_config cfg = {0};
     cfg.model_path = model_path;
     cfg.model_name = model_name;
-    cfg.max_ctx = max_ctx > 0 ? max_ctx : 131072;
+    cfg.max_ctx = resolved_max_ctx;
     cfg.expert_top_k = expert_top_k;
     cfg.kv_cache_dir = kv_dir;
     cfg.kv_cache_mb = kv_cache_mb;   // --kv-cache-mb, 0 = default
     cfg.batch_sessions = batch_sessions;
     cfg.ds4_prefill_mode = ds4_prefill_mode;
+    cfg.qwen_yarn = qwen_yarn;
     char *err = NULL;
     ember_backend *be = ember_backend_load(&cfg, &err);
     if (!be) {
@@ -4367,6 +4601,7 @@ int main(int argc, char **argv) {
     }
     ember_server srv = {0};
     srv.be = be;
+    srv.prompt_profile = prompt_profile;
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
     srv.no_progress_report = no_progress_report;

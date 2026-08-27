@@ -11,10 +11,8 @@
 #include <cstring>
 #include <limits>
 
-#if !defined(_WIN32)
 #include <sys/mman.h>
 #include <unistd.h>
-#endif
 
 namespace dflash::common {
 
@@ -116,7 +114,6 @@ void MoeHybridStreamEngine::prefetch_cold_experts(const void * mmap_data, size_t
                                                   int n_cold) {
     if (!mmap_data || mmap_size == 0 || !cold_expert_ids || n_cold <= 0) return;
 
-#if !defined(_WIN32)
     auto do_advise = [&](size_t offset, size_t length) {
         if (offset > mmap_size || length > mmap_size - offset || length == 0)
             return;
@@ -130,12 +127,10 @@ void MoeHybridStreamEngine::prefetch_cold_experts(const void * mmap_data, size_t
         ::madvise(const_cast<uint8_t *>(static_cast<const uint8_t *>(mmap_data)) + aligned_offset,
                   aligned_length, MADV_WILLNEED);
     };
-#endif
 
     for (int i = 0; i < n_cold; ++i) {
         const int32_t eid = cold_expert_ids[i];
         if (eid < 0) continue;
-#if !defined(_WIN32)
         auto advise_expert = [&](const ExpertFileRegion & region,
                                  size_t expert_bytes) {
             if (expert_bytes == 0 ||
@@ -161,10 +156,6 @@ void MoeHybridStreamEngine::prefetch_cold_experts(const void * mmap_data, size_t
             advise_expert(regions.up_exps, regions.expert_bytes_up);
         }
         advise_expert(regions.down_exps, regions.expert_bytes_down);
-#else
-        (void)eid;
-        (void)regions;
-#endif
     }
 }
 

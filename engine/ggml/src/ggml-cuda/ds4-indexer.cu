@@ -1,7 +1,7 @@
 #include "ds4-indexer.cuh"
 
 #if defined(GGML_USE_HIP)
-// rocWMMA 1.x rejects RDNA4/gfx1151 at compile time. Use the optimized path
+// rocWMMA 1.x rejects gfx1151 at compile time. Use the optimized path
 // only with rocWMMA 2.x or newer; older or header-less ROCm installations
 // retain the scalar implementation below.
 #    if __has_include(<rocwmma/rocwmma-version.hpp>)

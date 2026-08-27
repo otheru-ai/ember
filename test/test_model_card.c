@@ -113,7 +113,10 @@ int main(void){
         const char sampling[] =
             "{\"sampling\":{\"temperature\":0.7,\"top_p\":0.9,"
             "\"top_k\":17,\"min_p\":0.03,\"presence_penalty\":-0.4,"
-            "\"repetition_penalty\":1.15}}";
+            "\"repetition_penalty\":1.15},"
+            "\"context_extension\":{\"type\":\"static_yarn\","
+            "\"native_context\":262144,\"max_context\":1000000,"
+            "\"factor\":4.0,\"enabled_by_default\":false}}";
         CHECK(write(fd, sampling, sizeof(sampling)-1) ==
                   (ssize_t)(sizeof(sampling)-1),
               "write sampling-card fixture");
@@ -124,6 +127,11 @@ int main(void){
               c.min_p == 0.03 && c.presence_penalty == -0.4 &&
               c.repetition_penalty == 1.15,
               "all card sampler fields are retained");
+        CHECK(c.context_extension.available &&
+              c.context_extension.native_context == 262144 &&
+              c.context_extension.max_context == 1000000 &&
+              c.context_extension.factor == 4.0,
+              "static YaRN card recipe retained without activation");
         ember_model_card_free(&c);
         unlink(sampling_path);
     }

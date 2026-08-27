@@ -1,10 +1,6 @@
 #pragma once
 
 // Minimal HIP compatibility for vendored code that retains cuda* spellings.
-#if !defined(DFLASH27B_BACKEND_HIP) && !defined(GGML_USE_HIP)
-#error "Ember's dflash runtime supports only HIP"
-#endif
-
 #include <hip/hip_runtime.h>
 
 #define cudaDeviceSynchronize hipDeviceSynchronize

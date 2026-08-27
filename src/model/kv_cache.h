@@ -12,14 +12,11 @@
 //     the last user marker before the first assistant marker, so the shared
 //     system-prompt prefix is cached from turn 1.
 //
-// SUPERSEDES the vendored engine policy layer. engine/dflash/server/
-// prefix_cache.cpp (the inline+full-slot PrefixCache class) is NOT instantiated
-// in ember, and DiskPrefixCache's policy methods (continued_interval /
-// cold_prefix_boundary / boundary_align/trim, maybe_store_continued) are linked
-// but UNWIRED — ember consumes only its init/save/lookup/longest_prefix_len blob
-// interface. Checkpoint-cut and eviction policy live here + in main.c instead.
-// Do not assume ember shares ds4/lucebox checkpoint TIMING: it reimplements it.
-// (This is why disk_prefix_cache.h's boundary_align_tokens default is inert.)
+// SUPERSEDES the vendored engine policy layer. The engine bridge supplies only
+// snapshot blobs and disk init/save/lookup/longest-prefix primitives;
+// checkpoint-cut and slot policy live here and in main.c. Do not assume Ember
+// shares ds4/lucebox checkpoint timing: it deliberately reimplements it above
+// the backend ABI.
 #ifndef EMBER_KV_CACHE_H
 #define EMBER_KV_CACHE_H
 

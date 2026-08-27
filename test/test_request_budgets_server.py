@@ -36,7 +36,6 @@ def main() -> None:
     port = free_port()
     card = {
         "max_tokens": 7,
-        "complex_problem_max_tokens": 32,
         "hard_limit_reply_budget": 2,
         "thinking_terminator_hint": "</think>\n\n",
         "reasoning_effort_tiers": {

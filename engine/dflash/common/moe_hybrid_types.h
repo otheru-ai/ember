@@ -1,8 +1,7 @@
 // Common MoE hybrid mode types and descriptors.
 //
-// Model-agnostic abstractions used by both qwen35moe and laguna backends
-// to implement the hybrid expert offload strategy (hot experts on GPU,
-// cold experts on CPU, concurrent evaluation).
+// DeepSeek4 hybrid expert offload: hot experts on GPU, cold experts on CPU,
+// with concurrent evaluation.
 
 #pragma once
 
@@ -13,36 +12,23 @@
 
 namespace dflash::common {
 
-// ─── GPU SM version query ───────────────────────────────────────────────
-// Returns the compute capability as major*10+minor (e.g. 86 for sm_86).
-// Returns 0 if CUDA/HIP runtime is unavailable.
-int query_gpu_compute_sm();
-
 enum class MoeHybridColdBackend {
     Cpu,
     Gpu,
 };
 
-// ─── MoE architecture config (model-agnostic) ──────────────────────────
+// ─── MoE architecture config ───────────────────────────────────────────
 
 struct MoeHybridConfig {
     int n_embd        = 0;   // hidden dimension
     int n_expert      = 0;   // total experts per layer
     int n_expert_used = 0;   // top-k selected per token
     int n_ff_exp      = 0;   // routed expert intermediate dimension
-    int n_ff_shexp    = 0;   // shared expert intermediate dimension (0 = no shared)
     int n_layer       = 0;   // number of MoE layers
-    int first_moe_layer = 0; // index of first MoE layer (e.g., 0 for qwen35moe, 1 for laguna)
     float swiglu_clamp = 0.0f; // 0 = regular SwiGLU; >0 clamps gate upper/up symmetric (DS4)
     MoeHybridColdBackend cold_expert_backend = MoeHybridColdBackend::Cpu;
-    bool materialize_hot_experts = true;
     bool materialize_cold_experts = true;
 
-    // When true, MMQ mul_mat_id works correctly with reduced hot stacks
-    // (n_hot < n_expert). Safe on sm_80+ (Ampere/Ada/Hopper/Blackwell).
-    // On sm_75 (Turing) and gfx1151, the kernel has illegal memory accesses
-    // with reduced stacks, requiring the <=4-token sub-batch workaround.
-    bool mmq_safe_full_batch = false;
 };
 
 // ─── Per-layer expert tensor descriptor ─────────────────────────────────

@@ -157,6 +157,27 @@ def main() -> int:
         require_events(stream, '"role":"assistant"', '"content":"H"',
                        '"usage":{', "data: [DONE]")
 
+        # Image blocks are preserved by request normalization, but this build
+        # has no vision encoder/embedding splice. It must fail closed instead
+        # of answering from the surrounding text after silently dropping the
+        # image (the historical behavior).
+        image_request = {
+            "model": "deepseek-v4-flash",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image: "},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo="
+                    }},
+                ],
+            }],
+            "stream": False,
+        }
+        code, body = request(base + "/v1/chat/completions", image_request)
+        assert code == 400, body
+        assert body["error"]["code"] == "vision_not_available", body
+
         # Reasonix v1.31.3 and DeepSeek Harness's llm-deepseek 0.1.1-rc.2
         # both use the official DeepSeek Chat Completions thinking object.
         # The latter's source of record is

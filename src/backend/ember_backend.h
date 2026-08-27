@@ -36,6 +36,7 @@ typedef struct {
     long        kv_cache_mb;  // disk budget (0 = default)
     int         batch_sessions; // resident continuous-batch slots (1 = legacy)
     ember_ds4_prefill_mode ds4_prefill_mode; // sparse default; exact for quality reference
+    bool        qwen_yarn; // explicit static factor-4 1M Qwen recipe; off by default
 } ember_backend_config;
 
 // Load a model. Returns NULL on failure and sets *err (caller frees) if non-NULL.
@@ -49,6 +50,24 @@ int  ember_backend_encode(ember_backend *b, const char *text, int32_t **ids_out)
 // Detokenize one token to its raw byte string (borrowed, valid for backend life).
 const char *ember_backend_token_text(ember_backend *b, int32_t id);
 
+// One still image projected by a separate, lazily resident vision tower.
+// The caller owns `embeddings` and releases it with
+// ember_backend_vision_image_free(). Encoded bytes are decoded by the provider;
+// Ember itself accepts only bounded data URLs at the HTTP boundary.
+typedef struct {
+    int    grid_t;
+    int    grid_h;
+    int    grid_w;
+    int    n_tokens;
+    float *embeddings; // row-major [n_tokens,2560]
+} ember_vision_image;
+
+bool ember_backend_vision_encode(ember_backend *b,
+                                 const uint8_t *encoded, size_t encoded_size,
+                                 ember_vision_image *out,
+                                 char *error, size_t error_cap);
+void ember_backend_vision_image_free(ember_vision_image *image);
+
 // ── generation ──
 // on_token: called per generated token; return false to cancel (client gone).
 // on_prefill: called periodically during prefill for the SSE keepalive; return
@@ -57,8 +76,19 @@ typedef bool (*ember_token_cb)(int32_t token, void *ud);
 typedef bool (*ember_keepalive_cb)(void *ud);
 
 typedef struct {
+    int          prompt_offset;
+    int          grid_t;
+    int          grid_h;
+    int          grid_w;
+    int          n_tokens;
+    const float *embeddings;
+} ember_vision_run;
+
+typedef struct {
     const int32_t     *prompt;
     int                n_prompt;
+    const ember_vision_run *vision;
+    int                n_vision;
     int                max_tokens;
     bool               greedy;       // temperature==0
     // Decode policy and prefill policy are intentionally independent. An

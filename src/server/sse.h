@@ -43,6 +43,8 @@ typedef struct {
     char        *model;           // model name (owned)
     long         created;         // unix ts for the `created` field
     bool         has_tools;       // request declared tools
+    bool         qwen_tool_syntax;// repeated qwen3_coder wrappers, not DSML
+    const char  *tools_json;      // borrowed schema array for Qwen coercion
     bool         enable_cors;
     bool         include_usage;   // stream_options.include_usage (gate usage chunk)
     int          cached_tokens;   // restored prefix length → prompt_tokens_details
@@ -118,6 +120,10 @@ void ember_sse_free(ember_sse_stream *st);
 // sink while retaining the same stream-safe reasoning/content/tool parser.
 void ember_sse_set_sink(ember_sse_stream *st, const ember_sse_sink *sink,
                         void *ud);
+
+// Select Qwen's schema-coerced XML tool surface for this request. The schema
+// string is borrowed for the stream lifetime.
+void ember_sse_set_qwen_tools(ember_sse_stream *st, const char *tools_json);
 
 // Hide a server-authored suffix that is injected immediately before </think>
 // (for example the budget force-close directive) from reasoning deltas.

@@ -97,25 +97,25 @@ double milliseconds(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
-dflash::common::DraftWeights make_dspark_shim(
+dflash::common::DSparkHeadWeights make_dspark_head_weights(
         const dflash::common::DSparkDrafter & drafter) {
-    dflash::common::DraftWeights weights{};
-    weights.n_embd = drafter.core.n_embd;
-    weights.dspark.enabled = drafter.dspark_enabled;
-    weights.dspark.markov_rank = drafter.markov_rank;
-    weights.dspark.vocab_size = drafter.vocab_size;
-    weights.dspark.confidence_dim = drafter.confidence_dim;
-    weights.dspark.markov_w1 = drafter.markov_w1;
-    weights.dspark.markov_w2 = drafter.markov_w2;
-    weights.dspark.confidence_w = drafter.confidence_w;
-    weights.dspark.confidence_b = drafter.confidence_b;
-    return weights;
+    return {
+        drafter.dspark_enabled,
+        drafter.core.n_embd,
+        drafter.markov_rank,
+        drafter.vocab_size,
+        drafter.confidence_dim,
+        drafter.markov_w1,
+        drafter.markov_w2,
+        drafter.confidence_w,
+        drafter.confidence_b,
+    };
 }
 
 bool project_markov_chain(
         ggml_backend_t backend,
         const dflash::common::DSparkDrafter & drafter,
-        const dflash::common::DraftWeights & weights,
+        const dflash::common::DSparkHeadWeights & weights,
         ggml_tensor * lm_head,
         const std::vector<float> & hidden,
         const std::vector<float> & confidence_hidden,
@@ -255,8 +255,8 @@ int main(int argc, char ** argv) {
             std::numeric_limits<size_t>::max();
         bool token_match = true;
         bool pass = true;
-        const dflash::common::DraftWeights head_weights =
-            make_dspark_shim(drafter);
+        const dflash::common::DSparkHeadWeights head_weights =
+            make_dspark_head_weights(drafter);
 
         // One unmeasured pass builds the HIP graphs and warms the resident AIE
         // overlay before the reported samples.

@@ -9,23 +9,20 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cctype>
 #include <climits>
 #include <cmath>
 #include <cinttypes>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <functional>
 #include <limits>
 #include <set>
+#include <stdexcept>
 #include <system_error>
-#if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
-#endif
 
 namespace dflash::common {
 
@@ -62,7 +59,6 @@ static bool mkdir_p(const std::string & path) {
     return !ec;
 }
 
-#if !defined(_WIN32)
 static FILE * open_read_no_follow(const std::string & path) {
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return nullptr;
@@ -88,15 +84,6 @@ static bool sync_directory(const std::string & path) {
     ::close(fd);
     return ok;
 }
-#else
-static FILE * open_read_no_follow(const std::string & path) {
-    return std::fopen(path.c_str(), "rb");
-}
-
-static FILE * open_write_no_follow(const std::string & path) {
-    return std::fopen(path.c_str(), "wb");
-}
-#endif
 
 static uint64_t now_unix() {
     return (uint64_t)std::time(nullptr);
@@ -108,6 +95,33 @@ static bool disk_token_count_fits(size_t count) {
 
 static void add_total_bytes_saturating(uint64_t & total, uint64_t amount) {
     total = amount > UINT64_MAX - total ? UINT64_MAX : total + amount;
+}
+
+static PrefixHash hash_prefix(const int32_t * ids, int count) {
+    if (count < 0 || (count > 0 && !ids) ||
+        (size_t)count > (std::numeric_limits<size_t>::max() - 4) /
+                            sizeof(int32_t)) {
+        throw std::invalid_argument("invalid prefix token span");
+    }
+
+    std::vector<uint8_t> bytes(4 + (size_t)count * sizeof(int32_t));
+    const uint32_t n = static_cast<uint32_t>(count);
+    for (unsigned b = 0; b < 4; ++b) {
+        bytes[b] = static_cast<uint8_t>(n >> (8U * b));
+    }
+    for (int i = 0; i < count; ++i) {
+        const uint32_t token = static_cast<uint32_t>(ids[i]);
+        const size_t off = 4 + static_cast<size_t>(i) * 4;
+        for (unsigned b = 0; b < 4; ++b) {
+            bytes[off + b] = static_cast<uint8_t>(token >> (8U * b));
+        }
+    }
+
+    uint8_t sha[20];
+    sha1_hash(bytes.data(), bytes.size(), sha);
+    PrefixHash hash{};
+    std::memcpy(hash.data(), sha, hash.size());
+    return hash;
 }
 
 // #6: Shared CPU backend for disk-cache loads. A fresh ggml CPU backend used to
@@ -131,133 +145,6 @@ static ggml_backend_t disk_cache_cpu_backend() {
     };
     static CpuBackendHolder holder;  // thread-safe init; freed at process exit
     return holder.backend;
-}
-
-const char * disk_prefix_cache_mode_name(DiskPrefixCacheMode mode) {
-    switch (mode) {
-        case DiskPrefixCacheMode::Off:   return "off";
-        case DiskPrefixCacheMode::Full:  return "full";
-        case DiskPrefixCacheMode::Auto:  return "auto";
-        case DiskPrefixCacheMode::Fixed: return "fixed";
-    }
-    return "full";
-}
-
-std::string disk_prefix_cache_policy_name(const DiskPrefixCachePolicy & policy) {
-    std::string base;
-    if (policy.mode == DiskPrefixCacheMode::Fixed) {
-        base = "fixed:" + std::to_string(policy.fixed_tokens);
-    } else if (policy.mode == DiskPrefixCacheMode::Auto) {
-        base = "auto:" + std::to_string(policy.auto_window);
-    } else {
-        base = disk_prefix_cache_mode_name(policy.mode);
-    }
-    if (policy.compress) base += "+compress";
-    return base;
-}
-
-bool parse_disk_prefix_cache_policy(const std::string & value,
-                                    DiskPrefixCachePolicy & out) {
-    std::string v;
-    v.reserve(value.size());
-    for (char c : value) v.push_back((char)std::tolower((unsigned char)c));
-
-    if (v == "off" || v == "none" || v == "disabled") {
-        out = {};
-        out.mode = DiskPrefixCacheMode::Off;
-        return true;
-    }
-    if (v == "full" || v == "full-prefix") {
-        out = {};
-        out.mode = DiskPrefixCacheMode::Full;
-        return true;
-    }
-    if (v == "auto") {
-        out = {};
-        out.mode = DiskPrefixCacheMode::Auto;
-        return true;
-    }
-
-    const std::string auto_prefix = "auto:";
-    if (v.rfind(auto_prefix, 0) == 0) {
-        char * end = nullptr;
-        long n = std::strtol(v.c_str() + auto_prefix.size(), &end, 10);
-        if (!end || *end != '\0' || n <= 0 || n > 1000000) return false;
-        out = {};
-        out.mode = DiskPrefixCacheMode::Auto;
-        out.auto_window = (int)n;
-        return true;
-    }
-
-    char * end = nullptr;
-    long n = std::strtol(v.c_str(), &end, 10);
-    if (end && *end == '\0' && n > 0 && n <= 1000000) {
-        out = {};
-        out.mode = DiskPrefixCacheMode::Fixed;
-        out.fixed_tokens = (int)n;
-        return true;
-    }
-    return false;
-}
-
-bool apply_request_scope_override(DiskPrefixCachePolicy & server_policy,
-                                  const std::string & scope_str) {
-    DiskPrefixCachePolicy parsed;
-    if (!parse_disk_prefix_cache_policy(scope_str, parsed)) {
-        return false;
-    }
-    // Preserve server-level flags (e.g. compress) across the scope override.
-    parsed.compress = server_policy.compress;
-    server_policy = parsed;
-    return true;
-}
-
-static bool valid_boundary(int n, int full_len) {
-    return n > 0 && n <= full_len;
-}
-
-int disk_prefix_cache_fixed_boundary(const DiskPrefixCachePolicy & policy,
-                                     int full_len,
-                                     int min_tokens) {
-    if (policy.mode != DiskPrefixCacheMode::Fixed) return 0;
-    if (policy.fixed_tokens < min_tokens) return 0;
-    return valid_boundary(policy.fixed_tokens, full_len) ? policy.fixed_tokens : 0;
-}
-
-static int lcp_len(const std::vector<int32_t> & a,
-                   const std::vector<int32_t> & b) {
-    const int n = std::min((int)a.size(), (int)b.size());
-    int i = 0;
-    while (i < n && a[(size_t)i] == b[(size_t)i]) i++;
-    return i;
-}
-
-static int floor_to_safe_boundary(int n, const std::vector<int> & safe_boundaries) {
-    if (n <= 0) return 0;
-    if (safe_boundaries.empty()) return n;
-
-    int best = 0;
-    for (int b : safe_boundaries) {
-        if (b > 0 && b <= n) best = std::max(best, b);
-    }
-    return best;
-}
-
-int disk_prefix_cache_auto_boundary(
-    const std::vector<int32_t> & prompt_ids,
-    const std::vector<std::vector<int32_t>> & recent_prompts,
-    int window,
-    const std::vector<int> & safe_boundaries,
-    int min_tokens) {
-    if (prompt_ids.empty() || recent_prompts.empty() || window <= 0) return 0;
-
-    const int n_recent = std::min(window, (int)recent_prompts.size());
-    int common = 0;
-    for (int i = 0; i < n_recent; ++i) {
-        common = std::max(common, lcp_len(prompt_ids, recent_prompts[(size_t)i]));
-    }
-    common = floor_to_safe_boundary(common, safe_boundaries);
-    return common >= min_tokens ? common : 0;
 }
 
 // Little-endian I/O helpers.
@@ -926,13 +813,11 @@ bool DiskPrefixCache::save(int slot, const std::vector<int32_t> & prompt_ids,
         std::remove(tmp_path.c_str());
         return false;
     }
-#if !defined(_WIN32)
     if (!sync_directory(layout_dir_)) {
         std::fprintf(stderr,
                      "[disk-cache] warning: failed to sync checkpoint directory: %s\n",
                      std::strerror(errno));
     }
-#endif
 
     // Update index.
     DiskEntry entry;
@@ -967,22 +852,7 @@ bool DiskPrefixCache::save(int slot, const std::vector<int32_t> & prompt_ids,
     return true;
 }
 
-// ─── Continued checkpoints ──────────────────────────────────────────────
-
-int DiskPrefixCache::continued_interval() const {
-    // ds4 kv_cache_continued_step: round the interval UP to the alignment so
-    // every continued checkpoint lands on an aligned position.
-    int step = config_.continued_interval;
-    if (step <= 0) return 0;
-    const int align = config_.boundary_align_tokens;
-    if (align > 0) {
-        if (step > INT_MAX - (align - 1)) return 0;
-        const int rounded = (step + align - 1) / align;
-        if (rounded > INT_MAX / align) return 0;
-        step = rounded * align;
-    }
-    return step;
-}
+// ─── Prefix lookup ──────────────────────────────────────────────────────
 
 int DiskPrefixCache::longest_prefix_len(const std::vector<int32_t> & prompt_ids) {
     if (disabled() || !layout_known_ ||
@@ -995,93 +865,6 @@ int DiskPrefixCache::longest_prefix_len(const std::vector<int32_t> & prompt_ids)
         if (n <= best || n > prompt_len || n < config_.min_tokens) continue;
         if (hash_prefix(prompt_ids.data(), n) == e.token_hash) best = n;
     }
-    return best;
-}
-
-int DiskPrefixCache::store_len(int tokens) const {
-    // ds4_kvstore_store_len.
-    const int trim  = config_.boundary_trim_tokens;
-    const int align = config_.boundary_align_tokens;
-    if (tokens > config_.min_tokens + trim) {
-        int stable = tokens - trim;
-        if (align > 0) stable -= stable % align;
-        if (stable >= config_.min_tokens) return stable;
-    }
-    return tokens;
-}
-
-bool DiskPrefixCache::maybe_store_continued(int slot,
-                                            const std::vector<int32_t> & all_tokens,
-                                            int cur_pos) {
-    if (disabled() || !disk_token_count_fits(all_tokens.size())) return false;
-    if (cur_pos < config_.min_tokens) return false;
-
-    const int step = continued_interval();
-    if (step <= 0) return false;
-
-    // The tracker is process-global (one worker, one cache instance). A position
-    // that moved backwards means a new/shorter request began, so re-baseline
-    // rather than suppress every shorter follow-up. (reset_continued() is the
-    // explicit per-request hook; this guards the case where it was not called.)
-    if (cur_pos < continued_last_store_pos_) continued_last_store_pos_ = 0;
-
-    // The key length MUST equal the snapshot position. The previous code
-    // floored cur_pos to an interval multiple and wrote a key of that length
-    // describing a snapshot taken at cur_pos — e.g. a 20480-token key for a
-    // 28839-token snapshot. A later hit would restore 28839 tokens of KV while
-    // believing it held 20480, then diff-prefill from the wrong offset. It
-    // stayed latent only because save() died earlier on the deepseek4 path.
-    //
-    // ds4 keeps key == position by storing `live_tokens` exactly, gated on
-    // live_tokens % step == 0 — it can, because it is called per token during
-    // decode and so lands on multiples. This is called ONCE after generation,
-    // where the final position is almost never a multiple, so an exact-modulo
-    // gate would make continued checkpoints dead code. Use the interval to
-    // detect a crossing instead, and store the full live position.
-    if (cur_pos / step <= continued_last_store_pos_ / step) return false;
-    if (cur_pos > (int)all_tokens.size()) return false;
-
-    std::vector<int32_t> prefix(all_tokens.begin(), all_tokens.begin() + cur_pos);
-    bool ok = save(slot, prefix, DKV_REASON_CONTINUED);
-    if (ok) {
-        continued_last_store_pos_ = cur_pos;
-        std::fprintf(stderr, "[disk-cache] continued checkpoint at %d tokens\n", cur_pos);
-    }
-    return ok;
-}
-
-// ─── Cold prefix boundary ───────────────────────────────────────────────
-
-int DiskPrefixCache::cold_prefix_boundary(const std::vector<int32_t> & prompt_ids,
-                                          const std::vector<int> & boundaries) {
-    if (disabled() || !layout_known_ ||
-        !disk_token_count_fits(prompt_ids.size())) return 0;
-
-    const int prompt_len = (int)prompt_ids.size();
-    if (prompt_len <= config_.cold_max_tokens) return 0;
-    if (boundaries.empty()) return 0;
-
-    // Find the last turn boundary <= cold_max_tokens.
-    int best = 0;
-    for (int b : boundaries) {
-        if (b <= config_.cold_max_tokens && b >= config_.min_tokens) {
-            best = b;
-        }
-    }
-    if (best == 0) return 0;
-
-    // Align the cut. The caller prefills to exactly this value and saves a key
-    // of exactly this length, so trimming here keeps the snapshot position and
-    // the token key in agreement — the invariant maybe_store_continued used to
-    // violate.
-    best = store_len(best);
-    if (best < config_.min_tokens) return 0;
-
-    // Check if we already have a disk entry covering this prefix.
-    PrefixHash hash = hash_prefix(prompt_ids.data(), best);
-    std::lock_guard<std::mutex> lock(mu_);
-    if (find_entry(hash) >= 0) return 0;  // already cached
-
     return best;
 }
 
@@ -1349,9 +1132,7 @@ bool DiskPrefixCache::write_file(const std::string & path,
     // Commit the complete temporary file before the caller atomically renames
     // it into the content-addressed namespace.
     bool ok = std::fflush(f) == 0;
-#if !defined(_WIN32)
     if (ok) ok = ::fsync(::fileno(f)) == 0;
-#endif
     if (std::fclose(f) != 0) ok = false;
     return ok;
 }

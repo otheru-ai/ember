@@ -82,7 +82,7 @@ static inline __device__ void topk_swap(T & a, T & b) {
 // {1,2,4,8,16}; a wave64 top tail (j == 32) crosses the 32-lane group and falls
 // back to `__shfl_xor`. Each case passes a literal so the builtin's
 // immediate-operand requirement holds for any (even runtime) j. (The encoding
-// was verified bit-identical to `__shfl_xor` on gfx1201 and gfx1151 for all five masks.)
+// was verified bit-identical to `__shfl_xor` on gfx1151 for all five masks.)
 #    define TOPK_DS_SWIZZLE_XOR(m) (((m) << 10) | 0x1f)
 // The intra-quad xor masks (1, 2) are expressible as a DPP quad_perm, which runs
 // as a VALU cross-lane operand-gather (fused into the ALU pipe) rather than an
@@ -107,7 +107,7 @@ static inline __device__ void topk_swap(T & a, T & b) {
 // "off the LDS crossbar onto VALU" move that DPP quad_perm won for ^1/^2, now
 // applied to the largest intra-wave stride. bound_ctrl/fi are false; every lane
 // is written by the full permutation so the passthrough `old` operand is dead.
-// Verified bit-identical to `__shfl_xor(v, 16)` on gfx1201 and gfx1151. Masks 4/8 stay on
+// Verified bit-identical to `__shfl_xor(v, 16)` on gfx1151. Masks 4/8 stay on
 // ds_swizzle; the wave64 j==32 tail still falls back to __shfl_xor.
 static __device__ __forceinline__ int topk_shfl_xor_i32(int v, int mask) {
     switch (mask) {
@@ -1156,7 +1156,7 @@ static void topk_bitonic_smallk_cuda(const float * x,
 
     // kpad is a power of two <= warpSize (this path's precondition). Dispatch to
     // the KPAD-templated kernel so its Phase-A sort and Phase-B merge unroll at
-    // compile time. warpSize is 32 (wave32) on gfx1201 and 64 on CDNA/wave64, so
+    // compile time. warpSize is 32 on gfx1151 and 64 on CDNA/wave64, so
     // instantiate the full {2..64} ladder; the switch is exhaustive for any
     // power-of-two kpad in range.
     switch (kpad) {
@@ -1199,7 +1199,7 @@ static void topk_bitonic_2wave_cuda(const float * x,
     GGML_ASSERT(shared_mem <= ggml_cuda_info().devices[ggml_cuda_get_device()].smpb);
 
     // This path is entered only when kpad == 2*warpSize (a power of two with
-    // warpSize < kpad <= 2*warpSize). warpSize is 32 (wave32, gfx1201) or 64
+    // warpSize < kpad <= 2*warpSize). warpSize is 32 (gfx1151) or 64
     // (CDNA/wave64), so kpad is exactly 64 or 128; dispatch to the KPAD-templated
     // kernel so its Phase-A sort and Phase-B merge tail unroll at compile time.
     switch (kpad) {

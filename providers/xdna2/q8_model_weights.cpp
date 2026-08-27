@@ -20,7 +20,7 @@ extern "C" {
 namespace ember::xdna2 {
 namespace {
 
-using GgufOwner = std::unique_ptr<gguf_file, decltype(&gguf_free)>;
+using GgufOwner = std::unique_ptr<gguf_file, decltype(&ember_gguf_free)>;
 
 bool fail(std::string * error, const std::string & message) {
     if (error) *error = message;
@@ -109,9 +109,9 @@ bool load_q8_model_projection(const char * path,
     if (!raw_bytes || !q8_supported_shape(k, n))
         return fail(error, "unsupported Q8 AIE projection shape");
 
-    GgufOwner file(gguf_open(path), &gguf_free);
+    GgufOwner file(ember_gguf_open(path), &ember_gguf_free);
     if (!file) return fail(error, std::string("cannot parse GGUF: ") + path);
-    if (std::strcmp(gguf_get_str(file.get(), "general.architecture", ""),
+    if (std::strcmp(ember_gguf_get_str(file.get(), "general.architecture", ""),
                     "deepseek4-dflash-draft") != 0) {
         return fail(error, "GGUF is not a deepseek4-dflash-draft model");
     }
@@ -160,13 +160,13 @@ bool load_q8_model_shared_expert(const char * path,
     if (layer < 0 || layer >= kQ8ModelLayers)
         return fail(error, "DSpark layer must be in [0,2]");
 
-    GgufOwner file(gguf_open(path), &gguf_free);
+    GgufOwner file(ember_gguf_open(path), &ember_gguf_free);
     if (!file) return fail(error, std::string("cannot parse GGUF: ") + path);
-    if (std::strcmp(gguf_get_str(file.get(), "general.architecture", ""),
+    if (std::strcmp(ember_gguf_get_str(file.get(), "general.architecture", ""),
                     "deepseek4-dflash-draft") != 0) {
         return fail(error, "GGUF is not a deepseek4-dflash-draft model");
     }
-    if (gguf_get_int(file.get(),
+    if (ember_gguf_get_int(file.get(),
                      "deepseek4-dflash-draft.block_count", -1) !=
             kQ8ModelLayers) {
         return fail(error, "GGUF DSpark layer metadata is incompatible");

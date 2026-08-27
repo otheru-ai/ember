@@ -20,7 +20,7 @@
 #   scripts/profile_gpu.sh --model /models/model.gguf
 #
 # Output lands in --out-dir (default ./reports/profile-<UTC stamp>/) as
-# rocprofv3 CSVs plus manifest.json. Feed that directory to
+# rocprofv3 CSVs plus toolchain/counter provenance and manifest.json. Feed that directory to
 # scripts/profile_report.py for the roofline verdict.
 #
 # Methodology, and why it is shaped this way:
@@ -43,7 +43,7 @@ set -euo pipefail
 
 MODEL="${EMBER_PROFILE_MODEL:-}"
 DRAFT="${EMBER_PROFILE_DRAFT:-}"
-IMAGE="${EMBER_PROFILE_IMAGE:-ember-rocm:7.14-dev}"
+IMAGE="${EMBER_PROFILE_IMAGE:-ember-rocm:10.0-dev}"
 BINARY="${EMBER_PROFILE_BINARY:-/ember/build-rocm/ember-dflash}"
 PORT="${EMBER_PROFILE_PORT:-18081}"
 PRODUCTION_CONTAINER="${EMBER_PRODUCTION_CONTAINER:-ember-server}"
@@ -67,7 +67,7 @@ usage() {
 options:
   --model PATH         target GGUF (required unless --dry-run)
   --draft PATH         DSpark drafter GGUF; enables speculative decode
-  --image REF          ROCm image carrying rocprofv3 (default ember-rocm:7.14-dev)
+  --image REF          ROCm image carrying rocprofv3 (default ember-rocm:10.0-dev)
   --binary PATH        ember-dflash path inside the container
   --port N             port for the profiled instance (default 18081)
   --out-dir DIR        output directory (default reports/profile-<UTC stamp>)
@@ -148,8 +148,10 @@ preflight_hard() {
     || die "image not present: $IMAGE (build it with: docker build --target dev -f docker/Dockerfile -t $IMAGE .)"
 
   # rocprofv3 must exist *inside* the image; the host does not need it.
-  docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'command -v rocprofv3' >/dev/null 2>&1 \
-    || die "rocprofv3 not found in $IMAGE -- the profiler lives in the ROCm dev stage"
+  docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    'command -v rocprofv3 && command -v rocprof-compute && command -v rocprofv3-avail' \
+    >/dev/null 2>&1 \
+    || die "ROCm profiling tools not found in $IMAGE -- use the pinned full dev image"
 }
 
 # Every container that must SEE the GPU needs these. rocprofv3 --list-avail
@@ -330,6 +332,40 @@ select_counters() {
   (( ${#missing[@]} == 0 )) || log "counters unavailable, bandwidth will be partial: ${missing[*]}"
 }
 
+# Archive enough provenance to make a profile bundle independently auditable.
+# A locally tagged dev image commonly has no RepoDigest, so its content-addressed
+# image ID is authoritative and RepoDigests are retained when the registry
+# supplied them. Counter descriptions come from the device-specific SDK query,
+# not from names hardcoded in Ember.
+collect_provenance() {
+  docker image inspect --format \
+    '{"id":{{json .Id}},"repo_tags":{{json .RepoTags}},"repo_digests":{{json .RepoDigests}}}' \
+    "$IMAGE" >"$OUT_DIR/image-identity.json"
+  docker run --rm --entrypoint rocprofv3 "$IMAGE" --version \
+    >"$OUT_DIR/rocprofv3-version.txt" 2>&1
+  docker run --rm --entrypoint rocprof-compute "$IMAGE" --version \
+    >"$OUT_DIR/rocprof-compute-version.txt" 2>&1
+  docker run --rm "${GPU_ARGS[@]}" --entrypoint rocprofv3-avail "$IMAGE" \
+    info --pmc -d 0 >"$OUT_DIR/rocprofv3-counter-info.txt"
+  test -s "$OUT_DIR/image-identity.json"
+  test -s "$OUT_DIR/rocprofv3-version.txt"
+  test -s "$OUT_DIR/rocprof-compute-version.txt"
+  test -s "$OUT_DIR/rocprofv3-counter-info.txt"
+  for counter in "${PMC_COUNTERS[@]}"; do
+    grep -Eq "Counter_Name[[:space:]]*:[[:space:]]*$counter([[:space:]]|$)" \
+      "$OUT_DIR/rocprofv3-counter-info.txt" \
+      || die "$counter has no device-specific definition in rocprofv3-avail output"
+  done
+
+  # ROCm 7.14 was measured to report FETCH_SIZE/WRITE_SIZE in KiB on Ember's
+  # gfx1151 host. AMD's ROCm 10 documentation specifies Counter_Value as a
+  # numeric value but does not certify the unit of these derived counters.
+  # Preserve raw data, but fail the publication-confidence gate until a known-
+  # traffic gfx1151 calibration confirms the inherited unit assumption.
+  log "WARNING: ROCm 10 FETCH_SIZE/WRITE_SIZE unit is not yet gfx1151-calibrated"
+  log "WARNING: bandwidth verdicts from this bundle are exploratory, not release-certified"
+}
+
 # ── plan ─────────────────────────────────────────────────────────────────
 print_plan() {
   cat <<EOF
@@ -367,6 +403,7 @@ main() {
 
   trap cleanup EXIT INT TERM
   quiesce_production
+  collect_provenance
 
   for phase in prefill decode; do
     log "pass trace/$phase"
@@ -379,11 +416,59 @@ main() {
     done
   done
 
-  python3 - "$OUT_DIR" "${PMC_COUNTERS[@]}" <<'PY'
-import json, sys, os
+  python3 - "$OUT_DIR" "$IMAGE" "${PMC_COUNTERS[@]}" <<'PY'
+import hashlib, json, os, re, sys
 out = sys.argv[1]
+image_ref = sys.argv[2]
+
+def read_text(name):
+    with open(os.path.join(out, name), encoding="utf-8", errors="replace") as fh:
+        return fh.read().strip()
+
+with open(os.path.join(out, "image-identity.json"), encoding="utf-8") as fh:
+    image = json.load(fh)
+
+counter_info_name = "rocprofv3-counter-info.txt"
+counter_info = read_text(counter_info_name)
+blocks = {}
+matches = list(re.finditer(r"(?m)^\s*Counter_Name\s*:\s*(\S+)\s*$", counter_info))
+for index, match in enumerate(matches):
+    name = match.group(1)
+    if name not in {"FETCH_SIZE", "WRITE_SIZE"}:
+        continue
+    end = matches[index + 1].start() if index + 1 < len(matches) else len(counter_info)
+    blocks[name] = counter_info[match.start():end].strip()
+
+with open(os.path.join(out, counter_info_name), "rb") as fh:
+    counter_info_sha256 = hashlib.sha256(fh.read()).hexdigest()
+
 json.dump({
-    "counters": sys.argv[2:],
+    "image": {
+        "requested_ref": image_ref,
+        "id": image.get("id"),
+        "repo_tags": image.get("repo_tags") or [],
+        "repo_digests": image.get("repo_digests") or [],
+    },
+    "profilers": {
+        "rocprofv3_version": read_text("rocprofv3-version.txt"),
+        "rocprof_compute_version": read_text("rocprof-compute-version.txt"),
+    },
+    "counters": sys.argv[3:],
+    "counter_metadata": {
+        "query": "rocprofv3-avail info --pmc -d 0",
+        "file": counter_info_name,
+        "sha256": counter_info_sha256,
+        "selected_definitions": blocks,
+    },
+    "counter_unit": {
+        "assumed": "kb",
+        "status": "uncertified_rocm10_gfx1151",
+        "release_bandwidth_verdict_certified": False,
+        "reason": (
+            "KiB was measured under ROCm 7.14; ROCm 10 FETCH_SIZE/WRITE_SIZE "
+            "requires a known-traffic gfx1151 calibration before release use"
+        ),
+    },
     "note": "durations are valid only in trace-* passes; pmc-* passes serialize dispatches",
     "passes": sorted(f for f in os.listdir(out) if f.endswith(".csv")),
 }, open(os.path.join(out, "manifest.json"), "w"), indent=2)

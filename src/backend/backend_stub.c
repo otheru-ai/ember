@@ -73,6 +73,23 @@ const char *ember_backend_token_text(ember_backend *b, int32_t id) {
     return "";
 }
 
+bool ember_backend_vision_encode(ember_backend *b,
+                                 const uint8_t *encoded, size_t encoded_size,
+                                 ember_vision_image *out,
+                                 char *error, size_t error_cap) {
+    (void)b; (void)encoded; (void)encoded_size;
+    if (out) memset(out, 0, sizeof(*out));
+    if (error && error_cap)
+        snprintf(error, error_cap, "%s", "vision input is not supported by the stub backend");
+    return false;
+}
+
+void ember_backend_vision_image_free(ember_vision_image *image) {
+    if (!image) return;
+    free(image->embeddings);
+    memset(image, 0, sizeof(*image));
+}
+
 static bool prompt_contains(const ember_gen_request *req, const char *needle) {
     size_t n = strlen(needle);
     if (!req || !req->prompt || n == 0 || req->n_prompt < (int)n)

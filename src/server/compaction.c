@@ -323,6 +323,11 @@ static void free_msg(ember_chat_msg *m) {
     free(m->reasoning);
     free(m->tool_call_id);
     free(m->raw_tool_text);
+    for (int i = 0; i < m->n_parts; ++i) {
+        free(m->parts[i].text);
+        free(m->parts[i].detail);
+    }
+    free(m->parts);
     ember_tool_calls_free(&m->calls);
     memset(m, 0, sizeof(*m));
 }

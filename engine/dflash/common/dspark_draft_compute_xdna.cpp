@@ -6,9 +6,7 @@
 #include <limits>
 #include <utility>
 
-#if !defined(_WIN32)
 #include <dlfcn.h>
-#endif
 
 namespace dflash::common {
 namespace {
@@ -21,9 +19,7 @@ struct ProviderState {
 
     ~ProviderState() {
         if (provider && provider->destroy && context) provider->destroy(context);
-#if !defined(_WIN32)
         if (library) dlclose(library);
-#endif
     }
 };
 
@@ -176,11 +172,6 @@ std::unique_ptr<XdnaDSparkDraftJob> XdnaDSparkDraftCompute::submit(
 std::unique_ptr<XdnaDSparkDraftCompute> make_xdna_dspark_draft_compute(
     const XdnaDSparkDraftConfig & config, std::string * error) {
     if (error) error->clear();
-#if defined(_WIN32)
-    (void)config;
-    if (error) *error = "XDNA DSpark provider loading is not implemented on Windows";
-    return nullptr;
-#else
     if (config.plugin_path.empty() || config.draft_model_path.empty() ||
         config.n_embd <= 0 || config.n_target_layers <= 0 ||
         config.block_size <= 0 || config.n_swa <= 0 ||
@@ -250,7 +241,6 @@ std::unique_ptr<XdnaDSparkDraftCompute> make_xdna_dspark_draft_compute(
     impl->config = config;
     return std::unique_ptr<XdnaDSparkDraftCompute>(
         new XdnaDSparkDraftCompute(std::move(impl)));
-#endif
 }
 
 }  // namespace dflash::common

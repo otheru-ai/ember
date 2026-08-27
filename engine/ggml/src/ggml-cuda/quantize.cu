@@ -172,7 +172,7 @@ static __global__ void quantize_mmq_mxfp4(const float * __restrict__ x,
     }
 }
 
-template <mmq_q8_1_ds_layout ds_layout>
+template <mmq_q8_1_ds_layout ds_layout, bool i4_grid = false>
 static __global__ void quantize_mmq_q8_1(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
@@ -242,7 +242,18 @@ static __global__ void quantize_mmq_q8_1(
         }
     }
 
-    const float d_inv = 127.0f / amax;
+    const float d_inv = i4_grid ? (amax > 0.0f ? 7.0f / amax : 0.0f) : 127.0f / amax;
+    if constexpr (i4_grid) {
+        const int c0 = (int) fminf(fmaxf(roundf(xi.x*d_inv), -8.0f), 7.0f);
+        const int c1 = (int) fminf(fmaxf(roundf(xi.y*d_inv), -8.0f), 7.0f);
+        const int c2 = (int) fminf(fmaxf(roundf(xi.z*d_inv), -8.0f), 7.0f);
+        const int c3 = (int) fminf(fmaxf(roundf(xi.w*d_inv), -8.0f), 7.0f);
+        const int lo4 = (c0 & 15) | ((c1 & 15) << 8) | ((c2 & 15) << 16) | ((c3 & 15) << 24);
+        const int hi4 = __shfl_xor_sync(0xffffffff, lo4, 1, WARP_SIZE);
+        if (iqs % 8 == 0) {
+            ((int *) y[ib].qs)[iqs/8] = lo4 | (hi4 << 4);
+        }
+    } else {
     char4 q;
     // EMBER FORK DIVERGENCE (engine/VENDOR.md), from llama.cpp issue #21284
     // "Inefficient defaults for gfx1151".  roundf() lowers to a call-like
@@ -263,6 +274,7 @@ static __global__ void quantize_mmq_q8_1(
     // Write back 4 int8 values as a single 32 bit value for better memory bandwidth:
     char4 * yqs4 = (char4 *) y[ib].qs;
     yqs4[iqs/4] = q;
+    }
 
     if (ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6) {
         if (iqs % 16 != 0 || iqs >= 96) {
@@ -286,7 +298,7 @@ static __global__ void quantize_mmq_q8_1(
         return;
     }
 
-    const float d = 1.0f / d_inv;
+    const float d = i4_grid ? (amax > 0.0f ? amax/(7.0f*16.0f) : 0.0f) : 1.0f/d_inv;
 
     if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
         y[ib].ds4[iqs/32] = make_half2(d, sum);
@@ -322,6 +334,15 @@ void quantize_mmq_q8_1_cuda(
     const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(ne1, block_num_y, ne2*ne3);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
+#if GGML_ROCMI4_W4A4
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    if (type_src0 == GGML_TYPE_Q4_0_ROCMI4 && GGML_CUDA_CC_IS_GFX1151(cc)) {
+        quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, true>
+            <<<num_blocks, block_size, 0, stream>>>(x, ids, vy, ne00, s01, s02, s03,
+                                                   ne0, ne1, ne2, 0, 0);
+        return;
+    }
+#endif
     switch (mmq_get_q8_1_ds_layout(type_src0)) {
         case MMQ_Q8_1_DS_LAYOUT_D4:
             quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4>
@@ -356,6 +377,16 @@ void quantize_mmq_q8_1_grouped_cuda(
         (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(ne1, block_num_y, 1);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
+#if GGML_ROCMI4_W4A4
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    if (type_src0 == GGML_TYPE_Q4_0_ROCMI4 && GGML_CUDA_CC_IS_GFX1151(cc)) {
+        quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, true>
+            <<<num_blocks, block_size, 0, stream>>>(
+                x, nullptr, vy, ne00, token_stride, 0, 0,
+                ne0, ne1, 1, group_width, group_stride);
+        return;
+    }
+#endif
     switch (mmq_get_q8_1_ds_layout(type_src0)) {
         case MMQ_Q8_1_DS_LAYOUT_D4:
             quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4>

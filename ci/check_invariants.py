@@ -36,16 +36,6 @@ SINGLE_LIST_EXCEPTIONS = {
     "src/server/main.c":
         "ember-dflash lists it directly; the stub build compiles it into the "
         "separate ember-server executable target instead of ember_core.",
-    "src/model/gguf.c":
-        "Standalone GGUF metadata reader, ember_core only. No src/server/ or "
-        "src/backend/ file includes gguf.h, so ember-dflash has no use for it "
-        "-- the server reads GGUF through the vendored engine's loader. It is "
-        "NOT dead code and must not be retired: providers/xdna2/"
-        "{q8,rocmfp4}_model_weights.cpp include it, which pulls it into six "
-        "targets besides ember_core -- the GPU-free test_xdna_q8_model_weights "
-        "and test_xdna_rocmfp4_model_weights ctest binaries, the two "
-        "ember-dspark-*-bench targets, and the two ember-xdna-dspark-*-validate "
-        "targets. This exception is permanent; keep it.",
 }
 
 

@@ -1,63 +1,99 @@
-#pragma once
+// C-compatible thinking-budget state used by the C++ engine bridge today and
+// by the future C orchestration layer. Keep this header allocation-free: the
+// caller owns token storage and passes spans explicitly.
+#ifndef DFLASH_COMMON_THINKING_BUDGET_H
+#define DFLASH_COMMON_THINKING_BUDGET_H
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-namespace dflash::common {
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-// Tracks whether a generation that started inside <think> has naturally
-// emitted its closing token sequence.  A thinking-budget controller must never
-// inject another close after this state flips: doing so would place the
-// server-authored directive in visible content and can make the model restart
-// an answer it has already begun.
-class ThinkingBudgetState {
-public:
-    explicit ThinkingBudgetState(bool starts_in_thinking = true)
-        : in_thinking_(starts_in_thinking) {}
+typedef struct {
+    bool in_thinking;
+} dflash_thinking_budget_state;
 
-    void observe_existing(
-            const std::vector<int32_t> &generated,
-            const std::vector<int32_t> &natural_close_ids) {
-        if (!in_thinking_ || natural_close_ids.empty() ||
-            generated.size() < natural_close_ids.size())
+#define DFLASH_THINKING_BUDGET_INITIALIZER { true }
+
+static inline void dflash_thinking_budget_init(
+        dflash_thinking_budget_state *state, bool starts_in_thinking) {
+    state->in_thinking = starts_in_thinking;
+}
+
+static inline bool dflash_token_span_equal(
+        const int32_t *left, const int32_t *right, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        if (left[i] != right[i]) return false;
+    }
+    return true;
+}
+
+// Observe a complete already-generated prefix. A natural </think> anywhere in
+// it permanently disarms forced close, preventing a second server-authored
+// close from being injected into visible answer text.
+static inline void dflash_thinking_budget_observe_existing(
+        dflash_thinking_budget_state *state,
+        const int32_t *generated, size_t generated_count,
+        const int32_t *natural_close_ids, size_t natural_close_count) {
+    if (!state->in_thinking || !generated || !natural_close_ids ||
+        natural_close_count == 0 || generated_count < natural_close_count) {
+        return;
+    }
+    const size_t last = generated_count - natural_close_count;
+    for (size_t i = 0; i <= last; ++i) {
+        if (dflash_token_span_equal(generated + i, natural_close_ids,
+                                   natural_close_count)) {
+            state->in_thinking = false;
             return;
-        if (std::search(generated.begin(), generated.end(),
-                        natural_close_ids.begin(), natural_close_ids.end()) !=
-            generated.end())
-            in_thinking_ = false;
+        }
     }
+}
 
-    void observe_latest(
-            const std::vector<int32_t> &generated,
-            const std::vector<int32_t> &natural_close_ids) {
-        if (!in_thinking_ || natural_close_ids.empty() ||
-            generated.size() < natural_close_ids.size())
-            return;
-        if (std::equal(natural_close_ids.rbegin(), natural_close_ids.rend(),
-                       generated.rbegin()))
-            in_thinking_ = false;
+// Fast path for resident decoding: only the newest suffix can introduce the
+// first natural close, so compare the tail rather than rescanning the history.
+static inline void dflash_thinking_budget_observe_latest(
+        dflash_thinking_budget_state *state,
+        const int32_t *generated, size_t generated_count,
+        const int32_t *natural_close_ids, size_t natural_close_count) {
+    if (!state->in_thinking || !generated || !natural_close_ids ||
+        natural_close_count == 0 || generated_count < natural_close_count) {
+        return;
     }
-
-    bool should_force_close(int generation_limit,
-                            std::size_t generated_tokens,
-                            int hard_limit_remaining,
-                            bool has_forced_close_sequence) const {
-        if (!in_thinking_ || !has_forced_close_sequence ||
-            generation_limit < 0 || hard_limit_remaining <= 0 ||
-            generated_tokens > static_cast<std::size_t>(generation_limit))
-            return false;
-        const std::size_t remaining =
-            static_cast<std::size_t>(generation_limit) - generated_tokens;
-        return remaining <= static_cast<std::size_t>(hard_limit_remaining);
+    if (dflash_token_span_equal(
+            generated + generated_count - natural_close_count,
+            natural_close_ids, natural_close_count)) {
+        state->in_thinking = false;
     }
+}
 
-    void mark_closed() { in_thinking_ = false; }
-    bool in_thinking() const { return in_thinking_; }
+static inline bool dflash_thinking_budget_should_force_close(
+        const dflash_thinking_budget_state *state,
+        int generation_limit, size_t generated_tokens,
+        int hard_limit_remaining, bool has_forced_close_sequence) {
+    if (!state->in_thinking || !has_forced_close_sequence ||
+        generation_limit < 0 || hard_limit_remaining <= 0 ||
+        generated_tokens > (size_t)generation_limit) {
+        return false;
+    }
+    return (size_t)generation_limit - generated_tokens <=
+           (size_t)hard_limit_remaining;
+}
 
-private:
-    bool in_thinking_;
-};
+static inline void dflash_thinking_budget_mark_closed(
+        dflash_thinking_budget_state *state) {
+    state->in_thinking = false;
+}
 
-}  // namespace dflash::common
+static inline bool dflash_thinking_budget_in_thinking(
+        const dflash_thinking_budget_state *state) {
+    return state->in_thinking;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

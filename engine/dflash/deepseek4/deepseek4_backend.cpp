@@ -2,15 +2,14 @@
 
 #include "deepseek4_backend.h"
 #include "deepseek4_internal.h"
+#include "common/errors.h"
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
 #include "deepseek4_dspark_scheduler.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
 
-#if defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
 #include "common/gpu_runtime_compat.h"
-#endif
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -140,7 +139,6 @@ static void maybe_log_prefill_fingerprint(
 // to 3 (an sm_86 crossover) when this function does not run. Changing either
 // without the other splits the effective default by code path.
 static void configure_gfx1151_dspark_mmvq_default(int gpu) {
-#if defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
     if (!env_flag_enabled("DFLASH_DS4_SPEC") ||
         std::getenv("LUCE_MMVQ_MAX_NCOLS") != nullptr) {
         return;
@@ -183,9 +181,6 @@ static void configure_gfx1151_dspark_mmvq_default(int gpu) {
                      "[deepseek4] gfx1151 DSpark: defaulting "
                      "LUCE_MMVQ_MAX_NCOLS=%d\n", ncols);
     }
-#else
-    (void) gpu;
-#endif
 }
 
 static double gib(uint64_t bytes) {
@@ -478,9 +473,7 @@ static MoeHybridConfig make_ds4_parent_worker_cfg(const DeepSeek4Weights & w) {
     cfg.n_expert = w.n_expert;
     cfg.n_expert_used = w.n_expert_used;
     cfg.n_ff_exp = w.n_ff_exp;
-    cfg.n_ff_shexp = w.n_ff_exp;
     cfg.n_layer = w.n_layer;
-    cfg.first_moe_layer = 0;
     cfg.swiglu_clamp = w.swiglu_clamp_exp;
     cfg.materialize_cold_experts = false;
     return cfg;
@@ -521,7 +514,8 @@ struct DeepSeek4Backend::ResidentSession {
     bool budget_forced_close = false;
     bool degenerate_decode_close = false;
     std::string termination_reason;
-    ThinkingBudgetState thinking_budget;
+    dflash_thinking_budget_state thinking_budget =
+        DFLASH_THINKING_BUDGET_INITIALIZER;
     ProgressCycleDetector progress_cycle;
     bool inline_snapshot_saved = false;
     size_t forced_close_index = 0;
@@ -713,14 +707,18 @@ bool DeepSeek4Backend::resident_sample_next(ResidentSession &session) {
     }
 
     const BudgetHook &hook = session.request.budget_hook;
-    session.thinking_budget.observe_latest(
-        session.generated, hook.natural_close_token_ids);
+    dflash_thinking_budget_observe_latest(
+        &session.thinking_budget,
+        session.generated.data(), session.generated.size(),
+        hook.natural_close_token_ids.data(),
+        hook.natural_close_token_ids.size());
     if (!session.budget_forced_close &&
-        session.thinking_budget.should_force_close(
+        dflash_thinking_budget_should_force_close(
+            &session.thinking_budget,
             session.request.n_gen, session.generated.size(),
             hook.hard_limit_remaining, !hook.close_token_ids.empty())) {
         session.budget_forced_close = true;
-        session.thinking_budget.mark_closed();
+        dflash_thinking_budget_mark_closed(&session.thinking_budget);
         session.forced_close_index = 0;
     }
 
@@ -845,7 +843,7 @@ bool DeepSeek4Backend::load_model() {
                 std::fprintf(stderr,
                     "[deepseek4] monolithic HIP load required for %s prefill: %s\n",
                     prefill_attention_mode_name(cfg_.prefill_mode),
-                    dflash27b_last_error());
+                    last_error());
                 return false;
             }
             std::fprintf(stderr,
@@ -1410,7 +1408,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             ok = deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), n_tok, pos,
                                 logits, moe_hybrid_.get(), tokens.data() + i,
                                 &stream_engine_, timing ? &step_tel : nullptr,
-                                routing_stats_.get(), hp);
+                                hp);
         } else {
             std::vector<float> hc_state;
             // In exact q=1 prefill, intermediate logits have no consumer and
@@ -1514,7 +1512,7 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         return deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), 1,
                               committed + idx, lg, moe_hybrid_.get(), &tok,
                               moe_hybrid_ ? &stream_engine_ : nullptr, nullptr,
-                              routing_stats_.get(), nullptr);
+                              nullptr);
     };
     auto sample_from = [&](std::vector<float> & lg) -> int32_t {
         if (token_mask && token_mask->active())
@@ -1535,15 +1533,18 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         for (int i = 0; i < resume_from && i < (int) out_tokens.size(); i++)
             history.push_back(out_tokens[(size_t) i]);
     }
-    ThinkingBudgetState thinking_budget;
+    dflash_thinking_budget_state thinking_budget =
+        DFLASH_THINKING_BUDGET_INITIALIZER;
     ProgressCycleDetector progress_cycle(
         budget_hook.natural_close_token_ids, history_prefix,
         tool_open_ids, tool_close_ids);
     // Speculative decode may have naturally closed thinking before AR takes
     // over at the reply-budget seam. Detect that once across the existing
     // prefix, then track only the newly appended suffix below.
-    thinking_budget.observe_existing(
-        out_tokens, budget_hook.natural_close_token_ids);
+    dflash_thinking_budget_observe_existing(
+        &thinking_budget, out_tokens.data(), out_tokens.size(),
+        budget_hook.natural_close_token_ids.data(),
+        budget_hook.natural_close_token_ids.size());
     for (int32_t token : out_tokens) {
         if (progress_cycle.observe(token)) {
             if (degenerate_close_out) *degenerate_close_out = true;
@@ -1570,11 +1571,12 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         // model never wrote a reply — every runaway-thinking turn returned only
         // "<reasoning></think>" with empty content, which upstream agents retry in
         // an unbounded loop. The reserved reply budget was reserved but unused.
-        if (thinking_budget.should_force_close(
+        if (dflash_thinking_budget_should_force_close(
+                &thinking_budget,
                 n_gen, (size_t)generated,
                 budget_hook.hard_limit_remaining,
                 !budget_hook.close_token_ids.empty())) {
-            thinking_budget.mark_closed();
+            dflash_thinking_budget_mark_closed(&thinking_budget);
             if (forced_close_out) *forced_close_out = true;
             std::vector<float> logits;
             // The last sampled token is not in KV yet (fed lazily next iteration);
@@ -1644,7 +1646,7 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
                                 moe_hybrid_.get(), &tok_to_eval,
                                 moe_hybrid_ ? &stream_engine_ : nullptr,
                                 timing ? &step_tel : nullptr,
-                                routing_stats_.get(), nullptr)) {
+                                nullptr)) {
                 std::fprintf(stderr, "[deepseek4] decode step failed\n");
                 return false;
             }
@@ -1686,8 +1688,10 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
         }
         out_tokens.push_back(next_token);
         if (token_mask) token_mask->accept(next_token);
-        thinking_budget.observe_latest(
-            out_tokens, budget_hook.natural_close_token_ids);
+        dflash_thinking_budget_observe_latest(
+            &thinking_budget, out_tokens.data(), out_tokens.size(),
+            budget_hook.natural_close_token_ids.data(),
+            budget_hook.natural_close_token_ids.size());
         const auto emit_t0 = Clock::now();
         io.emit(next_token);
         if (timing) tel_acc.emit_us += elapsed_us(emit_t0, Clock::now());
@@ -1991,13 +1995,11 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
 
     if (out_io.cancelled) {
         result.succeed();
-        maybe_save_routing_stats();
         return result;
     }
 
     if (req.n_gen <= 0) {
         result.succeed();
-        maybe_save_routing_stats();
         return result;
     }
 
@@ -2104,7 +2106,6 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                      accept_rate, spec_budget,
                      spec_terminal ? 0 : 1);
     }
-    maybe_save_routing_stats();
     return result;
 }
 
@@ -2397,12 +2398,10 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
 
     if (out_io.cancelled) {
         result.succeed();
-        maybe_save_routing_stats();
         return result;
     }
     if (req.n_gen <= 0) {
         result.succeed();
-        maybe_save_routing_stats();
         return result;
     }
 
@@ -2511,7 +2510,6 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                          : 0.0,
                      accept_rate, spec_budget, spec_terminal ? 0 : 1);
     }
-    maybe_save_routing_stats();
     return result;
 }
 
@@ -3032,7 +3030,7 @@ DeepSeek4Backend::decode_batch(
             embed.data(), 1, pos, logits,
             moe_hybrid_.get(), &token,
             moe_hybrid_ ? &stream_engine_ : nullptr,
-            nullptr, routing_stats_.get(), nullptr);
+            nullptr, nullptr);
         session.decode_s += elapsed_s(t0);
         if (!ok) {
             session.failed = true;
@@ -3091,17 +3089,7 @@ ContinuousBatchMixedCompletion DeepSeek4Backend::execute_mixed(
     return mixed;
 }
 
-void DeepSeek4Backend::maybe_save_routing_stats() {
-    if (!routing_stats_ || routing_stats_out_path_.empty()) return;
-    std::string err;
-    if (!routing_stats_->save_csv(routing_stats_out_path_, &err)) {
-        std::fprintf(stderr, "[deepseek4] failed to save routing stats %s: %s\n",
-                     routing_stats_out_path_.c_str(), err.c_str());
-    }
-}
-
 void DeepSeek4Backend::shutdown() {
-    maybe_save_routing_stats();
     release_spec_drafter();
     free_resident_sessions();
     for (int i = 0; i < PREFIX_SLOTS; i++) {
@@ -3110,8 +3098,6 @@ void DeepSeek4Backend::shutdown() {
     free_deepseek4_cache(cache_);
     stream_engine_.destroy();
     moe_hybrid_.reset();
-    routing_stats_.reset();
-    routing_stats_out_path_.clear();
     moe_placement_ = {};
     free_deepseek4_weights(w_);
     if (snap_backend_) { ggml_backend_free(snap_backend_); snap_backend_ = nullptr; }

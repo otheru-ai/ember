@@ -7,14 +7,17 @@
 
 #pragma once
 
-#include "internal.h"  // DeltaNetCapture
-
 #include "ggml.h"
 #include "ggml-alloc.h"
 
 #include <vector>
 
 namespace dflash::common {
+
+struct DeltaNetCapture {
+    ggml_tensor * ssm_intermediate_states = nullptr;
+    ggml_tensor * conv_input              = nullptr;
+};
 
 struct StepGraph {
     ggml_context *  ctx = nullptr;
@@ -35,7 +38,6 @@ struct StepGraph {
     ggml_tensor *   inp_embed = nullptr;
     ggml_tensor *   positions = nullptr;
     ggml_tensor *   attn_mask = nullptr;     // may be null
-    ggml_tensor *   parent_ids = nullptr;    // DDTree tree-mode; null for chain mode
     ggml_tensor *   target_hidden_cat = nullptr;  // draft only
     ggml_tensor *   positions_k = nullptr;        // draft only
     ggml_tensor *   pad_mask_full = nullptr;      // draft only; padded-ctx mask
@@ -58,8 +60,6 @@ struct StepGraph {
     ggml_tensor *   ffn_residual = nullptr;  // [hidden, n_tokens] pre-FFN residual
     ggml_tensor *   ffn_post = nullptr;      // [hidden, n_tokens] post-attention norm
     ggml_tensor *   moe_weights = nullptr;   // [n_used, n_tokens] f32
-    ggml_tensor *   hot_local_lut = nullptr; // [1,n_expert] i32 global->hot-slot (fused FFN)
-    ggml_tensor *   valid_lut = nullptr;     // [1,n_expert] f32 1=resident 0=drop (fused FFN)
 
     // Per-delta-net-layer captures (verify only).
     std::vector<DeltaNetCapture> delta_captures;
@@ -77,7 +77,6 @@ inline void step_graph_free(StepGraph & sg) {
     sg.ctx_alloc = 0;
     sg.built_view = false;
     sg.hidden_input = nullptr;
-    sg.parent_ids = nullptr;
     sg.kv_write_rows = nullptr;
     sg.logits = nullptr;
     sg.hidden_states = nullptr;
@@ -86,8 +85,6 @@ inline void step_graph_free(StepGraph & sg) {
     sg.ffn_residual = nullptr;
     sg.ffn_post = nullptr;
     sg.moe_weights = nullptr;
-    sg.hot_local_lut = nullptr;
-    sg.valid_lut = nullptr;
     sg.delta_captures.clear();
     sg.moe_selected.clear();
 }

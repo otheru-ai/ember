@@ -1,7 +1,7 @@
 // Disk-backed prefix cache — persists KV snapshots to disk.
 //
-// Complements the in-memory PrefixCache by serializing snapshot tensors to
-// files, enabling cache survival across restarts and overflow to disk.
+// Serializes backend snapshot tensors to files, enabling cache survival across
+// restarts and overflow beyond Ember's in-memory snapshot slots.
 //
 // File format v1: 80-byte header + tensor table + raw tensor data.
 // File format v2: the same header, a parent-prefix descriptor, then a tensor
@@ -14,7 +14,7 @@
 // save reason (cold anchor / continued waypoint / routine) so reason-aware
 // eviction survives a restart (port of ds4_kvstore reasons). v1/v2 files remain
 // readable and are treated as reason=UNKNOWN.
-// Files are keyed by SHA-1 of prompt token IDs (same as in-memory cache).
+// Files are keyed by SHA-1 of prompt token IDs.
 // A layout fingerprint (SHA-1 of tensor names/types/shapes) prevents loading
 // snapshots from incompatible models.
 //
@@ -23,7 +23,6 @@
 
 #pragma once
 
-#include "prefix_cache.h"
 #include "common/model_backend.h"
 
 #include <array>
@@ -33,6 +32,8 @@
 #include <vector>
 
 namespace dflash::common {
+
+using PrefixHash = std::array<uint8_t, 16>;
 
 // ─── Configuration ──────────────────────────────────────────────────────
 
@@ -65,59 +66,7 @@ struct DiskCacheConfig {
     // must survive long enough to be switched back to. Only namespaces whose
     // newest checkpoint is older than this are removed.
     int         stale_layout_days = 7;
-    int         continued_interval = 10240; // save every N tokens during long sessions
-    int         cold_max_tokens = 10240;    // create cold checkpoint for prompts longer than this
-    // Checkpoint granularity (ds4 kv_cache parity). Storing the exact live
-    // position makes an entry brittle: any variation in the tail invalidates
-    // it. Trimming a few tokens and flooring to an alignment stores a
-    // slightly shorter but far more reusable prefix. 0 disables either step.
-    int         boundary_trim_tokens  = 0;
-    // NOTE: ds4's real server default is 2048 (ds4_kvstore.c:41,
-    // KV_CACHE_DEFAULT_BOUNDARY_ALIGN_TOKENS); 1000 appears only in a ds4 unit
-    // test. This value (and the trim/cold/continued knobs above) is currently
-    // INERT in ember: the DiskPrefixCache policy methods that consume them are
-    // not ABI-wired — ember reimplements checkpoint-cut policy in kv_cache.c +
-    // main.c. Left as-is to avoid gratuitous fork divergence; see kv_cache.h.
-    int         boundary_align_tokens = 1000;
 };
-
-enum class DiskPrefixCacheMode {
-    Off,
-    Full,
-    Auto,
-    Fixed,
-};
-
-struct DiskPrefixCachePolicy {
-    DiskPrefixCacheMode mode = DiskPrefixCacheMode::Full;
-    int fixed_tokens = 0;
-    int auto_window = 30;
-    // When true: compose with FlowKV aged-history compression.
-    // compress=false (default) → byte-identical to pr364-base behaviour.
-    bool compress = false;
-};
-
-const char * disk_prefix_cache_mode_name(DiskPrefixCacheMode mode);
-std::string disk_prefix_cache_policy_name(const DiskPrefixCachePolicy & policy);
-bool parse_disk_prefix_cache_policy(const std::string & value,
-                                    DiskPrefixCachePolicy & out);
-
-// Apply a request-level scope string on top of a server-level policy.
-// Parses scope_str into a new mode/window/fixed_tokens, then merges it with
-// server_policy so that server-level flags (e.g. compress) are preserved.
-// Returns false (and leaves server_policy unchanged) if scope_str is invalid.
-bool apply_request_scope_override(DiskPrefixCachePolicy & server_policy,
-                                  const std::string & scope_str);
-
-int disk_prefix_cache_fixed_boundary(const DiskPrefixCachePolicy & policy,
-                                     int full_len,
-                                     int min_tokens = 1);
-int disk_prefix_cache_auto_boundary(
-    const std::vector<int32_t> & prompt_ids,
-    const std::vector<std::vector<int32_t>> & recent_prompts,
-    int window,
-    const std::vector<int> & safe_boundaries,
-    int min_tokens);
 
 // ─── File header (80 bytes, little-endian) ──────────────────────────────
 
@@ -205,23 +154,6 @@ public:
     bool save(int slot, const std::vector<int32_t> & prompt_ids,
               uint8_t reason = DKV_REASON_UNKNOWN);
 
-    // Check if a continued checkpoint should be saved after generation.
-    // `all_tokens` = prompt + generated tokens, `cur_pos` = final position.
-    // If cur_pos crosses a continued-interval boundary since last save,
-    // saves a snapshot using `slot`. Returns true if a save occurred.
-    bool maybe_store_continued(int slot, const std::vector<int32_t> & all_tokens,
-                               int cur_pos);
-
-    // Reset the continued-store tracking (call at start of each request).
-    void reset_continued() { continued_last_store_pos_ = 0; }
-
-    // Find the cold boundary for a long prompt. Returns the token count at
-    // which to create a cold checkpoint, or 0 if no cold save is needed.
-    // A cold save is needed when: prompt is longer than cold_max_tokens AND
-    // there's no existing disk entry covering a prefix of this prompt.
-    int cold_prefix_boundary(const std::vector<int32_t> & prompt_ids,
-                             const std::vector<int> & boundaries);
-
     // Evict files until total disk usage is within budget. `incoming_tokens`,
     // when given, is the just-saved store; a CONTINUED entry that is a strict
     // token-prefix of it is demoted (ds4 incoming-supersedes-continued).
@@ -232,16 +164,6 @@ public:
 
     // Get total bytes used on disk.
     size_t total_bytes() const { return total_bytes_; }
-
-    // Get the continued-interval setting, rounded up to the alignment so
-    // continued checkpoints land on aligned positions (ds4 kv_cache_continued_step).
-    int continued_interval() const;
-
-    // Stable store length for `tokens`: trim the tail, then floor to the
-    // alignment. Port of ds4_kvstore_store_len. Never returns more than
-    // `tokens`, and falls back to `tokens` when trimming would go below
-    // min_tokens.
-    int store_len(int tokens) const;
 
     // Longest stored checkpoint that is a prefix of `prompt_ids`, or 0.
     // Port of ds4_kvstore_find_text_prefix: for each entry, re-hash the
@@ -265,9 +187,6 @@ public:
 private:
     DiskCacheConfig config_;
     ModelBackend &  backend_;
-
-    // Continued checkpoint tracking (per-session).
-    int continued_last_store_pos_ = 0;
 
     // Config/model identity salt (set via set_identity_salt before init()).
     // All-zeroes by default → backward-compatible behavior.

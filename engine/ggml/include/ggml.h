@@ -436,7 +436,8 @@ extern "C" {
         GGML_TYPE_Q8_0_ROCMFPX      = 103,
         GGML_TYPE_Q3_0_ROCMFPX      = 104,
         GGML_TYPE_Q2_0_ROCMFP2      = 107,
-        GGML_TYPE_COUNT   = 108,
+        GGML_TYPE_Q4_0_ROCMI4       = 108, // signed int4 nibbles + UE4M3 scale
+        GGML_TYPE_COUNT   = 109,
     };
 
     // precision
@@ -484,8 +485,12 @@ extern "C" {
         GGML_FTYPE_MOSTLY_Q6_0_ROCMFPX          = 110,
         GGML_FTYPE_MOSTLY_Q8_0_ROCMFPX          = 111,
         GGML_FTYPE_MOSTLY_Q3_0_ROCMFPX          = 112,
-        GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2          = 118,
-        GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2_STRIX    = 119,
+        // 118 is ROCmFPX's canonical ROCMI4 file type. Older Ember Q2 files
+        // used 118 as recipe metadata; their tensor type 107 remains unchanged
+        // and loaders dispatch by tensor type, so those GGUFs remain readable.
+        GGML_FTYPE_MOSTLY_Q4_0_ROCMI4           = 118,
+        GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2          = 119,
+        GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2_STRIX    = 120,
     };
 
     // available tensor operations:
@@ -2482,11 +2487,6 @@ extern "C" {
             int64_t               ff_dim,
             int64_t               n_expert_used);
 
-    GGML_API struct ggml_tensor * ggml_laguna_moe_combine(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * experts,
-            struct ggml_tensor  * expert_weights);
-
     // Fused DeepSeek4 hyper-connection helpers. The first dimension is the
     // per-token payload; an optional second dimension batches independent
     // tokens without changing their arithmetic.
@@ -2566,20 +2566,6 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * sx,
             struct ggml_tensor  * c);
-
-    // dflash extension: tree-mode ssm_conv for DDTree-style spec
-    // decoding. parent_ids is an int32 tensor of shape [n_tokens, n_seqs]
-    // where entry [t, s] is the new-token index of t's tree parent, or -1 if
-    // t's parent is "before the block" (walks into the old conv state region).
-    // The CUDA kernel walks the parent chain K-1 times per token to build the
-    // correct conv window, so siblings get their own parent lineage instead
-    // of sharing the DFS-neighbour window. Mirrors SGLang's
-    // causal_conv1d_triton HAS_EAGLE_TREE_CUSTOM_ATTN_MASK path.
-    GGML_API struct ggml_tensor * ggml_ssm_conv_tree(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * sx,
-            struct ggml_tensor  * c,
-            struct ggml_tensor  * parent_ids);
 
     GGML_API struct ggml_tensor * ggml_ssm_scan(
             struct ggml_context * ctx,
@@ -2713,43 +2699,6 @@ extern "C" {
     GGML_API void ggml_gated_delta_net_set_skip_intermediate(
             struct ggml_tensor * tensor,
             bool                 skip_intermediate);
-
-    // dflash extension: tree-mode gated delta net for DDTree-style
-    // speculative decoding verify. `parent_ids` is an int32 tensor of shape
-    // [n_tokens, n_seqs] where entry [t, s] is the index within sequence s of
-    // the parent token in the DFS-flattened tree (or -1 for a root-level
-    // node). At each token step t > 0 in the recurrence, if parent_ids[t] is
-    // not (t - 1), the kernel reloads the recurrent state from the
-    // intermediate-states region at parent_ids[t] instead of continuing
-    // sequentially. This lets one verify forward pass correctly process
-    // multiple tree branches (siblings) without cross-contamination.
-    GGML_API struct ggml_tensor * ggml_gated_delta_net_tree(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * q,
-            struct ggml_tensor  * k,
-            struct ggml_tensor  * v,
-            struct ggml_tensor  * g,
-            struct ggml_tensor  * beta,
-            struct ggml_tensor  * state,
-            struct ggml_tensor  * parent_ids);
-
-    // dflash extension: tree-mode with direct intermediate-state writes to a
-    // persistent external buffer. Identical to ggml_gated_delta_net_tree but
-    // the per-token intermediate states are written to `persist_inter->data`
-    // (f32 or f16, [S_v, S_v, H, n_tokens, n_seqs], contiguous) instead of
-    // the default internal region of the result tensor. Eliminates a
-    // downstream ggml_cpy into the persistent cache buffer, saving ~5-10 ms
-    // per verify step on a 27B hybrid target.
-    GGML_API struct ggml_tensor * ggml_gated_delta_net_tree_persist(
-            struct ggml_context * ctx,
-            struct ggml_tensor  * q,
-            struct ggml_tensor  * k,
-            struct ggml_tensor  * v,
-            struct ggml_tensor  * g,
-            struct ggml_tensor  * beta,
-            struct ggml_tensor  * state,
-            struct ggml_tensor  * parent_ids,
-            struct ggml_tensor  * persist_inter);
 
     // custom operators
 

@@ -1,7 +1,6 @@
 #include "dspark_head.h"
 
 #include "ggml-alloc.h"
-#include "ddtree.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -43,9 +42,8 @@ struct ThreadGallocr {
 
 thread_local ThreadGallocr g_dspark_step_alloc;
 thread_local ThreadGallocr g_dspark_chain_alloc;
-thread_local ThreadGallocr g_dspark_topk_alloc;
 
-bool dspark_step(const DraftWeights & dw,
+bool dspark_step(const DSparkHeadWeights & dw,
                  ggml_backend_t backend,
                  int32_t prev_token,
                  const float * draft_hidden,
@@ -54,15 +52,15 @@ bool dspark_step(const DraftWeights & dw,
                  int32_t & out_token,
                  float * confidence_out) {
     const int hidden = dw.n_embd;
-    const int rank = dw.dspark.markov_rank;
+    const int rank = dw.markov_rank;
     if (hidden <= 0 || rank <= 0 || vocab <= 0) return false;
-    if (!dw.dspark.markov_w1 || !dw.dspark.markov_w2) return false;
+    if (!dw.markov_w1 || !dw.markov_w2) return false;
 
     const bool want_conf =
         confidence_out != nullptr &&
-        dw.dspark.confidence_w != nullptr &&
-        dw.dspark.confidence_b != nullptr &&
-        dw.dspark.confidence_dim > 0;
+        dw.confidence_w != nullptr &&
+        dw.confidence_b != nullptr &&
+        dw.confidence_dim > 0;
 
     const size_t arena_size =
         ggml_tensor_overhead() * 256 + ggml_graph_overhead() + 2 * 1024 * 1024;
@@ -82,8 +80,8 @@ bool dspark_step(const DraftWeights & dw,
     ggml_set_input(inp_prev);
     ggml_set_input(inp_base);
 
-    ggml_tensor * prev_emb = ggml_get_rows(ctx, dw.dspark.markov_w1, inp_prev);
-    ggml_tensor * bias = ggml_mul_mat(ctx, dw.dspark.markov_w2, prev_emb);
+    ggml_tensor * prev_emb = ggml_get_rows(ctx, dw.markov_w1, inp_prev);
+    ggml_tensor * bias = ggml_mul_mat(ctx, dw.markov_w2, prev_emb);
     ggml_tensor * corrected = ggml_add(ctx, inp_base, bias);
     ggml_tensor * tok = ggml_argmax(ctx, corrected);
     ggml_set_output(tok);
@@ -95,14 +93,14 @@ bool dspark_step(const DraftWeights & dw,
         inp_hidden = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, 1);
         ggml_set_input(inp_hidden);
         ggml_tensor * conf_in = inp_hidden;
-        if (dw.dspark.confidence_dim == hidden + rank) {
+        if (dw.confidence_dim == hidden + rank) {
             conf_in = ggml_concat(ctx, inp_hidden, prev_emb, 0);
-        } else if (dw.dspark.confidence_dim != hidden) {
+        } else if (dw.confidence_dim != hidden) {
             ggml_free(ctx);
             return false;
         }
-        conf = ggml_mul_mat(ctx, dw.dspark.confidence_w, conf_in);
-        conf = ggml_add(ctx, conf, ggml_reshape_2d(ctx, dw.dspark.confidence_b, 1, 1));
+        conf = ggml_mul_mat(ctx, dw.confidence_w, conf_in);
+        conf = ggml_add(ctx, conf, ggml_reshape_2d(ctx, dw.confidence_b, 1, 1));
         conf = ggml_sigmoid(ctx, conf);
         ggml_set_output(conf);
         ggml_build_forward_expand(gf, conf);
@@ -145,10 +143,9 @@ bool dspark_step(const DraftWeights & dw,
 void reset_dspark_head_runtime_cache() {
     g_dspark_step_alloc.reset();
     g_dspark_chain_alloc.reset();
-    g_dspark_topk_alloc.reset();
 }
 
-bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
+bool dspark_markov_correct_greedy_chain(const DSparkHeadWeights & dw,
                                         ggml_backend_t backend,
                                         DFlashTarget & target,
                                         const float * local_hidden,
@@ -156,7 +153,7 @@ bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
                                         int32_t last_tok,
                                         float confidence_threshold,
                                         std::vector<int32_t> & draft_tok) {
-    if (!dw.dspark.enabled || q_len <= 1 || !local_hidden) return false;
+    if (!dw.enabled || q_len <= 1 || !local_hidden) return false;
     const int hidden = dw.n_embd;
     const int n_candidates = q_len - 1;
     if (hidden <= 0 || n_candidates <= 0) return false;
@@ -164,9 +161,9 @@ bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
     if (confidence_threshold > 1.0f) confidence_threshold = 1.0f;
     const bool use_confidence_gate =
         confidence_threshold > 0.0f &&
-        dw.dspark.confidence_w != nullptr &&
-        dw.dspark.confidence_b != nullptr &&
-        dw.dspark.confidence_dim > 0;
+        dw.confidence_w != nullptr &&
+        dw.confidence_b != nullptr &&
+        dw.confidence_dim > 0;
 
     std::vector<float> candidate_hidden((size_t)n_candidates * (size_t)hidden);
     for (int i = 0; i < n_candidates; ++i) {
@@ -186,9 +183,9 @@ bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
         return false;
     }
     const int vocab = static_cast<int>(vocab_size);
-    if (dw.dspark.vocab_size > 0 && vocab != dw.dspark.vocab_size) {
+    if (dw.vocab_size > 0 && vocab != dw.vocab_size) {
         std::fprintf(stderr, "dspark_markov_correct_greedy_chain: vocab mismatch target=%d dspark=%d\n",
-                     vocab, dw.dspark.vocab_size);
+                     vocab, dw.vocab_size);
         return false;
     }
 
@@ -234,20 +231,20 @@ struct MarkovChainGraph {
 
 // Guards shared by the fused Markov paths: head present, usable inputs, and
 // the target lm_head vocab matching the head's training vocab.
-bool dspark_fused_usable(const DraftWeights & dw, ggml_backend_t backend,
+bool dspark_fused_usable(const DSparkHeadWeights & dw, ggml_backend_t backend,
                          ggml_tensor * lm_head, const float * hidden,
                          const char * who) {
-    if (!dw.dspark.enabled || !hidden || !backend || !lm_head) return false;
-    if (!dw.dspark.markov_w1 || !dw.dspark.markov_w2) return false;
-    if (dw.n_embd <= 0 || dw.dspark.markov_rank <= 0) return false;
+    if (!dw.enabled || !hidden || !backend || !lm_head) return false;
+    if (!dw.markov_w1 || !dw.markov_w2) return false;
+    if (dw.n_embd <= 0 || dw.markov_rank <= 0) return false;
     const int vocab = (int)lm_head->ne[1];
     if (vocab <= 0) return false;
-    if (dw.dspark.vocab_size > 0 && vocab != dw.dspark.vocab_size) {
+    if (dw.vocab_size > 0 && vocab != dw.vocab_size) {
         static bool s_vocab_warned = false;
         if (!s_vocab_warned) {
             s_vocab_warned = true;
             std::fprintf(stderr, "%s: vocab mismatch lm_head=%d dspark=%d; falling back\n",
-                         who, vocab, dw.dspark.vocab_size);
+                         who, vocab, dw.vocab_size);
         }
         return false;
     }
@@ -262,7 +259,7 @@ bool dspark_fused_usable(const DraftWeights & dw, ggml_backend_t backend,
 //   tok_i       = argmax(corrected_i)   (feeds the next step's get_rows)
 // The chain seed is an I32 graph input; markov_w1 doubles as the previous-
 // token embedding table. Rows below first_corrected keep the uncorrected base.
-bool build_markov_chain_graph(const DraftWeights & dw,
+bool build_markov_chain_graph(const DSparkHeadWeights & dw,
                               ggml_tensor * lm_head,
                               int n_positions, int first_corrected,
                               bool corrected_are_outputs,
@@ -274,10 +271,10 @@ bool build_markov_chain_graph(const DraftWeights & dw,
     const int n_corr = n_positions - first_corrected;
     if (n_positions <= 0 || n_corr <= 0) return false;
     const bool have_confidence = confidence_are_outputs &&
-        dw.dspark.confidence_w != nullptr &&
-        dw.dspark.confidence_b != nullptr &&
-        (dw.dspark.confidence_dim == hdim ||
-         dw.dspark.confidence_dim == hdim + dw.dspark.markov_rank);
+        dw.confidence_w != nullptr &&
+        dw.confidence_b != nullptr &&
+        (dw.confidence_dim == hdim ||
+         dw.confidence_dim == hdim + dw.markov_rank);
 
     const size_t arena_size = ggml_tensor_overhead() * (size_t)(64 + 16 * n_corr) +
                               ggml_graph_overhead_custom(512, false) + 2 * 1024 * 1024;
@@ -314,8 +311,8 @@ bool build_markov_chain_graph(const DraftWeights & dw,
     out.confidence.assign((size_t)n_corr, nullptr);
     for (int i = 0; i < n_corr; ++i) {
         const int row = first_corrected + i;
-        ggml_tensor * prev_emb = ggml_get_rows(out.ctx, dw.dspark.markov_w1, prev_ids);
-        ggml_tensor * bias = ggml_mul_mat(out.ctx, dw.dspark.markov_w2, prev_emb);
+        ggml_tensor * prev_emb = ggml_get_rows(out.ctx, dw.markov_w1, prev_ids);
+        ggml_tensor * bias = ggml_mul_mat(out.ctx, dw.markov_w2, prev_emb);
         ggml_tensor * base_i = ggml_view_2d(out.ctx, out.base, vocab, 1,
                                             out.base->nb[1], (size_t)row * out.base->nb[1]);
         ggml_tensor * corrected = ggml_add(out.ctx, base_i, bias);
@@ -334,13 +331,13 @@ bool build_markov_chain_graph(const DraftWeights & dw,
                 out.inp_confidence_hidden->nb[1],
                 (size_t)row * out.inp_confidence_hidden->nb[1]);
             ggml_tensor * conf_in = hidden_i;
-            if (dw.dspark.confidence_dim == hdim + dw.dspark.markov_rank) {
+            if (dw.confidence_dim == hdim + dw.markov_rank) {
                 conf_in = ggml_concat(out.ctx, hidden_i, prev_emb, 0);
             }
-            ggml_tensor * conf = ggml_mul_mat(out.ctx, dw.dspark.confidence_w, conf_in);
+            ggml_tensor * conf = ggml_mul_mat(out.ctx, dw.confidence_w, conf_in);
             conf = ggml_add(
                 out.ctx, conf,
-                ggml_reshape_2d(out.ctx, dw.dspark.confidence_b, 1, 1));
+                ggml_reshape_2d(out.ctx, dw.confidence_b, 1, 1));
             conf = ggml_sigmoid(out.ctx, conf);
             ggml_set_output(conf);
             ggml_build_forward_expand(out.gf, conf);
@@ -353,7 +350,7 @@ bool build_markov_chain_graph(const DraftWeights & dw,
 
 }  // namespace
 
-bool dspark_markov_correct_greedy_chain_fused(const DraftWeights & dw,
+bool dspark_markov_correct_greedy_chain_fused(const DSparkHeadWeights & dw,
                                               ggml_backend_t backend,
                                               ggml_tensor * lm_head,
                                               const float * local_hidden,
@@ -424,73 +421,6 @@ bool dspark_markov_correct_greedy_chain_fused(const DraftWeights & dw,
     if (want_confidence && !g.confidence.empty() && g.confidence[0]) {
         *confidence_out = std::move(c_out);
     }
-    ggml_free(g.ctx);
-    return true;
-}
-
-bool dspark_markov_project_topk(const DraftWeights & dw,
-                                ggml_backend_t backend,
-                                ggml_tensor * lm_head,
-                                const float * hidden,
-                                int n_tokens, int K, float temperature,
-                                int32_t last_tok,
-                                std::vector<float> & top_log_probs,
-                                std::vector<int32_t> & top_token_ids) {
-    if (n_tokens <= 1 || K <= 0) return false;
-    if (!dspark_fused_usable(dw, backend, lm_head, hidden, "dspark_topk")) return false;
-    const int hdim  = dw.n_embd;
-    const int vocab = (int)lm_head->ne[1];
-    if (K > vocab) return false;
-
-    static thread_local std::vector<uint8_t> g_arena_topk;
-    MarkovChainGraph g;
-    if (!build_markov_chain_graph(dw, lm_head, n_tokens, /*first_corrected=*/1,
-                                  /*corrected_are_outputs=*/true,
-                                  /*confidence_are_outputs=*/false,
-                                  g_arena_topk, g)) {
-        return false;
-    }
-
-    ggml_gallocr_t galloc_topk = g_dspark_topk_alloc.get(backend);
-    if (!galloc_topk) {
-        ggml_free(g.ctx);
-        return false;
-    }
-    if (!ggml_gallocr_alloc_graph(galloc_topk, g.gf)) {
-        std::fprintf(stderr, "dspark_topk: gallocr_alloc_graph failed\n");
-        ggml_free(g.ctx);
-        return false;
-    }
-
-    ggml_backend_tensor_set(g.inp_hidden, hidden, 0,
-                            sizeof(float) * (size_t)hdim * (size_t)n_tokens);
-    ggml_backend_tensor_set(g.inp_seed, &last_tok, 0, sizeof(int32_t));
-
-    if (ggml_backend_graph_compute(backend, g.gf) != GGML_STATUS_SUCCESS) {
-        std::fprintf(stderr, "dspark_topk: graph_compute failed\n");
-        ggml_free(g.ctx);
-        return false;
-    }
-
-    // Corrected logits per row (row 0 keeps the uncorrected base), then the
-    // same host top-K extraction as project_hidden_to_topk for identical
-    // budget-allocation semantics in build_ddtree.
-    std::vector<float> logits_host((size_t)vocab * (size_t)n_tokens);
-    ggml_backend_tensor_get_async(backend, g.base, logits_host.data(), 0,
-                                  sizeof(float) * (size_t)vocab);
-    const int n_corr = n_tokens - 1;
-    for (int i = 0; i < n_corr; ++i) {
-        ggml_backend_tensor_get_async(backend, g.corrected[(size_t)i],
-                                      logits_host.data() + (size_t)(i + 1) * (size_t)vocab,
-                                      0, sizeof(float) * (size_t)vocab);
-    }
-    ggml_backend_synchronize(backend);
-
-    top_log_probs.assign((size_t)n_tokens * (size_t)K, 0.0f);
-    top_token_ids.assign((size_t)n_tokens * (size_t)K, 0);
-    extract_draft_topk(logits_host.data(), n_tokens, vocab, K,
-                       top_log_probs.data(), top_token_ids.data(), temperature);
-
     ggml_free(g.ctx);
     return true;
 }

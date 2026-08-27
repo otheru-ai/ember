@@ -14,6 +14,7 @@
 #include "ops.h"
 #include "ggml.h"
 #include "common.h"
+#include "../../rocmfpx/rocmfpx.h"
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
@@ -366,6 +367,31 @@ typedef pthread_t ggml_thread_t;
 #include <TargetConditionals.h>
 #endif
 
+static int8_t rocmi4_nibble_i8(uint8_t nibble) {
+    return (int8_t) ((nibble & 8u) ? (int) (nibble | 0xf0u) : (int) (nibble & 7u));
+}
+
+static void ggml_vec_dot_rocmi4_q8_0(int n, float * GGML_RESTRICT s, size_t bs,
+        const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy,
+        size_t by, int nrc) {
+    GGML_UNUSED(bs); GGML_UNUSED(bx); GGML_UNUSED(by);
+    assert(nrc == 1); GGML_UNUSED(nrc);
+    assert(n % QK_ROCMI4 == 0 && QK_ROCMI4 == QK8_0);
+    const block_rocmi4 * x = (const block_rocmi4 *) vx;
+    const block_q8_0 * y = (const block_q8_0 *) vy;
+    float sum = 0.0f;
+    for (int ib = 0; ib < n / QK_ROCMI4; ++ib) {
+        const float d = rocmfpx_ue4m3_to_fp32(x[ib].e) * GGML_CPU_FP16_TO_FP32(y[ib].d);
+        int sumi = 0;
+        for (int j = 0; j < QS_ROCMI4; ++j) {
+            sumi += (int) rocmi4_nibble_i8(x[ib].qs[j] & 15u) * (int) y[ib].qs[j];
+            sumi += (int) rocmi4_nibble_i8(x[ib].qs[j] >> 4) * (int) y[ib].qs[j + QS_ROCMI4];
+        }
+        sum += d * (float) sumi;
+    }
+    *s = sum;
+}
+
 static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
     [GGML_TYPE_F32] = {
         .from_float               = (ggml_from_float_t) ggml_cpu_fp32_to_fp32,
@@ -394,6 +420,12 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
 #else
         .nrows                    = 1,
 #endif
+    },
+    [GGML_TYPE_Q4_0_ROCMI4] = {
+        .from_float               = rocmfpx_quantize_row_i4,
+        .vec_dot                  = ggml_vec_dot_rocmi4_q8_0,
+        .vec_dot_type             = GGML_TYPE_Q8_0,
+        .nrows                    = 1,
     },
     [GGML_TYPE_Q4_1] = {
         .from_float               = quantize_row_q4_1,

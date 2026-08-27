@@ -23,7 +23,7 @@ static void expect_pieces(const char * input,
                           std::initializer_list<const char *> expected,
                           const char * message) {
     const std::vector<std::string> actual =
-        pre_tokenize_text(input, PreTokenizer::JOYAI_LLM);
+        pre_tokenize_text(input);
     std::vector<std::string> wanted;
     for (const char * piece : expected) wanted.emplace_back(piece);
     if (actual == wanted) {
@@ -41,21 +41,20 @@ static void expect_pieces(const char * input,
 }
 
 int main() {
-    PreTokenizer selected = PreTokenizer::QWEN35;
+    PreTokenizer selected = PreTokenizer::QWEN2;
     CHECK(pre_tokenizer_from_name("joyai-llm", selected) &&
               selected == PreTokenizer::JOYAI_LLM,
           "joyai-llm metadata selects JoyAI");
     CHECK(pre_tokenizer_from_name("qwen2", selected) &&
               selected == PreTokenizer::QWEN2,
-          "qwen2 metadata selects Qwen2");
+          "qwen2 metadata selects the Qwen tokenizer");
     CHECK(pre_tokenizer_from_name("qwen35", selected) &&
               selected == PreTokenizer::QWEN35,
-          "qwen35 metadata selects Qwen3.5");
+          "qwen35 metadata retains the generalized engine seam");
     CHECK(!pre_tokenizer_from_name("joyai", selected),
           "unknown metadata cannot silently fall back");
-    CHECK(std::string(pre_tokenizer_name(PreTokenizer::JOYAI_LLM)) ==
-              "joyai-llm",
-          "JoyAI diagnostic preserves the GGUF metadata spelling");
+    CHECK(std::string(pre_tokenizer_name(PreTokenizer::QWEN2)) == "qwen2",
+          "Qwen diagnostic preserves its GGUF metadata spelling");
 
     // Regression from the production piper review. DS4 emits 003 and 379 as
     // whole BPE words; the old hard-coded Qwen splitter emitted single digits.
@@ -90,10 +89,27 @@ int main() {
     expect_pieces(" café", {" café"},
                   "ordinary non-ASCII letters remain attached to the word");
 
-    const std::vector<std::string> qwen_digits =
-        pre_tokenize_text("003", PreTokenizer::QWEN35);
-    CHECK(qwen_digits == std::vector<std::string>({"0", "0", "3"}),
-          "Qwen retains its intentionally different single-digit rule");
+    const auto qwen = [](const char * text) {
+        return pre_tokenize_text(text, PreTokenizer::QWEN2);
+    };
+    CHECK(qwen("0038 379") ==
+              std::vector<std::string>({"0", "0", "3", "8", " ",
+                                        "3", "7", "9"}),
+          "Qwen emits every Unicode number as one piece");
+    CHECK(qwen("WE'RE we'll") ==
+              std::vector<std::string>({"WE", "'RE", " we", "'ll"}),
+          "Qwen contractions are case-insensitive and stay separate");
+    CHECK(qwen(" café\n") ==
+              std::vector<std::string>({" café", "\n"}),
+          "Qwen optional prefix and newline alternatives match the regex");
+    CHECK(qwen("x!!!\r\n") ==
+              std::vector<std::string>({"x", "!!!\r\n"}),
+          "Qwen punctuation consumes trailing CRLF");
+    CHECK(qwen("क्") == std::vector<std::string>({"क्"}),
+          "Qwen keeps Unicode letters and combining marks together");
+    CHECK(qwen(" cafe\xCC\x81") ==
+              std::vector<std::string>({" caf\xC3\xA9"}),
+          "Qwen applies the tokenizer.json NFC normalizer before splitting");
 
     std::printf("pre-tokenizer: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

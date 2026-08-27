@@ -42,13 +42,34 @@ static char *dup_or(const char *s, const char *dflt) {
     return copy;
 }
 
-// content is either a string or an array of parts; flatten text parts.
-static char *flatten_content(const ember_json *content, bool *ok) {
+static void content_part_push(ember_chat_msg *msg,
+                              ember_content_part_kind kind,
+                              const char *text, const char *detail) {
+    if (msg->n_parts == INT_MAX ||
+        (size_t)(msg->n_parts + 1) > SIZE_MAX / sizeof(*msg->parts))
+        ember_buf_fatal("too many message content parts");
+    ember_content_part *grown = realloc(
+        msg->parts, (size_t)(msg->n_parts + 1) * sizeof(*msg->parts));
+    if (!grown) ember_buf_fatal("out of memory parsing message content");
+    msg->parts = grown;
+    ember_content_part *part = &msg->parts[msg->n_parts++];
+    part->kind = kind;
+    part->text = dup_or(text, "");
+    part->detail = dup_or(detail, NULL);
+}
+
+// Content is either a string or an ordered array of parts. Keep the historical
+// flattened text view for the text pipeline, but do not discard image parts:
+// Qwen's M-RoPE positions depend on their exact placement.
+static char *flatten_content(const ember_json *content, ember_chat_msg *msg,
+                             bool *has_images, bool *ok) {
     *ok = true;
     if (!content) return dup_or("", NULL);
     if (content->type == EMBER_JSON_NULL) return dup_or("", NULL);
-    if (content->type == EMBER_JSON_STRING)
+    if (content->type == EMBER_JSON_STRING) {
+        content_part_push(msg, EMBER_CONTENT_TEXT, content->u.str, NULL);
         return dup_or(ember_json_str(content, ""), NULL);
+    }
     if (content->type == EMBER_JSON_ARRAY) {
         ember_buf b = {0};
         for (int i = 0; i < ember_json_len(content); i++) {
@@ -61,7 +82,32 @@ static char *flatten_content(const ember_json *content, bool *ok) {
                 const ember_json *text = ember_json_get(part, "text");
                 if (!text || text->type != EMBER_JSON_STRING) goto invalid;
                 ember_buf_puts(&b, text->u.str);
-            } // Non-text multimodal parts remain intentionally ignored.
+                content_part_push(msg, EMBER_CONTENT_TEXT, text->u.str, NULL);
+            } else if (strcmp(type, "image_url") == 0) {
+                const ember_json *image = ember_json_get(part, "image_url");
+                const char *url = NULL;
+                const char *detail = NULL;
+                if (image && image->type == EMBER_JSON_STRING) {
+                    url = image->u.str;
+                } else if (image && image->type == EMBER_JSON_OBJECT) {
+                    const ember_json *url_node = ember_json_get(image, "url");
+                    const ember_json *detail_node = ember_json_get(image, "detail");
+                    if (!url_node || url_node->type != EMBER_JSON_STRING ||
+                        (detail_node && detail_node->type != EMBER_JSON_STRING))
+                        goto invalid;
+                    url = url_node->u.str;
+                    detail = ember_json_str(detail_node, NULL);
+                } else {
+                    goto invalid;
+                }
+                if (!url || !url[0]) goto invalid;
+                content_part_push(msg, EMBER_CONTENT_IMAGE_URL, url, detail);
+                *has_images = true;
+            } else {
+                // Unknown blocks must not disappear from the model-visible
+                // request. Add explicit support or reject them at the adapter.
+                goto invalid;
+            }
         }
         char *s = ember_buf_take(&b);
         return s ? s : dup_or("", NULL);
@@ -75,20 +121,21 @@ invalid:
 }
 
 // ds4 parse_reasoning_effort_name: none→NONE(off), minimal..xhigh→HIGH, max→MAX.
-// Returns true if recognized. Unknown strings resolve to HIGH (lenient).
-static bool effort_to_mode(const char *s, ember_think_mode *mode, bool *enabled) {
-    if (!s) return false;
-    if (strcmp(s, "none") == 0)     { *mode = EMBER_THINK_NONE; *enabled = false; return true; }
-    if (strcmp(s, "max") == 0)      { *mode = EMBER_THINK_MAX;  *enabled = true;  return true; }
+// Unknown strings resolve to HIGH (lenient).
+static void effort_to_mode(const char *s, ember_think_mode *mode, bool *enabled) {
+    if (!s) return;
+    if (strcmp(s, "none") == 0)     { *mode = EMBER_THINK_NONE; *enabled = false; return; }
+    if (strcmp(s, "max") == 0)      { *mode = EMBER_THINK_MAX;  *enabled = true;  return; }
     // "x-high" is the spelling used by the model card and by OpenAI; "xhigh"
     // was accepted here historically. Take both, or a request would resolve a
     // think mode here and a different effort tier in model_card.c tier_for().
     if (strcmp(s, "minimal") == 0 || strcmp(s, "low") == 0 ||
         strcmp(s, "medium") == 0 || strcmp(s, "high") == 0 ||
         strcmp(s, "xhigh") == 0 || strcmp(s, "x-high") == 0) {
-        *mode = EMBER_THINK_HIGH; *enabled = true; return true;
+        *mode = EMBER_THINK_HIGH; *enabled = true; return;
     }
-    *mode = EMBER_THINK_HIGH; *enabled = true; return false;  // unknown → lenient HIGH
+    *mode = EMBER_THINK_HIGH;
+    *enabled = true;
 }
 
 static void stop_push(ember_chat_request *r, const char *s) {
@@ -512,7 +559,8 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
         out->messages[i].role = dup_or(role->u.str, "");
         bool content_ok = false;
         out->messages[i].content =
-            flatten_content(ember_json_get(m, "content"), &content_ok);
+            flatten_content(ember_json_get(m, "content"), &out->messages[i],
+                            &out->has_images, &content_ok);
         if (!content_ok) goto invalid;
         out->messages[i].name =
             dup_or(ember_json_str(name, NULL), NULL);
@@ -886,6 +934,11 @@ void ember_chat_request_free(ember_chat_request *r) {
         free(r->messages[i].reasoning);
         free(r->messages[i].tool_call_id);  // B3
         free(r->messages[i].raw_tool_text); // B3
+        for (int j = 0; j < r->messages[i].n_parts; ++j) {
+            free(r->messages[i].parts[j].text);
+            free(r->messages[i].parts[j].detail);
+        }
+        free(r->messages[i].parts);
         ember_tool_calls_free(&r->messages[i].calls);
     }
     free(r->messages);

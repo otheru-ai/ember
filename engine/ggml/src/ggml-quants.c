@@ -5,6 +5,7 @@
 #include "ggml-impl.h"
 #include "ggml-cpu/ggml-cpu-impl.h"
 #include "ggml-cpu.h"
+#include "../rocmfpx/rocmfpx.h"
 
 #include <math.h>
 #include <string.h>
@@ -5435,6 +5436,12 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                 GGML_UNUSED(data);
                 GGML_UNUSED(nb);
             } break;
+        case GGML_TYPE_Q4_0_ROCMI4:
+            if (!rocmfpx_validate_row_data_i4(data, nbytes)) {
+                fprintf(stderr, "%s: invalid ROCmI4 row data\n", __func__);
+                return false;
+            }
+            break;
         case GGML_TYPE_Q2_K:
             {
                 VALIDATE_ROW_DATA_DM_F16_IMPL(block_q2_K, data, nb, d, dmin);

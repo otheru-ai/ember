@@ -11,11 +11,6 @@
 #if defined(RDNA3)
 #define GGML_USE_WMMA_FATTN
 #endif // defined(RDNA3)
-#if defined(RDNA4) && ROCWMMA_VERSION_MAJOR > 1
-#define GGML_USE_WMMA_FATTN
-#elif defined(RDNA4)
-#warning "rocwmma fattn is not supported on RDNA4 on rocwmma < v2.0.0, expect degraded performance"
-#endif // defined(RDNA4) && ROCWMMA_VERSION_MAJOR > 1
 #endif // defined(GGML_HIP_ROCWMMA_FATTN)
 
 // WMMA flash attention requires FP16 matrix instructions to be available for ggml code.
@@ -32,12 +27,6 @@ static bool ggml_cuda_should_use_wmma_fattn(const int cc) {
 #else
         return false;
 #endif // defined(GGML_HIP_ROCWMMA_FATTN) (ROCWMMA_VERSION_MAJOR < 2 || ROCWMMA_VERSION_MINOR > 0 || ROCWMMA_VERSION_PATCH > 0)
-    } else if (GGML_CUDA_CC_IS_RDNA4(cc)) {
-#if defined(GGML_HIP_ROCWMMA_FATTN) && ROCWMMA_VERSION_MAJOR > 1
-        return true;
-#else
-        return false;
-#endif // defined(GGML_HIP_ROCWMMA_FATTN) && ROCWMMA_VERSION_MAJOR > 1
     } else {
         return false;
     }

@@ -753,6 +753,14 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .to_float                 = (ggml_to_float_t) rocmfpx_dequantize_row_fp2,
         .from_float_ref           = (ggml_from_float_t) rocmfpx_quantize_row_fp2_ref,
     },
+    [GGML_TYPE_Q4_0_ROCMI4] = {
+        .type_name                = "q4_0_rocmi4",
+        .blck_size                = QK_ROCMI4,
+        .type_size                = sizeof(block_rocmi4),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) rocmfpx_dequantize_row_i4,
+        .from_float_ref           = (ggml_from_float_t) rocmfpx_quantize_row_i4_ref,
+    },
     [GGML_TYPE_Q6_0_ROCMFPX] = {
         .type_name                = "q6_0_rocmfpx",
         .blck_size                = QK_ROCMFP6,
@@ -1516,6 +1524,7 @@ enum ggml_type ggml_ftype_to_ggml_type(enum ggml_ftype ftype) {
         case GGML_FTYPE_MOSTLY_Q6_0_ROCMFPX:                 wtype = GGML_TYPE_Q6_0_ROCMFPX;      break;
         case GGML_FTYPE_MOSTLY_Q8_0_ROCMFPX:                 wtype = GGML_TYPE_Q8_0_ROCMFPX;      break;
         case GGML_FTYPE_MOSTLY_Q3_0_ROCMFPX:                 wtype = GGML_TYPE_Q3_0_ROCMFPX;      break;
+        case GGML_FTYPE_MOSTLY_Q4_0_ROCMI4:                  wtype = GGML_TYPE_Q4_0_ROCMI4;       break;
         case GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2:
         case GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2_STRIX:           wtype = GGML_TYPE_Q2_0_ROCMFP2;      break;
     }
@@ -5703,29 +5712,6 @@ struct ggml_tensor * ggml_ssm_conv(
     return result;
 }
 
-// dflash: tree-mode variant. Same op, with parent_ids plumbed into
-// src[2] so the CUDA kernel gathers each token's window along its tree
-// parent chain instead of the DFS-neighbour window.
-struct ggml_tensor * ggml_ssm_conv_tree(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * sx,
-        struct ggml_tensor  * c,
-        struct ggml_tensor  * parent_ids) {
-    struct ggml_tensor * result = ggml_ssm_conv(ctx, sx, c);
-
-    GGML_ASSERT(parent_ids != NULL);
-    GGML_ASSERT(parent_ids->type == GGML_TYPE_I32);
-    GGML_ASSERT(ggml_is_contiguous(parent_ids));
-
-    const int64_t n_t = sx->ne[0] - c->ne[0] + 1;
-    const int64_t n_s = sx->ne[2];
-    GGML_ASSERT(ggml_nelements(parent_ids) == n_t * n_s);
-
-    result->src[2] = parent_ids;
-
-    return result;
-}
-
 // ggml_ssm_scan
 
 struct ggml_tensor * ggml_ssm_scan(
@@ -6485,74 +6471,12 @@ void ggml_gated_delta_net_set_skip_intermediate(
     const int64_t n_tokens = v->ne[2];
     const int64_t n_seqs   = v->ne[3];
 
-    // Compact only the plain chain path. Tree/persistent variants need
-    // intermediate states for branch reloads or explicit capture storage.
-    const bool can_compact = tensor->src[6] == NULL && tensor->src[7] == NULL;
     tensor->ne[1] = n_tokens*n_seqs + S_v*n_seqs;
-    if (!skip_intermediate || !can_compact) {
+    if (!skip_intermediate) {
         tensor->ne[1] += S_v*n_tokens*n_seqs;
     }
     tensor->nb[2] = tensor->nb[1]*tensor->ne[1];
     tensor->nb[3] = tensor->nb[2]*tensor->ne[2];
-}
-
-// dflash: tree-mode variant. Same op, with parent_ids plumbed into
-// src[6] so the CUDA kernel can branch-reload state at DFS transitions.
-struct ggml_tensor * ggml_gated_delta_net_tree(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * q,
-        struct ggml_tensor  * k,
-        struct ggml_tensor  * v,
-        struct ggml_tensor  * g,
-        struct ggml_tensor  * beta,
-        struct ggml_tensor  * state,
-        struct ggml_tensor  * parent_ids) {
-    struct ggml_tensor * result = ggml_gated_delta_net(ctx, q, k, v, g, beta, state);
-
-    GGML_ASSERT(parent_ids != NULL);
-    GGML_ASSERT(parent_ids->type == GGML_TYPE_I32);
-    GGML_ASSERT(ggml_is_contiguous(parent_ids));
-
-    const int64_t n_tokens = v->ne[2];
-    const int64_t n_seqs   = v->ne[3];
-    GGML_ASSERT(ggml_nelements(parent_ids) == n_tokens * n_seqs);
-
-    result->src[6] = parent_ids;
-
-    return result;
-}
-
-// dflash: tree-mode + external persistent intermediate buffer. The
-// kernel writes per-token intermediate states DIRECTLY into persist_inter's
-// memory, skipping the cost of copying them out of the result tensor's
-// internal region after graph_compute.
-struct ggml_tensor * ggml_gated_delta_net_tree_persist(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * q,
-        struct ggml_tensor  * k,
-        struct ggml_tensor  * v,
-        struct ggml_tensor  * g,
-        struct ggml_tensor  * beta,
-        struct ggml_tensor  * state,
-        struct ggml_tensor  * parent_ids,
-        struct ggml_tensor  * persist_inter) {
-    struct ggml_tensor * result = ggml_gated_delta_net_tree(
-        ctx, q, k, v, g, beta, state, parent_ids);
-
-    GGML_ASSERT(persist_inter != NULL);
-    GGML_ASSERT(persist_inter->type == GGML_TYPE_F32 ||
-                persist_inter->type == GGML_TYPE_F16);
-    GGML_ASSERT(ggml_is_contiguous(persist_inter));
-
-    const int64_t S_v      = v->ne[0];
-    const int64_t H        = v->ne[1];
-    const int64_t n_tokens = v->ne[2];
-    const int64_t n_seqs   = v->ne[3];
-    GGML_ASSERT(ggml_nelements(persist_inter) >= S_v * S_v * H * n_tokens * n_seqs);
-
-    result->src[7] = persist_inter;
-
-    return result;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -8037,6 +7961,10 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_IQ1_M:   result = quantize_iq1_m  (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ4_NL:  result = quantize_iq4_nl (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_IQ4_XS:  result = quantize_iq4_xs (src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_Q4_0_ROCMI4:
+            result = rocmfpx_quantize_i4(src + start, (char *) dst + start_row * row_size,
+                                        nrows, n_per_row, imatrix);
+            break;
         case GGML_TYPE_F16:
             {
                 size_t elemsize = sizeof(ggml_fp16_t);
@@ -8147,30 +8075,6 @@ struct ggml_tensor * ggml_moe_fused(
     ggml_set_op_params_i32(result, 0, (int32_t) n_embd);
     ggml_set_op_params_i32(result, 1, (int32_t) ff_dim);
     ggml_set_op_params_i32(result, 2, (int32_t) n_expert_used);
-
-    return result;
-}
-
-struct ggml_tensor * ggml_laguna_moe_combine(
-        struct ggml_context * ctx,
-        struct ggml_tensor  * experts,
-        struct ggml_tensor  * expert_weights) {
-    GGML_ASSERT(experts->type == GGML_TYPE_F32);
-    GGML_ASSERT(expert_weights->type == GGML_TYPE_F32);
-    GGML_ASSERT(experts->ne[1] == expert_weights->ne[0]);
-    GGML_ASSERT(experts->ne[2] == expert_weights->ne[1]);
-
-    const int64_t ne[4] = { experts->ne[0], experts->ne[2], 1, 1 };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 2, ne);
-
-    result->op = GGML_OP_MOE_FUSED;
-    result->src[0] = experts;
-    result->src[1] = expert_weights;
-
-    ggml_set_op_params_i32(result, 0, -1);
-    ggml_set_op_params_i32(result, 1, (int32_t) experts->ne[0]);
-    ggml_set_op_params_i32(result, 2, (int32_t) experts->ne[1]);
-    ggml_set_op_params_i32(result, 3, (int32_t) experts->ne[2]);
 
     return result;
 }

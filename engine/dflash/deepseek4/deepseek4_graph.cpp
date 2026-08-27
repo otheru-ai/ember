@@ -11,11 +11,9 @@
 #include "deepseek4_internal.h"
 #include "deepseek4_attention_shape.h"
 #include "deepseek4_hc_cuda.h"
-#include "internal.h"
 #include "../common/step_graph.h"
 #include "../common/crash_breadcrumb.h"
 #include "../common/moe_hybrid_ffn_eval.h"
-#include "../common/moe_hybrid_routing_stats.h"
 #include "../common/moe_hybrid_stream.h"
 #include "../common/moe_hybrid_types.h"
 
@@ -2692,7 +2690,6 @@ static bool ds4_try_gpu_hc_pre_device(ggml_tensor * working,
                                       int n_hc,
                                       int sinkhorn_iters,
                                       float hc_eps) {
-#if defined(DFLASH27B_BACKEND_CUDA) || defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
     const void * fn_device = fn_device_override ? fn_device_override : (fn_tensor ? fn_tensor->data : nullptr);
     if (!working || !post || !comb || !hc_state || !fn_device || !scale_data || !base_data ||
         !working->data || !post->data || !comb->data || !hc_state->data) {
@@ -2729,26 +2726,6 @@ static bool ds4_try_gpu_hc_pre_device(ggml_tensor * working,
                                                working->data,
                                                post->data,
                                                comb->data);
-#else
-    (void) working;
-    (void) post;
-    (void) comb;
-    (void) backend;
-    (void) layer_idx;
-    (void) ffn;
-    (void) hc_state;
-    (void) fn_tensor;
-    (void) fn_device_override;
-    (void) scale_tensor;
-    (void) base_tensor;
-    (void) scale_data;
-    (void) base_data;
-    (void) n_embd;
-    (void) n_hc;
-    (void) sinkhorn_iters;
-    (void) hc_eps;
-    return false;
-#endif
 }
 
 static bool build_cached_decode_hc_pre_graph(
@@ -2915,9 +2892,7 @@ static MoeHybridConfig make_ds4_moe_hybrid_config(const DeepSeek4Weights & w) {
     cfg.n_expert = w.n_expert;
     cfg.n_expert_used = ds4_effective_expert_count(w);
     cfg.n_ff_exp = w.n_ff_exp;
-    cfg.n_ff_shexp = w.n_ff_exp;
     cfg.n_layer = w.n_layer;
-    cfg.first_moe_layer = 0;
     cfg.swiglu_clamp = w.swiglu_clamp_exp;
     return cfg;
 }
@@ -3922,8 +3897,7 @@ static bool deepseek4_step_hybrid(
         std::vector<float> & out_logits,
         const int32_t * token_ids,
         MoeHybridStreamEngine * stream_engine,
-        DeepSeek4StepTelemetry * telemetry,
-        MoeHybridRoutingStats * routing_stats) {
+        DeepSeek4StepTelemetry * telemetry) {
     const auto step_t0 = Ds4TimingClock::now();
     const int n_embd = w.n_embd;
     const int n_hc = w.n_hc;
@@ -4180,14 +4154,6 @@ static bool deepseek4_step_hybrid(
                 }
             }
             if (telemetry) telemetry->route_select_us += ds4_elapsed_us(route_select_t0, Ds4TimingClock::now());
-            if (routing_stats) {
-                for (int ti = 0; ti < n_tokens; ++ti) {
-                    routing_stats->observe(il,
-                        selected_host.data() + (size_t)ti * (size_t)n_used,
-                        n_used);
-                }
-            }
-
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
@@ -4298,14 +4264,6 @@ static bool deepseek4_step_hybrid(
                 }
             }
             if (telemetry) telemetry->route_select_us += ds4_elapsed_us(route_select_t0, Ds4TimingClock::now());
-            if (routing_stats) {
-                for (int ti = 0; ti < n_tokens; ++ti) {
-                    routing_stats->observe(il,
-                        selected_host.data() + (size_t)ti * (size_t)n_used,
-                        n_used);
-                }
-            }
-
             MoeHybridConfig hybrid_cfg = make_ds4_moe_hybrid_config(w);
             MoeLayerDesc desc = make_ds4_moe_layer_desc(L);
             auto & storage = moe_hybrid.layers[(size_t) il];
@@ -4418,7 +4376,6 @@ bool deepseek4_step(
         const int32_t * token_ids,
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
-        MoeHybridRoutingStats * routing_stats,
         Ds4VerifyHooks * verify_hooks) {
     if (w.moe_hybrid && moe_hybrid != nullptr) {
         if (!deepseek4_cuda_hc_set_device(device)) {
@@ -4429,7 +4386,7 @@ bool deepseek4_step(
         }
         return deepseek4_step_hybrid(backend, w, cache, *moe_hybrid,
                                      embed, n_tokens, kv_start, out_logits,
-                                     token_ids, stream_engine, telemetry, routing_stats);
+                                     token_ids, stream_engine, telemetry);
     }
 
     std::vector<float> hc_state;

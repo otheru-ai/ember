@@ -1,6 +1,7 @@
 // Extract a normalized chat-completion request from a parsed JSON body.
-// Handles content as a plain string OR as an array of {type:"text",text:...}
-// parts (multimodal shape — text parts flattened, non-text ignored for now).
+// Handles content as a plain string or an ordered content-part array. Text
+// keeps a flattened compatibility view; image URLs are preserved and cause a
+// fail-closed response until the backend vision seam is available.
 #ifndef EMBER_CHAT_API_H
 #define EMBER_CHAT_API_H
 
@@ -14,6 +15,15 @@
 // NONE = thinking off; HIGH = default reasoning; MAX = maximum-effort prefix.
 typedef enum { EMBER_THINK_NONE, EMBER_THINK_HIGH, EMBER_THINK_MAX } ember_think_mode;
 
+// Server-selected prompt ABI.  This is not derived from the client-provided
+// `model` string: a mismatched renderer changes special-token identity and can
+// poison prefix/tool replay.  Zero remains DeepSeek so existing callers and
+// zero-initialized GPU-free fixtures preserve their behavior.
+typedef enum {
+    EMBER_PROMPT_DEEPSEEK_DSML = 0,
+    EMBER_PROMPT_QWEN4_CHATML = 1,
+} ember_prompt_profile;
+
 typedef enum {
     EMBER_TOOL_CHOICE_AUTO,
     EMBER_TOOL_CHOICE_NONE,
@@ -21,6 +31,22 @@ typedef enum {
     EMBER_TOOL_CHOICE_NAMED,
     EMBER_TOOL_CHOICE_ALLOWED,
 } ember_tool_choice_kind;
+
+// Ordered message content. `content` below remains the flattened text view
+// used by the existing text pipeline, while these parts preserve image
+// placement for Qwen4Exp vision. The server currently fails closed before
+// generation when an image is present; retaining the exact order here avoids
+// designing the eventual vision ABI around an already-lossy parser.
+typedef enum {
+    EMBER_CONTENT_TEXT,
+    EMBER_CONTENT_IMAGE_URL,
+} ember_content_part_kind;
+
+typedef struct {
+    ember_content_part_kind kind;
+    char                   *text;       // text bytes or image URL (owned)
+    char                   *detail;     // image detail hint (owned; optional)
+} ember_content_part;
 
 typedef struct {
     char            *role;      // "system" | "developer" | "user" | "assistant" | "tool"
@@ -33,10 +59,13 @@ typedef struct {
                        // assistant turn's call ids resolve; reasoning/content
                        // remain canonical and only this replaces rendered calls)
     ember_tool_calls calls;     // assistant tool_calls parsed from history (may be empty)
+    ember_content_part *parts;  // ordered original content parts (owned)
+    int                n_parts;
 } ember_chat_msg;
 
 typedef struct {
     ember_api_kind  api;
+    ember_prompt_profile prompt_profile; // set from loaded GGUF metadata
     char           *model;
     char           *raw_prompt;   // legacy /v1/completions prompt, otherwise NULL
     ember_chat_msg *messages;
@@ -50,6 +79,7 @@ typedef struct {
     // suppresses the summary item/events.
     bool            reasoning_summary_emit;
     bool            background;  // ember_background: defer until foreground idle
+    bool            has_images;  // at least one preserved image content part
     int             max_tokens;   // value; see max_tokens_set
     bool            max_tokens_set;
     // Sampler surface (ds4 parity). *_set distinguishes client-supplied from default.

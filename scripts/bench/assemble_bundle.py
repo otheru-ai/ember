@@ -157,6 +157,11 @@ def main():
     ctx = jsonl(bundle / "context-sweep.jsonl")
 
     summary = summarise_groups(rows)
+    benchmark_summaries = [r for r in rows if r.get("kind") == "summary"]
+    if benchmark_summaries and benchmark_summaries[-1].get("hard_gate"):
+        summary["hard_gate"] = benchmark_summaries[-1]["hard_gate"]
+        summary["prefill_calibration"] = benchmark_summaries[-1].get(
+            "prefill_calibration")
     if wl_on:
         summary["by_workload"] = summarise_workloads(wl_on, wl_off)
         # A file of connection errors still parses as JSONL and used to assemble

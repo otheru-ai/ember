@@ -355,6 +355,16 @@ Its upstream origin and pinned commits are recorded in
 fork divergence: port upstream work against the pinned revision, preserve
 license/provenance records, and identify local changes clearly.
 
+Engine orchestration may migrate to C incrementally, but language conversion
+does not move this ownership boundary or justify replacing tuned kernels. The
+safe order is allocation-free policy and diagnostics first, then scheduler and
+snapshot plumbing, then loader/graph orchestration. Each conversion must keep a
+C-callable seam, preserve the existing differential tests, and pass the full
+ROCm build before the next layer moves. The thinking-budget controller,
+crash-breadcrumb storage, and loader diagnostic channel are the first converted
+pieces. HIP kernels remain HIP, and the tokenizer remains the byte-exact
+reference until a replacement proves identical token IDs over the full corpus.
+
 HIP graph replay is deliberately disabled. On gfx1151, measured capture churn
 made it slower than the normal path. The benchmark and gate are documented next
 to the option in `engine/CMakeLists.txt`; it should not be enabled until a stable

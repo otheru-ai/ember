@@ -118,6 +118,46 @@ static std::vector<int32_t> vec(const int32_t *p, int n) {
     return std::vector<int32_t>(p, p + n);
 }
 
+extern "C" bool ember_backend_vision_encode(
+        ember_backend *b, const uint8_t *encoded, size_t encoded_size,
+        ember_vision_image *out, char *error, size_t error_cap) {
+    if (out) *out = {};
+    if (!b || !out || !encoded || encoded_size == 0) {
+        if (error && error_cap) std::snprintf(error, error_cap, "%s", "invalid vision encode request");
+        return false;
+    }
+    dflash::common::EncodedVisionImage image;
+    std::string detail;
+    if (!b->be->encode_vision_image(encoded, encoded_size, image, detail)) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s", detail.c_str());
+        return false;
+    }
+    const size_t count = image.embeddings.size();
+    if (count > SIZE_MAX / sizeof(float)) {
+        if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding size overflow");
+        return false;
+    }
+    float *copy = static_cast<float *>(std::malloc(count * sizeof(float)));
+    if (!copy && count != 0) {
+        if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding allocation failed");
+        return false;
+    }
+    if (count) std::memcpy(copy, image.embeddings.data(), count * sizeof(float));
+    out->grid_t = image.grid_t;
+    out->grid_h = image.grid_h;
+    out->grid_w = image.grid_w;
+    out->n_tokens = static_cast<int>(count / 2560);
+    out->embeddings = copy;
+    return true;
+}
+
+extern "C" void ember_backend_vision_image_free(ember_vision_image *image) {
+    if (!image) return;
+    std::free(image->embeddings);
+    *image = {};
+}
+
 static char *c_err(const char *m) { return m ? strdup(m) : nullptr; }
 
 static int64_t batch_now_us() {
@@ -443,6 +483,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
     }
     args.ds4_prefill_mode_set = true;
     args.ds4_fused_decode = true;
+    args.qwen_yarn = cfg->qwen_yarn;
     args.ds4_expert_top_k = cfg->expert_top_k;  // 0 = model default
 
     b->be = dflash::common::create_backend(args);
@@ -614,6 +655,23 @@ static void build_generate_request(const ember_gen_request *req,
                                    DaemonIO &io,
                                    bool *cancelled) {
     greq.prompt.assign(req->prompt, req->prompt + req->n_prompt);
+    greq.vision.clear();
+    if (req->vision && req->n_vision > 0) {
+        greq.vision.reserve(static_cast<size_t>(req->n_vision));
+        for (int i = 0; i < req->n_vision; ++i) {
+            const ember_vision_run &src = req->vision[i];
+            dflash::common::VisionEmbeddingRun dst;
+            dst.prompt_offset = src.prompt_offset;
+            dst.grid_t = src.grid_t;
+            dst.grid_h = src.grid_h;
+            dst.grid_w = src.grid_w;
+            const size_t count = src.n_tokens > 0
+                ? static_cast<size_t>(src.n_tokens) * 2560 : 0;
+            if (src.embeddings && count)
+                dst.embeddings.assign(src.embeddings, src.embeddings + count);
+            greq.vision.push_back(std::move(dst));
+        }
+    }
     // main.c already resolves the budget (unset -> context room); a literal 0
     // means "generate nothing", so only a negative (shouldn't occur) falls back.
     greq.n_gen = req->max_tokens < 0 ? 2048 : req->max_tokens;
@@ -1430,7 +1488,6 @@ static bool backend_validate_impl(
 // the DeepSeek4 decode-time projection family: one activation row per session,
 // a weight matrix shared across the batch (strideA = 0), f16 in / f32 out --
 // the same layout ds4 uses for f16_router_rows_exact.
-#if defined(DFLASH27B_BACKEND_HIP)
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
@@ -1474,7 +1531,6 @@ void hip_free_if(void *ptr) {
 }
 
 }  // namespace
-#endif  // DFLASH27B_BACKEND_HIP
 
 extern "C" bool ember_backend_validate_gemm_batch(
         ember_backend *b, int limit, ember_gemm_batch_report *report) {
@@ -1482,12 +1538,6 @@ extern "C" bool ember_backend_validate_gemm_batch(
     std::memset(report, 0, sizeof(*report));
     report->limit = limit;
     report->max_exact = 1;
-#if !defined(DFLASH27B_BACKEND_HIP)
-    (void)b;
-    std::snprintf(report->detail, sizeof(report->detail),
-                  "built without the HIP backend");
-    return false;
-#else
     (void)b;
     if (limit < 2) {
         std::snprintf(report->detail, sizeof(report->detail),
@@ -1666,7 +1716,6 @@ extern "C" bool ember_backend_validate_gemm_batch(
                       "bit-exact through batchCount=%d on %d shape(s)",
                       report->max_exact, report->shapes_tested);
     return report->ok;
-#endif  // DFLASH27B_BACKEND_HIP
 }
 
 extern "C" bool ember_backend_validate(

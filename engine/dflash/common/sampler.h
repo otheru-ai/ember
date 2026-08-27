@@ -1,20 +1,13 @@
-// Shared CPU sampler chain used by both target arches.
+// Shared CPU sampler chain used by DeepSeek4 target and draft decode.
 //
-// dflash::common daemon protocol embeds optional sampler params as a tail on each
-// generate command: ` samp=temp,top_p,top_k,rep_pen,seed[,freq_pen,pres_pen]`.
-// parse_sampler_token strips the tail in place and fills a SamplerCfg;
 // sample_logits applies the chain:
 //   rep_penalty -> freq/pres_penalty -> dry -> top_k -> softmax(temp)
 //   -> top_p -> min_p -> draw.
 //
-// All backends (qwen35, qwen3, gemma4, laguna) include this header to keep
-// sampling behaviour identical across arches.
-
 #pragma once
 
 #include <cstdint>
 #include <random>
-#include <string>
 #include <vector>
 
 namespace dflash::common {
@@ -84,10 +77,5 @@ int sample_logits(const float * logits_in,
                   const SamplerCfg & cfg,
                   const std::vector<int32_t> & history,
                   std::mt19937_64 & rng);
-
-// Strip ` samp=...` tail from `line` (in place); return true when one was
-// parsed. Out-of-band fields default to a permissive greedy-equivalent (top_p=1,
-// top_k=0, rep_pen=1, seed=0).
-bool parse_sampler_token(std::string & line, SamplerCfg & out);
 
 }  // namespace dflash::common

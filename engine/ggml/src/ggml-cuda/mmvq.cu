@@ -21,6 +21,7 @@ static constexpr __device__ vec_dot_q_cuda_t get_vec_dot_q_cuda(ggml_type type) 
         case GGML_TYPE_NVFP4:   return vec_dot_nvfp4_q8_1;
         case GGML_TYPE_Q4_0_ROCMFP4:      return vec_dot_rocmfp4_q8_1;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return vec_dot_rocmfp4_fast_q8_1;
+        case GGML_TYPE_Q4_0_ROCMI4:       return vec_dot_rocmi4_q8_1;
         case GGML_TYPE_Q2_0_ROCMFP2:      return vec_dot_rocmfpx_fp2_q8_1;
         case GGML_TYPE_Q3_0_ROCMFPX:      return vec_dot_rocmfpx_fp3_q8_1;
         case GGML_TYPE_Q6_0_ROCMFPX:      return vec_dot_rocmfpx_fp6_q8_1;
@@ -54,6 +55,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_NVFP4:   return VDR_NVFP4_Q8_1_MMVQ;
         case GGML_TYPE_Q4_0_ROCMFP4:      return VDR_ROCMFP4_Q8_1_MMVQ;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return VDR_ROCMFP4_FAST_Q8_1_MMVQ;
+        case GGML_TYPE_Q4_0_ROCMI4:       return VDR_ROCMI4_Q8_1_MMVQ;
         case GGML_TYPE_Q2_0_ROCMFP2:      return VDR_ROCMFP2_Q8_1_MMVQ;
         case GGML_TYPE_Q3_0_ROCMFPX:      return VDR_ROCMFP3_Q8_1_MMVQ;
         case GGML_TYPE_Q6_0_ROCMFPX:      return VDR_ROCMFP6_Q8_1_MMVQ;
@@ -78,14 +80,11 @@ enum mmvq_parameter_table_id {
     MMVQ_PARAMETERS_GENERIC = 0,
     MMVQ_PARAMETERS_GCN,
     MMVQ_PARAMETERS_RDNA2,
-    MMVQ_PARAMETERS_RDNA3_0,
-    MMVQ_PARAMETERS_RDNA4
+    MMVQ_PARAMETERS_RDNA3_0
 };
 
 static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
-#if defined(RDNA4)
-    return MMVQ_PARAMETERS_RDNA4;
-#elif defined(RDNA3_0)
+#if defined(RDNA3_0)
     return MMVQ_PARAMETERS_RDNA3_0;
 #elif defined(RDNA2) || defined(RDNA3_5)
     return MMVQ_PARAMETERS_RDNA2;
@@ -97,9 +96,6 @@ static constexpr __device__ mmvq_parameter_table_id get_device_table_id() {
 }
 
 static __host__ mmvq_parameter_table_id get_device_table_id(int cc) {
-    if (GGML_CUDA_CC_IS_RDNA4(cc)) {
-        return MMVQ_PARAMETERS_RDNA4;
-    }
     if (GGML_CUDA_CC_IS_RDNA3_0(cc)) {
         return MMVQ_PARAMETERS_RDNA3_0;
     }
@@ -222,32 +218,6 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna3(ggml_type
     }
 }
 
-static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_rdna4(ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_IQ1_S:   return 7;
-        case GGML_TYPE_IQ1_M:   return 7;
-        case GGML_TYPE_IQ2_S:   return 4;
-        case GGML_TYPE_IQ2_XS:  return 4;
-        case GGML_TYPE_IQ2_XXS: return 4;
-        case GGML_TYPE_IQ3_S:   return 4;
-        case GGML_TYPE_IQ3_XXS: return 4;
-        case GGML_TYPE_IQ4_NL:  return 7;
-        case GGML_TYPE_IQ4_XS:  return 5;
-        case GGML_TYPE_MXFP4:   return 5;
-        case GGML_TYPE_Q3_K:    return 4;
-        case GGML_TYPE_Q4_0:    return 7;
-        case GGML_TYPE_Q4_1:    return 7;
-        case GGML_TYPE_Q4_K:    return 4;
-        case GGML_TYPE_Q5_0:    return 7;
-        case GGML_TYPE_Q5_1:    return 7;
-        case GGML_TYPE_Q5_K:    return 5;
-        case GGML_TYPE_Q6_K:    return 5;
-        case GGML_TYPE_Q8_0:    return 7;
-        default:                return MMVQ_MAX_BATCH_SIZE;
-    }
-}
-
-
 // [TAG_MMID_GROUPED] grouped-expert MUL_MAT_ID for small speculative-verify
 // batches (2..MMVQ_MAX_MOE_BATCH_SIZE tokens). Consecutive draft tokens route
 // to heavily overlapping expert sets, but mul_mat_vec_q_moe reads each
@@ -355,9 +325,6 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
 
     // AMD
     if (GGML_CUDA_CC_IS_AMD(cc)) {
-        if (GGML_CUDA_CC_IS_RDNA4(cc)) {
-            return get_mmvq_mmid_max_batch_rdna4(type);
-        }
         if (GGML_CUDA_CC_IS_RDNA3(cc)) {
             return get_mmvq_mmid_max_batch_rdna3(type);
         }
@@ -377,9 +344,7 @@ int get_mmvq_mmid_max_batch(ggml_type type, int cc) {
 // Device constexpr: returns the max batch size for the current arch+type at compile time.
 template <ggml_type type>
 static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
-#if defined(RDNA4)
-    return get_mmvq_mmid_max_batch_rdna4(type);
-#elif defined(RDNA3)
+#if defined(RDNA3)
     return get_mmvq_mmid_max_batch_rdna3(type);
 #elif defined(RDNA2) || defined(RDNA1)
     return get_mmvq_mmid_max_batch_rdna1_rdna2(type);
@@ -432,33 +397,8 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
                 return 1;
         }
     }
-    if (table_id == MMVQ_PARAMETERS_RDNA4) {
-        // nwarps=8 benefits types with simple vec_dot on RDNA4 (ncols_dst=1).
-        // Types with complex vec_dot (Q3_K, IQ2_*, IQ3_*) regress due to register
-        // pressure and lookup table contention at higher thread counts.
-        if (ncols_dst == 1) {
-            switch (type) {
-                case GGML_TYPE_Q4_0:
-                case GGML_TYPE_Q4_1:
-                case GGML_TYPE_Q5_0:
-                case GGML_TYPE_Q5_1:
-                case GGML_TYPE_Q8_0:
-                case GGML_TYPE_Q2_K:
-                case GGML_TYPE_Q4_K:
-                case GGML_TYPE_Q5_K:
-                case GGML_TYPE_Q6_K:
-                case GGML_TYPE_IQ4_NL:
-                case GGML_TYPE_IQ4_XS:
-                    return 8;
-                default:
-                    return 1;
-            }
-        }
-        return 1;
-    }
     if (table_id == MMVQ_PARAMETERS_RDNA3_0) {
-        // RDNA3 (W7900): stricter whitelist than RDNA4.
-        // Q2_K / Q5_K / IQ4_XS regress in full quant sweeps.
+        // RDNA3 (W7900): tuned whitelist from full quant sweeps.
         if (ncols_dst == 1) {
             switch (type) {
                 case GGML_TYPE_Q4_0:
@@ -1759,6 +1699,12 @@ static void mul_mat_vec_q_switch_type(
             break;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST:
             mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_0_ROCMFP4_FAST>
+                (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
+                 nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
+                 nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);
+            break;
+        case GGML_TYPE_Q4_0_ROCMI4:
+            mul_mat_vec_q_switch_ncols_dst<GGML_TYPE_Q4_0_ROCMI4>
                 (vx, vy, ids, fusion, dst, ncols_x, nrows_x, ncols_dst, stride_row_x, stride_col_y, stride_col_dst,
                  nchannels_x, nchannels_y, nchannels_dst, stride_channel_x, stride_channel_y, stride_channel_dst,
                  nsamples_x, nsamples_dst, stride_sample_x, stride_sample_y, stride_sample_dst, ids_stride, stream);

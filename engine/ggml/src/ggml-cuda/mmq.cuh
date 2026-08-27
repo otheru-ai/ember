@@ -10,6 +10,9 @@
 using namespace ggml_cuda_mma;
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
+#ifndef GGML_ROCMI4_W4A4
+#define GGML_ROCMI4_W4A4 0
+#endif
 #define MMQ_ITER_K 256
 #define MMQ_ITER_K_MXFP4_FP4    512
 #define MMQ_NWARPS 8
@@ -69,6 +72,7 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_Q2_0_ROCMFP2:
             return MMQ_Q8_1_DS_LAYOUT_DS4;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+        case GGML_TYPE_Q4_0_ROCMI4:
         case GGML_TYPE_Q3_0_ROCMFPX:
             return MMQ_Q8_1_DS_LAYOUT_D4;
         case GGML_TYPE_MXFP4:
@@ -112,8 +116,8 @@ struct tile_x_sizes {
 #ifndef LUCEBOX_RDNA_MMQ_TILE_OVERRIDE
 #define LUCEBOX_RDNA_MMQ_TILE_OVERRIDE 1
 #endif
-#define LUCEBOX_RDNA_TILE_HOST(cc) (LUCEBOX_RDNA_MMQ_TILE_OVERRIDE && (GGML_CUDA_CC_IS_RDNA3(cc) || GGML_CUDA_CC_IS_RDNA4(cc)))
-#if LUCEBOX_RDNA_MMQ_TILE_OVERRIDE && (defined(RDNA3) || defined(RDNA4))
+#define LUCEBOX_RDNA_TILE_HOST(cc) (LUCEBOX_RDNA_MMQ_TILE_OVERRIDE && GGML_CUDA_CC_IS_RDNA3(cc))
+#if LUCEBOX_RDNA_MMQ_TILE_OVERRIDE && defined(RDNA3)
 #define LUCEBOX_RDNA_TILE_DEVICE 1
 #else
 #define LUCEBOX_RDNA_TILE_DEVICE 0
@@ -237,6 +241,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_Q5_1:    return MMQ_DP4A_TXS_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_Q4_0_ROCMI4:       return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_Q2_0_ROCMFP2: return MMQ_DP4A_TXS_Q4_1;
         case GGML_TYPE_Q3_0_ROCMFPX: return MMQ_DP4A_TXS_Q8_0_16;
         case GGML_TYPE_MXFP4:   return MMQ_DP4A_TXS_Q8_1;
@@ -259,6 +264,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
 }
 
 #define MMQ_MMA_TILE_X_K_Q8_0  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
+#define MMQ_MMA_TILE_X_K_ROCMI4 (MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                    + 4)
 #define MMQ_MMA_TILE_X_K_FP4   (2*MMQ_TILE_NE_K + 8                                       + 4) // MXFP4
 #define MMQ_MMA_TILE_X_K_NVFP4 (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/2                         + 4) // NVFP4
 #define MMQ_MMA_TILE_X_K_Q8_1  (2*MMQ_TILE_NE_K + 2*MMQ_TILE_NE_K/QI8_0                   + 4)
@@ -267,6 +273,7 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
 #define MMQ_MMA_TILE_X_K_Q6_K  (2*MMQ_TILE_NE_K + MMQ_TILE_NE_K/QI6_K   + MMQ_TILE_NE_K/8 + 7)
 
 static_assert(MMQ_MMA_TILE_X_K_Q8_0 % 8 == 4, "Wrong padding.");
+static_assert(MMQ_MMA_TILE_X_K_ROCMI4 % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q8_1 % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q2_K % 8 == 4, "Wrong padding.");
 static_assert(MMQ_MMA_TILE_X_K_Q3_K % 8 == 4, "Wrong padding.");
@@ -276,7 +283,7 @@ static_assert(MMQ_MMA_TILE_X_K_FP4 == MMQ_MMA_TILE_X_K_Q8_1, "Wrong tile size fo
 static_assert(MMQ_MMA_TILE_X_K_NVFP4 % 8 == 4, "Wrong padding.");
 
 
-static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
+static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type, int cc) {
     switch (type) {
         case GGML_TYPE_Q4_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q4_1:    return MMQ_MMA_TILE_X_K_Q8_1;
@@ -284,6 +291,13 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_Q5_1:    return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q8_0:    return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST: return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_Q4_0_ROCMI4:
+#if GGML_ROCMI4_W4A4
+            return GGML_CUDA_CC_IS_GFX1151(cc) ? MMQ_MMA_TILE_X_K_ROCMI4 : MMQ_MMA_TILE_X_K_Q8_0;
+#else
+            GGML_UNUSED(cc);
+            return MMQ_MMA_TILE_X_K_Q8_0;
+#endif
         case GGML_TYPE_Q2_0_ROCMFP2: return MMQ_MMA_TILE_X_K_Q8_1;
         case GGML_TYPE_Q3_0_ROCMFPX: return MMQ_MMA_TILE_X_K_Q3_K;
         // tile sizes are the same for Q8_1 and FP4 for blackwell
@@ -1036,6 +1050,81 @@ struct rocmfpx_dual_mmq_traits<GGML_TYPE_Q3_0_ROCMFPX> {
 // Q2/FP3 store one UE4M3 scale per 16 weights.  Expand their packed values
 // into int8 and reuse the existing scale-per-16 Q8_0 x Q8_1 MMQ kernels.  One
 // wave loads a full 256-weight row: each lane expands two groups of four.
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_rocmi4(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    int * x_qs = x_tile;
+    float * x_df = (float *) (x_qs + MMQ_TILE_NE_K*2);
+    constexpr int threads_per_row = MMQ_ITER_K / (4 * QR_ROCMI4);
+    constexpr int nrows = warp_size / threads_per_row;
+    const int txi = warp_size > threads_per_row ? threadIdx.x % threads_per_row : threadIdx.x;
+    const int kbx = txi / QI_ROCMI4;
+    const int kqsx = txi % QI_ROCMI4;
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (need_check) i = min(i, i_max);
+        const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbx;
+        const int2 v = rocmi4_unpack_signed_nibbles(rocmfp4_get_qs_i32(bxi->qs, kqsx));
+        const int k0 = kbx*(2*QI_ROCMI4) + kqsx;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0] = v.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0 + QI_ROCMI4] = v.y;
+    }
+    constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI_ROCMI4;
+    constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
+    const int kbxd = threadIdx.x % blocks_per_tile_x_row;
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps*rows_per_warp) {
+        int i = i0 + threadIdx.y*rows_per_warp + threadIdx.x/blocks_per_tile_x_row;
+        if (need_check) i = min(i, i_max);
+        const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbxd;
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0 + kbxd] = rocmfpx_ue4m3_to_fp32_finite(bxi->e);
+    }
+}
+
+#if GGML_ROCMI4_W4A4
+static __device__ __forceinline__ int rocmi4_pack_lo(const int a, const int b) {
+    return (a & 0x0f0f0f0f) | ((b & 0x0f0f0f0f) << 4);
+}
+static __device__ __forceinline__ int rocmi4_pack_hi(const int a, const int b) {
+    return ((a >> 4) & 0x0f0f0f0f) | (((b >> 4) & 0x0f0f0f0f) << 4);
+}
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_rocmi4_w4a4(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int nwarps = mmq_get_nwarps_device();
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    int * x_qs = x_tile;
+    float * x_df = (float *) (x_qs + MMQ_TILE_NE_K);
+    constexpr int threads_per_row = 16;
+    constexpr int nrows = warp_size / threads_per_row;
+    const int txi = threadIdx.x % threads_per_row;
+    const int kbx = txi / 2;
+    const int half = txi % 2;
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (need_check) i = min(i, i_max);
+        const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbx;
+        const int d0 = rocmfp4_get_qs_i32(bxi->qs, 2*half);
+        const int d1 = rocmfp4_get_qs_i32(bxi->qs, 2*half + 1);
+        const int kp = kbx*4 + half;
+        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp] = rocmi4_pack_lo(d0, d1);
+        x_qs[i*MMQ_MMA_TILE_X_K_ROCMI4 + kp + 2] = rocmi4_pack_hi(d0, d1);
+    }
+    constexpr int blocks_per_row = MMQ_TILE_NE_K / QI_ROCMI4;
+    constexpr int rows_per_warp = warp_size / blocks_per_row;
+    const int kbxd = threadIdx.x % blocks_per_row;
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += nwarps*rows_per_warp) {
+        int i = i0 + threadIdx.y*rows_per_warp + threadIdx.x/blocks_per_row;
+        if (need_check) i = min(i, i_max);
+        const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbxd;
+        x_df[i*MMQ_MMA_TILE_X_K_ROCMI4 + kbxd] = rocmfpx_ue4m3_to_fp32_finite(bxi->e);
+    }
+}
+#endif
+
 template <ggml_type type, int mmq_y, bool need_check>
 static __device__ __forceinline__ void load_tiles_rocmfpx_dual(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
@@ -3663,6 +3752,25 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_ROCMFP4_FAST> {
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
 };
 
+#if GGML_ROCMI4_W4A4
+template <int mmq_x, int mmq_y>
+static __device__ __forceinline__ void vec_dot_rocmi4_w4a4_wmma(
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
+#endif
+
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q4_0_ROCMI4> {
+    static constexpr int              vdr          = VDR_ROCMI4_Q8_1_MMQ;
+#if GGML_ROCMI4_W4A4 && defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4_w4a4<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_rocmi4_w4a4_wmma<mmq_x, mmq_y>;
+#else
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_rocmi4<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+#endif
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
 template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_Q2_0_ROCMFP2> {
     static constexpr int              vdr          = VDR_Q4_1_Q8_1_MMQ;
@@ -3908,13 +4016,9 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
 template <ggml_type type, int mmq_x, bool need_check>
 #if defined(GGML_USE_HIP)
-// RDNA4 is compute-bound on MMQ (WMMA path); allow compiler to use more VGPRs
-// (minBlocks=1 matches NVIDIA Volta+ behavior and reduces register spilling).
-#if defined(RDNA4) && !defined(GGML_CUDA_ROCMFPX_MMQ_TILE)
-    __launch_bounds__(ggml_cuda_get_physical_warp_size()*mmq_get_nwarps_device(), 1)
-#elif defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
+#if defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
     __launch_bounds__(ggml_cuda_get_physical_warp_size()*mmq_get_nwarps_device(), 2)
-#endif // defined(RDNA4) || defined(RDNA3) || defined(RDNA2) || defined(CDNA) || defined(GCN)
+#endif
 #else
 #if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
     __launch_bounds__(ggml_cuda_get_physical_warp_size()*mmq_get_nwarps_device(), 1)
@@ -4336,7 +4440,7 @@ struct mmq_args {
 template<ggml_type type>
 static size_t mmq_get_nbytes_shared(const int mmq_x, const int mmq_y, const int cc, const int warp_size, const int nwarps) {
     const tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
-    const int mmq_tile_x_k = mmq_get_mma_tile_x_k(type);
+    const int mmq_tile_x_k = mmq_get_mma_tile_x_k(type, cc);
     const size_t nbs_ids = mmq_x*sizeof(int);
     const size_t nbs_x = (turing_mma_available(cc) || amd_mfma_available(cc) || amd_wmma_available(cc)) ? mmq_y*mmq_tile_x_k*sizeof(int) : txs.qs*sizeof(int) + txs.dm*sizeof(half2) + txs.sc*sizeof(int);
     const size_t nbs_y = mmq_x * (sizeof(block_q8_1_mmq));
@@ -4521,6 +4625,59 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     }
 }
 
+#if GGML_ROCMI4_W4A4
+template <int mmq_x, int mmq_y>
+static __device__ __forceinline__ void vec_dot_rocmi4_w4a4_wmma(
+    const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00) {
+#if defined(AMD_WMMA_AVAILABLE) && defined(__gfx1151__)
+    constexpr data_layout layout = get_input_data_layout();
+    typedef tile<16, 4, int, layout> tile_A;
+    typedef tile<16, 4, int, layout> tile_B;
+    typedef tile<16, 16, int, DATA_LAYOUT_J_MAJOR> tile_C;
+    constexpr int granularity = mmq_get_granularity_device(mmq_x);
+    constexpr int rows_per_warp = granularity;
+    constexpr int ntx = rows_per_warp/tile_C::I;
+    y += (threadIdx.y % ntx)*(tile_C::J*MMQ_TILE_Y_K);
+    const int * x_qs = x;
+    const float * x_df = (const float *) x_qs + MMQ_TILE_NE_K;
+    const int * y_qs = y + 4;
+    const float * y_df = (const float *) y;
+    const int i0 = (threadIdx.y / ntx)*rows_per_warp;
+    for (int k01 = 0; k01 < MMQ_TILE_NE_K; k01 += QI8_0) {
+        const int k0 = k00 + k01;
+        const int kp = k0/2;
+        tile_A A[ntx];
+#pragma unroll
+        for (int n = 0; n < ntx; ++n) {
+            load_ldmatrix(A[n], x_qs + (i0 + n*tile_A::I)*MMQ_MMA_TILE_X_K_ROCMI4 + kp,
+                          MMQ_MMA_TILE_X_K_ROCMI4);
+        }
+#pragma unroll
+        for (int j0 = 0; j0 < mmq_x; j0 += ntx*tile_C::J) {
+            tile_B B;
+            load_ldmatrix(B, y_qs + j0*MMQ_TILE_Y_K + k01/2, MMQ_TILE_Y_K);
+            const int j = j0 + tile_C::get_j(0);
+            const float dB = y_df[j*MMQ_TILE_Y_K + k01/QI8_1];
+#pragma unroll
+            for (int n = 0; n < ntx; ++n) {
+                tile_C C;
+                mma_iu4<true>(C, A[n], B);
+#pragma unroll
+                for (int l = 0; l < tile_C::ne; ++l) {
+                    const int i = i0 + n*tile_A::I + tile_C::get_i(l);
+                    const float dA = x_df[i*MMQ_MMA_TILE_X_K_ROCMI4 + k0/QI8_0];
+                    sum[(j0/tile_C::J + n)*tile_C::ne + l] += (C.x[l]*16)*dA*dB;
+                }
+            }
+        }
+    }
+#else
+    GGML_UNUSED_VARS(x, y, sum, k00);
+    NO_DEVICE_CODE;
+#endif
+}
+#endif
+
 #define DECL_MMQ_CASE(type)                                                        \
     template void mul_mat_q_case<type>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
 
@@ -4530,6 +4687,7 @@ extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);
 extern DECL_MMQ_CASE(GGML_TYPE_Q5_1);
 extern DECL_MMQ_CASE(GGML_TYPE_Q8_0);
 extern DECL_MMQ_CASE(GGML_TYPE_Q4_0_ROCMFP4_FAST);
+extern DECL_MMQ_CASE(GGML_TYPE_Q4_0_ROCMI4);
 extern DECL_MMQ_CASE(GGML_TYPE_Q2_0_ROCMFP2);
 extern DECL_MMQ_CASE(GGML_TYPE_Q3_0_ROCMFPX);
 extern DECL_MMQ_CASE(GGML_TYPE_MXFP4);

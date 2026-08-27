@@ -237,9 +237,13 @@ Build the real ROCm backend from the repository root with:
 
 ```bash
 docker build --network host --target dev -f docker/Dockerfile \
-  -t ember-rocm:7.14-dev .
+  -t ember-rocm:10.0-dev .
 scripts/build.sh
 ```
+
+The image is pinned to ROCm 10.0.0 and includes ROCm Compute Profiler 3.8.0;
+see [the ROCm 10 migration note](docs/rocm-10.md) before comparing new
+roofline output with older profiling bundles.
 
 ### CPU/GPU/NPU prototype
 

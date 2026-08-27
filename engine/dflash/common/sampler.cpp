@@ -3,13 +3,10 @@
 #include "sampler.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
-#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -375,82 +372,6 @@ int sample_logits(const float * logits_in,
     const int chosen = draw_from_weights(cand, r_uniform);
     trace_sampler_choice(cand, chosen, cfg, r_uniform, "cpu_sample");
     return chosen;
-}
-
-bool parse_sampler_token(std::string & line, SamplerCfg & out) {
-    auto pos = line.find(" samp=");
-    if (pos == std::string::npos) return false;
-    auto end = line.find(' ', pos + 1);
-    std::string tok = (end == std::string::npos)
-                          ? line.substr(pos + 6)
-                          : line.substr(pos + 6, end - (pos + 6));
-    std::vector<std::string> fields;
-    size_t field_begin = 0;
-    for (;;) {
-        const size_t comma = tok.find(',', field_begin);
-        fields.push_back(tok.substr(field_begin, comma == std::string::npos
-                                                    ? std::string::npos
-                                                    : comma - field_begin));
-        if (comma == std::string::npos) break;
-        field_begin = comma + 1;
-    }
-    if (fields.empty() || fields.size() > 7) return false;
-    for (const auto & field : fields) if (field.empty()) return false;
-
-    auto parse_float = [](const std::string & text, float & value) {
-        errno = 0;
-        char * tail = nullptr;
-        value = std::strtof(text.c_str(), &tail);
-        return errno != ERANGE && tail != text.c_str() && *tail == '\0';
-    };
-    auto parse_int = [](const std::string & text, int & value) {
-        errno = 0;
-        char * tail = nullptr;
-        const long parsed = std::strtol(text.c_str(), &tail, 10);
-        if (errno == ERANGE || tail == text.c_str() || *tail != '\0' ||
-            parsed < INT_MIN || parsed > INT_MAX) return false;
-        value = static_cast<int>(parsed);
-        return true;
-    };
-    auto parse_seed = [](const std::string & text, uint64_t & value) {
-        if (!text.empty() && text[0] == '-') return false;
-        errno = 0;
-        char * tail = nullptr;
-        const unsigned long long parsed = std::strtoull(text.c_str(), &tail, 10);
-        if (errno == ERANGE || tail == text.c_str() || *tail != '\0' ||
-            parsed > std::numeric_limits<uint64_t>::max()) return false;
-        value = static_cast<uint64_t>(parsed);
-        return true;
-    };
-
-    float t = 0.0f, tp = 1.0f, rp = 1.0f, fp = 0.0f, pp = 0.0f;
-    int tk = 0;
-    uint64_t sd = 0;
-    if (!parse_float(fields[0], t) ||
-        (fields.size() > 1 && !parse_float(fields[1], tp)) ||
-        (fields.size() > 2 && !parse_int(fields[2], tk)) ||
-        (fields.size() > 3 && !parse_float(fields[3], rp)) ||
-        (fields.size() > 4 && !parse_seed(fields[4], sd)) ||
-        (fields.size() > 5 && !parse_float(fields[5], fp)) ||
-        (fields.size() > 6 && !parse_float(fields[6], pp))) {
-        return false;
-    }
-    if (!std::isfinite(t) || t < 0.0f ||
-        !std::isfinite(tp) || tp < 0.0f || tp > 1.0f ||
-        tk < 0 || !std::isfinite(rp) || rp <= 0.0f ||
-        !std::isfinite(fp) || fp < -2.0f || fp > 2.0f ||
-        !std::isfinite(pp) || pp < -2.0f || pp > 2.0f) {
-        return false;
-    }
-    line.erase(pos, (end == std::string::npos ? std::string::npos : end - pos));
-    out.temp     = t;
-    out.top_p    = tp;
-    out.top_k    = tk;
-    out.rep_pen  = rp;
-    out.seed     = sd;
-    out.freq_pen = fp;
-    out.pres_pen = pp;
-    return true;
 }
 
 }  // namespace dflash::common

@@ -195,3 +195,14 @@ static __device__ __forceinline__ void dequantize_rocmfpx_fp8(const void * vx, c
     v.x = d * (float) x[ib].qs[iqs + 0];
     v.y = d * (float) x[ib].qs[iqs + 1];
 }
+
+static __device__ __forceinline__ void dequantize_rocmi4(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_rocmi4 * x = (const block_rocmi4 *) vx;
+    const float d = rocmfpx_ue4m3_to_fp32_finite(x[ib].e);
+    const uint8_t q = x[ib].qs[iqs];
+    const int8_t q0 = (int8_t) ((q & 8u) ? (int) (q | 0xf0u) : (int) (q & 7u));
+    const uint8_t hi = q >> 4;
+    const int8_t q1 = (int8_t) ((hi & 8u) ? (int) (hi | 0xf0u) : (int) (hi & 7u));
+    v.x = d * (float) q0;
+    v.y = d * (float) q1;
+}

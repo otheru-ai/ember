@@ -29,7 +29,6 @@ static double card_float(const ember_json *v, double dflt,
 
 static void defaults(ember_model_card *c) {
     c->max_tokens = 16384;
-    c->complex_problem_max_tokens = 32768;
     c->hard_limit_reply_budget = 1024;  // DeepSeek-V4-Flash is terse
     c->thinking_terminator_hint = dupz(
         "Considering the limited time by the user, I have to give the solution "
@@ -45,6 +44,7 @@ static void defaults(ember_model_card *c) {
     c->min_p = 0.0;
     c->presence_penalty = 0.0;
     c->repetition_penalty = 1.0;
+    c->context_extension.available = false;
 }
 
 bool ember_model_card_load(ember_model_card *card, const char *path) {
@@ -71,9 +71,6 @@ bool ember_model_card_load(ember_model_card *card, const char *path) {
 
     card->max_tokens = card_int(
         ember_json_get(v, "max_tokens"), card->max_tokens, 1);
-    card->complex_problem_max_tokens = card_int(
-        ember_json_get(v, "complex_problem_max_tokens"),
-        card->complex_problem_max_tokens, 1);
     card->hard_limit_reply_budget = card_int(
         ember_json_get(v, "hard_limit_reply_budget"),
         card->hard_limit_reply_budget, 0);
@@ -118,6 +115,28 @@ bool ember_model_card_load(ember_model_card *card, const char *path) {
             card->repetition_penalty, 0.0, (double)FLT_MAX);
         if (repetition_penalty > 0.0)
             card->repetition_penalty = repetition_penalty;
+    }
+    const ember_json *extension = ember_json_get(v, "context_extension");
+    if (extension && extension->type == EMBER_JSON_OBJECT) {
+        const ember_json *type = ember_json_get(extension, "type");
+        const int native_context = card_int(
+            ember_json_get(extension, "native_context"), 0, 1);
+        const int max_context = card_int(
+            ember_json_get(extension, "max_context"), 0, 1);
+        const double factor = card_float(
+            ember_json_get(extension, "factor"), 0.0, 1.0, (double)FLT_MAX);
+        // Cards are advisory rather than authority. Accept only a complete,
+        // internally consistent static-YaRN tuple; the model-specific backend
+        // performs the stricter architecture/provenance check at load time.
+        if (type && type->type == EMBER_JSON_STRING &&
+            strcmp(ember_json_str(type, ""), "static_yarn") == 0 &&
+            native_context > 0 && max_context > native_context &&
+            factor > 1.0) {
+            card->context_extension.available = true;
+            card->context_extension.native_context = native_context;
+            card->context_extension.max_context = max_context;
+            card->context_extension.factor = factor;
+        }
     }
     ember_json_free(v);
     card->loaded = true;

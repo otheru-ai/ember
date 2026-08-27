@@ -45,14 +45,14 @@ typedef struct {
     uint64_t     data_offset;   // aligned start of tensor data in the file
 } gguf_file;
 
-// Read metadata from `path`. Returns NULL on failure. Free with gguf_free.
-gguf_file *gguf_open(const char *path);
-void       gguf_free(gguf_file *g);
+// Read metadata from `path`. Returns NULL on failure. Free with ember_gguf_free.
+gguf_file *ember_gguf_open(const char *path);
+void       ember_gguf_free(gguf_file *g);
 
 // KV lookups (NULL / defaults if absent or wrong type).
-const gguf_kv *gguf_get(const gguf_file *g, const char *key);
-int64_t     gguf_get_int(const gguf_file *g, const char *key, int64_t dflt);
-double      gguf_get_float(const gguf_file *g, const char *key, double dflt);
-const char *gguf_get_str(const gguf_file *g, const char *key, const char *dflt);
+const gguf_kv *ember_gguf_get(const gguf_file *g, const char *key);
+int64_t     ember_gguf_get_int(const gguf_file *g, const char *key, int64_t dflt);
+double      ember_gguf_get_float(const gguf_file *g, const char *key, double dflt);
+const char *ember_gguf_get_str(const gguf_file *g, const char *key, const char *dflt);
 
 #endif  // EMBER_GGUF_H

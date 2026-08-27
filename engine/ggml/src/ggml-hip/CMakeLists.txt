@@ -15,12 +15,7 @@ if (NOT DEFINED CMAKE_HIP_FLAGS_DEBUG)
     set(CMAKE_HIP_FLAGS_DEBUG "-g -O2")
 endif()
 
-# CMake on Windows doesn't support the HIP language yet
-if (WIN32)
-    set(CXX_IS_HIPCC TRUE)
-else()
-    string(REGEX MATCH "hipcc(\.bat)?$" CXX_IS_HIPCC "${CMAKE_CXX_COMPILER}")
-endif()
+string(REGEX MATCH "hipcc$" CXX_IS_HIPCC "${CMAKE_CXX_COMPILER}")
 
 if (CXX_IS_HIPCC)
     if (LINUX)
@@ -160,6 +155,13 @@ if (GGML_HIP_NO_VMM)
     add_compile_definitions(GGML_HIP_NO_VMM)
 endif()
 
+if (GGML_HIP_ROCMI4_W4A4)
+    add_compile_definitions(GGML_ROCMI4_W4A4=1)
+    message(WARNING
+        "GGML_HIP_ROCMI4_W4A4 is a lossy, experimental ROCmI4 prefill path "
+        "verified only on gfx1151. Exact MMQ is used on other architectures.")
+endif()
+
 if (GGML_HIP_ROCWMMA_FATTN)
     add_compile_definitions(GGML_HIP_ROCWMMA_FATTN)
 endif()
@@ -178,11 +180,6 @@ endif()
 
 if (CXX_IS_HIPCC)
     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE CXX)
-    if (WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-        # CMake on Windows doesn't support the HIP language yet.
-        # Therefore we workaround debug build's failure on HIP backend this way.
-        set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES COMPILE_FLAGS "-O2 -g")
-    endif()
     target_link_libraries(ggml-hip PRIVATE hip::device)
 else()
     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE HIP)

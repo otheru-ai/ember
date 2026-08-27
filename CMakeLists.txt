@@ -96,6 +96,7 @@ add_subdirectory(vendor/xgrammar)
 add_library(ember_core STATIC
   src/server/sse.c
   src/model/tool_parser.c
+  src/model/tool_parser_qwen4.c
   src/model/tool_schema.c
   src/model/tool_grammar.c
   src/model/tool_memory.c
@@ -108,7 +109,10 @@ add_library(ember_core STATIC
   src/server/http.c
   src/server/background_gate.c
   src/model/chat_template.c
+  src/model/chat_template_qwen4.c
+  src/model/image_input.c
   src/model/gguf.c
+  src/model/model_profile.c
   src/backend/backend_stub.c
   src/model/model_card.c
   src/model/kv_cache.c
@@ -125,6 +129,10 @@ add_test(NAME sse COMMAND test_sse)
 add_executable(test_tool_parser test/test_tool_parser.c)
 target_link_libraries(test_tool_parser ember_core)
 add_test(NAME tool_parser COMMAND test_tool_parser)
+
+add_executable(test_tool_parser_qwen4 test/test_tool_parser_qwen4.c)
+target_link_libraries(test_tool_parser_qwen4 ember_core)
+add_test(NAME tool_parser_qwen4 COMMAND test_tool_parser_qwen4)
 
 add_executable(test_tool_schema test/test_tool_schema.c)
 target_link_libraries(test_tool_schema ember_core m)
@@ -181,6 +189,18 @@ add_executable(test_chat_template test/test_chat_template.c)
 target_link_libraries(test_chat_template ember_core m)
 add_test(NAME chat_template COMMAND test_chat_template)
 
+add_executable(test_chat_template_qwen4 test/test_chat_template_qwen4.c)
+target_link_libraries(test_chat_template_qwen4 ember_core m)
+add_test(NAME chat_template_qwen4 COMMAND test_chat_template_qwen4)
+
+add_executable(test_model_profile test/test_model_profile.c)
+target_link_libraries(test_model_profile ember_core m)
+add_test(NAME model_profile COMMAND test_model_profile)
+
+add_executable(test_image_input test/test_image_input.c)
+target_link_libraries(test_image_input ember_core)
+add_test(NAME image_input COMMAND test_image_input)
+
 add_executable(test_compaction test/test_compaction.c)
 target_link_libraries(test_compaction ember_core m)
 add_test(NAME compaction COMMAND test_compaction)
@@ -206,14 +226,20 @@ add_test(NAME qa COMMAND test_qa)
 add_executable(test_rocmfp_scale test/test_rocmfp_scale.c)
 add_test(NAME rocmfp_scale COMMAND test_rocmfp_scale)
 
+add_executable(test_rocmi4 test/test_rocmi4.c engine/ggml/rocmfpx/rocmfpx.c)
+target_include_directories(test_rocmi4 PRIVATE engine/ggml/include engine/ggml/rocmfpx)
+target_link_libraries(test_rocmi4 PRIVATE m)
+add_test(NAME rocmi4 COMMAND test_rocmi4)
+
 add_executable(test_dspark_scheduler test/test_dspark_scheduler.cpp)
 target_include_directories(test_dspark_scheduler PRIVATE
   engine/dflash/deepseek4)
 add_test(NAME dspark_scheduler COMMAND test_dspark_scheduler)
 
-add_executable(test_thinking_budget test/test_thinking_budget.cpp)
+add_executable(test_thinking_budget test/test_thinking_budget.c)
 target_include_directories(test_thinking_budget PRIVATE
   engine/dflash/common)
+ember_strict(test_thinking_budget)
 add_test(NAME thinking_budget COMMAND test_thinking_budget)
 
 add_executable(test_progress_cycle_detector
@@ -233,6 +259,99 @@ add_executable(test_pre_tokenizer
   engine/dflash/server/pre_tokenizer.cpp)
 target_include_directories(test_pre_tokenizer PRIVATE engine/dflash/server)
 add_test(NAME pre_tokenizer COMMAND test_pre_tokenizer)
+
+add_executable(test_qwen4exp_contract test/test_qwen4exp_contract.cpp)
+target_include_directories(test_qwen4exp_contract PRIVATE
+  engine/dflash/qwen4exp)
+add_test(NAME qwen4exp_contract COMMAND test_qwen4exp_contract)
+
+add_executable(test_qwen4exp_shard_paths
+  test/test_qwen4exp_shard_paths.cpp
+  engine/dflash/qwen4exp/qwen4exp_shards.cpp)
+target_include_directories(test_qwen4exp_shard_paths PRIVATE
+  engine/dflash/qwen4exp)
+ember_strict(test_qwen4exp_shard_paths)
+add_test(NAME qwen4exp_shard_paths COMMAND test_qwen4exp_shard_paths)
+
+add_executable(test_qwen4exp_state
+  test/test_qwen4exp_state.cpp
+  engine/dflash/qwen4exp/qwen4exp_state.cpp)
+target_include_directories(test_qwen4exp_state PRIVATE
+  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
+add_test(NAME qwen4exp_state COMMAND test_qwen4exp_state)
+
+add_executable(test_qwen4exp_mtp
+  test/test_qwen4exp_mtp.cpp
+  engine/dflash/qwen4exp/qwen4exp_mtp.cpp
+  engine/dflash/qwen4exp/qwen4exp_state.cpp)
+target_include_directories(test_qwen4exp_mtp PRIVATE
+  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
+add_test(NAME qwen4exp_mtp COMMAND test_qwen4exp_mtp)
+
+add_executable(test_qwen4exp_reference
+  test/test_qwen4exp_reference.cpp
+  engine/dflash/qwen4exp/qwen4exp_reference.cpp)
+target_include_directories(test_qwen4exp_reference PRIVATE
+  engine/dflash/qwen4exp)
+ember_strict(test_qwen4exp_reference)
+add_test(NAME qwen4exp_reference COMMAND test_qwen4exp_reference)
+
+add_executable(test_qwen4exp_yarn_reference
+  test/test_qwen4exp_yarn_reference.cpp
+  engine/dflash/qwen4exp/qwen4exp_yarn_reference.cpp)
+target_include_directories(test_qwen4exp_yarn_reference PRIVATE
+  engine/dflash/qwen4exp)
+ember_strict(test_qwen4exp_yarn_reference)
+add_test(NAME qwen4exp_yarn_reference COMMAND test_qwen4exp_yarn_reference)
+
+add_executable(test_qwen4exp_activation_dump
+  test/test_qwen4exp_activation_dump.cpp
+  engine/dflash/qwen4exp/qwen4exp_activation_dump.cpp)
+target_include_directories(test_qwen4exp_activation_dump PRIVATE
+  engine/dflash/qwen4exp)
+ember_strict(test_qwen4exp_activation_dump)
+add_test(NAME qwen4exp_activation_dump COMMAND test_qwen4exp_activation_dump)
+
+add_executable(test_qwen4exp_vision
+  test/test_qwen4exp_vision.cpp
+  engine/dflash/qwen4exp/qwen4exp_vision.cpp
+  engine/dflash/qwen4exp/qwen4exp_vision_loader.cpp)
+target_include_directories(test_qwen4exp_vision PRIVATE
+  engine/dflash/qwen4exp)
+ember_strict(test_qwen4exp_vision)
+add_test(NAME qwen4exp_vision COMMAND test_qwen4exp_vision)
+
+add_library(mock_qwen4exp_vision_provider MODULE
+  test/mock_qwen4exp_vision_provider.cpp)
+target_include_directories(mock_qwen4exp_vision_provider PRIVATE
+  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
+set_target_properties(mock_qwen4exp_vision_provider PROPERTIES PREFIX "")
+add_executable(test_qwen4exp_vision_provider
+  test/test_qwen4exp_vision_provider.cpp
+  engine/dflash/qwen4exp/qwen4exp_vision.cpp
+  engine/dflash/qwen4exp/qwen4exp_vision_provider.cpp)
+target_include_directories(test_qwen4exp_vision_provider PRIVATE
+  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
+target_link_libraries(test_qwen4exp_vision_provider PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_qwen4exp_vision_provider mock_qwen4exp_vision_provider)
+add_test(NAME qwen4exp_vision_provider
+  COMMAND test_qwen4exp_vision_provider
+          $<TARGET_FILE:mock_qwen4exp_vision_provider>)
+
+add_executable(test_qwen_yarn
+  test/test_qwen_yarn.c
+  engine/dflash/common/qwen_yarn.c)
+target_include_directories(test_qwen_yarn PRIVATE engine/dflash/common)
+target_link_libraries(test_qwen_yarn PRIVATE m)
+ember_strict(test_qwen_yarn)
+add_test(NAME qwen_yarn COMMAND test_qwen_yarn)
+
+add_executable(test_gguf_quantize_common
+  test/test_gguf_quantize_common.cpp
+  tools/gguf_quantize_common.cpp)
+target_include_directories(test_gguf_quantize_common PRIVATE tools)
+ember_strict(test_gguf_quantize_common)
+add_test(NAME gguf_quantize_common COMMAND test_gguf_quantize_common)
 
 add_executable(test_continuous_batch_scheduler
   test/test_continuous_batch_scheduler.cpp
@@ -351,11 +470,16 @@ ember_strict(test_xdna_q8_model_weights)
 # ci/check_invariants.py fails the build if a test is registered without a
 # timeout, so a new add_test() cannot silently opt out of this.
 set(EMBER_C_TESTS
-  sse tool_parser tool_schema tool_grammar tool_grammar_match tool_memory
+  sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
   chat_api prefill_policy api_adapters http background_gate chat_template
-  compaction gguf model_card kv_cache qa rocmfp_scale dspark_scheduler thinking_budget
-  progress_cycle_detector sampler pre_tokenizer continuous_batch_scheduler
+  chat_template_qwen4
+  compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 dspark_scheduler thinking_budget
+  progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
+  qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
+  qwen4exp_vision_provider qwen_yarn
+  gguf_quantize_common
+  continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator
   xdna_dspark_provider xdna_dspark_cpu_ops
   xdna_rocmfp4_pack xdna_rocmfp4_model_weights xdna_q8_pack
@@ -368,17 +492,18 @@ target_link_libraries(ember-server ember_core m)
 
 # Ember-owned targets, held to EMBER_STRICT. Excludes every target that
 # compiles or includes vendored engine/ code (test_prefill_policy,
-# test_dspark_scheduler, test_thinking_budget, test_progress_cycle_detector,
+# test_dspark_scheduler, test_progress_cycle_detector,
 # test_sampler, test_continuous_batch_*, test_resident_batch_coordinator):
 # upstream keeps its own warning standard. ci/check_invariants.py verifies this
 # list stays complete as tests are added.
 set(EMBER_STRICT_TARGETS
   ember_core ember-server
-  test_sse test_tool_parser test_tool_schema test_tool_memory
+  test_sse test_tool_parser test_tool_parser_qwen4 test_tool_schema test_tool_memory
   test_tool_grammar test_tool_grammar_match
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
-  test_compaction test_gguf test_model_card test_kv_cache test_qa)
+  test_chat_template_qwen4
+  test_compaction test_gguf test_model_card test_model_profile test_image_input test_kv_cache test_qa)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
 endforeach()
@@ -455,6 +580,46 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mirror_gh_issues.py)
   set_tests_properties(mirror_gh_issues PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_release_package
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_release_package.py)
+  set_tests_properties(qwen_release_package PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_vision_provider_scripts
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_provider_scripts.py)
+  set_tests_properties(qwen_vision_provider_scripts PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_quantize_pipeline
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)
+  set_tests_properties(qwen_quantize_pipeline PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_intervention
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_intervention.py)
+  set_tests_properties(qwen_intervention PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_mtp_export
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_mtp_export.py)
+  set_tests_properties(qwen_mtp_export PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen4exp_baseline
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen4exp_baseline.py)
+  set_tests_properties(qwen4exp_baseline PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME qwen_builder_preflight
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_builder_preflight.py)
+  set_tests_properties(qwen_builder_preflight PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME benchmark_gate
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_gate.py)
+  set_tests_properties(benchmark_gate PROPERTIES TIMEOUT 20)
 endif()
 
 # ── standalone model-compute engine (vendored ggml fork + DeepSeek4) ──────
@@ -480,6 +645,17 @@ if(EMBER_ENGINE)
   set(AMDGPU_TARGETS          "gfx1151" CACHE STRING "" FORCE)
   enable_language(HIP)
   add_subdirectory(engine)
+
+  # Metadata-only split-set coverage. It links the real loader's gguf parser
+  # but never creates a HIP backend or touches a device, so it remains runnable
+  # in the GPU-less ROCm build container.
+  add_executable(test_qwen4exp_shards test/test_qwen4exp_shards.cpp)
+  target_include_directories(test_qwen4exp_shards PRIVATE
+    engine/dflash/qwen4exp engine/ggml/include)
+  target_link_libraries(test_qwen4exp_shards PRIVATE ember_engine)
+  ember_strict(test_qwen4exp_shards)
+  add_test(NAME qwen4exp_shards COMMAND test_qwen4exp_shards)
+  set_tests_properties(qwen4exp_shards PROPERTIES TIMEOUT 60)
 
   # Narrow placement diagnostic: loads only the trained DSpark main and three
   # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
@@ -520,6 +696,74 @@ if(EMBER_ENGINE)
     BUILD_RPATH "$ORIGIN/engine/ggml/src"
     BUILD_RPATH_USE_ORIGIN TRUE)
 
+  # Architecture-neutral, bounded-memory GGUF transformer. It uses ggml-base's
+  # CPU type traits and ROCMI4 reference quantizer only; no HIP backend is
+  # linked or initialized even though it ships from the full engine build.
+  set(EMBER_CONFIGURED_GIT_HEAD "" CACHE STRING
+    "40-hex Ember revision embedded in release tools")
+  if(NOT EMBER_CONFIGURED_GIT_HEAD)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+      execute_process(
+        COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse HEAD
+        OUTPUT_VARIABLE EMBER_CONFIGURED_GIT_HEAD
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE EMBER_GIT_COMMAND_RESULT)
+      if(NOT EMBER_GIT_COMMAND_RESULT EQUAL 0)
+        set(EMBER_CONFIGURED_GIT_HEAD "")
+      endif()
+    endif()
+    if(NOT EMBER_CONFIGURED_GIT_HEAD AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD")
+      file(READ "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD" EMBER_GIT_HEAD_TEXT)
+      string(STRIP "${EMBER_GIT_HEAD_TEXT}" EMBER_GIT_HEAD_TEXT)
+      if(EMBER_GIT_HEAD_TEXT MATCHES "^ref: (.+)$")
+        set(EMBER_GIT_HEAD_REF "${CMAKE_MATCH_1}")
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git/${EMBER_GIT_HEAD_REF}")
+          file(READ "${CMAKE_CURRENT_SOURCE_DIR}/.git/${EMBER_GIT_HEAD_REF}"
+            EMBER_CONFIGURED_GIT_HEAD)
+          string(STRIP "${EMBER_CONFIGURED_GIT_HEAD}"
+            EMBER_CONFIGURED_GIT_HEAD)
+        endif()
+      else()
+        set(EMBER_CONFIGURED_GIT_HEAD "${EMBER_GIT_HEAD_TEXT}")
+      endif()
+    endif()
+  endif()
+  string(LENGTH "${EMBER_CONFIGURED_GIT_HEAD}" EMBER_GIT_HEAD_LENGTH)
+  if(NOT EMBER_GIT_HEAD_LENGTH EQUAL 40 OR
+     NOT EMBER_CONFIGURED_GIT_HEAD MATCHES "^[0-9a-f]+$")
+    # Docker intentionally excludes .git. An unrelated server image must still
+    # configure when no explicit EMBER_CONFIGURED_GIT_HEAD was supplied, but a
+    # provenance-free quantizer must never be emitted. Release CI passes the
+    # revision explicitly; normal source checkouts discover it above.
+    message(STATUS
+      "ember-gguf-quantize disabled: configure with a 40-hex "
+      "EMBER_CONFIGURED_GIT_HEAD to build release tools")
+  else()
+    add_executable(ember-gguf-quantize
+      tools/gguf_quantize.cpp
+      tools/gguf_quantize_common.cpp)
+    target_include_directories(ember-gguf-quantize PRIVATE
+      tools
+      engine/third_party)
+    target_compile_definitions(ember-gguf-quantize PRIVATE
+      EMBER_CONFIGURED_GIT_HEAD="${EMBER_CONFIGURED_GIT_HEAD}")
+    target_link_libraries(ember-gguf-quantize PRIVATE ggml-base Threads::Threads)
+    ember_strict(ember-gguf-quantize)
+    set_target_properties(ember-gguf-quantize PROPERTIES
+      BUILD_RPATH "$ORIGIN/engine/ggml/src"
+      BUILD_RPATH_USE_ORIGIN TRUE)
+    if(Python3_Interpreter_FOUND)
+      add_test(
+        NAME gguf_quantize_tool
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test/test_gguf_quantize_tool.py
+                $<TARGET_FILE:ember-gguf-quantize>)
+      set_tests_properties(gguf_quantize_tool PROPERTIES TIMEOUT 60)
+    endif()
+  endif()
+
   # ember-dflash: the real server — Ember's C pipeline + the dflash bridge,
   # linked against the vendored ember_engine (no lucebox checkout needed). Uses
   # an explicit source list rather than ember_core, because ember_core links
@@ -532,6 +776,7 @@ if(EMBER_ENGINE)
     src/server/api_adapters.c
     src/server/compaction.c
     src/model/tool_parser.c
+    src/model/tool_parser_qwen4.c
     src/model/tool_schema.c
     src/model/tool_grammar.c
     src/server/background_gate.c
@@ -539,6 +784,10 @@ if(EMBER_ENGINE)
     src/model/continuation.c
     src/model/dsml_decode.c
     src/model/chat_template.c
+    src/model/chat_template_qwen4.c
+    src/model/image_input.c
+    src/model/gguf.c
+    src/model/model_profile.c
     src/model/model_card.c
     src/model/kv_cache.c
     src/server/main.c
@@ -552,7 +801,7 @@ if(EMBER_ENGINE)
   target_compile_definitions(ember-dflash PRIVATE _GNU_SOURCE)
   # The bridge TU pulls in lucebox headers that switch on the GPU backend.
   set_source_files_properties(src/backend/backend_dflash.cc PROPERTIES
-    COMPILE_DEFINITIONS "DFLASH27B_BACKEND_HIP=1;GGML_USE_HIP;GGML_USE_CPU")
+    COMPILE_DEFINITIONS "GGML_USE_HIP;GGML_USE_CPU")
   # xgrammar: backend_dflash.cc compiles the tool grammar and masks logits.
   target_link_libraries(ember-dflash PRIVATE ember_engine xgrammar Threads::Threads m)
   # --validate-gemm-batch calls hipBLAS directly from backend_dflash.cc.

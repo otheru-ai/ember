@@ -102,7 +102,7 @@ static bool rd_kv(FILE *f, gguf_kv *kv) {
     return rd_scalar(f, kv->type, &kv->i, &kv->f);
 }
 
-gguf_file *gguf_open(const char *path) {
+gguf_file *ember_gguf_open(const char *path) {
     if (!path) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -119,7 +119,7 @@ gguf_file *gguf_open(const char *path) {
     gguf_file *g = (gguf_file *)calloc(1, sizeof(gguf_file));
     if (!g) { fclose(f); return NULL; }
     if (!rd_u32(f, &g->version) || !rd_u64(f, &g->n_tensors) || !rd_u64(f, &g->n_kv)) {
-        fclose(f); gguf_free(g); return NULL;
+        fclose(f); ember_gguf_free(g); return NULL;
     }
     // The metadata directory cannot legitimately contain millions of entries.
     // Bound file-provided counts before converting them to allocation sizes.
@@ -130,51 +130,51 @@ gguf_file *gguf_open(const char *path) {
         g->n_kv > max_entries || g->n_tensors > max_entries ||
         g->n_kv > SIZE_MAX / sizeof(gguf_kv) ||
         g->n_tensors > SIZE_MAX / sizeof(gguf_tensor)) {
-        fclose(f); gguf_free(g); return NULL;
+        fclose(f); ember_gguf_free(g); return NULL;
     }
     g->kv = (gguf_kv *)calloc(g->n_kv ? g->n_kv : 1, sizeof(gguf_kv));
-    if (!g->kv) { fclose(f); gguf_free(g); return NULL; }
+    if (!g->kv) { fclose(f); ember_gguf_free(g); return NULL; }
     for (uint64_t i = 0; i < g->n_kv; i++) {
-        if (!rd_kv(f, &g->kv[i])) { fclose(f); gguf_free(g); return NULL; }
+        if (!rd_kv(f, &g->kv[i])) { fclose(f); ember_gguf_free(g); return NULL; }
     }
 
     g->tensors = (gguf_tensor *)calloc(g->n_tensors ? g->n_tensors : 1,
                                        sizeof(gguf_tensor));
-    if (!g->tensors) { fclose(f); gguf_free(g); return NULL; }
+    if (!g->tensors) { fclose(f); ember_gguf_free(g); return NULL; }
     for (uint64_t i = 0; i < g->n_tensors; i++) {
         gguf_tensor *t = &g->tensors[i];
         t->name = rd_str(f);
         if (!t->name || !rd_u32(f, &t->n_dims) || t->n_dims > 4) {
-            fclose(f); gguf_free(g); return NULL;
+            fclose(f); ember_gguf_free(g); return NULL;
         }
         for (uint32_t d = 0; d < t->n_dims; d++)
-            if (!rd_u64(f, &t->dims[d])) { fclose(f); gguf_free(g); return NULL; }
+            if (!rd_u64(f, &t->dims[d])) { fclose(f); ember_gguf_free(g); return NULL; }
         if (!rd_u32(f, &t->type) || !rd_u64(f, &t->offset)) {
-            fclose(f); gguf_free(g); return NULL;
+            fclose(f); ember_gguf_free(g); return NULL;
         }
     }
 
     // data section starts at the next `alignment` boundary (default 32).
-    int64_t align = gguf_get_int(g, "general.alignment", 32);
+    int64_t align = ember_gguf_get_int(g, "general.alignment", 32);
     // GGUF alignment is a small power of two. Reject invalid metadata instead
     // of allowing signed overflow in the rounding expression.
     if (align <= 0 || align > (1 << 20) ||
         ((uint64_t)align & ((uint64_t)align - 1)) != 0) {
-        fclose(f); gguf_free(g); return NULL;
+        fclose(f); ember_gguf_free(g); return NULL;
     }
     long pos = ftell(f);
     if (pos < 0 || (uint64_t)pos > UINT64_MAX - ((uint64_t)align - 1)) {
-        fclose(f); gguf_free(g); return NULL;
+        fclose(f); ember_gguf_free(g); return NULL;
     }
     g->data_offset =
         ((uint64_t)pos + (uint64_t)align - 1) / (uint64_t)align *
         (uint64_t)align;
     if (g->n_tensors > 0 && g->data_offset > file_size) {
-        fclose(f); gguf_free(g); return NULL;
+        fclose(f); ember_gguf_free(g); return NULL;
     }
     for (uint64_t i = 0; i < g->n_tensors; ++i) {
         if (g->tensors[i].offset > file_size - g->data_offset) {
-            fclose(f); gguf_free(g); return NULL;
+            fclose(f); ember_gguf_free(g); return NULL;
         }
     }
     fclose(f);
@@ -189,7 +189,7 @@ gguf_file *gguf_open(const char *path) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
 #endif
-void gguf_free(gguf_file *g) {
+void ember_gguf_free(gguf_file *g) {
     if (!g) return;
     for (uint64_t i = 0; g->kv && i < g->n_kv; i++) {
         gguf_kv *kv = &g->kv[i];
@@ -211,22 +211,22 @@ void gguf_free(gguf_file *g) {
 #pragma GCC diagnostic pop
 #endif
 
-const gguf_kv *gguf_get(const gguf_file *g, const char *key) {
+const gguf_kv *ember_gguf_get(const gguf_file *g, const char *key) {
     for (uint64_t i = 0; i < g->n_kv; i++)
         if (strcmp(g->kv[i].key, key) == 0) return &g->kv[i];
     return NULL;
 }
-int64_t gguf_get_int(const gguf_file *g, const char *key, int64_t dflt) {
-    const gguf_kv *kv = gguf_get(g, key);
+int64_t ember_gguf_get_int(const gguf_file *g, const char *key, int64_t dflt) {
+    const gguf_kv *kv = ember_gguf_get(g, key);
     return kv && kv->type != GGUF_STRING && kv->type != GGUF_ARRAY &&
                    kv->type != GGUF_F32 && kv->type != GGUF_F64
                ? kv->i : dflt;
 }
-double gguf_get_float(const gguf_file *g, const char *key, double dflt) {
-    const gguf_kv *kv = gguf_get(g, key);
+double ember_gguf_get_float(const gguf_file *g, const char *key, double dflt) {
+    const gguf_kv *kv = ember_gguf_get(g, key);
     return kv && (kv->type == GGUF_F32 || kv->type == GGUF_F64) ? kv->f : dflt;
 }
-const char *gguf_get_str(const gguf_file *g, const char *key, const char *dflt) {
-    const gguf_kv *kv = gguf_get(g, key);
+const char *ember_gguf_get_str(const gguf_file *g, const char *key, const char *dflt) {
+    const gguf_kv *kv = ember_gguf_get(g, key);
     return kv && kv->type == GGUF_STRING ? kv->str : dflt;
 }

@@ -105,7 +105,7 @@ message(STATUS
 set(DFLASH ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
 set(EMBER_ENGINE_INC
   ${DFLASH} ${DFLASH}/common ${DFLASH}/deepseek4
-  ${DFLASH}/server ${DFLASH}/placement ${DFLASH}/include ${DFLASH}/qwen35
+  ${DFLASH}/qwen4exp ${DFLASH}/server ${DFLASH}/placement
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 add_library(ember_engine STATIC
@@ -114,26 +114,35 @@ add_library(ember_engine STATIC
   ${DFLASH}/deepseek4/deepseek4_backend.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark_spec.cpp
-  ${DFLASH}/common/crash_breadcrumb.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_model.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_shards.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_loader.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_runtime.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_state.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_mtp.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_mtp_runtime.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_mtp_loader.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_activation_dump.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_backend.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_vision.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_vision_provider.cpp
+  ${DFLASH}/common/crash_breadcrumb.c
+  ${DFLASH}/common/qwen_yarn.c
   ${DFLASH}/common/continuous_batch_executor.cpp
   ${DFLASH}/common/continuous_batch_scheduler.cpp
   ${DFLASH}/common/resident_batch_coordinator.cpp
   ${DFLASH}/common/sampler.cpp
-  ${DFLASH}/common/ddtree.cpp
   ${DFLASH}/common/dspark_head.cpp
   ${DFLASH}/common/dspark_draft_compute_xdna.cpp
   ${DFLASH}/common/moe_hybrid_ffn_eval.cpp
   ${DFLASH}/common/moe_hybrid_placement.cpp
-  ${DFLASH}/common/moe_hybrid_routing_stats.cpp
   ${DFLASH}/common/moe_hybrid_storage.cpp
   ${DFLASH}/common/moe_hybrid_stream.cpp
   ${DFLASH}/server/pre_tokenizer.cpp
   ${DFLASH}/server/tokenizer.cpp
-  ${DFLASH}/server/prefix_cache.cpp
   ${DFLASH}/server/disk_prefix_cache.cpp
-  # Link-time infrastructure (base classes / helpers defined in "other" files):
-  ${DFLASH}/errors.cpp                     # set_last_error
-  ${DFLASH}/qwen35/gguf_target_loader.cpp  # CpuEmbedder (generic despite the dir)
+  ${DFLASH}/common/cpu_embedder.cpp
+  ${DFLASH}/errors.c
   ${DFLASH}/ember_create_backend.cpp)
 
 target_include_directories(ember_engine PUBLIC ${EMBER_ENGINE_INC})
@@ -149,7 +158,7 @@ target_sources(ember_engine PRIVATE ${DFLASH}/deepseek4/deepseek4_hc_cuda.cu)
 set_source_files_properties(${DFLASH}/deepseek4/deepseek4_hc_cuda.cu
   PROPERTIES LANGUAGE HIP)
 set_target_properties(ember_engine PROPERTIES HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
-target_compile_definitions(ember_engine PRIVATE DFLASH27B_BACKEND_HIP=1 GGML_USE_HIP GGML_USE_CPU)
+target_compile_definitions(ember_engine PRIVATE GGML_USE_HIP GGML_USE_CPU)
 # The dflash sources use CUDA-compatible spellings supplied by HIP shims.
 target_include_directories(ember_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/hip_compat_engine)
 find_package(hip QUIET)

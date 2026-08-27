@@ -14,7 +14,6 @@
 
 typedef struct {
     int    max_tokens;                 // standard combined cap
-    int    complex_problem_max_tokens; // drives x-high/max tiers
     int    hard_limit_reply_budget;    // tokens reserved post-</think>
     char  *thinking_terminator_hint;   // injected at the budget edge (owned)
     struct { int low, medium, high, xhigh, max; } tiers;
@@ -24,6 +23,16 @@ typedef struct {
     double temperature, top_p;
     int    top_k;
     double min_p, presence_penalty, repetition_penalty;
+    // Advisory context-extension recipe from the sidecar. Loading a card never
+    // activates it: the server still requires the architecture-specific CLI
+    // opt-in and passes the exact requested context to the backend. This keeps
+    // static YaRN from silently changing short-context quality.
+    struct {
+        bool   available;
+        int    native_context;
+        int    max_context;
+        double factor;
+    } context_extension;
     bool   loaded;
 } ember_model_card;
 

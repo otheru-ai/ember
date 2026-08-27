@@ -104,8 +104,9 @@ private:
     int32_t eos_id_ = -1;
     int32_t eos_chat_id_ = -1;  // <|im_end|> for Qwen3
 
-    // Pre-tokenizer type selected from GGUF metadata.
-    PreTokenizer pre_type_ = PreTokenizer::QWEN35;
+    // Selected from tokenizer.ggml.pre at load time. Keeping this as runtime
+    // state prevents Qwen4Exp from silently taking DeepSeek's JoyAI splitter.
+    PreTokenizer pre_type_ = PreTokenizer::JOYAI_LLM;
 
     // Decode mode: SentencePiece tokens use UTF-8 with ▁ for space;
     // GPT-2/BPE tokens use byte-level Unicode encoding.

@@ -1540,8 +1540,7 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
 // returns nonsense. Derive it the same way CK does.
 #if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
     defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || \
-    defined(__gfx1152__) || defined(__gfx1153__) || defined(__gfx11_generic__) || \
-    defined(__gfx1200__) || defined(__gfx1201__)
+    defined(__gfx1152__) || defined(__gfx1153__) || defined(__gfx11_generic__)
 #define DS4_HAVE_WMMA 1
 #endif
 
@@ -1926,7 +1925,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
     if (dec_wmma_enabled &&
         n_tokens == 1 && n_heads == 64 && !sparse && !indexed_mask && mask &&
         mask->type == GGML_TYPE_F16 && rope_flags == 0 && n_kv >= 16 &&
-        (GGML_CUDA_CC_IS_RDNA3(dec_cc) || GGML_CUDA_CC_IS_RDNA4(dec_cc))) {
+        GGML_CUDA_CC_IS_RDNA3(dec_cc)) {
         constexpr int NH = 64;
         // DFLASH_DS4_DECODE_SPLIT pins the split count. Different split counts
         // change the order of the cross-split rescale in the combine pass, so a
@@ -2652,31 +2651,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_VEC;
         }
         return BEST_FATTN_KERNEL_WMMA_F16;
-    }
-
-    if (amd_wmma_available(cc) && GGML_CUDA_CC_IS_RDNA4(cc) && gqa_opt_applies && Q->ne[0] <= 128 && Q->ne[0] != 40 && Q->ne[0] != 72) {
-        if (can_use_vector_kernel) {
-            if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
-                if (Q->ne[1] == 1) {
-                    if (!gqa_opt_applies) {
-                        return BEST_FATTN_KERNEL_VEC;
-                    }
-                }
-            } else {
-                if (Q->ne[1] <= 2) {
-                    return BEST_FATTN_KERNEL_VEC;
-                }
-            }
-        }
-        int gqa_ratio_eff = 1;
-        const int ncols2_max = Q->ne[0] == 576 ? 16 : 8;
-        while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
-            gqa_ratio_eff *= 2;
-        }
-        if (Q->ne[1] * gqa_ratio_eff <= 8) {
-            return BEST_FATTN_KERNEL_TILE; // AMD WMMA is only faster if the full tile width of 16 can be utilized.
-        }
-        return BEST_FATTN_KERNEL_MMA_F16;
     }
 
     // Use MFMA flash attention for CDNA (MI100+):

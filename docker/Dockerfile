@@ -5,7 +5,7 @@
 # stages add the current resident DSpark XDNA2 path; historical kernel
 # generations and validators are deliberately not shipped.
 
-ARG ROCM_DEV_IMAGE=rocm/dev-ubuntu-24.04:7.14.0-full@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
+ARG ROCM_DEV_IMAGE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:019e8eb29a85e74d64925745884f2ec79aa27e3feab36353d24656f4d6b89467
 ARG EMBER_VERSION=dev
 ARG EMBER_VCS_REF=unknown
@@ -24,17 +24,48 @@ RUN apt-get update \
 RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig
 
+# The Qwen vision tower stays in a separate llama.cpp mtmd/ggml lineage. Build
+# its tiny Ember ABI adapter against the exact converter revision; neither the
+# text GGUF nor the BF16 mmproj is present or opened during the image build.
+FROM toolchain AS qwen-vision-provider-build
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /ember
+COPY scripts/build_qwen_vision_provider.sh scripts/check_qwen_vision_provider.py /ember/scripts/
+COPY tools/qwen4exp_vision_provider_llamacpp.cpp /ember/tools/
+COPY tools/qwen_vision_provider/ /ember/tools/qwen_vision_provider/
+COPY engine/dflash/qwen4exp/qwen4exp_vision_provider.h /ember/engine/dflash/qwen4exp/
+
+ENV CCACHE_DIR=/root/.cache/ccache \
+    CCACHE_COMPRESS=true \
+    CCACHE_MAXSIZE=20G
+RUN --mount=type=cache,id=ember-qwen-vision-ccache,target=/root/.cache/ccache,sharing=locked \
+    scripts/build_qwen_vision_provider.sh \
+      --build-dir /qwen-vision-build \
+      --install-dir /opt/qwen-vision-provider \
+      --backend hip \
+      --jobs "$(nproc)" \
+ && install -Dm0644 /qwen-vision-build/llama.cpp/LICENSE \
+      /qwen-vision-licenses/llama.cpp/LICENSE
+
 FROM toolchain AS dev
+
+ARG EMBER_VCS_REF
 
 # Kernel profiling is a first-class dev-image capability (scripts/profile_gpu.sh,
 # and the rocprofv3 traces cited in quantize.cu and tools/bench_decode_attn.hip).
-# rocprofv3 arrives with the pinned rocm/dev-ubuntu-24.04:*-full base rather than
-# from apt, so nothing in this file would otherwise record that we depend on it.
-# Assert it here: a base-image bump that drops the profiler, or a switch to a
-# non-full ROCm variant, then fails the build instead of silently shipping a dev
-# image that cannot profile. Kept before COPY so it fails fast and stays cached.
+# Both profilers arrive with the pinned ROCm full image rather than from apt.
+# ROCm Compute Profiler 3.8.0 is load-bearing for its corrected gfx1150/1151/
+# 1152 roofline model. Keep these assertions before COPY so a mutable-tag or
+# package-content regression fails fast and stays cached.
 RUN command -v rocprofv3 >/dev/null 2>&1 \
- || { echo 'rocprofv3 missing: the dev image must be able to profile kernels' >&2; exit 1; }
+ && rocprofv3 --version 2>&1 | grep -F 'rocm_version: 10.0.0' >/dev/null \
+ && command -v rocprof-compute >/dev/null 2>&1 \
+ && rocprof-compute --version 2>&1 | grep -F 'rocprofiler-compute version: 3.8.0' >/dev/null \
+ || { echo 'ROCm 10.0 profiling toolchain missing or version-mismatched' >&2; exit 1; }
 
 # Hyperloom (AMD-AGI): agentic inference-optimization toolkit -- TraceLens trace
 # analysis, the GEAK kernel optimizer, and the Arbor search engine. Dev image
@@ -74,6 +105,8 @@ RUN apt-get update \
 
 WORKDIR /ember
 COPY . /ember
+COPY --from=qwen-vision-provider-build /opt/qwen-vision-provider/ /opt/qwen-vision-provider/
+COPY --from=qwen-vision-provider-build /qwen-vision-licenses/ /ember-licenses/
 
 ENV CCACHE_DIR=/root/.cache/ccache \
     CCACHE_COMPRESS=true \
@@ -85,6 +118,7 @@ RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharin
     cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
       -DEMBER_ENGINE=ON \
+      -DEMBER_CONFIGURED_GIT_HEAD="${EMBER_VCS_REF}" \
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /ember/build-rocm \
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
@@ -107,6 +141,7 @@ RUN gcc -shared -fPIC -O2 -g \
  && bash docker/collect-runtime.sh /ember-runtime \
       /usr/local/bin/ember-dflash \
       /usr/local/lib/libsegvtrace.so \
+      /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so \
       /opt/rocm/bin/rocminfo \
  && rocblas_kpack="$(find /opt/rocm -type f \
       -path '*/.kpack/blas_lib_gfx1151.kpack' -print -quit)" \
@@ -143,7 +178,7 @@ FROM ${RUNTIME_IMAGE} AS release
 ARG EMBER_VERSION
 ARG EMBER_VCS_REF
 LABEL org.opencontainers.image.title="Ember" \
-      org.opencontainers.image.description="DeepSeek-V4-Flash inference server for AMD Strix Halo" \
+      org.opencontainers.image.description="DeepSeek-V4-Flash and Qwen3.8-Flash-Next inference server for AMD Strix Halo" \
       org.opencontainers.image.version="${EMBER_VERSION}" \
       org.opencontainers.image.revision="${EMBER_VCS_REF}" \
       org.opencontainers.image.licenses="MIT" \
@@ -164,10 +199,12 @@ COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig \
- && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found'
+ && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found' \
+ && ! ldd /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so | grep -q 'not found'
 
 ENV EMBER_MODEL_DIR=/models \
-    EMBER_KV_CACHE_DIR=/cache
+    EMBER_KV_CACHE_DIR=/cache \
+    DFLASH_QWEN_VISION_PROVIDER=/opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so
 
 ENTRYPOINT ["/usr/local/bin/ember-entrypoint"]
 
@@ -297,7 +334,7 @@ RUN apt-get update \
 
 FROM release AS release-xdna
 
-LABEL org.opencontainers.image.description="DeepSeek-V4-Flash inference server with experimental CPU/GPU/XDNA2 DSpark provider"
+LABEL org.opencontainers.image.description="Ember inference server with experimental CPU/GPU/XDNA2 DSpark provider"
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

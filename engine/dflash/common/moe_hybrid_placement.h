@@ -7,12 +7,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <string>
 #include <vector>
 
 namespace dflash::common {
-
-struct MoeHybridRoutingStats;  // forward decl
 
 inline uint64_t moe_hybrid_core_bytes_from_memory(const char * log_prefix,
                                                   size_t gpu_free,
@@ -42,28 +39,6 @@ struct MoeHybridPlacement {
 
     bool matches(int n_layer, int n_expert, int n_expert_used) const;
     bool matches(const MoeHybridConfig & cfg) const;
-    bool empty() const;
-    bool is_hot(int layer_idx, int expert_idx) const;
-
-    bool save_json(const std::string & path, const std::string & arch_name = "moe_hybrid",
-                   std::string * err = nullptr) const;
-    static bool load_json(const std::string & path,
-                          MoeHybridPlacement & out,
-                          std::string * err = nullptr);
-
-    static bool build_from_stats(const MoeHybridRoutingStats & stats,
-                                 int total_hot_budget,
-                                 int min_hot_per_layer,
-                                 MoeHybridPlacement & out,
-                                 std::string * err = nullptr);
-
-    static bool build_from_stats_with_layer_bytes(
-        const MoeHybridRoutingStats & stats,
-        const std::vector<uint64_t> & layer_expert_bytes,
-        uint64_t total_hot_budget_bytes,
-        int min_hot_per_layer,
-        MoeHybridPlacement & out,
-        std::string * err = nullptr);
 };
 
 }  // namespace dflash::common

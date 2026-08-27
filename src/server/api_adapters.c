@@ -53,6 +53,38 @@ static char *content_text(const ember_json *v) {
     return out ? out : strdup("");
 }
 
+static bool responses_message_content_is_text_only(const ember_json *v,
+                                                   char *err,
+                                                   size_t err_cap) {
+    if (!v || v->type == EMBER_JSON_STRING) return true;
+    if (v->type != EMBER_JSON_ARRAY) {
+        set_err(err, err_cap,
+                "Responses message content must be a string or block array");
+        return false;
+    }
+    for (int i = 0; i < ember_json_len(v); ++i) {
+        const ember_json *part = ember_json_at(v, i);
+        const char *type = ember_json_str(
+            ember_json_get(part, "type"), NULL);
+        if (!part || part->type != EMBER_JSON_OBJECT || !type) {
+            set_err(err, err_cap,
+                    "Responses content blocks require a string type");
+            return false;
+        }
+        if (!strcmp(type, "text") || !strcmp(type, "input_text") ||
+            !strcmp(type, "output_text") || !strcmp(type, "summary_text"))
+            continue;
+        if (!strcmp(type, "input_image")) {
+            set_err(err, err_cap,
+                    "Responses image inputs are not available in this engine build");
+            return false;
+        }
+        set_err(err, err_cap, "unsupported Responses message content block");
+        return false;
+    }
+    return true;
+}
+
 static void message_begin(ember_buf *messages, bool *comma,
                           const char *role, const char *content) {
     if (*comma) ember_buf_putc(messages, ',');
@@ -415,7 +447,13 @@ static bool build_responses_messages(const ember_json *input,
             if (strcmp(role, "assistant"))
                 flush_pending_reasoning(
                     messages, &comma, &pending_reasoning);
-            char *text = content_text(ember_json_get(item, "content"));
+            const ember_json *message_content = ember_json_get(item, "content");
+            if (!responses_message_content_is_text_only(
+                    message_content, err, err_cap)) {
+                free(pending_reasoning);
+                return false;
+            }
+            char *text = content_text(message_content);
             message_begin(messages, &comma, role, text);
             if (!strcmp(role, "assistant") &&
                 pending_reasoning && pending_reasoning[0]) {

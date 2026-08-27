@@ -23,10 +23,10 @@ Methodology notes that matter for reading the output:
     client and the profiler. Every segment found is printed with its duration
     and dispatch count, so a bad split is obvious instead of load-bearing.
 
-  * FETCH_SIZE/WRITE_SIZE are reported by rocprof in KILOBYTES on every ROCm
-    release checked. That factor is the difference between "at the roofline"
-    and "3% of it", so it is stated in the output and overridable with
-    --counter-unit rather than buried.
+  * FETCH_SIZE/WRITE_SIZE were measured in KiB with Ember's ROCm 7.14 setup.
+    ROCm 10 does not document those derived-counter units, so a new bundle's
+    manifest can withhold the roofline verdict until a known-traffic gfx1151
+    calibration is supplied explicitly with --counter-unit.
 
 Stdlib only, matching every other script in this repo.
 """
@@ -47,6 +47,20 @@ from collections import defaultdict
 DEFAULT_PEAK_GBPS = 212.0
 
 UNIT_SCALE = {"b": 1, "kb": 1024, "mb": 1024 * 1024}
+
+
+def load_manifest(outdir):
+    path = os.path.join(outdir, "manifest.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{path}: invalid profiling manifest: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"{path}: profiling manifest must be a JSON object")
+    return value
 
 
 def _find(header, *candidates):
@@ -276,6 +290,11 @@ def verdict(decode, peak_gbps):
 
 def human(report, peak_gbps):
     out = []
+    if not report.get("counter_unit_certified", True):
+        out.append(
+            "WARNING: counter unit is an uncalibrated manifest assumption; "
+            "bandwidth values below are exploratory"
+        )
     for phase in ("prefill", "decode"):
         p = report["phases"].get(phase, {})
         out.append(f"\n=== {phase.upper()} ===")
@@ -332,26 +351,51 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=12, help="hotspots to list (default 12)")
     ap.add_argument("--peak-gbps", type=float, default=DEFAULT_PEAK_GBPS,
                     help=f"measured memory roofline (default {DEFAULT_PEAK_GBPS})")
-    ap.add_argument("--counter-unit", choices=sorted(UNIT_SCALE), default="kb",
-                    help="unit of FETCH_SIZE/WRITE_SIZE (default kb, as rocprof reports)")
+    ap.add_argument("--counter-unit", choices=sorted(UNIT_SCALE), default=None,
+                    help=("calibrated unit of FETCH_SIZE/WRITE_SIZE; required to "
+                          "certify a bundle whose manifest marks units uncertified"))
     ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = ap.parse_args(argv)
 
     if not os.path.isdir(args.outdir):
         raise SystemExit(f"not a directory: {args.outdir}")
 
-    scale = UNIT_SCALE[args.counter_unit]
+    manifest = load_manifest(args.outdir)
+    unit_metadata = manifest.get("counter_unit", {}) if manifest else {}
+    manifest_unit = unit_metadata.get("assumed", "kb")
+    if manifest_unit not in UNIT_SCALE:
+        raise SystemExit(f"manifest has unsupported counter unit: {manifest_unit!r}")
+    counter_unit = args.counter_unit or manifest_unit
+    explicit_counter_unit = args.counter_unit is not None
+    unit_certified = bool(
+        unit_metadata.get("release_bandwidth_verdict_certified", True)
+    ) or explicit_counter_unit
+    scale = UNIT_SCALE[counter_unit]
     gap_ns = int(args.gap_ms * 1e6)
     report = {
         "outdir": args.outdir,
         "peak_gbps": args.peak_gbps,
-        "counter_unit": args.counter_unit,
+        "counter_unit": counter_unit,
+        "counter_unit_source": "explicit" if explicit_counter_unit else (
+            "manifest" if manifest else "legacy_default"
+        ),
+        "counter_unit_certified": unit_certified,
         "phases": {
             phase: analyse_phase(args.outdir, phase, gap_ns, args.top, scale)
             for phase in ("prefill", "decode")
         },
     }
-    report["verdict"] = verdict(report["phases"].get("decode", {}), args.peak_gbps)
+    if unit_certified:
+        report["verdict"] = verdict(
+            report["phases"].get("decode", {}), args.peak_gbps
+        )
+    else:
+        report["verdict"] = (
+            "INCONCLUSIVE: this bundle marks FETCH_SIZE/WRITE_SIZE units "
+            "uncertified for ROCm 10 on gfx1151. Calibrate with known traffic "
+            "and pass the verified unit explicitly via --counter-unit before "
+            "publishing a bandwidth or roofline verdict."
+        )
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)

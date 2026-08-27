@@ -10,7 +10,6 @@
 #include "common/progress_cycle_detector.h"
 #include "common/sampler.h"
 #include "../common/moe_hybrid_placement.h"
-#include "../common/moe_hybrid_routing_stats.h"
 #include "../common/moe_hybrid_storage.h"
 #include "../common/moe_hybrid_stream.h"
 #include "../common/dspark_draft_compute_xdna.h"
@@ -185,13 +184,9 @@ private:
                                           int max_ctx,
                                           MoeHybridPlacement & out,
                                           std::string * err) const;
-    void maybe_save_routing_stats();
-
     std::shared_ptr<MoeHybridStorage> moe_hybrid_;
     MoeHybridPlacement                moe_placement_;
     MoeHybridStreamEngine             stream_engine_;
-    std::shared_ptr<MoeHybridRoutingStats> routing_stats_;
-    std::string                       routing_stats_out_path_;
 };
 
 }  // namespace dflash::common

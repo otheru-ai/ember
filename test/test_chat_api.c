@@ -53,7 +53,13 @@ static void test_multimodal_content(void) {
     ember_chat_request req;
     CHECK(ember_chat_request_parse(v, &req), "parse multimodal");
     CHECK(strcmp(req.messages[0].content, "look: a cat") == 0,
-          "text parts flattened, non-text dropped");
+          "text parts retain their flattened compatibility view");
+    CHECK(req.has_images, "multimodal request records an image");
+    CHECK(req.messages[0].n_parts == 3,
+          "ordered multimodal parts are preserved");
+    CHECK(req.messages[0].parts[1].kind == EMBER_CONTENT_IMAGE_URL &&
+          strcmp(req.messages[0].parts[1].text, "x") == 0,
+          "image URL survives request normalization");
     CHECK(!req.has_tools, "no tools");
     CHECK(!ember_chat_request_is_tool_result_continuation(&req),
           "ordinary message history may use speculative decode");

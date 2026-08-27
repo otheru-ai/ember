@@ -43,11 +43,6 @@ struct CachedFfnGraph {
     ggml_tensor * ids = nullptr;        // [n_hot, 1] I32 expert IDs
     ggml_tensor * weights = nullptr;    // [n_hot, 1] F32 expert weights
     ggml_tensor * output = nullptr;     // [n_embd, 1] F32 output (routed + shared)
-    ggml_tensor * global_ids = nullptr;   // [n_hot,1] I32 global expert ids (gpu-remap)
-    ggml_tensor * raw_weights = nullptr;  // [n_hot,1] F32 router weights (gpu-remap)
-    ggml_tensor * hot_local_lut = nullptr;// [1,n_expert] I32 global->local hot id
-    ggml_tensor * valid_lut = nullptr;    // [1,n_expert] F32 1=hot 0=cold
-    ggml_tensor * residual_in = nullptr; // [n_embd,1] F32 residual (gpu-remap)
     int n_hot = 0;                      // number of hot experts this graph supports
     int n_tokens = 1;                   // batched graph token count
 
@@ -92,16 +87,6 @@ struct MoeHybridLayerStorage {
     std::vector<int32_t> cold_expert_ids;
     std::vector<int32_t> hot_local_by_global;
     std::vector<int32_t> cold_local_by_global;
-
-    // --- Bounded GPU expert cache (laguna) ---
-    // Hot tensors are over-allocated by `cache_slots` spare entries appended
-    // after the `hot_active` calibration-placed experts. A spare slot holds a
-    // swapped-in cold expert; LRU eviction keeps the cache bounded.
-    int hot_active = 0;            // # calibration-placed (pinned) hot experts
-    int cache_slots = 0;          // # spare slots (cache capacity)
-    std::vector<int32_t> spare_global;  // [cache_slots] global expert in each slot (-1 empty)
-    std::vector<uint64_t> spare_lru;    // [cache_slots] last-use tick
-    uint64_t lru_clock = 0;
 
     // Bitmask: bit set = expert is in VRAM (hot). Supports up to 256 experts.
     uint64_t expert_vram_mask[4] = {};
@@ -164,7 +149,6 @@ struct MoeHybridStorage {
     ggml_backend_t cpu_backend = nullptr;
     ggml_backend_t cold_backend = nullptr; // Alias: either cpu_backend or caller-owned GPU/HIP backend.
     MoeHybridColdBackend cold_backend_kind = MoeHybridColdBackend::Cpu;
-    bool materialized_hot_experts = true;
     bool materialized_cold_experts = true;
     MoeHybridPlacement placement;
     std::vector<MoeHybridLayerStorage> layers;
@@ -197,20 +181,6 @@ struct LayerExpertFileData {
     ExpertTensorFileData gate_up_exps;  // optional fused
 };
 
-// Build hybrid storage from GPU-resident expert tensors.
-// layer_descs: one MoeLayerDesc per MoE layer (caller constructs from model-specific types).
-bool build_moe_hybrid_storage(const MoeHybridConfig & cfg,
-                              ggml_backend_t gpu_backend,
-                              const MoeHybridPlacement & placement,
-                              const std::vector<MoeLayerDesc> & layer_descs,
-                              MoeHybridStorage & out,
-                              std::string * err = nullptr);
-
-// Swap a cold expert into a spare GPU cache slot (LRU evict). Returns the new
-// hot-local index, or -1 on failure. No-op (returns existing) if already hot.
-int moe_hybrid_cache_swap_in(MoeHybridLayerStorage & st, int global_expert,
-                             ggml_backend_t gpu_backend);
-
 // Build hybrid storage by loading expert data directly from file (mmap).
 bool build_moe_hybrid_storage_from_file(
     const MoeHybridConfig & cfg,
@@ -219,17 +189,7 @@ bool build_moe_hybrid_storage_from_file(
     const std::vector<MoeLayerDesc> & layer_descs,
     const std::vector<LayerExpertFileData> & file_data,
     MoeHybridStorage & out,
-    std::string * err = nullptr,
-    int cache_slots = 0,
-    bool allocate_cold = true);
-
-// Spark: split a VRAM budget into a pinned-hot tier + an auto-sized expert
-// cache ring. target_bytes==0 keeps the current budget (use the card);
-// otherwise the budget is clamped to fit target_bytes minus core_kv_safety.
-struct MoeSparkBudget { uint64_t hot_bytes; int cache_slots; };
-MoeSparkBudget spark_budget_split(uint64_t expert_budget, uint64_t total_expert_bytes,
-                                  int n_expert, uint64_t core_kv_safety,
-                                  uint64_t target_bytes);
+    std::string * err = nullptr);
 
 // Build hybrid storage from file AND retain mmap for streaming prefill.
 // Ownership of a successful mapping transfer moves to `out`; its destructor
@@ -246,7 +206,6 @@ bool build_moe_hybrid_storage_from_file_with_mmap(
     const void * mmap_base,
     size_t mmap_total_size,
     MoeHybridStorage & out,
-    std::string * err = nullptr,
-    int cache_slots = 0);
+    std::string * err = nullptr);
 
 }  // namespace dflash::common

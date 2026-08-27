@@ -22,12 +22,24 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
+#include "gguf.h"
 
-#include "internal.h"
+#include "common/cpu_embedder.h"
 #include "placement/placement_config.h"
 #include "common/prefill_attention_mode.h"
 
 namespace dflash::common {
+
+struct MoeHybridStorage;
+
+struct TargetLoadPlan {
+    int  layer_begin = 0;
+    int  layer_end = -1;
+    bool load_output = true;
+    bool skip_expert_tensors = false;
+    bool metadata_only = false;
+    bool expert_metadata_only = false;
+};
 
 // Layer-major prefill may schedule two 2K numerical bands while preserving
 // the raw-cache rounding boundary between them.
@@ -45,7 +57,6 @@ inline constexpr std::size_t DS4_DECODE_FLASH_SHMEM_BUDGET = 63u * 1024u;
 
 struct MoeHybridPlacement;
 struct MoeHybridConfig;
-struct MoeHybridRoutingStats;
 class MoeHybridStreamEngine;
 
 // PORTED from lucebox: verify-width bounds for DSpark speculative decode.
@@ -419,7 +430,6 @@ bool deepseek4_step(
     const int32_t *             token_ids = nullptr,
     MoeHybridStreamEngine *     stream_engine = nullptr,
     DeepSeek4StepTelemetry *    telemetry = nullptr,
-    MoeHybridRoutingStats *     routing_stats = nullptr,
     Ds4VerifyHooks *            verify_hooks = nullptr);
 
 // Optional hooks for the DSpark spec-decode batched verify (deepseek4_dspark).
@@ -451,23 +461,6 @@ bool deepseek4_step_layer_range(
     DeepSeek4StepTelemetry *    telemetry = nullptr,
     bool                        allow_decode_graph_reuse = true,
     Ds4VerifyHooks *            verify_hooks = nullptr);
-
-bool build_deepseek4_moe_hybrid_storage_from_file(
-    const std::string &         path,
-    ggml_backend_t              backend,
-    const DeepSeek4Weights &    w,
-    const MoeHybridPlacement &  placement,
-    const MoeHybridConfig *     cfg_override,
-    MoeHybridStorage &          out,
-    std::string *               err = nullptr);
-
-bool build_deepseek4_moe_hybrid_storage_from_file(
-    const std::string &         path,
-    ggml_backend_t              backend,
-    const DeepSeek4Weights &    w,
-    const MoeHybridPlacement &  placement,
-    MoeHybridStorage &          out,
-    std::string *               err = nullptr);
 
 bool build_deepseek4_moe_hybrid_storage_from_file_with_mmap(
     const std::string &         path,

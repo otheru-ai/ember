@@ -85,6 +85,10 @@ jobs:
           # parent, so both commits must be present locally.
           fetch-depth: 2
 
+      - name: Inspect Qwen artifact-builder capacity
+        if: startsWith(github.ref, 'refs/heads/feat/qwen3.8-flash-next')
+        run: python3 scripts/qwen_builder_preflight.py --output qwen-builder-preflight.json
+
       - name: Verify checkout, version, and hardware certification
         env:
           CERTIFIED_SHA: ${{ vars.EMBER_GFX1151_CERTIFIED_SHA }}

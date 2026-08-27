@@ -21,7 +21,7 @@ extern "C" {
 namespace ember::xdna2 {
 namespace {
 
-using GgufOwner = std::unique_ptr<gguf_file, decltype(&gguf_free)>;
+using GgufOwner = std::unique_ptr<gguf_file, decltype(&ember_gguf_free)>;
 
 bool fail(std::string * error, const std::string & message) {
     if (error) *error = message;
@@ -118,16 +118,16 @@ bool load_rocmfp4_model_experts(const char * path,
         seen[id] = true;
     }
 
-    GgufOwner file(gguf_open(path), &gguf_free);
+    GgufOwner file(ember_gguf_open(path), &ember_gguf_free);
     if (!file) return fail(error, std::string("cannot parse GGUF: ") + path);
-    if (std::strcmp(gguf_get_str(file.get(), "general.architecture", ""),
+    if (std::strcmp(ember_gguf_get_str(file.get(), "general.architecture", ""),
                     "deepseek4-dflash-draft") != 0) {
         return fail(error, "GGUF is not a deepseek4-dflash-draft model");
     }
-    if (gguf_get_int(file.get(),
+    if (ember_gguf_get_int(file.get(),
                      "deepseek4-dflash-draft.block_count", -1) !=
             kRocmfp4ModelLayers ||
-        gguf_get_int(file.get(),
+        ember_gguf_get_int(file.get(),
                      "deepseek4-dflash-draft.expert_count", -1) !=
             kRocmfp4ModelExperts) {
         return fail(error, "GGUF DSpark layer/expert metadata is incompatible");

@@ -9,14 +9,14 @@
 # Must run in the ROCm/HIP container — the HIP toolchain is not on the host.
 #
 #   docker build --target dev -f docker/Dockerfile \
-#     -t ember-rocm:7.14-dev .                                  # once
+#     -t ember-rocm:10.0-dev .                                  # once
 #   scripts/build.sh                                             # from repo root
 #
 # Produces ./build-rocm/ember-dflash plus its ggml .so tree in
 # ./build-rocm/engine/ggml/src/.
 set -euo pipefail
 
-IMAGE="${EMBER_IMAGE:-ember-rocm:7.14-dev}"
+IMAGE="${EMBER_IMAGE:-ember-rocm:10.0-dev}"
 JOBS="${JOBS:-$(nproc)}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

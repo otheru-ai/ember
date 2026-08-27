@@ -308,12 +308,10 @@ bool hc_pre_device_locked(HcCudaScratch & scratch,
     if (err != cudaSuccess) {
         return fail("finish kernel", err);
     }
-#if defined(DFLASH27B_BACKEND_HIP) || defined(GGML_USE_HIP)
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         return fail("device sync", err);
     }
-#endif
 
     if (working_device != scratch.d_working) {
         err = cudaMemcpy(working_device, scratch.d_working,

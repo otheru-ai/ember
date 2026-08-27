@@ -26,7 +26,7 @@ set -uo pipefail
 ORIG_ARGS=("$@")
 
 OUT=""; RELEASE=""; MODEL_DIR=${MODEL_DIR:-/srv/models}
-IMAGE=${IMAGE:-ember-rocm:7.14}
+IMAGE=${IMAGE:-ember-rocm:10.0}
 BIN=${BIN:-/ember/build-rocm/ember-dflash}
 # Bind-mounted only when benchmarking a repo build. Certification measures the
 # published image, which carries its own binary -- benchmarking anything else

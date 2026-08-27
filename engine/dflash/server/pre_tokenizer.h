@@ -1,11 +1,9 @@
-// Model-selected byte pre-tokenization for the dflash BPE tokenizer.
+// Model-selected byte pre-tokenization for dflash BPE tokenizers.
 //
 // A BPE merge never crosses a pre-tokenized piece boundary.  Selecting the
 // wrong splitter therefore changes token IDs even when encode->decode still
-// reproduces the same text bytes.  DeepSeek-V4-Flash declares
-// tokenizer.ggml.pre="joyai-llm"; treating that value as Qwen silently turns
-// common source-code numbers such as 0038 and 379 into different prompt token
-// streams and changes the model's logits.
+// reproduces the same text bytes. DeepSeek-V4-Flash uses `joyai-llm`; Qwen4Exp
+// uses the Qwen2 regex (single digits and Unicode letter/mark categories).
 
 #pragma once
 
@@ -20,13 +18,18 @@ enum class PreTokenizer {
     JOYAI_LLM,
 };
 
-// Exact GGUF metadata mapping.  Unknown non-empty names are rejected instead
-// of silently taking a different tokenizer; byte-exact failure is safer than a
-// plausible-looking but incorrectly conditioned generation.
+// Exact GGUF metadata mapping. Unknown names are rejected rather than silently
+// changing prompt token IDs.
 bool pre_tokenizer_from_name(const char * name, PreTokenizer & out);
 const char * pre_tokenizer_name(PreTokenizer type);
+bool pre_tokenizer_supported(const char * name);
 
 std::vector<std::string> pre_tokenize_text(const std::string & text,
                                            PreTokenizer type);
+
+// Compatibility overload retained for DeepSeek-owned call sites/tests.
+inline std::vector<std::string> pre_tokenize_text(const std::string & text) {
+    return pre_tokenize_text(text, PreTokenizer::JOYAI_LLM);
+}
 
 }  // namespace dflash::common

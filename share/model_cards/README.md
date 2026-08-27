@@ -1,80 +1,43 @@
 # Model cards
 
-Sidecar JSON files carrying per-model defaults transcribed from the
-upstream model card (typically the HuggingFace README +
-`generation_config.json`).
+Ember accepts an optional JSON sidecar through `--model-card PATH`. The card
+supplies model-specific output-budget and sampler defaults without requiring a
+rebuild. Explicit request fields and CLI flags still take precedence.
 
-`dflash_server` reads these at startup to set sensible
-`--default-max-tokens`, `--think-max-tokens`, sampler, and
-`reasoning.effort` tier values for the loaded model. The CLI
-flags still override anything here: CLI flag > sidecar value >
-per-family table built into the server > hard fallback.
-
-## Lookup
-
-The server normalises the loaded GGUF's `general.name` metadata to
-lowercase with spaces replaced by `-`, then looks for
-`share/model_cards/<normalised>.json`. A missing file falls back to
-the per-family table built into the server, then to the hard
-fallback (`antirez/ds4 ds4_eval.c` reference values).
-
-## Adding a new card
-
-1. Find the upstream model card (HuggingFace README +
-   `generation_config.json`).
-2. Note the recommended `max_tokens` (or equivalent), and any
-   separate recommendation for hard reasoning / benchmarking
-   workloads.
-3. Author a JSON file in this directory. Set `source` to the URL
-   you used and `verified_at` to today's ISO date.
-4. The file is bundled into the Docker image and read at server
-   startup. No recompile needed.
+Ember does not infer a sidecar from GGUF metadata. Without `--model-card`, the
+server uses the DeepSeek defaults compiled into `src/model/model_card.c`.
+Qwen3.8-Flash-Next deployments must pass
+`--model-card share/model_cards/qwen3.8-flash-next.json`; its thinking and
+non-thinking sampler recommendations differ, as recorded in the card notes.
 
 ## Fields
 
-[`_schema.json`](_schema.json) is the authoritative field reference —
-every field below carries a `description` there, including the
-constraints this table summarises.
+[`_schema.json`](_schema.json) is the authoritative authoring schema.
 
-| Field | Required | Notes |
+| Field | Required | Runtime use |
 |---|---|---|
-| `name` | yes | Display name; informational. |
-| `source` | yes | URL of the upstream card. |
-| `verified_at` | yes | ISO date these values were last checked. |
-| `max_tokens` | yes | The card's standard recommendation. |
-| `download_urls` | no | Map of variant tag (e.g. `Q4_K_M`, `bf16`) to GGUF download URL. Used by deployment tooling. |
-| `complex_problem_max_tokens` | no | For hard reasoning / benchmarking. Used to compute `x-high` and `max` effort tiers. |
-| `hard_limit_reply_budget` | no | Tokens reserved after `</think>` for the visible answer phase. |
-| `thinking_marker` | no | Bytes signalling end-of-thinking to parsers. Empty = per-arch default. |
-| `thinking_terminator_hint` | no | Trained directive injected mid-stream when the budget hook fires during thinking. |
-| `sampling` | no | Recommended sampler defaults. |
-| `reasoning_effort_tiers` | no | Explicit per-tier phase-1 budgets. Overrides any computed defaults. Use this when the ratio-based defaults don't fit the model. |
-| `notes` | no | Free-form notes about provenance, caveats, or non-card-derived choices. |
+| `name` | yes | Provenance only. |
+| `source` | yes | Provenance only. |
+| `verified_at` | yes | Provenance only. |
+| `max_tokens` | yes | Default combined reasoning and visible-output cap. |
+| `hard_limit_reply_budget` | no | Visible-output reserve after `</think>`. |
+| `thinking_terminator_hint` | no | Verbatim text injected when the reasoning budget expires. |
+| `sampling` | no | Defaults for omitted sampler fields. |
+| `reasoning_effort_tiers` | no | Explicit reasoning budgets for `low` through `max`. |
+| `context_extension` | no | Advisory static-YaRN recipe and provenance. Loading the card never activates it; the architecture-specific CLI opt-in remains mandatory. |
+| `notes` | no | Provenance and measured caveats. |
 
-## Validating a sidecar
-
-The schema for these files lives at [`_schema.json`](_schema.json)
-(JSON Schema draft 2020-12). Any author-facing JSON Schema validator
-works; a couple of examples:
+The C loader is intentionally permissive: missing or malformed runtime fields
+fall back independently, and provenance fields are not parsed. Validate edited
+cards against the schema before packaging them. For example, with any JSON
+Schema draft-2020-12 validator:
 
 ```bash
-# Python (stdlib + jsonschema)
-python -m pip install jsonschema
-python -c "import json, jsonschema; \
-  schema=json.load(open('share/model_cards/_schema.json')); \
-  doc=json.load(open('share/model_cards/deepseek-v4-flash-src.json')); \
-  jsonschema.Draft202012Validator(schema).validate(doc); print('OK')"
-
-# Node (ajv-cli)
 npx --yes ajv-cli@5 validate \
   -s share/model_cards/_schema.json \
   -d share/model_cards/deepseek-v4-flash-src.json \
   --spec=draft2020
 ```
 
-`additionalProperties: false` is set at the root, so typos in field
-names (e.g. `verified_on` instead of `verified_at`) surface as
-validation errors instead of being silently ignored by `dflash_server`.
-The server itself does a runtime sanity check for the four required
-fields when loading a sidecar and warns (does not fail-start) when one
-is missing.
+Validate the Qwen card with the same command after substituting
+`share/model_cards/qwen3.8-flash-next.json` for the data path.

@@ -89,11 +89,20 @@ class ResourceSampler:
         }
 
 
+HARD_GATE_PROTOCOL = "ember-2026.8.24-prefill2048-decode256-v1"
+HARD_GATE_PREFILL_TPS = 412.0
+HARD_GATE_DECODE_TPS = 39.49
+HARD_GATE_PREFILL_TOKENS = 2074
+HARD_GATE_SAMPLES = 3
+
+
 class Suite:
-    def __init__(self, endpoint: str, output: Path, timeout: float) -> None:
+    def __init__(self, endpoint: str, output: Path, timeout: float,
+                 model: str) -> None:
         self.endpoint = endpoint
         self.output = output
         self.timeout = timeout
+        self.model = model
         self.records: list[dict] = []
         self.lock = threading.Lock()
         self.output.write_text("")
@@ -116,7 +125,7 @@ class Suite:
         repeat: int,
     ) -> dict:
         payload = {
-            "model": "deepseek-v4-flash",
+            "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "reasoning_effort": "none",
             "temperature": 0,
@@ -205,6 +214,68 @@ class Suite:
         return summary
 
 
+def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
+                       decode_target: float) -> dict:
+    prefill_rows = [
+        row for row in records
+        if row.get("kind") == "request" and row.get("group") == "prefill-2048"
+        and row.get("ok") and row.get("prefill_tokens_per_second") is not None
+    ]
+    decode_rows = [
+        row for row in records
+        if row.get("kind") == "request" and row.get("group") == "decode-256"
+        and row.get("ok") and row.get("decode_tokens_per_second") is not None
+    ]
+    prefill_values = [float(row["prefill_tokens_per_second"])
+                      for row in prefill_rows]
+    decode_values = [float(row["decode_tokens_per_second"])
+                     for row in decode_rows]
+    prefill_median = (statistics.median(prefill_values)
+                      if len(prefill_values) == HARD_GATE_SAMPLES else None)
+    decode_median = (statistics.median(decode_values)
+                     if len(decode_values) == HARD_GATE_SAMPLES else None)
+    prefill_shape_match = (
+        len(prefill_rows) == HARD_GATE_SAMPLES and
+        all(row.get("evaluated_prefill_tokens") == HARD_GATE_PREFILL_TOKENS
+            for row in prefill_rows)
+    )
+    decode_shape_match = (
+        len(decode_rows) == HARD_GATE_SAMPLES and
+        all(row.get("completion_tokens") == 256 for row in decode_rows)
+    )
+    passed = bool(
+        prefill_shape_match and decode_shape_match and
+        prefill_median is not None and prefill_median >= prefill_target and
+        decode_median is not None and decode_median >= decode_target
+    )
+    return {
+        "protocol": HARD_GATE_PROTOCOL,
+        "passed": passed,
+        "required_samples_per_group": HARD_GATE_SAMPLES,
+        "prefill_2048": {
+            "samples": len(prefill_values),
+            "expected_evaluated_tokens": HARD_GATE_PREFILL_TOKENS,
+            "evaluated_tokens": [row.get("evaluated_prefill_tokens")
+                                 for row in prefill_rows],
+            "shape_match": prefill_shape_match,
+            "median_tps": prefill_median,
+            "target_tps": prefill_target,
+            "passed": bool(prefill_shape_match and prefill_median is not None
+                           and prefill_median >= prefill_target),
+        },
+        "decode_256_counting": {
+            "samples": len(decode_values),
+            "completion_tokens": [row.get("completion_tokens")
+                                  for row in decode_rows],
+            "shape_match": decode_shape_match,
+            "median_tps": decode_median,
+            "target_tps": decode_target,
+            "passed": bool(decode_shape_match and decode_median is not None
+                           and decode_median >= decode_target),
+        },
+    }
+
+
 def container_pid() -> int | None:
     try:
         raw = os.popen("docker inspect -f '{{.State.Pid}}' ember-server 2>/dev/null").read().strip()
@@ -229,20 +300,81 @@ def make_decode_prompt(marker: str) -> str:
     )
 
 
+def calibrate_prefill_words(suite: Suite, target_tokens: int,
+                            max_attempts: int = 8) -> tuple[int, list[dict]]:
+    """Find the alpha-word count that this server tokenizes to target_tokens.
+
+    The published 2K shape happened to be 2,074 tokens with the DeepSeek
+    template. Qwen has a different template/tokenizer, so its hard gate first
+    calibrates the inert filler rather than failing on tokenizer overhead. Use
+    usage.prompt_tokens: prefix-cache hits can reduce evaluated_prefill_tokens
+    during the probes even though the complete prompt shape is unchanged.
+    """
+    words = 2048
+    seen: set[int] = set()
+    attempts: list[dict] = []
+    low: tuple[int, int] | None = None
+    high: tuple[int, int] | None = None
+    for attempt in range(1, max_attempts + 1):
+        if words in seen:
+            break
+        seen.add(words)
+        record = suite.request(
+            f"prefill-calibration-r{attempt}",
+            make_prefill_prompt("0", words), 1,
+            group="calibration", repeat=attempt)
+        observed = record.get("prompt_tokens") if record.get("ok") else None
+        attempts.append({
+            "attempt": attempt,
+            "words": words,
+            "prompt_tokens": observed,
+            "ok": bool(record.get("ok")),
+        })
+        if not isinstance(observed, int):
+            break
+        if observed == target_tokens:
+            return words, attempts
+        if observed < target_tokens:
+            low = (words, observed)
+        else:
+            high = (words, observed)
+        proposed = max(1, words + target_tokens - observed)
+        if proposed in seen and low and high:
+            proposed = (low[0] + high[0]) // 2
+        words = proposed
+    return words, attempts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:8000/v1/chat/completions")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--model", default="deepseek-v4-flash")
+    parser.add_argument("--protocol", choices=("full", "hard-gate"),
+                        default="full")
+    parser.add_argument("--prefill-target", type=float,
+                        default=HARD_GATE_PREFILL_TPS)
+    parser.add_argument("--decode-target", type=float,
+                        default=HARD_GATE_DECODE_TPS)
+    parser.add_argument("--require-gate", action="store_true",
+                        help="exit nonzero unless the matched hard gate passes")
     args = parser.parse_args()
+    if args.require_gate and args.protocol != "hard-gate":
+        parser.error("--require-gate requires --protocol hard-gate")
+    if args.prefill_target <= 0 or args.decode_target <= 0:
+        parser.error("gate targets must be positive")
 
-    suite = Suite(args.endpoint, args.output, args.timeout)
+    suite = Suite(args.endpoint, args.output, args.timeout, args.model)
     sampler = ResourceSampler(container_pid())
     sampler.start()
     suite.emit({
         "kind": "metadata",
         "started_unix": time.time(),
         "endpoint": args.endpoint,
+        "model": args.model,
+        "protocol": (HARD_GATE_PROTOCOL if args.protocol == "hard-gate"
+                     else "full"),
         "container_pid": sampler.pid,
         "pid": os.getpid(),
     })
@@ -257,14 +389,22 @@ def main() -> int:
     )
 
     markers = iter("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()")
-    for words, repeats in ((128, 3), (512, 3), (2048, 3), (8192, 3), (16384, 2), (32768, 2)):
+    calibration: list[dict] = []
+    hard_gate_words = 2048
+    if args.protocol == "hard-gate":
+        hard_gate_words, calibration = calibrate_prefill_words(
+            suite, HARD_GATE_PREFILL_TOKENS)
+    shapes = ((hard_gate_words, 3),) if args.protocol == "hard-gate" else (
+        (128, 3), (512, 3), (2048, 3), (8192, 3), (16384, 2), (32768, 2))
+    for words, repeats in shapes:
         for repeat in range(1, repeats + 1):
             marker = next(markers)
             suite.request(
                 f"prefill-{words}-r{repeat}",
                 make_prefill_prompt(marker, words),
                 1,
-                group=f"prefill-{words}",
+                group=("prefill-2048" if args.protocol == "hard-gate"
+                       else f"prefill-{words}"),
                 repeat=repeat,
             )
 
@@ -278,19 +418,30 @@ def main() -> int:
             repeat=repeat,
         )
 
-    cache_marker = next(markers)
-    cache_prompt = make_prefill_prompt(cache_marker, 8192)
-    suite.request("cache-cold", cache_prompt, 1, group="cache", repeat=1)
-    suite.request("cache-identical", cache_prompt, 1, group="cache", repeat=2)
+    if args.protocol == "full":
+        cache_marker = next(markers)
+        cache_prompt = make_prefill_prompt(cache_marker, 8192)
+        suite.request("cache-cold", cache_prompt, 1, group="cache", repeat=1)
+        suite.request("cache-identical", cache_prompt, 1, group="cache", repeat=2)
 
     sampler.stop()
+    groups = suite.summarize()
+    gate = evaluate_hard_gate(
+        suite.records, prefill_target=args.prefill_target,
+        decode_target=args.decode_target) if args.protocol == "hard-gate" else None
     suite.emit({
         "kind": "summary",
         "finished_unix": time.time(),
-        "groups": suite.summarize(),
+        "groups": groups,
+        "hard_gate": gate,
+        "prefill_calibration": ({
+            "target_prompt_tokens": HARD_GATE_PREFILL_TOKENS,
+            "selected_words": hard_gate_words,
+            "attempts": calibration,
+        } if args.protocol == "hard-gate" else None),
         "resources": sampler.summary(),
     })
-    return 0
+    return 1 if args.require_gate and gate and not gate["passed"] else 0
 
 
 if __name__ == "__main__":

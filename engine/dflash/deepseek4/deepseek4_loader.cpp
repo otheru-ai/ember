@@ -14,8 +14,7 @@
 //   hc_ffn_fn, hc_ffn_scale, hc_ffn_base
 
 #include "deepseek4_internal.h"
-#include "internal.h"
-#include "dflash27b.h"
+#include "common/errors.h"
 #include "common/gguf_bounds.h"
 #include "../common/moe_hybrid_storage.h"
 #include "../common/moe_hybrid_types.h"
@@ -32,18 +31,13 @@
 #include <vector>
 #include <thread>
 #include <atomic>
-#include <unistd.h>
-#include <fcntl.h>
-
 extern "C" bool ggml_backend_cuda_buffer_is_managed(ggml_backend_buffer_t buffer);
 
-#if !defined(_WIN32)
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
 
 namespace dflash::common {
 
@@ -1005,9 +999,7 @@ static MoeHybridConfig make_ds4_moe_hybrid_config(const DeepSeek4Weights & w) {
     cfg.n_expert = w.n_expert;
     cfg.n_expert_used = w.n_expert_used;
     cfg.n_ff_exp = w.n_ff_exp;
-    cfg.n_ff_shexp = w.n_ff_exp;
     cfg.n_layer = w.n_layer;
-    cfg.first_moe_layer = 0;
     cfg.cold_expert_backend = ds4_cold_backend_from_env();
     return cfg;
 }
@@ -1026,85 +1018,6 @@ static MoeLayerDesc make_ds4_moe_layer_desc(const DeepSeek4Layer & L) {
 }
 
 }  // namespace
-
-bool build_deepseek4_moe_hybrid_storage_from_file(
-        const std::string & path,
-        ggml_backend_t backend,
-        const DeepSeek4Weights & w,
-        const MoeHybridPlacement & placement,
-        const MoeHybridConfig * cfg_override,
-        MoeHybridStorage & out,
-        std::string * err) {
-    ggml_context * expert_meta = nullptr;
-    gguf_init_params gip{};
-    gip.no_alloc = true;
-    gip.ctx = &expert_meta;
-    gguf_context * gctx = gguf_init_from_file(path.c_str(), gip);
-    if (!gctx) {
-        if (err) *err = "failed to re-open GGUF for expert loading";
-        return false;
-    }
-
-    DS4Mmap mmap;
-    std::string mmap_err;
-    if (!mmap.open_ro(path, mmap_err)) {
-        gguf_free(gctx);
-        if (expert_meta) ggml_free(expert_meta);
-        if (err) *err = mmap_err;
-        return false;
-    }
-
-    const size_t data_start = gguf_get_data_offset(gctx);
-    const auto * file_bytes = static_cast<const uint8_t *>(mmap.addr);
-    std::vector<LayerExpertFileData> layer_file_data((size_t)w.n_layer);
-    bool bad_bounds = false;
-    std::string bounds_err;
-
-    for (int il = 0; il < w.n_layer; ++il) {
-        char name[128];
-        auto find_tensor_data = [&](const char * suffix) -> ExpertTensorFileData {
-            std::snprintf(name, sizeof(name), "blk.%d.%s.weight", il, suffix);
-            int64_t tid = gguf_find_tensor(gctx, name);
-            if (tid < 0) return {};
-            const size_t tensor_off = gguf_get_tensor_offset(gctx, tid);
-            const size_t sz = gguf_get_tensor_size(gctx, tid);
-            if (!gguf_tensor_in_file(data_start, tensor_off, sz, mmap.len)) {
-                bad_bounds = true;
-                bounds_err = gguf_bounds_error("deepseek4 expert GGUF", name,
-                                               ggml_type_name(gguf_get_tensor_type(gctx, tid)),
-                                               data_start, tensor_off, sz, mmap.len);
-                return {};
-            }
-            const size_t off = data_start + tensor_off;
-            return { file_bytes + off, sz };
-        };
-
-        layer_file_data[(size_t)il].gate_exps = find_tensor_data("ffn_gate_exps");
-        layer_file_data[(size_t)il].up_exps = find_tensor_data("ffn_up_exps");
-        layer_file_data[(size_t)il].down_exps = find_tensor_data("ffn_down_exps");
-        if (bad_bounds) {
-            mmap.close_map();
-            gguf_free(gctx);
-            if (expert_meta) ggml_free(expert_meta);
-            if (err) *err = bounds_err;
-            return false;
-        }
-    }
-
-    std::vector<MoeLayerDesc> layer_descs((size_t)w.n_layer);
-    for (int il = 0; il < w.n_layer; ++il) {
-        layer_descs[(size_t)il] = make_ds4_moe_layer_desc(w.layers[(size_t)il]);
-    }
-
-    const MoeHybridConfig cfg = cfg_override ? *cfg_override : make_ds4_moe_hybrid_config(w);
-    const bool ok = build_moe_hybrid_storage_from_file(
-        cfg, backend, placement, layer_descs, layer_file_data, out, err);
-
-    mmap.close_map();
-    gguf_free(gctx);
-    if (expert_meta) ggml_free(expert_meta);
-    return ok;
-}
 
 bool build_deepseek4_moe_hybrid_storage_from_file_with_mmap(
         const std::string & path,
@@ -1193,17 +1106,6 @@ bool build_deepseek4_moe_hybrid_storage_from_file_with_mmap(
     gguf_free(gctx);
     if (expert_meta) ggml_free(expert_meta);
     return ok;
-}
-
-bool build_deepseek4_moe_hybrid_storage_from_file(
-        const std::string & path,
-        ggml_backend_t backend,
-        const DeepSeek4Weights & w,
-        const MoeHybridPlacement & placement,
-        MoeHybridStorage & out,
-        std::string * err) {
-    return build_deepseek4_moe_hybrid_storage_from_file(
-        path, backend, w, placement, nullptr, out, err);
 }
 
 void free_deepseek4_weights(DeepSeek4Weights & w) {

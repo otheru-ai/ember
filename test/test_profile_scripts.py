@@ -46,7 +46,9 @@ def run_sh(args, env=None, expect_ok=True):
 
 def sabotaged_path(directory):
     """A PATH whose docker/curl/sudo abort loudly, proving --dry-run touches nothing."""
-    for tool in ("docker", "curl", "sudo", "rocprofv3"):
+    for tool in (
+        "docker", "curl", "sudo", "rocprofv3", "rocprof-compute", "rocprofv3-avail"
+    ):
         stub = pathlib.Path(directory) / tool
         stub.write_text(
             "#!/bin/sh\necho \"FORBIDDEN: %s invoked during dry run\" >&2\nexit 97\n" % tool
@@ -120,15 +122,28 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("is-active", body)
 
     def test_dev_image_guarantees_the_profiler(self):
-        # rocprofv3 ships with the pinned rocm/dev-ubuntu-24.04:*-full base, not
-        # from apt, so without an explicit assertion nothing records the
-        # dependency and a base-image bump could silently remove it.
+        # Both profilers ship with the pinned full base, not from apt. ROCm
+        # Compute Profiler 3.8.0 is the first release with the corrected gfx1151
+        # roofline model, so the version checks are part of the image contract.
         dockerfile = (ROOT / "docker" / "Dockerfile").read_text()
+        self.assertIn("rocm/dev-ubuntu-24.04:10.0.0-full@sha256:", dockerfile)
+        self.assertIn(
+            "sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374",
+            dockerfile,
+        )
         dev = dockerfile.split("FROM toolchain AS dev", 1)
         self.assertEqual(len(dev), 2, "dev stage not found in docker/Dockerfile")
         dev_stage = dev[1].split("\nFROM ", 1)[0]
         self.assertIn("rocprofv3", dev_stage)
         self.assertRegex(dev_stage, r"command -v rocprofv3")
+        self.assertIn("rocm_version: 10.0.0", dev_stage)
+        self.assertRegex(dev_stage, r"command -v rocprof-compute")
+        self.assertIn("rocprofiler-compute version: 3.8.0", dev_stage)
+
+    def test_default_profile_image_tracks_the_rocm_release(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn('EMBER_PROFILE_IMAGE:-ember-rocm:10.0-dev', body)
+        self.assertNotIn("ember-rocm:7.14-dev", body)
 
     def test_release_image_does_not_carry_the_profiler(self):
         # The release image is a stripped runtime closure; collect-runtime.sh
@@ -177,6 +192,28 @@ class HarnessContractTests(unittest.TestCase):
         body = PROFILE_SH.read_text()
         self.assertIn("run_pass trace", body)
         self.assertIn("run_pass pmc", body)
+
+    def test_rocm10_profile_bundle_records_toolchain_and_counter_provenance(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn("image-identity.json", body)
+        self.assertIn('"repo_digests"', body)
+        self.assertIn("rocprofv3-version.txt", body)
+        self.assertIn("rocprof-compute-version.txt", body)
+        self.assertIn("rocprofv3-counter-info.txt", body)
+        self.assertIn("rocprofv3-avail info --pmc -d 0", body)
+        self.assertIn('"selected_definitions"', body)
+
+    def test_rocm10_counter_unit_is_not_silently_certified(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn("uncertified_rocm10_gfx1151", body)
+        self.assertIn('"release_bandwidth_verdict_certified": False', body)
+        self.assertIn("known-traffic gfx1151 calibration", body)
+        self.assertIn("exploratory, not release-certified", body)
+
+    def test_provenance_collection_happens_under_exclusive_gpu_hold(self):
+        body = PROFILE_SH.read_text()
+        main = body.split("main() {", 1)[1]
+        self.assertLess(main.index("quiesce_production"), main.index("collect_provenance"))
 
 
 def write_trace(path, rows):
@@ -276,6 +313,25 @@ class ReportTests(unittest.TestCase):
             self.make_outdir(tmp, decode_kb=21_200_000, decode_busy_ms=100.0)
             as_bytes = self.analyse(tmp, "--counter-unit", "b")
         self.assertLess(as_bytes["phases"]["decode"]["achieved_gbps"], 1.0)
+
+    def test_rocm10_uncertified_unit_withholds_verdict_until_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_outdir(tmp, decode_kb=21_200_000, decode_busy_ms=100.0)
+            pathlib.Path(tmp, "manifest.json").write_text(json.dumps({
+                "counter_unit": {
+                    "assumed": "kb",
+                    "status": "uncertified_rocm10_gfx1151",
+                    "release_bandwidth_verdict_certified": False,
+                }
+            }))
+            implicit = self.analyse(tmp)
+            explicit = self.analyse(tmp, "--counter-unit", "kb")
+        self.assertFalse(implicit["counter_unit_certified"])
+        self.assertEqual(implicit["counter_unit_source"], "manifest")
+        self.assertIn("INCONCLUSIVE", implicit["verdict"])
+        self.assertTrue(explicit["counter_unit_certified"])
+        self.assertEqual(explicit["counter_unit_source"], "explicit")
+        self.assertIn("BANDWIDTH-BOUND", explicit["verdict"])
 
     def test_overlapping_kernels_do_not_inflate_busy_time(self):
         # Concurrent dispatches overlap; summing durations would double-count and

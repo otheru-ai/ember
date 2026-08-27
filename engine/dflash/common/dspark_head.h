@@ -1,18 +1,34 @@
 #pragma once
 
 #include "dflash_target.h"
-#include "internal.h"
+#include "ggml.h"
+#include "ggml-backend.h"
 
 #include <cstdint>
 #include <vector>
 
 namespace dflash::common {
 
+// Only the state consumed by the shared DSpark projection head. Keeping this
+// contract narrow prevents an unrelated legacy draft-model object graph from
+// leaking into the DeepSeek4 backend.
+struct DSparkHeadWeights {
+    bool enabled = false;
+    int n_embd = 0;
+    int markov_rank = 0;
+    int vocab_size = 0;
+    int confidence_dim = 0;
+    ggml_tensor * markov_w1 = nullptr;
+    ggml_tensor * markov_w2 = nullptr;
+    ggml_tensor * confidence_w = nullptr;
+    ggml_tensor * confidence_b = nullptr;
+};
+
 // Release thread-local graph allocators while their owning GPU backend is
 // still alive. Safe to call repeatedly on the generation thread.
 void reset_dspark_head_runtime_cache();
 
-bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
+bool dspark_markov_correct_greedy_chain(const DSparkHeadWeights & weights,
                                         ggml_backend_t backend,
                                         DFlashTarget & target,
                                         const float * local_hidden,
@@ -30,7 +46,7 @@ bool dspark_markov_correct_greedy_chain(const DraftWeights & dw,
 // non-null, has the same padded layout as `local_hidden` and supplies the
 // pre-output-norm state expected by the confidence head. Callers without a
 // separate state retain the legacy behavior by leaving it null.
-bool dspark_markov_correct_greedy_chain_fused(const DraftWeights & dw,
+bool dspark_markov_correct_greedy_chain_fused(const DSparkHeadWeights & weights,
                                               ggml_backend_t backend,
                                               ggml_tensor * lm_head,
                                               const float * local_hidden,
@@ -39,19 +55,5 @@ bool dspark_markov_correct_greedy_chain_fused(const DraftWeights & dw,
                                               std::vector<int32_t> & draft_tok,
                                               std::vector<float> * confidence_out = nullptr,
                                               const float * confidence_hidden = nullptr);
-
-// DDTree candidate generation with the Markov correction: base logits for
-// all n_tokens positions in ONE lm_head matmul; rows 1..n-1 get the low-rank
-// previous-token bias chained along the main (argmax) path; top-K extracted
-// on host via extract_draft_topk. Output contract matches
-// DFlashTarget::project_hidden_to_topk (row 0 = seed position, uncorrected).
-bool dspark_markov_project_topk(const DraftWeights & dw,
-                                ggml_backend_t backend,
-                                ggml_tensor * lm_head,
-                                const float * hidden,
-                                int n_tokens, int K, float temperature,
-                                int32_t last_tok,
-                                std::vector<float> & top_log_probs,
-                                std::vector<int32_t> & top_token_ids);
 
 }  // namespace dflash::common

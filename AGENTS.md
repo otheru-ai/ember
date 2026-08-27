@@ -98,7 +98,7 @@ cmake -S . -B build && cmake --build build && ctest --test-dir build
 
 # Real backend (ROCm/HIP; MUST run in the container — no HIP toolchain on host)
 docker build --target dev -f docker/Dockerfile \
-  -t ember-rocm:7.14-dev .                                # once
+  -t ember-rocm:10.0-dev .                                # once
 scripts/build.sh                                          # -> build-rocm/ember-dflash
 ```
 
@@ -131,12 +131,13 @@ scripts/build.sh                                          # -> build-rocm/ember-
 - A growing set of C++ tests compiles engine, `providers/xdna2/`, or other
   vendored sources directly instead of linking `ember_core`, so that logic gets
   GPU-free coverage: `test_prefill_policy`, `test_dspark_scheduler`,
-  `test_thinking_budget`, `test_progress_cycle_detector`, `test_sampler`,
-  `test_pre_tokenizer`, `test_continuous_batch_{scheduler,executor}`,
-  `test_resident_batch_coordinator`, and the `test_xdna_*` set. These are
-  exactly the targets held *out* of `EMBER_STRICT_TARGETS` — upstream keeps its
-  own warning standard, and a directory-scoped strict flag would turn every
-  fork sync into a warning-fixing exercise.
+  `test_progress_cycle_detector`, `test_sampler`, `test_pre_tokenizer`,
+  `test_continuous_batch_{scheduler,executor}`, `test_resident_batch_coordinator`,
+  and the `test_xdna_*` set. These are exactly the targets held *out* of
+  `EMBER_STRICT_TARGETS` — upstream keeps its own warning standard, and a
+  directory-scoped strict flag would turn every fork sync into a warning-fixing
+  exercise. `test_thinking_budget` is C and receives strict flags directly; it
+  exercises the first C-compatible engine orchestration component.
 
 ## Runtime verification (GPU-dependent — read before running)
 
@@ -458,7 +459,7 @@ runtime verification above. `docs/ci.md` is the long-form reference.
   default model when needed, and persists model and KV data in local mounted
   directories. `compose.build.yaml` is the explicit local source-build override.
 - The `dev` target is AMD's stock
-  `rocm/dev-ubuntu-24.04:7.14.0-full` plus build tooling, source, and symbols.
+  `rocm/dev-ubuntu-24.04:10.0.0-full` plus build tooling, source, and symbols.
   The Ubuntu-based `release` target contains only the stripped server, its
   recursive ROCm ELF dependency closure, rocBLAS runtime kernel data, download
   utilities, and `libsegvtrace.so`. The shim is LD_PRELOAD'd to print a

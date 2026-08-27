@@ -14,6 +14,7 @@
 #include "../common/json_util.h"
 #include "../common/utf8.h"
 #include "../model/tool_parser.h"
+#include "../model/tool_parser_qwen4.h"
 
 // B#5: mint a RANDOM, per-call unique id (mirrors ds4 random_tool_id) instead
 // of hashing name+index. The old FNV hash gave e.g. the first `bash` call an
@@ -79,6 +80,7 @@ static const char *const TOOL_STARTS[] = {
     "<?DSML?tool_calls>",                // ascii-degraded
     "<tool_calls>",                      // plain-XML (parser has a matching family)
     "<ds_engine_tool_use>",              // model's native format (see tool_parser.c)
+    "<tool_call>",                       // Qwen qwen3_coder format
 };
 static const size_t N_TOOL_STARTS =
     sizeof(TOOL_STARTS) / sizeof(TOOL_STARTS[0]);
@@ -101,6 +103,7 @@ static const char *const TOOL_ENDS[] = {
     "</?DSML?tool_calls>",
     "</tool_calls>",
     "</ds_engine_tool_use>",
+    "</tool_call>",
 };
 const char *ember_find_tool_end(const char *s) {
     if (!s) return NULL;
@@ -137,7 +140,8 @@ static bool slice_has_tool_markup(const char *s, size_t n) {
 }
 
 bool ember_text_has_tool_markup(const char *s) {
-    return s && slice_has_tool_markup(s, strlen(s));
+    return s && (slice_has_tool_markup(s, strlen(s)) ||
+                 strstr(s, "<tool_call>") != NULL);
 }
 
 bool ember_sse_delivered_tool_markup(const ember_sse_stream *st) {
@@ -258,6 +262,12 @@ void ember_sse_set_sink(ember_sse_stream *st, const ember_sse_sink *sink,
     if (sink) st->sink = *sink;
     else memset(&st->sink, 0, sizeof(st->sink));
     st->sink_ud = ud;
+}
+
+void ember_sse_set_qwen_tools(ember_sse_stream *st, const char *tools_json) {
+    if (!st) return;
+    st->qwen_tool_syntax = true;
+    st->tools_json = tools_json;
 }
 
 void ember_sse_set_reasoning_filter(ember_sse_stream *st, const char *hint) {
@@ -632,12 +642,20 @@ bool ember_sse_emit_tools(ember_sse_stream *st, const char *raw, size_t raw_len,
     if (st->mode != EMBER_SSE_TOOL) return false;
     // Validation-gated flush: emit the complete call and close its arguments.
     // This remains idempotent in case a caller probes the final result twice.
-    emit_tool_stream(st, raw, raw_len, true, out);
+    if (!st->qwen_tool_syntax)
+        emit_tool_stream(st, raw, raw_len, true, out);
     // Fallback for non-DSML formats (ds_engine_tool_use): the incremental walker
     // handles DSML only, so parse the buffered region and emit each call whole.
     if (!st->any_tool) {
         ember_tool_calls tc = {0};
-        int n = ember_parse_dsml_tool_calls(raw + st->tool_start, &tc);
+        int n;
+        if (st->qwen_tool_syntax) {
+            ember_qwen_tool_parse_report report = {0};
+            n = ember_parse_qwen_tool_calls(raw + st->tool_start,
+                                            st->tools_json, &tc, &report);
+        } else {
+            n = ember_parse_dsml_tool_calls(raw + st->tool_start, &tc);
+        }
         for (int i = 0; i < n; i++) {
             tool_start_delta(st, i, tc.calls[i].name, out);
             tool_args_delta(st, i, tc.calls[i].arguments,

@@ -259,65 +259,7 @@ static __global__ void moe_fused_kernel(
     }
 }
 
-static __global__ void laguna_moe_combine_kernel(
-    const char * __restrict__ experts,
-    const char * __restrict__ weights,
-    char * __restrict__ output,
-    const int n_embd,
-    const int n_used,
-    const int n_tokens,
-    const size_t experts_nb0,
-    const size_t experts_nb1,
-    const size_t experts_nb2,
-    const size_t weights_nb0,
-    const size_t weights_nb1,
-    const size_t output_nb0,
-    const size_t output_nb1) {
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total = n_embd * n_tokens;
-    if (idx >= total) return;
-
-    const int h = idx % n_embd;
-    const int t = idx / n_embd;
-    float sum = 0.0f;
-    for (int e = 0; e < n_used; ++e) {
-        const float v = *(const float *)(experts +
-            (size_t)h * experts_nb0 +
-            (size_t)e * experts_nb1 +
-            (size_t)t * experts_nb2);
-        const float w = *(const float *)(weights +
-            (size_t)e * weights_nb0 +
-            (size_t)t * weights_nb1);
-        const float prod = __fmul_rn(v, w);
-        sum = (e == 0) ? prod : __fadd_rn(sum, prod);
-    }
-    *(float *)(output +
-        (size_t)h * output_nb0 +
-        (size_t)t * output_nb1) = sum;
-}
-
 void ggml_cuda_op_moe_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    if (ggml_get_op_params_i32(dst, 0) == -1) {
-        const ggml_tensor * experts = dst->src[0];  // [n_embd, n_used, n_tokens]
-        const ggml_tensor * weights = dst->src[1];  // [n_used, n_tokens]
-        const int n_embd   = (int) experts->ne[0];
-        const int n_used   = (int) experts->ne[1];
-        const int n_tokens = (int) experts->ne[2];
-        const int total = n_embd * n_tokens;
-
-        const int block = 256;
-        const int grid = (total + block - 1) / block;
-        laguna_moe_combine_kernel<<<grid, block, 0, ctx.stream()>>>(
-            (const char *) experts->data,
-            (const char *) weights->data,
-            (char *) dst->data,
-            n_embd, n_used, n_tokens,
-            experts->nb[0], experts->nb[1], experts->nb[2],
-            weights->nb[0], weights->nb[1],
-            dst->nb[0], dst->nb[1]);
-        return;
-    }
-
     const ggml_tensor * input        = dst->src[0];
     const ggml_tensor * gate_w       = dst->src[1];
     const ggml_tensor * up_w         = dst->src[2];

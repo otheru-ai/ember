@@ -33,7 +33,6 @@
 #include "deepseek4_dspark_scheduler.h"
 #include "common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
-#include "internal.h"
 #include "common/dspark_head.h"
 
 #include "ggml.h"
@@ -256,20 +255,18 @@ private:
 
 namespace {
 
-// Build the DraftWeights shim the target-agnostic dspark head expects (only the
-// DSpark head fields + n_embd are read).
-DraftWeights make_dspark_shim(const DSparkDrafter & d) {
-    DraftWeights dw{};
-    dw.n_embd = d.core.n_embd;
-    dw.dspark.enabled = d.dspark_enabled;
-    dw.dspark.markov_rank = d.markov_rank;
-    dw.dspark.vocab_size = d.vocab_size;
-    dw.dspark.confidence_dim = d.confidence_dim;
-    dw.dspark.markov_w1 = d.markov_w1;
-    dw.dspark.markov_w2 = d.markov_w2;
-    dw.dspark.confidence_w = d.confidence_w;
-    dw.dspark.confidence_b = d.confidence_b;
-    return dw;
+DSparkHeadWeights make_dspark_head_weights(const DSparkDrafter & d) {
+    return {
+        d.dspark_enabled,
+        d.core.n_embd,
+        d.markov_rank,
+        d.vocab_size,
+        d.confidence_dim,
+        d.markov_w1,
+        d.markov_w2,
+        d.confidence_w,
+        d.confidence_b,
+    };
 }
 
 bool spec_env_flag(const char * name) {
@@ -835,7 +832,7 @@ bool deepseek4_dspark_resident_finish(
     DeepSeek4StepTelemetry verify_telemetry;
     const bool detailed_timing = spec_env_flag("DFLASH_DS4_TIMING");
     if (detailed_timing) target.set_telemetry(&verify_telemetry);
-    DraftWeights draft_weights = make_dspark_shim(drafter);
+    DSparkHeadWeights draft_weights = make_dspark_head_weights(drafter);
     std::vector<float> padded_hidden(
         (size_t)n_embd * ((size_t)drafter.block_size + 1), 0.0f);
     std::vector<float> padded_confidence_hidden;
@@ -1293,7 +1290,7 @@ bool run_deepseek4_dspark_spec_decode(
     DeepSeek4DFlashTarget target(target_w, target_cache, backend, device, snap_backend,
                                  drafter.capture_layer_ids, drafter.mask_token_id,
                                  /*strict_verify=*/batch_gate.strict_cycle());
-    DraftWeights dw = make_dspark_shim(drafter);
+    DSparkHeadWeights dw = make_dspark_head_weights(drafter);
     DeepSeek4SpecRollback rollback;
     DeepSeek4StepTelemetry tel{};
     if (timing) target.set_telemetry(&tel);
