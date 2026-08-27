@@ -79,7 +79,8 @@ class CandidateBuilderTests(unittest.TestCase):
             write_json(record, {
                 "status": "complete",
                 "experiment": {"kind": "stock_control", "stock_weights_unchanged": True},
-                "output": {"shards": [{"path": str(shard),
+                "output": {"shards": [{
+                    "path": f"/qwen-work/artifacts/{stock.name}/{shard.name}",
                                           "size_bytes": shard.stat().st_size,
                                           "sha256": digest(shard)}]},
             })

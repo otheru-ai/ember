@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 import resource
 import re
 import shutil
@@ -568,6 +569,52 @@ def exact_candidate_shards(candidate_dir: Path, record: dict[str, Any]) -> list[
     return rows
 
 
+def exact_retirement_stock_shards(
+    stock_dir: Path,
+    record: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Map the converter namespace to the one mounted retirement directory.
+
+    The stock converter runs with its workspace mounted at ``/qwen-work`` and
+    records paths below ``/qwen-work/artifacts/<stock-dir-name>``.  Retirement
+    runs later with that artifact directory mounted at its fixed host-absolute
+    path.  Accept only that exact, documented namespace substitution; trusting
+    an arbitrary recorded parent here would broaden the deletion boundary.
+    """
+    output = record.get("output")
+    if not isinstance(output, dict) or not isinstance(output.get("shards"), list):
+        raise BuilderError("captured stock build record omits output shards")
+    expected_parent = PurePosixPath("/qwen-work/artifacts") / stock_dir.name
+    rows: list[dict[str, Any]] = []
+    filenames: set[str] = set()
+    for index, row in enumerate(output["shards"]):
+        if not isinstance(row, dict):
+            raise BuilderError("captured stock shard row is malformed")
+        raw = row.get("path")
+        if not isinstance(raw, str) or not raw or posixpath.normpath(raw) != raw:
+            raise BuilderError("captured stock shard path is not normalized")
+        recorded_path = PurePosixPath(raw)
+        if (not recorded_path.is_absolute()
+                or recorded_path.parent != expected_parent
+                or recorded_path.name in filenames
+                or PurePosixPath(recorded_path.name).name != recorded_path.name):
+            raise BuilderError(
+                "captured stock shard is duplicated or outside the exact converter namespace")
+        filenames.add(recorded_path.name)
+        path = stock_dir / recorded_path.name
+        if path.parent != stock_dir:
+            raise BuilderError("mapped stock shard escapes the retirement directory")
+        try:
+            evidence = quant.inspect_exact_file(
+                path, row.get("sha256"), row.get("size_bytes"),
+                f"captured stock shard {index}")
+        except quant.PipelineError as exc:
+            raise BuilderError(str(exc)) from exc
+        rows.append({"path": evidence["path"], "size_bytes": evidence["size_bytes"],
+                     "sha256": evidence["sha256"]})
+    return rows
+
+
 def retire_captured_stock(args: argparse.Namespace) -> dict[str, Any]:
     """Free stock shard space only after durable activation-capture evidence."""
     stock_dir = args.stock_dir.absolute()
@@ -581,7 +628,7 @@ def retire_captured_stock(args: argparse.Namespace) -> dict[str, Any]:
             or experiment.get("kind") != "stock_control"
             or experiment.get("stock_weights_unchanged") is not True):
         raise BuilderError("only a completed unchanged stock control can be retired")
-    shards = exact_candidate_shards(stock_dir, record)
+    shards = exact_retirement_stock_shards(stock_dir, record)
     capture = validate_stock_capture_match(
         args.stock_capture_manifest, args.stock_capture_manifest_sha256, record)
     manifest, _ = quant.read_exact_json_file(

@@ -198,6 +198,61 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, body)
 
+    def test_retirement_maps_only_exact_converter_namespace(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            'pathlib.PurePosixPath("/qwen-work/artifacts") / stock.name', body,
+        )
+        self.assertIn("os.path.normpath(raw) != raw", body)
+        self.assertIn("recorded_path.parent != recorded_parent", body)
+        self.assertIn("stock / recorded_path.name", body)
+        self.assertIn("outside the exact converter namespace", body)
+
+    def test_builder_converter_namespace_mapping_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            stock = root / "stock-rocmi4-deadbeefcafe"
+            stock.mkdir()
+            first = stock / "stock-00001-of-00002.gguf"
+            second = stock / "stock-00002-of-00002.gguf"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            prefix = f"/qwen-work/artifacts/{stock.name}"
+
+            def row(path: str, artifact: Path) -> dict:
+                return {"path": path, "size_bytes": artifact.stat().st_size,
+                        "sha256": digest(artifact)}
+
+            accepted = {"output": {"shards": [
+                row(f"{prefix}/{first.name}", first),
+                row(f"{prefix}/{second.name}", second),
+            ]}}
+            mapped = builder.exact_retirement_stock_shards(stock, accepted)
+            self.assertEqual([Path(item["path"]).name for item in mapped],
+                             [first.name, second.name])
+            self.assertEqual([item["size_bytes"] for item in mapped],
+                             [first.stat().st_size, second.stat().st_size])
+            self.assertEqual([item["sha256"] for item in mapped],
+                             [digest(first), digest(second)])
+
+            bad_paths = (
+                f"/qwen-work/artifacts/{stock.name}-sibling/{first.name}",
+                f"{prefix}/../{stock.name}/{first.name}",
+                str(first),
+            )
+            for path in bad_paths:
+                with self.subTest(path=path):
+                    rejected = {"output": {"shards": [row(path, first)]}}
+                    with self.assertRaises(builder.BuilderError):
+                        builder.exact_retirement_stock_shards(stock, rejected)
+
+            mixed = {"output": {"shards": [
+                row(f"{prefix}/{first.name}", first),
+                row(f"/qwen-work/artifacts/{stock.name}-sibling/{second.name}", second),
+            ]}}
+            with self.assertRaises(builder.BuilderError):
+                builder.exact_retirement_stock_shards(stock, mixed)
+
     def test_builder_rejects_bad_capture_and_preserves_uninventoried_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -214,7 +269,7 @@ class QwenRetireStockWorkflowTest(unittest.TestCase):
             write_json(record, {
                 "status": "complete",
                 "experiment": {"kind": "stock_control", "stock_weights_unchanged": True},
-                "output": {"shards": [{"path": str(shard),
+                "output": {"shards": [{"path": f"/qwen-work/artifacts/{stock.name}/{shard.name}",
                                           "size_bytes": shard.stat().st_size,
                                           "sha256": digest(shard)}]},
             })

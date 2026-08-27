@@ -319,14 +319,29 @@ jobs:
           captured_rows = model.get("shards")
           if not isinstance(rows, list) or not rows or not isinstance(captured_rows, list):
               raise SystemExit("stock/capture shard inventory is absent")
+          # qwen-convert-control records paths in its fixed container
+          # namespace.  Map only that exact parent to the independently
+          # derived host artifact directory; no other parent is a retirement
+          # authority.
+          recorded_parent = pathlib.PurePosixPath("/qwen-work/artifacts") / stock.name
           deletion_scope = []
           names = set()
           for index, row in enumerate(rows):
               if not isinstance(row, dict):
                   raise SystemExit("stock shard row is malformed")
-              path = exact_path(str(row.get("path", "")), f"stock shard {index}", kind="file")
-              if path.parent != stock or path.name in names:
-                  raise SystemExit("stock shard is duplicated or escapes the exact stock directory")
+              raw = row.get("path")
+              if not isinstance(raw, str) or not raw or os.path.normpath(raw) != raw:
+                  raise SystemExit("stock shard path is not normalized")
+              recorded_path = pathlib.PurePosixPath(raw)
+              if (not recorded_path.is_absolute()
+                      or recorded_path.parent != recorded_parent
+                      or recorded_path.name in names
+                      or pathlib.PurePosixPath(recorded_path.name).name != recorded_path.name):
+                  raise SystemExit("stock shard is duplicated or outside the exact converter namespace")
+              path = exact_path(stock / recorded_path.name,
+                                f"mapped stock shard {index}", kind="file")
+              if path.parent != stock:
+                  raise SystemExit("mapped stock shard escapes the exact stock directory")
               if path.stat().st_size != row.get("size_bytes"):
                   raise SystemExit("stock shard size differs before retirement")
               names.add(path.name)
