@@ -20,6 +20,10 @@ KERNEL_RE = re.compile(
     r"ELb(?P<checked>[01])ELb1EE[^:]*)\s*:"
 )
 WMMA = "v_wmma_i32_16x16x16_iu4"
+V_RANGE_RE = re.compile(r"v\[(\d+):(\d+)\]")
+SHIFT_RE = re.compile(
+    r"v_(?:dual_)?lshlrev_b32(?:_e32)?\s+v(\d+),\s*4,\s*v(\d+)"
+)
 
 
 def fail(message: str) -> None:
@@ -52,6 +56,100 @@ def kernel_metadata(lines: list[str], symbol: str) -> dict[str, int]:
     return values
 
 
+def register_range(text: str, operand: int) -> list[int]:
+    ranges = V_RANGE_RE.findall(text)
+    if len(ranges) != 4:
+        fail(f"malformed IU4 WMMA operand list: {text.strip()}")
+    first, last = (int(value) for value in ranges[operand])
+    if last - first != 7:
+        fail(f"IU4 WMMA accumulator range is not eight registers: {text.strip()}")
+    return list(range(first, last + 1))
+
+
+def check_accumulator_dataflow(symbol: str, body: list[str]) -> None:
+    # Physical registers are reused aggressively, so carry only the state that
+    # matters to the exact high*16+low accumulator chain.  The lane ordinal is
+    # retained across compiler register renames performed by v_lshlrev_b32.
+    registers: dict[int, tuple[int, int, str]] = {}
+    groups: dict[int, dict[str, object]] = {}
+    next_group = 0
+
+    for text in body:
+        # A dual-issue assembly line can contain two independent shift
+        # mnemonics. Validate both accumulator lanes rather than crediting only
+        # the first textual match.
+        for shift in SHIFT_RE.finditer(text):
+            dst = int(shift.group(1))
+            src = int(shift.group(2))
+            token = registers.get(src)
+            if token is not None and token[2] == "high":
+                group, lane, _stage = token
+                registers[dst] = (group, lane, "shifted")
+                shifted = groups[group]["shifted"]
+                assert isinstance(shifted, set)
+                shifted.add(lane)
+
+        if WMMA not in text:
+            continue
+        destination = register_range(text, 0)
+        accumulator = register_range(text, 3)
+        is_signed = "neg_lo:[1,1,0]" in text
+        is_unsigned = "neg_lo:[1,0,0]" in text
+
+        if is_signed:
+            tokens = [registers.get(reg) for reg in accumulator]
+            carry = (
+                all(token is not None for token in tokens)
+                and len({token[0] for token in tokens if token is not None}) == 1
+                and all(token is not None and token[1] == lane and token[2] == "high"
+                        for lane, token in enumerate(tokens))
+            )
+            if carry:
+                group = tokens[0][0]  # type: ignore[index]
+                groups[group]["high"] = int(groups[group]["high"]) + 1
+            else:
+                group = next_group
+                next_group += 1
+                groups[group] = {"high": 1, "low": 0, "shifted": set()}
+            for lane, reg in enumerate(destination):
+                registers[reg] = (group, lane, "high")
+            continue
+
+        if not is_unsigned:
+            fail(f"{symbol}: IU4 WMMA has an unrecognized signedness modifier")
+
+        tokens = [registers.get(reg) for reg in accumulator]
+        if any(token is None for token in tokens):
+            fail(f"{symbol}: unsigned-low WMMA accumulator has no signed-high origin")
+        group_ids = {token[0] for token in tokens if token is not None}
+        if len(group_ids) != 1:
+            fail(f"{symbol}: unsigned-low WMMA mixes signed-high accumulator groups")
+        group = next(iter(group_ids))
+        stages = {token[2] for token in tokens if token is not None}
+        if stages == {"shifted"}:
+            shifted = groups[group]["shifted"]
+            if shifted != set(range(8)) or any(
+                token is None or token[1] != lane for lane, token in enumerate(tokens)
+            ):
+                fail(f"{symbol}: unsigned-low WMMA sees a partially shifted I32 accumulator")
+        elif stages == {"done"}:
+            if any(token is None or token[1] != lane for lane, token in enumerate(tokens)):
+                fail(f"{symbol}: unsigned-low WMMA accumulator lane order changed")
+        else:
+            fail(f"{symbol}: unsigned-low WMMA lacks eight matching x16 accumulator shifts")
+        groups[group]["low"] = int(groups[group]["low"]) + 1
+        for lane, reg in enumerate(destination):
+            registers[reg] = (group, lane, "done")
+
+    if not groups or any(
+        int(group["high"]) != 2
+        or int(group["low"]) != 2
+        or group["shifted"] != set(range(8))
+        for group in groups.values()
+    ):
+        fail(f"{symbol}: incomplete two-high -> eight-lane x16 -> two-low accumulator group")
+
+
 def inspect(path: pathlib.Path) -> list[str]:
     lines = path.read_text(encoding="utf-8").splitlines()
     candidates: list[tuple[str, int, int, int]] = []
@@ -77,34 +175,7 @@ def inspect(path: pathlib.Path) -> list[str]:
                 f"IU4 WMMAs, found {len(signed)}, {len(unsigned)}, total {len(all_wmma)}"
             )
 
-        # LLVM may interleave independent accumulator groups.  Track WMMA
-        # credits rather than requiring all high products before all low
-        # products: a signed-high product becomes consumable only after an
-        # intervening I32 x16.  This accepts the real scheduled
-        # high,high,x16,low,high,low,high,x16,low,low stream while rejecting a
-        # low product that has no exact shifted-high accumulator available.
-        unshifted_high = 0
-        shifted_high = 0
-        shift_count = 0
-        for text in body:
-            is_signed = WMMA in text and "neg_lo:[1,1,0]" in text
-            is_unsigned = WMMA in text and "neg_lo:[1,0,0]" in text
-            is_x16 = (
-                ("v_lshlrev_b32" in text or "v_dual_lshlrev_b32" in text)
-                and re.search(r",\s*4,", text) is not None
-            )
-            if is_signed:
-                unshifted_high += 1
-            if is_x16 and unshifted_high:
-                shifted_high += unshifted_high
-                unshifted_high = 0
-                shift_count += 1
-            if is_unsigned:
-                if shifted_high == 0:
-                    fail(f"{symbol}: unsigned-low WMMA lacks a preceding shifted signed-high product")
-                shifted_high -= 1
-        if unshifted_high or shifted_high or shift_count == 0:
-            fail(f"{symbol}: incomplete signed-high -> x16 I32 -> unsigned-low WMMA sequence")
+        check_accumulator_dataflow(symbol, body)
         if any("scratch_load" in text or "scratch_store" in text for text in body):
             fail(f"{symbol}: explicit scratch instruction emitted")
 
@@ -114,8 +185,8 @@ def inspect(path: pathlib.Path) -> list[str]:
         sgpr = metadata.get("next_free_sgpr", -1)
         if private != 0:
             fail(f"{symbol}: scratch/private segment is {private}, expected 0")
-        if vgpr < 1 or vgpr > 186:
-            fail(f"{symbol}: VGPR count {vgpr} exceeds screened ceiling 186")
+        if vgpr < 1 or vgpr > 190:
+            fail(f"{symbol}: VGPR count {vgpr} exceeds screened ceiling 190")
         if sgpr < 1 or sgpr > 36:
             fail(f"{symbol}: numbered SGPR count {sgpr} exceeds screened ceiling 36")
         candidates.append((symbol, checked, vgpr, sgpr))

@@ -18,20 +18,35 @@ def kernel(
     modifier_low: str = "neg_lo:[1,0,0]",
     scratch: int = 0,
     shift_before_high: bool = False,
-    pairs: int = 8,
+    groups: int = 4,
+    partial_shift: bool = False,
+    dual_shift: bool = False,
 ) -> str:
     symbol = (
         "_ZL9mul_mat_qIL9ggml_type108ELi32ELb"
         f"{checked}ELb1EEvPKcPKiS4_S4_PfS5_iiiiiiiiiiiiiiiii"
     )
-    high_then_shift = """\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] neg_lo:[1,1,0]
-\tv_lshlrev_b32_e32 v0, 4, v0"""
-    if shift_before_high:
-        high_then_shift = """\tv_lshlrev_b32_e32 v0, 4, v0
+    high = """\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[16:23] neg_lo:[1,1,0]
 \tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] neg_lo:[1,1,0]"""
-    pair = f"""{high_then_shift}
+    lanes = list(range(7 if partial_shift else 8))
+    if dual_shift:
+        shifts = "\n".join(
+            f"\tv_dual_lshlrev_b32 v{lanes[index]}, 4, v{lanes[index]} :: "
+            f"v_dual_lshlrev_b32 v{lanes[index + 1]}, 4, v{lanes[index + 1]}"
+            for index in range(0, len(lanes), 2)
+        )
+    else:
+        shifts = "\n".join(
+            f"\tv_lshlrev_b32_e32 v{lane}, 4, v{lane}" for lane in lanes
+        )
+    if shift_before_high:
+        high_then_shift = f"{shifts}\n{high}"
+    else:
+        high_then_shift = f"{high}\n{shifts}"
+    group = f"""{high_then_shift}
+\tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}
 \tv_wmma_i32_16x16x16_iu4 v[0:7], v[8:9], v[10:11], v[0:7] {modifier_low}"""
-    body = "\n".join(pair for _ in range(pairs))
+    body = "\n".join(group for _ in range(groups))
     return f"""{symbol}:
 {body}
 .Lfunc_end{checked}:
@@ -61,7 +76,9 @@ def main() -> int:
     assert run_gate(kernel(0, modifier_low="neg_lo:[1,1,0]") + kernel(1)).returncode != 0
     assert run_gate(kernel(0, shift_before_high=True) + kernel(1)).returncode != 0
     assert run_gate(kernel(0, scratch=4) + kernel(1)).returncode != 0
-    assert run_gate(kernel(0, pairs=7) + kernel(1)).returncode != 0
+    assert run_gate(kernel(0, groups=3) + kernel(1)).returncode != 0
+    assert run_gate(kernel(0, partial_shift=True) + kernel(1)).returncode != 0
+    assert run_gate(kernel(0, dual_shift=True) + kernel(1, dual_shift=True)).returncode == 0
     assert run_gate(kernel(0) + kernel(0) + kernel(1)).returncode != 0
     print("PASS: rocmi4 W4A8 ISA gate accepts native exact code and rejects drift")
     return 0
