@@ -183,7 +183,8 @@ bool Qwen4ExpBackend::init() {
     }
     std::fprintf(stderr,
                  "[qwen4exp] text AR initialized: layers=48 ctx=%d yarn=%s; "
-                 "vision=lazy mtp=%s mtp_depth=%d mtp_verify=serial-q1 "
+                 "vision=lazy mtp=%s mtp_depth=%d "
+                 "mtp_verify=native-layer-major "
                  "batching=unsupported "
                  "activation_dump=%s\n",
                  max_ctx, weights_.yarn.enabled ? "factor-4" : "off",
@@ -478,66 +479,90 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         result.spec_decode_ran = true;
         ++result.spec_cycles;
 
+        std::vector<Qwen4ExpReplayRow> verify_rows;
+        verify_rows.reserve(candidates.size() + 1);
+        for (size_t row = 0; row <= candidates.size(); ++row) {
+            const int64_t pos64 = static_cast<int64_t>(state_.cur_pos) +
+                                  rope_delta + static_cast<int64_t>(row);
+            if (pos64 < 0 || pos64 > std::numeric_limits<int32_t>::max()) {
+                result.fail(GenerateErrorCode::DecodeFailed,
+                            "Qwen4Exp MTP verify M-RoPE position is out of range");
+                result.decode_s = seconds_since(decode_start);
+                return result;
+            }
+            verify_rows.push_back({
+                row == 0 ? token : candidates[row - 1],
+                {static_cast<int32_t>(pos64), static_cast<int32_t>(pos64),
+                 static_cast<int32_t>(pos64)}});
+        }
+        if (!step_memory_available(error)) {
+            result.fail(GenerateErrorCode::ContextOverflow, error);
+            result.decode_s = seconds_since(decode_start);
+            return result;
+        }
+        const auto verify_start = Clock::now();
+        Qwen4ExpMtpVerifyOutput verify_output;
+        Qwen4ExpMtpVerifyResult verify_result;
+        if (!qwen4exp_verify_bounded_batch(
+                state_, logits_, verify_rows, candidates, weights_.eos_id,
+                weights_.eot_id, qwen4exp_verify_target_batch,
+                qwen4exp_replay_target_q1, &weights_, verify_output,
+                verify_result, error)) {
+            result.fail(GenerateErrorCode::DecodeFailed,
+                        "Qwen4Exp MTP target verification failed: " + error);
+            result.decode_s = seconds_since(decode_start);
+            return result;
+        }
+        result.spec_verify_s += seconds_since(verify_start);
+
+        // The first MTP call consumed the authoritative base pair. Advance
+        // the persistent draft cache only over candidates the target accepted,
+        // using target (not speculative) HC rows from the verified batch.
+        mtp_state_ = std::move(persistent_after_base);
+        for (size_t i = 0; i < verify_result.accepted_predictions; ++i) {
+            const int32_t accepted_token = candidates[i];
+            if (accepted_token == weights_.eos_id ||
+                accepted_token == weights_.eot_id) break;
+            std::vector<float> ignored_logits, ignored_hc;
+            if (!qwen4exp_mtp_step_q1(
+                    weights_, mtp_weights_, mtp_state_, accepted_token,
+                    nullptr, 0, verify_output.row_hc[i].data(),
+                    verify_output.row_hc[i].size(),
+                    verify_rows[i + 1].mrope_position, ignored_logits,
+                    ignored_hc, error)) {
+                result.fail(GenerateErrorCode::DecodeFailed,
+                            "Qwen4Exp MTP accepted draft advance failed: " + error);
+                result.decode_s = seconds_since(decode_start);
+                return result;
+            }
+        }
+        mtp_target_hc_ = state_.hc;
+
         result.tokens.push_back(token);
         history.push_back(token);
         ++emitted;
         io.emit(token);
-        if (io.cancelled) break;
-        const auto verify_start = Clock::now();
-        if (!target_step(token)) {
-            result.fail(GenerateErrorCode::DecodeFailed, error);
-            result.decode_s = seconds_since(decode_start);
-            return result;
-        }
-        mtp_state_ = std::move(persistent_after_base);
-        mtp_target_hc_ = state_.hc;
-
-        bool stop = false;
-        uint64_t round_accepted = 0;
-        for (int depth = 0; depth < proposal_depth && !io.cancelled; ++depth) {
-            const int32_t actual = argmax_logits(logits_);
-            if (actual != candidates[static_cast<size_t>(depth)]) break;
-            ++round_accepted;
-            if (actual == weights_.eos_id || actual == weights_.eot_id) {
-                stop = true;
-                break;
-            }
-            if (emitted >= request.n_gen) break;
-            result.tokens.push_back(actual);
-            history.push_back(actual);
+        for (size_t i = 0; i < verify_result.accepted_predictions &&
+                           !io.cancelled; ++i) {
+            const int32_t accepted_token = candidates[i];
+            if (accepted_token == weights_.eos_id ||
+                accepted_token == weights_.eot_id) break;
+            result.tokens.push_back(accepted_token);
+            history.push_back(accepted_token);
             ++emitted;
-            io.emit(actual);
-            if (io.cancelled) break;
-
-            const int64_t pos64 = static_cast<int64_t>(state_.cur_pos) + rope_delta;
-            if (pos64 < 0 || pos64 > std::numeric_limits<int32_t>::max()) {
-                error = "Qwen4Exp MTP accepted-token position is out of range";
-                result.fail(GenerateErrorCode::DecodeFailed, error);
-                result.decode_s = seconds_since(decode_start);
-                return result;
-            }
-            std::vector<float> ignored_logits, ignored_hc;
-            const int32_t p = static_cast<int32_t>(pos64);
-            if (!qwen4exp_mtp_step_q1(
-                    weights_, mtp_weights_, mtp_state_, actual, nullptr, 0,
-                    mtp_target_hc_.data(), mtp_target_hc_.size(), {p, p, p},
-                    ignored_logits, ignored_hc, error) || !target_step(actual)) {
-                result.fail(GenerateErrorCode::DecodeFailed,
-                            "Qwen4Exp MTP accepted-token advance failed: " + error);
-                result.decode_s = seconds_since(decode_start);
-                return result;
-            }
-            mtp_target_hc_ = state_.hc;
+            io.emit(accepted_token);
         }
-        result.spec_verify_s += seconds_since(verify_start);
+        const bool partial_replay = verify_result.replay.disposition !=
+            Qwen4ExpReplayDisposition::FullAcceptance;
         if (!qwen4exp_mtp_record_round(
-                mtp_stats, candidates.size(), round_accepted, false)) {
+                mtp_stats, candidates.size(),
+                verify_result.accepted_predictions, partial_replay)) {
             result.fail(GenerateErrorCode::DecodeFailed,
                         "Qwen4Exp MTP scheduler telemetry overflow");
             result.decode_s = seconds_since(decode_start);
             return result;
         }
-        if (stop) break;
+        if (verify_result.terminal_prediction) break;
     }
     if (result.spec_decode_ran) result.accept_rate = mtp_stats.accept_rate();
     result.decode_s = seconds_since(decode_start);

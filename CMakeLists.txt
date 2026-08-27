@@ -662,6 +662,16 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_shards COMMAND test_qwen4exp_shards)
   set_tests_properties(qwen4exp_shards PROPERTIES TIMEOUT 60)
 
+  # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
+  # weights are required, but it exercises the same persistent ggml graph that
+  # production dispatches through gfx1151 MMVQ/MMQ.
+  add_executable(test_qwen4exp_frontier test/test_qwen4exp_frontier.cpp)
+  target_include_directories(test_qwen4exp_frontier PRIVATE
+    engine/dflash/qwen4exp engine/ggml/include)
+  target_link_libraries(test_qwen4exp_frontier PRIVATE ember_engine)
+  add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
+  set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
+
   # Narrow placement diagnostic: loads only the trained DSpark main and three
   # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
   # context widths. It avoids a second resident target-model allocation.

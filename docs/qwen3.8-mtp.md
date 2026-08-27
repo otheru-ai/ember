@@ -3,9 +3,11 @@
 Qwen3.8-Flash-Next carries one embedded multi-token-prediction block. Ember can
 extract it losslessly, convert and load a matching quantized GGUF companion,
 run its input fusion, full-QSA block and MoE graph with independent draft state,
-and reconcile partial target verification without retaining rejected target
+and reconcile bounded target verification without retaining rejected target
 state. This is a runnable correctness-first path, not yet a throughput claim:
-target verification is still serial q=1 rather than a batched verify graph.
+the scheduler has the exact q>1 verifier contract and a native layer-major
+bounded target entry, but neither acceptance nor throughput has been measured
+on the target gfx1151 device.
 
 ## Audited upstream contract
 
@@ -73,6 +75,27 @@ The GPU-free test mutates and compares every state family, including COW QSA
 slabs and shared GDN vectors. This prevents a scheduler implementation from
 testing only token position while leaving rejected recurrent state alive.
 
+`qwen4exp_verify_bounded_batch()` is the provider-independent batch boundary.
+For draft depth `d`, it consumes `[base, candidate_0, ..., candidate_(d-1)]`
+in one verifier transaction and requires one next-token logit row plus the raw
+10,240-wide target HC row for every input. The scheduler compares the first
+`d` logit rows, retains the final batch state only on complete non-terminal
+acceptance, and otherwise invokes strict replay over `base` plus the accepted
+non-terminal candidates. EOS/EOT is accepted as a prediction but never
+consumed into target state, matching ordinary autoregressive generation.
+
+The differential host tests cover complete acceptance, rejection after a
+prefix, verifier failure, terminal acceptance, and saving/restoring the target
+snapshot after rejected tail rows have touched every state family.
+
+The production provider calls `qwen4exp_step_batch_mrope()` once per bounded
+verification window. It embeds all rows together and executes them layer-major,
+keeping each target layer and its persistent frontier MoE graph hot across the
+window. Within a layer it advances rows strictly in causal order: PLE history,
+GDN convolution/recurrent state and QSA K/V/index insertion are never reordered
+or shared with the draft. Per-row raw HC and logits are materialized only after
+all 48 layers, and the complete target frontier advances by the batch width.
+
 At runtime, set `DFLASH_QWEN_MTP` to the quantized companion GGUF and optionally
 set `DFLASH_QWEN_MTP_DEPTH` to an integer from 1 through 4. The backend keeps
 the draft QSA cache and target-HC frontier synchronized through prompt ingest,
@@ -85,11 +108,10 @@ or the request requires it.
 The following work is required before `--spec-type` or an MTP speed result is
 honest:
 
-1. replace serial q=1 candidate verification with a bounded batched target
-   verifier that invokes strict replay on every partial acceptance;
-2. differential-test greedy AR against MTP at short and long contexts, after
+1. differential-test greedy q=1 against the native layer-major verifier with
+   real weights at short and long contexts, after
    snapshot restore, and across partial rejection;
-3. measure unprofiled end-to-end throughput and acceptance on exclusive
+2. measure unprofiled end-to-end throughput and acceptance on exclusive
    gfx1151 before profiling the target verify and draft kernels separately.
 
 Until those gates pass, MTP remains opt-in and Ember's release baseline remains

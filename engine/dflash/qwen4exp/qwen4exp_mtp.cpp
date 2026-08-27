@@ -41,6 +41,106 @@ bool qwen4exp_mtp_record_round(Qwen4ExpMtpStats & stats, uint64_t proposed,
     return true;
 }
 
+bool qwen4exp_run_layer_major(size_t rows, size_t layers,
+                              Qwen4ExpLayerMajorStep step, void * opaque,
+                              std::string & error) {
+    if (!rows || !layers || !step) {
+        error = "invalid Qwen4Exp layer-major batch schedule";
+        return false;
+    }
+    for (size_t layer = 0; layer < layers; ++layer) {
+        for (size_t row = 0; row < rows; ++row) {
+            if (!step(opaque, layer, row, error)) return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+int32_t argmax_row(const std::vector<float> & logits) {
+    return logits.empty() ? -1 : static_cast<int32_t>(std::distance(
+        logits.begin(), std::max_element(logits.begin(), logits.end())));
+}
+} // namespace
+
+bool qwen4exp_verify_bounded_batch(
+        Qwen4ExpState & target_state, std::vector<float> & target_logits,
+        const std::vector<Qwen4ExpReplayRow> & input_rows,
+        const std::vector<int32_t> & candidates, int32_t eos_id,
+        int32_t eot_id, Qwen4ExpVerifyBatch verify_batch,
+        Qwen4ExpReplayStep replay_step, void * opaque,
+        Qwen4ExpMtpVerifyOutput & output,
+        Qwen4ExpMtpVerifyResult & result, std::string & error) {
+    result = {};
+    output = {};
+    error.clear();
+    if (!verify_batch || !replay_step || input_rows.empty() ||
+        candidates.empty() || input_rows.size() != candidates.size() + 1) {
+        error = "invalid Qwen4Exp MTP bounded verifier contract";
+        return false;
+    }
+
+    const Qwen4ExpState committed_state = target_state;
+    const std::vector<float> committed_logits = target_logits;
+    if (!verify_batch(opaque, target_state, input_rows, output, error)) {
+        target_state = committed_state;
+        target_logits = committed_logits;
+        output = {};
+        if (error.empty()) error = "Qwen4Exp MTP target batch failed";
+        return false;
+    }
+    if (output.row_logits.size() != input_rows.size() ||
+        output.row_hc.size() != input_rows.size()) {
+        target_state = committed_state;
+        target_logits = committed_logits;
+        output = {};
+        error = "Qwen4Exp MTP target batch returned incomplete rows";
+        return false;
+    }
+    for (size_t row = 0; row < input_rows.size(); ++row) {
+        if (output.row_logits[row].empty() ||
+            output.row_hc[row].size() != 10240) {
+            target_state = committed_state;
+            target_logits = committed_logits;
+            output = {};
+            error = "Qwen4Exp MTP target batch returned invalid row shapes";
+            return false;
+        }
+    }
+    if (target_state.cur_pos != committed_state.cur_pos +
+                                    static_cast<int>(input_rows.size()) ||
+        target_state.hc != output.row_hc.back()) {
+        target_state = committed_state;
+        target_logits = committed_logits;
+        output = {};
+        error = "Qwen4Exp MTP target batch returned an inconsistent frontier";
+        return false;
+    }
+
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (argmax_row(output.row_logits[i]) != candidates[i]) break;
+        ++result.accepted_predictions;
+        if (candidates[i] == eos_id || candidates[i] == eot_id) {
+            result.terminal_prediction = true;
+            break;
+        }
+    }
+    // The base row is always authoritative. Every accepted non-terminal
+    // candidate is also an emitted input row; EOS/EOT is observed but is not
+    // consumed, matching ordinary q=1 generation semantics.
+    result.committed_input_rows = 1 + result.accepted_predictions;
+    if (result.terminal_prediction) --result.committed_input_rows;
+    target_logits = output.row_logits.back();
+    if (!qwen4exp_replay_accepted_prefix(
+            committed_state, committed_logits, target_state, target_logits,
+            input_rows, result.committed_input_rows, replay_step, opaque,
+            result.replay, error)) {
+        output = {};
+        return false;
+    }
+    return true;
+}
+
 bool qwen4exp_replay_accepted_prefix(
         const Qwen4ExpState & committed_state,
         const std::vector<float> & committed_logits,

@@ -1,4 +1,5 @@
 #include "qwen4exp_internal.h"
+#include "qwen4exp_frontier.h"
 #include "qwen4exp_model.h"
 
 #include "gguf.h"
@@ -64,8 +65,7 @@ bool evict_dense_source_pages(void * mapping, size_t mapping_size, int fd,
 bool is_mapped_weight(const char * name) {
     if (std::strcmp(name, "token_embd.weight") == 0 ||
         std::strcmp(name, "per_layer_token_embd.weight") == 0) return true;
-    return std::strstr(name, ".ffn_gate_up_exps.weight") != nullptr ||
-           std::strstr(name, ".ffn_down_exps.weight") != nullptr;
+    return false;
 }
 
 bool parse_layer_suffix(const char * name, int & layer, std::string & suffix) {
@@ -397,11 +397,13 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
             } else if (parse_layer_suffix(name, layer_index, suffix)) {
                 Qwen4ExpLayer & layer = out.layers[static_cast<size_t>(layer_index)];
                 if (suffix == "ffn_gate_up_exps.weight") {
+                    layer.experts_gate_up_tensor = find(meta, name);
                     layer.experts_gate_up = mapped_tensor(
                         static_cast<const uint8_t *>(shard.mmap_addr), shard.mmap_size,
                         data_offset, gctx, meta, i, error);
                     if (!layer.experts_gate_up.valid()) goto fail;
                 } else if (suffix == "ffn_down_exps.weight") {
+                    layer.experts_down_tensor = find(meta, name);
                     layer.experts_down = mapped_tensor(
                         static_cast<const uint8_t *>(shard.mmap_addr), shard.mmap_size,
                         data_offset, gctx, meta, i, error);
@@ -417,6 +419,7 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
         error = "Qwen4Exp mapped embedding tensors were not bound";
         goto fail;
     }
+    if (!qwen4exp_frontier_create(out, error)) goto fail;
     for (gguf_context * context : contexts) gguf_free(context);
     return true;
 
@@ -429,6 +432,7 @@ fail:
 }
 
 void free_qwen4exp_weights(Qwen4ExpWeights & weights) {
+    qwen4exp_frontier_destroy(weights);
     if (weights.buf) ggml_backend_buffer_free(weights.buf);
     for (Qwen4ExpWeightShard & shard : weights.shards) {
         if (shard.ctx) ggml_free(shard.ctx);

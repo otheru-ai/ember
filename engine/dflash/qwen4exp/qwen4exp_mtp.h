@@ -90,6 +90,12 @@ int qwen4exp_mtp_effective_depth(int configured_depth,
 bool qwen4exp_mtp_record_round(Qwen4ExpMtpStats & stats, uint64_t proposed,
                                uint64_t accepted, bool partial_replay);
 
+using Qwen4ExpLayerMajorStep = bool (*)(
+    void * opaque, size_t layer, size_t row, std::string & error);
+bool qwen4exp_run_layer_major(size_t rows, size_t layers,
+                              Qwen4ExpLayerMajorStep step, void * opaque,
+                              std::string & error);
+
 bool load_qwen4exp_mtp_gguf(const std::string & path,
                             ggml_backend_t backend,
                             Qwen4ExpMtpWeights & out,
@@ -121,12 +127,33 @@ using Qwen4ExpReplayStep = bool (*)(
     void * opaque, Qwen4ExpState & state, const Qwen4ExpReplayRow & row,
     std::vector<float> & logits, std::string & error);
 
+struct Qwen4ExpMtpVerifyOutput {
+    // One next-token logit row and raw target HC row for every consumed input
+    // row. The final entry is retained when every candidate is accepted.
+    std::vector<std::vector<float>> row_logits;
+    std::vector<std::vector<float>> row_hc;
+};
+
+using Qwen4ExpVerifyBatch = bool (*)(
+    void * opaque, Qwen4ExpState & state,
+    const std::vector<Qwen4ExpReplayRow> & rows,
+    Qwen4ExpMtpVerifyOutput & output, std::string & error);
+
 // Adapter for the production q=1 target step. Pass `Qwen4ExpWeights *` as
 // opaque to qwen4exp_replay_accepted_prefix(). Kept explicit so tests can use
 // a deterministic state mutator without a HIP backend.
 bool qwen4exp_replay_target_q1(
     void * opaque, Qwen4ExpState & state, const Qwen4ExpReplayRow & row,
     std::vector<float> & logits, std::string & error);
+
+// Production verifier adapter. Its bounded contract is independent of the
+// execution provider: the current correctness fallback executes q=1 rows;
+// the gfx1151 provider may replace the body with one native q>1 graph without
+// changing acceptance/replay scheduling.
+bool qwen4exp_verify_target_batch(
+    void * opaque, Qwen4ExpState & state,
+    const std::vector<Qwen4ExpReplayRow> & rows,
+    Qwen4ExpMtpVerifyOutput & output, std::string & error);
 
 enum class Qwen4ExpReplayDisposition {
     FullAcceptance,
@@ -139,6 +166,31 @@ struct Qwen4ExpReplayResult {
         Qwen4ExpReplayDisposition::RestoredCheckpoint;
     size_t rows_replayed = 0;
 };
+
+struct Qwen4ExpMtpVerifyResult {
+    size_t accepted_predictions = 0;
+    size_t committed_input_rows = 0;
+    bool terminal_prediction = false;
+    Qwen4ExpReplayResult replay;
+};
+
+// Runs one bounded target batch over [base, candidate_0, ...], compares each
+// row's next-token logits to the corresponding candidate, and reconciles the
+// complete target state. A rejected candidate may already have mutated every
+// target state family, so every non-full result goes through strict replay.
+bool qwen4exp_verify_bounded_batch(
+    Qwen4ExpState & target_state,
+    std::vector<float> & target_logits,
+    const std::vector<Qwen4ExpReplayRow> & input_rows,
+    const std::vector<int32_t> & candidates,
+    int32_t eos_id,
+    int32_t eot_id,
+    Qwen4ExpVerifyBatch verify_batch,
+    Qwen4ExpReplayStep replay_step,
+    void * opaque,
+    Qwen4ExpMtpVerifyOutput & output,
+    Qwen4ExpMtpVerifyResult & result,
+    std::string & error);
 
 // Reconcile a speculative target verification with its committed checkpoint.
 // `verified_state`/`verified_logits` are in/out and may contain mutations from

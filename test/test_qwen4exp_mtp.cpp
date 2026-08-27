@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace dflash::common;
@@ -72,6 +73,12 @@ struct StepHarness {
     int fail_at = -1;
 };
 
+struct BatchHarness {
+    StepHarness step;
+    std::vector<int32_t> predictions;
+    bool fail = false;
+};
+
 static bool fake_q1_step(void * opaque, Qwen4ExpState & state,
                          const Qwen4ExpReplayRow & row,
                          std::vector<float> & logits, std::string & error) {
@@ -101,6 +108,40 @@ static bool fake_q1_step(void * opaque, Qwen4ExpState & state,
     layer.index_key.append(&v, 1);
     logits = {v, v + 0.5f};
     return true;
+}
+
+static bool fake_verify_batch(
+        void * opaque, Qwen4ExpState & state,
+        const std::vector<Qwen4ExpReplayRow> & input_rows,
+        Qwen4ExpMtpVerifyOutput & output, std::string & error) {
+    auto * batch = static_cast<BatchHarness *>(opaque);
+    if (batch->fail) {
+        state.cur_pos += 100;
+        error = "injected batch failure";
+        return false;
+    }
+    if (batch->predictions.size() != input_rows.size()) return false;
+    output.row_logits.clear();
+    output.row_hc.clear();
+    for (size_t i = 0; i < input_rows.size(); ++i) {
+        std::vector<float> ignored;
+        if (!fake_q1_step(&batch->step, state, input_rows[i], ignored, error))
+            return false;
+        std::vector<float> logits(16, -1.0f);
+        logits[static_cast<size_t>(batch->predictions[i])] = 1.0f;
+        output.row_logits.push_back(std::move(logits));
+        state.hc.assign(10240, static_cast<float>(state.cur_pos));
+        output.row_hc.push_back(state.hc);
+    }
+    return true;
+}
+
+static bool fake_batch_replay(void * opaque, Qwen4ExpState & state,
+                              const Qwen4ExpReplayRow & row,
+                              std::vector<float> & logits,
+                              std::string & error) {
+    auto * batch = static_cast<BatchHarness *>(opaque);
+    return fake_q1_step(&batch->step, state, row, logits, error);
 }
 
 static std::vector<Qwen4ExpReplayRow> rows() {
@@ -244,12 +285,190 @@ static void test_depth_and_instrumentation_contract() {
           "impossible MTP acceptance telemetry fails closed");
 }
 
+struct LayerMajorHarness {
+    size_t rows = 0;
+    size_t layers = 0;
+    std::vector<float> seed;
+    std::vector<float> output;
+    std::vector<float> causal;
+    std::vector<std::pair<size_t, size_t>> order;
+};
+
+static bool fake_layer_major_step(void * opaque, size_t layer, size_t row,
+                                  std::string &) {
+    auto * harness = static_cast<LayerMajorHarness *>(opaque);
+    const float input = layer == 0
+        ? harness->seed[row]
+        : harness->output[row * harness->layers + layer - 1];
+    const float value = input + 0.5f * harness->causal[layer] +
+                        static_cast<float>(layer + 1);
+    harness->output[row * harness->layers + layer] = value;
+    harness->causal[layer] = value;
+    harness->order.emplace_back(layer, row);
+    return true;
+}
+
+static void test_layer_major_matches_token_major_causality() {
+    constexpr size_t rows = 5;
+    constexpr size_t layers = 7;
+    const std::vector<float> seed = {1, 2, 3, 4, 5};
+    std::vector<float> expected(rows * layers);
+    std::vector<float> expected_causal(layers, 0.0f);
+    for (size_t row = 0; row < rows; ++row) {
+        for (size_t layer = 0; layer < layers; ++layer) {
+            const float input = layer == 0
+                ? seed[row] : expected[row * layers + layer - 1];
+            const float value = input + 0.5f * expected_causal[layer] +
+                                static_cast<float>(layer + 1);
+            expected[row * layers + layer] = value;
+            expected_causal[layer] = value;
+        }
+    }
+    LayerMajorHarness harness{
+        rows, layers, seed, std::vector<float>(rows * layers),
+        std::vector<float>(layers, 0.0f), {}};
+    std::string error;
+    CHECK(qwen4exp_run_layer_major(rows, layers, fake_layer_major_step,
+                                   &harness, error),
+          "native verifier layer-major schedule completes");
+    CHECK(harness.output == expected && harness.causal == expected_causal,
+          "layer-major verifier is differential-equivalent to token-major q=1");
+    const std::pair<size_t, size_t> first{0, 0};
+    const std::pair<size_t, size_t> end_first_layer{0, rows - 1};
+    const std::pair<size_t, size_t> start_second_layer{1, 0};
+    CHECK(harness.order.front() == first &&
+              harness.order[rows - 1] == end_first_layer &&
+              harness.order[rows] == start_second_layer,
+          "native verifier keeps rows causal inside each hot target layer");
+}
+
+static void test_bounded_batch_full_and_partial_rejection() {
+    const std::vector<Qwen4ExpReplayRow> input = {
+        {210, {7, 7, 7}}, {211, {8, 8, 8}},
+        {212, {9, 9, 9}}, {213, {10, 10, 10}}};
+    const Qwen4ExpState committed = seed_state();
+    const std::vector<float> committed_logits = {1.0f};
+
+    Qwen4ExpState full = committed;
+    std::vector<float> full_logits = committed_logits;
+    BatchHarness full_batch;
+    full_batch.predictions = {3, 4, 5, 6};
+    Qwen4ExpMtpVerifyOutput output;
+    Qwen4ExpMtpVerifyResult result;
+    std::string error;
+    CHECK(qwen4exp_verify_bounded_batch(
+              full, full_logits, input, {3, 4, 5}, 14, 15,
+              fake_verify_batch, fake_batch_replay, &full_batch, output,
+              result, error),
+          "bounded target batch accepts a complete draft");
+    CHECK(result.accepted_predictions == 3 &&
+              result.committed_input_rows == 4 &&
+              result.replay.disposition ==
+                  Qwen4ExpReplayDisposition::FullAcceptance &&
+              result.replay.rows_replayed == 0,
+          "full bounded acceptance retains the batch state");
+    CHECK(output.row_logits.size() == 4 && output.row_hc.size() == 4 &&
+              full.cur_pos == committed.cur_pos + 4,
+          "bounded verifier exposes every target logit and HC row");
+
+    Qwen4ExpState partial = committed;
+    std::vector<float> partial_logits = committed_logits;
+    BatchHarness partial_batch;
+    partial_batch.predictions = {3, 4, 5, 6};
+    CHECK(qwen4exp_verify_bounded_batch(
+              partial, partial_logits, input, {3, 9, 5}, 14, 15,
+              fake_verify_batch, fake_batch_replay, &partial_batch, output,
+              result, error),
+          "bounded target batch reconciles a partial rejection");
+    Qwen4ExpState expected = committed;
+    std::vector<float> expected_logits = committed_logits;
+    StepHarness expected_step;
+    CHECK(fake_q1_step(&expected_step, expected, input[0], expected_logits,
+                       error) &&
+              fake_q1_step(&expected_step, expected, input[1], expected_logits,
+                           error),
+          "partial bounded reference prefix builds");
+    CHECK(result.accepted_predictions == 1 &&
+              result.committed_input_rows == 2 && same_state(partial, expected) &&
+              partial_logits == expected_logits,
+          "partial rejection restores and replays exactly base plus acceptance");
+    CHECK(result.replay.disposition ==
+              Qwen4ExpReplayDisposition::ReplayedAcceptedPrefix &&
+              result.replay.rows_replayed == 2,
+          "partial bounded rejection reports strict HaloSpecKV replay");
+
+    // A prefix-cache snapshot copied after reconcile must restore the exact
+    // accepted target frontier, never the rejected tail evaluated in batch.
+    const Qwen4ExpState snapshot = partial;
+    const std::vector<float> snapshot_logits = partial_logits;
+    poison_verified_state(partial, partial_logits);
+    partial = snapshot;
+    partial_logits = snapshot_logits;
+    CHECK(same_state(partial, expected) && partial_logits == expected_logits,
+          "post-rejection snapshot restores target state and seed logits");
+}
+
+static void test_bounded_batch_failure_is_transactional() {
+    Qwen4ExpState state = seed_state();
+    const Qwen4ExpState committed = state;
+    std::vector<float> logits = {1.0f};
+    const std::vector<float> committed_logits = logits;
+    BatchHarness batch;
+    batch.fail = true;
+    Qwen4ExpMtpVerifyOutput output;
+    Qwen4ExpMtpVerifyResult result;
+    std::string error;
+    const std::vector<Qwen4ExpReplayRow> input = {
+        {210, {7, 7, 7}}, {211, {8, 8, 8}}};
+    CHECK(!qwen4exp_verify_bounded_batch(
+              state, logits, input, {3}, 14, 15, fake_verify_batch,
+              fake_batch_replay, &batch, output, result, error),
+          "bounded target batch failure is reported");
+    CHECK(same_state(state, committed) && logits == committed_logits &&
+              output.row_logits.empty() && error == "injected batch failure",
+          "failed bounded target batch restores the complete checkpoint");
+}
+
+static void test_bounded_terminal_is_observed_not_consumed() {
+    const std::vector<Qwen4ExpReplayRow> input = {
+        {210, {7, 7, 7}}, {211, {8, 8, 8}},
+        {212, {9, 9, 9}}, {213, {10, 10, 10}}};
+    Qwen4ExpState state = seed_state();
+    const Qwen4ExpState committed = state;
+    std::vector<float> logits = {1.0f};
+    BatchHarness batch;
+    batch.predictions = {3, 14, 5, 6};
+    Qwen4ExpMtpVerifyOutput output;
+    Qwen4ExpMtpVerifyResult result;
+    std::string error;
+    CHECK(qwen4exp_verify_bounded_batch(
+              state, logits, input, {3, 14, 5}, 14, 15,
+              fake_verify_batch, fake_batch_replay, &batch, output, result,
+              error),
+          "bounded target batch observes an accepted terminal prediction");
+    Qwen4ExpState expected = committed;
+    std::vector<float> expected_logits = {1.0f};
+    StepHarness expected_step;
+    CHECK(fake_q1_step(&expected_step, expected, input[0], expected_logits,
+                       error) &&
+              fake_q1_step(&expected_step, expected, input[1], expected_logits,
+                           error),
+          "terminal reference frontier builds without consuming EOS");
+    CHECK(result.accepted_predictions == 2 && result.terminal_prediction &&
+              result.committed_input_rows == 2 && same_state(state, expected),
+          "accepted EOS is reported but absent from target state and snapshots");
+}
+
 int main() {
     test_full_accept_keeps_fast_state();
     test_partial_accept_replays_only_prefix();
     test_zero_accept_and_failure_are_transactional();
     test_invalid_accept_count_fails_closed();
     test_depth_and_instrumentation_contract();
+    test_layer_major_matches_token_major_causality();
+    test_bounded_batch_full_and_partial_rejection();
+    test_bounded_batch_failure_is_transactional();
+    test_bounded_terminal_is_observed_not_consumed();
     std::printf("qwen4exp mtp replay: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -1,4 +1,5 @@
 #include "qwen4exp_internal.h"
+#include "qwen4exp_frontier.h"
 #include "qwen4exp_mtp.h"
 
 #include "ggml-alloc.h"
@@ -495,9 +496,14 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
                   static_cast<int>(attended.size()), output, error);
 }
 
-bool run_moe(const Qwen4ExpWeights & weights, const Qwen4ExpLayer & layer,
+bool run_moe(const Qwen4ExpWeights & weights, int layer_index,
+             const Qwen4ExpLayer & layer,
              const std::vector<float> & input, std::vector<float> & output,
              std::string & error) {
+    if (weights.frontier && layer_index >= 0 && layer_index < 48) {
+        return qwen4exp_frontier_moe_q1(weights, layer_index, input.data(),
+                                        input.size(), output, error);
+    }
     std::vector<float> router;
     if (!matvec(weights.backend, layer.router, input.data(), kEmbedding,
                 router, error) || router.size() != kExpertCount) return false;
@@ -607,7 +613,8 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
         hc_combine(state.hc, block, inject);
         if (!hc_mix(weights, state.hc, layer.hc_ffn_norm, layer.hc_ffn_down,
                     layer.hc_ffn_up, layer.hc_ffn_inject, mixed, &inject,
-                    error) || !run_moe(weights, layer, mixed, block, error)) return false;
+                    error) || !run_moe(weights, layer_index, layer, mixed,
+                                       block, error)) return false;
         hc_combine(state.hc, block, inject);
     }
     std::vector<float> final;
@@ -736,7 +743,7 @@ bool qwen4exp_mtp_step_q1(
     if (!hc_mix(target, state.hc, mtp.layer.hc_ffn_norm,
                 mtp.layer.hc_ffn_down, mtp.layer.hc_ffn_up,
                 mtp.layer.hc_ffn_inject, mixed, &inject, error) ||
-        !run_moe(target, mtp.layer, mixed, block, error)) return false;
+        !run_moe(target, 48, mtp.layer, mixed, block, error)) return false;
     hc_combine(state.hc, block, inject);
 
     draft_hc = state.hc;
@@ -746,6 +753,118 @@ bool qwen4exp_mtp_step_q1(
         !matvec(target.backend, target.output, final.data(), kEmbedding,
                 logits, error)) return false;
     ++state.cur_pos;
+    return true;
+}
+
+namespace {
+struct Qwen4ExpBatchLayerContext {
+    const Qwen4ExpWeights & weights;
+    Qwen4ExpState & state;
+    const std::vector<int32_t> & tokens;
+    const std::vector<std::array<int32_t, 3>> & positions;
+    std::vector<std::vector<float>> & hc_rows;
+};
+
+bool qwen4exp_batch_layer_step(void * opaque, size_t layer_number,
+                               size_t row, std::string & error) {
+    auto & context = *static_cast<Qwen4ExpBatchLayerContext *>(opaque);
+    const int layer_index = static_cast<int>(layer_number);
+    const Qwen4ExpLayer & layer = context.weights.layers[layer_number];
+    context.state.hc = std::move(context.hc_rows[row]);
+    if (layer_index == 1 && !run_ple(context.weights, context.state, layer,
+                                     context.tokens[row], error)) return false;
+    std::vector<float> mixed, block;
+    std::array<float, kHc> inject{};
+    if (!hc_mix(context.weights, context.state.hc, layer.hc_attn_norm,
+                layer.hc_attn_down, layer.hc_attn_up, layer.hc_attn_inject,
+                mixed, &inject, error)) return false;
+    const bool qsa = (layer_index + 1) % 4 == 0;
+    if (qsa) {
+        if (!run_qsa(context.weights,
+                     context.state.layers[layer_number], layer, mixed,
+                     context.positions[row], context.state.mrope_positions,
+                     block, error)) return false;
+    } else if (!run_gdn(context.weights, context.state.layers[layer_number],
+                        layer, mixed, block, error)) {
+        return false;
+    }
+    hc_combine(context.state.hc, block, inject);
+    if (!hc_mix(context.weights, context.state.hc, layer.hc_ffn_norm,
+                layer.hc_ffn_down, layer.hc_ffn_up, layer.hc_ffn_inject,
+                mixed, &inject, error) ||
+        !run_moe(context.weights, layer_index, layer, mixed, block, error))
+        return false;
+    hc_combine(context.state.hc, block, inject);
+    context.hc_rows[row] = std::move(context.state.hc);
+    return true;
+}
+} // namespace
+
+bool qwen4exp_step_batch_mrope(
+        const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::array<int32_t, 3>> & mrope_positions,
+        std::vector<std::vector<float>> & row_logits,
+        std::vector<std::vector<float>> & row_hc, std::string & error) {
+    row_logits.clear();
+    row_hc.clear();
+    const size_t rows = tokens.size();
+    if (rows < 2 || rows > 5 || mrope_positions.size() != rows ||
+        state.cur_pos < 0 || state.cur_pos > weights.max_ctx ||
+        weights.layers.size() != 48 ||
+        rows > static_cast<size_t>(weights.max_ctx - state.cur_pos)) {
+        error = "invalid Qwen4Exp bounded q>1 verifier frontier";
+        return false;
+    }
+    for (int32_t token : tokens) {
+        if (token < 0 || token >= 248320) {
+            error = "invalid Qwen4Exp bounded verifier token";
+            return false;
+        }
+    }
+
+    std::vector<float> embeddings(rows * static_cast<size_t>(kEmbedding));
+    if (!weights.embedder.embed(tokens.data(), static_cast<int>(rows),
+                                embeddings.data())) {
+        error = "Qwen4Exp bounded verifier embedding lookup failed";
+        return false;
+    }
+    std::vector<std::vector<float>> hc_rows(
+        rows, std::vector<float>(static_cast<size_t>(kHcDim)));
+    for (size_t row = 0; row < rows; ++row) {
+        const float * embedding = embeddings.data() + row * kEmbedding;
+        for (int stream = 0; stream < kHc; ++stream) {
+            std::copy_n(embedding, kEmbedding,
+                        hc_rows[row].data() + stream * kEmbedding);
+        }
+        for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
+            state.mrope_positions[axis].push_back(mrope_positions[row][axis]);
+    }
+
+    // Layer-major execution is causally equivalent to q=1 token-major
+    // execution: a later row at layer L depends only on earlier rows at L and
+    // its own output from L-1. The inner row order is never parallelized across
+    // PLE/GDN/QSA state mutations.
+    Qwen4ExpBatchLayerContext context{
+        weights, state, tokens, mrope_positions, hc_rows};
+    if (!qwen4exp_run_layer_major(rows, 48, qwen4exp_batch_layer_step,
+                                  &context, error)) return false;
+
+    row_logits.reserve(rows);
+    row_hc.reserve(rows);
+    for (size_t row = 0; row < rows; ++row) {
+        std::vector<float> final, logits;
+        if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
+                    weights.output_hc_down, weights.output_hc_up, nullptr,
+                    final, nullptr, error) ||
+            !matvec(weights.backend, weights.output, final.data(), kEmbedding,
+                    logits, error)) return false;
+        row_hc.push_back(hc_rows[row]);
+        row_logits.push_back(std::move(logits));
+    }
+    state.hc = row_hc.back();
+    state.cur_pos += static_cast<int>(rows);
+    state.last_token = tokens.back();
     return true;
 }
 

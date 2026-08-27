@@ -118,6 +118,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/qwen4exp/qwen4exp_shards.cpp
   ${DFLASH}/qwen4exp/qwen4exp_loader.cpp
   ${DFLASH}/qwen4exp/qwen4exp_runtime.cpp
+  ${DFLASH}/qwen4exp/qwen4exp_frontier.cpp
   ${DFLASH}/qwen4exp/qwen4exp_state.cpp
   ${DFLASH}/qwen4exp/qwen4exp_mtp.cpp
   ${DFLASH}/qwen4exp/qwen4exp_mtp_runtime.cpp

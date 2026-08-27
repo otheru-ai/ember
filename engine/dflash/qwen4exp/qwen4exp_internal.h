@@ -23,6 +23,8 @@
 
 namespace dflash::common {
 
+struct Qwen4ExpFrontierRuntime;
+
 struct Qwen4ExpMappedTensor {
     const uint8_t * data = nullptr;
     size_t bytes = 0;
@@ -78,6 +80,8 @@ struct Qwen4ExpLayer {
     ggml_tensor * shared_gate = nullptr;
     ggml_tensor * shared_up = nullptr;
     ggml_tensor * shared_down = nullptr;
+    ggml_tensor * experts_gate_up_tensor = nullptr;
+    ggml_tensor * experts_down_tensor = nullptr;
     Qwen4ExpMappedTensor experts_gate_up;
     Qwen4ExpMappedTensor experts_down;
 };
@@ -132,6 +136,7 @@ struct Qwen4ExpWeights {
     ember_qwen_yarn_config yarn{};
     uint64_t resident_weight_bytes = 0;
     uint64_t state_budget_bytes = 0;
+    Qwen4ExpFrontierRuntime * frontier = nullptr;
 };
 
 struct Qwen4ExpLayerState {
@@ -224,6 +229,19 @@ bool qwen4exp_step_q1_mrope_capture(
     const Qwen4ExpWeights & weights, Qwen4ExpState & state, int32_t token,
     const std::array<int32_t, 3> & mrope_position,
     std::vector<float> & logits, std::vector<float> & attn_mixed_capture,
+    std::string & error);
+
+// Native bounded verifier entry. Rows are evaluated layer-major so target
+// weights/frontier graphs stay hot across the depth-1..4 MTP window, while
+// PLE, GDN and QSA state still advance causally in row order. The final state
+// covers every input row; callers must restore/replay on partial acceptance.
+bool qwen4exp_step_batch_mrope(
+    const Qwen4ExpWeights & weights,
+    Qwen4ExpState & state,
+    const std::vector<int32_t> & tokens,
+    const std::vector<std::array<int32_t, 3>> & mrope_positions,
+    std::vector<std::vector<float>> & row_logits,
+    std::vector<std::vector<float>> & row_hc,
     std::string & error);
 
 } // namespace dflash::common
