@@ -67,6 +67,22 @@ bool qwen4exp_mtp_prompt_sync_plan(
     int target_pos_before, int mtp_pos_before, size_t target_rows,
     std::vector<Qwen4ExpMtpPromptSyncRow> & plan, std::string & error);
 
+struct Qwen4ExpMtpCacheBatchShape {
+    size_t rows = 0;
+    size_t embedding_values = 0;    // [rows, 2560]
+    size_t target_hc_values = 0;    // [rows, 10240]
+    size_t hc_projection_rows = 0;  // four 2560-wide streams per row
+    size_t key_values = 0;          // [rows, 2, 256]
+    size_t value_values = 0;        // [rows, 2, 256]
+    size_t index_key_values = 0;    // [rows, 128]
+};
+
+// Pure bounded-layout contract used before constructing GPU batch inputs.
+// Widths beyond the target q16 frontier are rejected rather than silently
+// split, because each target chunk is one causal synchronization boundary.
+bool qwen4exp_mtp_cache_batch_shape(
+    size_t rows, Qwen4ExpMtpCacheBatchShape & shape, std::string & error);
+
 // Snapshot validity is stronger than a scalar position check. The MTP QSA
 // K/V/raw-index caches and all M-RoPE axes must cover exactly the trailing
 // draft frontier, while target_hc remains the target's authoritative h_p.
@@ -158,6 +174,19 @@ bool qwen4exp_mtp_sync_cache_q1(
     const float * target_hc,
     size_t target_hc_count,
     const std::array<int32_t, 3> & mrope_position,
+    std::string & error);
+
+// Bounded text-prompt synchronization. All projection and HC-mix rows are
+// evaluated as q<=16 matrices; only the final K/V/raw-indexK and position
+// commits are row-ordered. `target_hc_rows[r]` is the preceding authoritative
+// target HC selected by qwen4exp_mtp_prompt_sync_plan().
+bool qwen4exp_mtp_sync_cache_batch(
+    const Qwen4ExpWeights & target,
+    const Qwen4ExpMtpWeights & mtp,
+    Qwen4ExpMtpState & state,
+    const std::vector<int32_t> & tokens,
+    const std::vector<std::vector<float>> & target_hc_rows,
+    const std::vector<std::array<int32_t, 3>> & mrope_positions,
     std::string & error);
 
 struct Qwen4ExpReplayRow {

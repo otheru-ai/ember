@@ -128,6 +128,55 @@ bool matvec(ggml_backend_t backend, ggml_tensor * weight,
     return ok;
 }
 
+bool matmul_rows(ggml_backend_t backend, ggml_tensor * weight,
+                 const float * input, int input_count, int rows,
+                 std::vector<float> & output, std::string & error) {
+    if (!backend || !weight || !input || input_count <= 0 || rows <= 0 ||
+        weight->ne[0] != input_count || ggml_n_dims(weight) != 2) {
+        error = "invalid Qwen4Exp batched matrix shape";
+        return false;
+    }
+    ggml_init_params params{};
+    params.mem_size = 1024 * 1024;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        error = "Qwen4Exp batched matrix context allocation failed";
+        return false;
+    }
+    ggml_tensor * in = ggml_new_tensor_2d(
+        ctx, GGML_TYPE_F32, input_count, rows);
+    ggml_set_input(in);
+    ggml_tensor * out = ggml_mul_mat(ctx, weight, in);
+    ggml_set_output(out);
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 16, false);
+    ggml_build_forward_expand(graph, out);
+    ggml_gallocr_t allocator =
+        ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
+    if (!allocator || !ggml_gallocr_alloc_graph(allocator, graph)) {
+        if (allocator) ggml_gallocr_free(allocator);
+        ggml_free(ctx);
+        error = "Qwen4Exp batched matrix graph allocation failed";
+        return false;
+    }
+    const size_t input_values = static_cast<size_t>(input_count) *
+                                static_cast<size_t>(rows);
+    ggml_backend_tensor_set(in, input, 0, input_values * sizeof(float));
+    const bool ok =
+        ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
+    if (ok) {
+        output.resize(static_cast<size_t>(weight->ne[1]) *
+                      static_cast<size_t>(rows));
+        ggml_backend_tensor_get(out, output.data(), 0,
+                                output.size() * sizeof(float));
+    } else {
+        error = "Qwen4Exp batched matrix graph execution failed";
+    }
+    ggml_gallocr_free(allocator);
+    ggml_free(ctx);
+    return ok;
+}
+
 bool rotate_optional(ggml_backend_t backend, ggml_tensor * rotation,
                      std::vector<float> & values, std::string & error) {
     if (!rotation) return true;
@@ -761,6 +810,197 @@ bool prepare_mtp_hc(const Qwen4ExpWeights & target,
     }
     return true;
 }
+
+bool prepare_mtp_hc_batch(
+        const Qwen4ExpWeights & target, const Qwen4ExpMtpWeights & mtp,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::vector<float>> & target_hc_rows,
+        std::vector<float> & hc_rows, std::string & error) {
+    Qwen4ExpMtpCacheBatchShape shape;
+    if (!qwen4exp_mtp_cache_batch_shape(tokens.size(), shape, error) ||
+        target_hc_rows.size() != shape.rows || !mtp.pre_embedding_norm ||
+        !mtp.pre_hc_norm || !mtp.fc_embedding || !mtp.fc_hc) {
+        if (error.empty()) error = "invalid Qwen4Exp MTP cache batch inputs";
+        return false;
+    }
+    for (size_t row = 0; row < shape.rows; ++row) {
+        if (tokens[row] < 0 || tokens[row] >= 248320 ||
+            target_hc_rows[row].size() != 10240U) {
+            error = "invalid Qwen4Exp MTP cache batch row";
+            return false;
+        }
+    }
+
+    std::vector<float> embeddings(shape.embedding_values);
+    if (!target.embedder.embed(tokens.data(), static_cast<int>(shape.rows),
+                               embeddings.data())) {
+        error = "Qwen4Exp MTP cache batch embedding lookup failed";
+        return false;
+    }
+    std::vector<float> embedding_norm, hc_norm;
+    if (!tensor_f32(mtp.pre_embedding_norm, embedding_norm, error) ||
+        embedding_norm.size() != 2560U ||
+        !tensor_f32(mtp.pre_hc_norm, hc_norm, error) ||
+        hc_norm.size() != 10240U) return false;
+    for (size_t row = 0; row < shape.rows; ++row) {
+        rms_norm(embeddings.data() + row * 2560U, kEmbedding,
+                 embedding_norm.data());
+    }
+    std::vector<float> projected_embeddings;
+    if (!matmul_rows(target.backend, mtp.fc_embedding, embeddings.data(),
+                     kEmbedding, static_cast<int>(shape.rows),
+                     projected_embeddings, error) ||
+        projected_embeddings.size() != shape.embedding_values) return false;
+
+    std::vector<float> normalized_hc(shape.target_hc_values);
+    for (size_t row = 0; row < shape.rows; ++row) {
+        float * destination = normalized_hc.data() + row * 10240U;
+        std::copy(target_hc_rows[row].begin(), target_hc_rows[row].end(),
+                  destination);
+        rms_norm(destination, kHcDim, hc_norm.data());
+    }
+    std::vector<float> projected_hidden;
+    if (!matmul_rows(target.backend, mtp.fc_hc, normalized_hc.data(),
+                     kEmbedding, static_cast<int>(shape.hc_projection_rows),
+                     projected_hidden, error) ||
+        projected_hidden.size() != shape.target_hc_values) return false;
+
+    hc_rows.resize(shape.target_hc_values);
+    for (size_t row = 0; row < shape.rows; ++row) {
+        for (size_t stream = 0; stream < 4U; ++stream) {
+            for (size_t channel = 0; channel < 2560U; ++channel) {
+                const size_t offset = (row * 4U + stream) * 2560U + channel;
+                hc_rows[offset] = projected_hidden[offset] +
+                    projected_embeddings[row * 2560U + channel];
+            }
+        }
+    }
+    return true;
+}
+
+bool hc_mix_batch(const Qwen4ExpWeights & target,
+                  const Qwen4ExpLayer & layer, size_t rows,
+                  const std::vector<float> & hc_rows,
+                  std::vector<float> & mixed_rows, std::string & error) {
+    if (!layer.hc_attn_norm || !layer.hc_attn_down ||
+        !layer.hc_attn_up || rows == 0 || rows > 16 ||
+        hc_rows.size() != rows * 10240U ||
+        layer.hc_attn_down->ne[1] <= 0 ||
+        layer.hc_attn_down->ne[1] > std::numeric_limits<int>::max()) {
+        error = "invalid Qwen4Exp MTP HC cache batch shape";
+        return false;
+    }
+    std::vector<float> norm_weight;
+    if (!tensor_f32(layer.hc_attn_norm, norm_weight, error) ||
+        norm_weight.size() != 10240U) return false;
+    std::vector<float> normalized = hc_rows;
+    for (size_t row = 0; row < rows; ++row) {
+        float * base = normalized.data() + row * 10240U;
+        for (size_t stream = 0; stream < 4U; ++stream)
+            rms_norm(base + stream * 2560U, kEmbedding, nullptr);
+        for (size_t value = 0; value < 10240U; ++value)
+            base[value] *= norm_weight[value];
+    }
+    const int low_width = static_cast<int>(layer.hc_attn_down->ne[1]);
+    std::vector<float> low;
+    if (!matmul_rows(target.backend, layer.hc_attn_down, normalized.data(),
+                     kHcDim, static_cast<int>(rows), low, error) ||
+        low.size() != rows * static_cast<size_t>(low_width)) return false;
+    for (float & value : low)
+        value = silu(value / static_cast<float>(kHc));
+    std::vector<float> gate;
+    if (!matmul_rows(target.backend, layer.hc_attn_up, low.data(), low_width,
+                     static_cast<int>(rows), gate, error) ||
+        gate.size() != rows * 10240U) return false;
+    for (float & value : gate) value = sigmoid(value);
+
+    mixed_rows.assign(rows * 2560U, 0.0f);
+    for (size_t row = 0; row < rows; ++row) {
+        for (size_t stream = 0; stream < 4U; ++stream) {
+            for (size_t channel = 0; channel < 2560U; ++channel) {
+                const size_t hc_offset =
+                    (row * 4U + stream) * 2560U + channel;
+                mixed_rows[row * 2560U + channel] +=
+                    normalized[hc_offset] * gate[hc_offset] /
+                    static_cast<float>(kHc);
+            }
+        }
+    }
+    return true;
+}
+
+bool rotate_optional_batch(ggml_backend_t backend, ggml_tensor * rotation,
+                           std::vector<float> & values,
+                           std::string & error) {
+    if (!rotation) return true;
+    if (ggml_n_dims(rotation) != 2 || rotation->ne[0] != rotation->ne[1] ||
+        rotation->ne[0] <= 0 ||
+        rotation->ne[0] > std::numeric_limits<int>::max() ||
+        values.size() % static_cast<size_t>(rotation->ne[0]) != 0) {
+        error = "invalid Qwen4Exp batched optional Hadamard rotation shape";
+        return false;
+    }
+    const int width = static_cast<int>(rotation->ne[0]);
+    const size_t row_count = values.size() / static_cast<size_t>(width);
+    if (row_count == 0 ||
+        row_count > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        error = "invalid Qwen4Exp batched optional Hadamard rotation rows";
+        return false;
+    }
+    std::vector<float> rotated;
+    if (!matmul_rows(backend, rotation, values.data(), width,
+                     static_cast<int>(row_count), rotated, error)) return false;
+    values = std::move(rotated);
+    return true;
+}
+
+bool append_qsa_cache_batch(
+        const Qwen4ExpWeights & target, Qwen4ExpMtpState & state,
+        const Qwen4ExpLayer & layer, const std::vector<float> & mixed_rows,
+        const std::vector<std::array<int32_t, 3>> & positions,
+        std::string & error) {
+    const size_t rows = positions.size();
+    if (rows == 0 || rows > 16 || mixed_rows.size() != rows * 2560U) {
+        error = "invalid Qwen4Exp MTP QSA cache batch shape";
+        return false;
+    }
+    std::vector<float> key, value, index_key;
+    if (!matmul_rows(target.backend, layer.attn_k, mixed_rows.data(),
+                     kEmbedding, static_cast<int>(rows), key, error) ||
+        !matmul_rows(target.backend, layer.attn_v, mixed_rows.data(),
+                     kEmbedding, static_cast<int>(rows), value, error) ||
+        !matmul_rows(target.backend, layer.index_k, mixed_rows.data(),
+                     kEmbedding, static_cast<int>(rows), index_key, error) ||
+        key.size() != rows * 512U || value.size() != rows * 512U ||
+        index_key.size() != rows * 128U) return false;
+    std::vector<float> key_norm;
+    if (!tensor_f32(layer.attn_k_norm, key_norm, error) ||
+        key_norm.size() != 256U) return false;
+    for (size_t row = 0; row < rows; ++row) {
+        for (size_t head = 0; head < 2U; ++head) {
+            float * head_key = key.data() + (row * 2U + head) * 256U;
+            rms_norm(head_key, kQsaDim, key_norm.data());
+            if (!rope(target, head_key, kQsaDim, positions[row].data(),
+                      error)) return false;
+        }
+    }
+    if (!rotate_optional_batch(target.backend, layer.self_k_rot, key, error) ||
+        !rotate_optional_batch(target.backend, layer.self_v_rot, value, error))
+        return false;
+
+    // Commit only after every stateless batch operation succeeded. The
+    // append sequence matches qwen4exp_mtp_sync_cache_q1 exactly: K/V/raw
+    // index-K first, then the corresponding M-RoPE row and cur_pos.
+    for (size_t row = 0; row < rows; ++row) {
+        state.qsa.key.append(key.data() + row * 512U, 512U);
+        state.qsa.value.append(value.data() + row * 512U, 512U);
+        state.qsa.index_key.append(index_key.data() + row * 128U, 128U);
+        for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
+            state.mrope_positions[axis].push_back(positions[row][axis]);
+        ++state.cur_pos;
+    }
+    return true;
+}
 } // namespace
 
 bool qwen4exp_mtp_step_q1(
@@ -833,6 +1073,32 @@ bool qwen4exp_mtp_sync_cache_q1(
     for (size_t axis = 0; axis < state.mrope_positions.size(); ++axis)
         state.mrope_positions[axis].push_back(mrope_position[axis]);
     ++state.cur_pos;
+    return true;
+}
+
+bool qwen4exp_mtp_sync_cache_batch(
+        const Qwen4ExpWeights & target, const Qwen4ExpMtpWeights & mtp,
+        Qwen4ExpMtpState & state, const std::vector<int32_t> & tokens,
+        const std::vector<std::vector<float>> & target_hc_rows,
+        const std::vector<std::array<int32_t, 3>> & mrope_positions,
+        std::string & error) {
+    Qwen4ExpMtpCacheBatchShape shape;
+    if (!qwen4exp_mtp_cache_batch_shape(tokens.size(), shape, error) ||
+        target_hc_rows.size() != shape.rows ||
+        mrope_positions.size() != shape.rows || state.cur_pos < 0 ||
+        state.cur_pos > target.max_ctx ||
+        shape.rows > static_cast<size_t>(target.max_ctx - state.cur_pos)) {
+        if (error.empty())
+            error = "invalid Qwen4Exp MTP cache batch frontier";
+        return false;
+    }
+    std::vector<float> hc_rows, mixed_rows;
+    if (!prepare_mtp_hc_batch(target, mtp, tokens, target_hc_rows, hc_rows,
+                              error) ||
+        !hc_mix_batch(target, mtp.layer, shape.rows, hc_rows, mixed_rows,
+                      error) ||
+        !append_qsa_cache_batch(target, state, mtp.layer, mixed_rows,
+                                mrope_positions, error)) return false;
     return true;
 }
 

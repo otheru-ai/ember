@@ -47,6 +47,26 @@ bool qwen4exp_mtp_prompt_sync_plan(
     return true;
 }
 
+bool qwen4exp_mtp_cache_batch_shape(
+        size_t rows, Qwen4ExpMtpCacheBatchShape & shape,
+        std::string & error) {
+    shape = {};
+    error.clear();
+    constexpr size_t kMaxRows = 16;
+    if (rows == 0 || rows > kMaxRows) {
+        error = "Qwen4Exp MTP cache batch width must be from 1 to 16";
+        return false;
+    }
+    shape.rows = rows;
+    shape.embedding_values = rows * 2560U;
+    shape.target_hc_values = rows * 10240U;
+    shape.hc_projection_rows = rows * 4U;
+    shape.key_values = rows * 512U;
+    shape.value_values = rows * 512U;
+    shape.index_key_values = rows * 128U;
+    return true;
+}
+
 bool qwen4exp_mtp_frontier_valid(
         const Qwen4ExpState & target, const Qwen4ExpMtpState & mtp,
         const std::vector<float> & target_hc, std::string & error) {

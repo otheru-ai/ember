@@ -371,29 +371,31 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 return result;
             }
             if (mtp_depth_) {
+                std::vector<int32_t> sync_tokens;
+                std::vector<std::vector<float>> sync_target_hc;
+                std::vector<std::array<int32_t, 3>> sync_positions;
+                sync_tokens.reserve(sync_plan.size());
+                sync_target_hc.reserve(sync_plan.size());
+                sync_positions.reserve(sync_plan.size());
                 for (const Qwen4ExpMtpPromptSyncRow & sync : sync_plan) {
-                    const float * preceding_hc = nullptr;
-                    size_t preceding_hc_count = 0;
+                    sync_tokens.push_back(tokens[sync.token_row]);
+                    sync_positions.push_back(positions[sync.token_row]);
                     if (sync.preceding_target_hc_row < 0) {
-                        preceding_hc = pre_chunk_target_hc.data();
-                        preceding_hc_count = pre_chunk_target_hc.size();
+                        sync_target_hc.push_back(pre_chunk_target_hc);
                     } else {
-                        const auto & row_hc = target_row_hc[static_cast<size_t>(
-                            sync.preceding_target_hc_row)];
-                        preceding_hc = row_hc.data();
-                        preceding_hc_count = row_hc.size();
+                        sync_target_hc.push_back(target_row_hc[
+                            static_cast<size_t>(
+                                sync.preceding_target_hc_row)]);
                     }
-                    if (!qwen4exp_mtp_sync_cache_q1(
-                            weights_, mtp_weights_, mtp_state_,
-                            tokens[sync.token_row], nullptr, 0, preceding_hc,
-                            preceding_hc_count, positions[sync.token_row],
-                            error)) {
-                        result.fail(
-                            GenerateErrorCode::PrefillFailed,
-                            "Qwen4Exp batched MTP cache synchronization failed: " +
-                                error);
-                        return result;
-                    }
+                }
+                if (!qwen4exp_mtp_sync_cache_batch(
+                        weights_, mtp_weights_, mtp_state_, sync_tokens,
+                        sync_target_hc, sync_positions, error)) {
+                    result.fail(
+                        GenerateErrorCode::PrefillFailed,
+                        "Qwen4Exp batched MTP cache synchronization failed: " +
+                            error);
+                    return result;
                 }
                 mtp_target_hc_ = state_.hc;
             }

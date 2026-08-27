@@ -333,6 +333,29 @@ static void test_prompt_sync_plan_is_causally_exact() {
           "q16 MTP synchronization is differential-equivalent to q1 order");
 }
 
+static void test_mtp_cache_batch_shape_contract() {
+    Qwen4ExpMtpCacheBatchShape shape;
+    std::string error;
+    CHECK(qwen4exp_mtp_cache_batch_shape(1, shape, error) &&
+              shape.rows == 1 && shape.embedding_values == 2560 &&
+              shape.target_hc_values == 10240 &&
+              shape.hc_projection_rows == 4 && shape.key_values == 512 &&
+              shape.value_values == 512 && shape.index_key_values == 128,
+          "q1 cache batch shape matches one MTP synchronization row");
+    CHECK(qwen4exp_mtp_cache_batch_shape(16, shape, error) &&
+              shape.embedding_values == 16U * 2560U &&
+              shape.target_hc_values == 16U * 10240U &&
+              shape.hc_projection_rows == 64 &&
+              shape.key_values == 16U * 512U &&
+              shape.index_key_values == 16U * 128U,
+          "q16 cache batch shape preserves every independent projection row");
+    CHECK(!qwen4exp_mtp_cache_batch_shape(0, shape, error) &&
+              shape.rows == 0 && error.find("1 to 16") != std::string::npos,
+          "empty MTP cache batch is rejected");
+    CHECK(!qwen4exp_mtp_cache_batch_shape(17, shape, error),
+          "MTP cache batch cannot exceed the target q16 frontier");
+}
+
 static Qwen4ExpMtpState covered_mtp_state(int rows) {
     Qwen4ExpMtpState state;
     state.cur_pos = rows;
@@ -580,6 +603,7 @@ int main() {
     test_invalid_accept_count_fails_closed();
     test_depth_and_instrumentation_contract();
     test_prompt_sync_plan_is_causally_exact();
+    test_mtp_cache_batch_shape_contract();
     test_mtp_snapshot_frontier_invariant();
     test_layer_major_matches_token_major_causality();
     test_bounded_batch_full_and_partial_rejection();
