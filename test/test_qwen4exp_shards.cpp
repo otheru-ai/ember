@@ -135,7 +135,7 @@ void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
             ratios_i32[3] = 3;
             ratios_u32[3] = 3;
         }
-        const int32_t rope_sections[] = {11, 11, 10};
+        const int32_t rope_sections[] = {11, 11, 10, 0};
         const int32_t ple_layers[] = {1};
         const float ratios_f32[48] = {};
         const void * ratio_data = ratios_i32;
@@ -145,7 +145,7 @@ void write_tiny_gguf(const std::filesystem::path & path, uint16_t split_no,
         gguf_set_arr_data(gguf, "qwen4exp.attention.compress_ratios",
                           canonical_array_type, ratio_data, ratio_count);
         gguf_set_arr_data(gguf, "qwen4exp.rope.dimension_sections",
-                          GGUF_TYPE_INT32, rope_sections, 3);
+                          GGUF_TYPE_INT32, rope_sections, 4);
         gguf_set_arr_data(gguf, "qwen4exp.ple.layers", GGUF_TYPE_INT32,
                           ple_layers, 1);
 

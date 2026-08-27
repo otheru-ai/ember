@@ -568,8 +568,12 @@ bool validate_qwen4exp_gguf(const char * model_path, std::string & error) {
                                      ratios, error);
     }
     if (error.empty()) {
+        // _Qwen35MRopeMixin serializes the three interleaved section widths
+        // with llama.cpp's trailing zero compatibility lane. Ember evaluates
+        // the three real position axes, but the on-disk contract is exactly
+        // [11, 11, 10, 0].
         (void)get_required_u32_array(gctx, "qwen4exp.rope.dimension_sections",
-                                     {11, 11, 10}, error);
+                                     {11, 11, 10, 0}, error);
     }
     if (error.empty()) {
         (void)get_required_u32_array(gctx, "qwen4exp.ple.layers", {1}, error);
@@ -617,8 +621,8 @@ bool validate_qwen4exp_gguf(const char * model_path, std::string & error) {
     if (error.empty()) {
         const int64_t pre_id = gguf_find_key(gctx, "tokenizer.ggml.pre");
         if (pre_id < 0 || gguf_get_kv_type(gctx, pre_id) != GGUF_TYPE_STRING ||
-            std::strcmp(gguf_get_val_str(gctx, pre_id), "qwen2") != 0) {
-            error = "Qwen4Exp requires tokenizer.ggml.pre=qwen2";
+            std::strcmp(gguf_get_val_str(gctx, pre_id), "qwen35") != 0) {
+            error = "Qwen4Exp requires tokenizer.ggml.pre=qwen35";
         }
     }
     if (error.empty()) {
