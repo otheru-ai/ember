@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import re
 import struct
@@ -162,14 +163,71 @@ def inspect(path: pathlib.Path) -> dict[str, object]:
             raise AssertionError(kind)
         metadata[key] = value
     tensors: dict[str, int] = {}
+    tensor_info: dict[str, dict[str, object]] = {}
     for _ in range(tensor_count):
         name, cursor = read_string(data, cursor)
         dimensions = struct.unpack_from("<I", data, cursor)[0]
-        cursor += 4 + dimensions * 8
-        tensor_type, _ = struct.unpack_from("<IQ", data, cursor)
+        cursor += 4
+        shape = list(struct.unpack_from("<" + "Q" * dimensions, data, cursor))
+        cursor += dimensions * 8
+        tensor_type, offset = struct.unpack_from("<IQ", data, cursor)
         cursor += 12
         tensors[name] = tensor_type
-    return {"metadata": metadata, "tensors": tensors, "size": len(data)}
+        tensor_info[name] = {"type": tensor_type, "shape": shape, "offset": offset}
+    data_offset = (cursor + 31) & ~31
+    return {
+        "metadata": metadata, "tensors": tensors, "tensor_info": tensor_info,
+        "data_offset": data_offset, "size": len(data),
+    }
+
+
+def ue4m3_scale(value: int) -> float:
+    if value > 0x7E:
+        return 0.0
+    exponent, mantissa = value >> 3, value & 7
+    if exponent == 0:
+        return mantissa * 2.0**-10
+    return (8 + mantissa) * 2.0 ** (exponent - 11)
+
+
+def decode_4bit_rows(raw: bytes, rows: int, *, rocmfp4_fast: bool) -> list[list[float]]:
+    self_rows = []
+    for row in range(rows):
+        block = raw[row * 17:(row + 1) * 17]
+        if len(block) != 17:
+            raise AssertionError("truncated 4-bit row")
+        scale = ue4m3_scale(block[16])
+        values = []
+        low = [byte & 15 for byte in block[:16]]
+        high = [byte >> 4 for byte in block[:16]]
+        for nibble in low + high:
+            if rocmfp4_fast:
+                magnitude3 = nibble & 7
+                magnitude = magnitude3 if magnitude3 <= 4 else 2 * magnitude3 - 4
+                decoded = -magnitude if nibble & 8 else magnitude
+            else:
+                decoded = nibble - 16 if nibble & 8 else nibble
+            values.append(decoded * scale)
+        self_rows.append(values)
+    return self_rows
+
+
+def tensor_raw(path: pathlib.Path, name: str) -> tuple[dict[str, object], bytes]:
+    result = inspect(path)
+    info = result["tensor_info"][name]
+    shape = info["shape"]
+    assert shape[0] == 32
+    rows = math.prod(shape[1:])
+    start = result["data_offset"] + info["offset"]
+    return info, path.read_bytes()[start:start + rows * 17]
+
+
+def direction_projection_l2(rows: list[list[float]], direction: list[float]) -> float:
+    projection = [
+        sum(direction[row] * rows[row][column] for row in range(len(rows)))
+        for column in range(len(rows[0]))
+    ]
+    return math.sqrt(sum(value * value for value in projection))
 
 
 class QuantizerToolTests(unittest.TestCase):
@@ -423,6 +481,90 @@ class QuantizerToolTests(unittest.TestCase):
                 self.assertNotEqual(invalid_run.returncode, 0)
                 self.assertIn(expected_error, invalid_run.stderr)
                 self.assertFalse(invalid_output.exists())
+
+    def test_intervention_audit_uses_each_destination_type_not_cross_decoder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "input.gguf"
+            target_name = "blk.3.attn_output.weight"
+            write_fixture(source, tensors=[
+                TENSORS[1],
+                (target_name, TYPE_F32, [32, 2]),
+            ])
+            direction_value = 2**-0.5
+            direction = [direction_value, direction_value]
+            manifest = root / "intervention.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "kind": "directional_ablation",
+                "status": "complete",
+                "weight_intervention": True,
+                "prompt_only": False,
+                "application_stage": "pre_quantization_encoding",
+                "source": {"repo_id": "Qwen/Qwen3.8-Flash-Next"},
+                "tooling": {"upstream_heretic": {"revision": "b" * 40}},
+                "corpora": [{"id": "fixture"}],
+                "directions": [{
+                    "id": "r1", "dtype": "F32", "values": direction,
+                    "sha256": hashlib.sha256(struct.pack("<ff", *direction)).hexdigest(),
+                }],
+                "targets": [{
+                    "tensor_name": target_name, "direction_id": "r1", "scale": 0.75,
+                    "normalization": "row_norm_preserve", "expected_shape": [32, 2],
+                }],
+                "tensor_map": {
+                    "kind": "exact_tensor_names", "target_count": 1,
+                    "target_names_sha256": hashlib.sha256(target_name.encode()).hexdigest(),
+                },
+            }, sort_keys=True), encoding="utf-8")
+            budget = (
+                "--device-budget-bytes", str(128 * 1024**3),
+                "--runtime-reserve-bytes", str(32 * 1024**3),
+            )
+
+            for label, tensor_type, fast, override in (
+                ("rocmi4", TYPE_ROCMI4, False, ()),
+                (
+                    "rocmfp4-fast", TYPE_ROCMFP4_FAST, True,
+                    ("--tensor-type", rf"^{re.escape(target_name)}$=Q4_0_ROCMFP4_FAST"),
+                ),
+            ):
+                output = root / f"{label}.gguf"
+                completed = subprocess.run(
+                    self.command(
+                        source, output, "--intervention-manifest", str(manifest),
+                        *override, *budget,
+                    ),
+                    check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                report = json.loads(completed.stdout)
+                metric = report["intervention_metrics"][0]
+                info, raw = tensor_raw(output, target_name)
+                self.assertEqual(info["type"], tensor_type)
+                correct_rows = decode_4bit_rows(raw, 2, rocmfp4_fast=fast)
+                cross_rows = decode_4bit_rows(raw, 2, rocmfp4_fast=not fast)
+                correct_l2 = direction_projection_l2(correct_rows, direction)
+                cross_l2 = direction_projection_l2(cross_rows, direction)
+                self.assertAlmostEqual(metric["stored_projection_l2"], correct_l2, places=6)
+                self.assertGreater(
+                    abs(metric["stored_projection_l2"] - cross_l2), 1e-3,
+                    f"{label} audit unexpectedly matches the other format's decoder",
+                )
+
+            unsupported = root / "q6-intervention.gguf"
+            rejected = subprocess.run(
+                self.command(
+                    source, unsupported, "--intervention-manifest", str(manifest),
+                    "--tensor-type", rf"^{re.escape(target_name)}$=Q6_K", *budget,
+                ),
+                check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                "must use Q4_0_ROCMI4 or Q4_0_ROCMFP4_FAST", rejected.stderr
+            )
+            self.assertFalse(unsupported.exists())
 
     def test_budget_failure_happens_before_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

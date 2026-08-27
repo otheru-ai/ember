@@ -937,7 +937,7 @@ void quantize_tensor(FILE * input, FILE * output, const TensorPlan & plan,
             checked_product(count, source_row_size, "source chunk"));
         std::vector<float> converted(checked_product(count, columns, "F32 chunk"));
         std::vector<std::uint8_t> quantized(
-            checked_product(count, output_row_size, "ROCMI4 chunk"));
+            checked_product(count, output_row_size, "quantized chunk"));
 
         seek_input(input, checked_sum(
             plan.source_offset,
@@ -1005,9 +1005,11 @@ void quantize_tensor(FILE * input, FILE * output, const TensorPlan & plan,
         });
         if (plan.intervention) {
             const ggml_type_traits * stored_traits =
-                ggml_get_type_traits(GGML_TYPE_Q4_0_ROCMI4);
+                ggml_get_type_traits(plan.output_type);
             if (!stored_traits || !stored_traits->to_float) {
-                throw std::runtime_error("ROCMI4 has no dequantizer for intervention audit");
+                throw std::runtime_error(
+                    "selected format has no dequantizer for intervention audit: " +
+                    std::string(ggml_type_name(plan.output_type)));
             }
             std::vector<float> original(columns);
             std::vector<float> stored(columns);
@@ -1041,7 +1043,7 @@ void quantize_tensor(FILE * input, FILE * output, const TensorPlan & plan,
                     ++row_norm_count;
                 } else if (stored_row_squared != 0.0) {
                     throw std::runtime_error(
-                        "ROCMI4 changed a zero intervention target row: " + plan.name);
+                        "quantization changed a zero intervention target row: " + plan.name);
                 }
             }
         }
@@ -1199,12 +1201,14 @@ std::unique_ptr<ShardPlan> plan_shard(
                 }
                 if (!selected) {
                     throw std::runtime_error(
-                        "intervention target is not selected for ROCMI4 encoding: " +
+                        "intervention target is not selected for quantized encoding: " +
                         std::string(tensor_name));
                 }
-                if (output_type != GGML_TYPE_Q4_0_ROCMI4) {
+                if (output_type != GGML_TYPE_Q4_0_ROCMI4 &&
+                    output_type != GGML_TYPE_Q4_0_ROCMFP4_FAST) {
                     throw std::runtime_error(
-                        "intervention target must use Q4_0_ROCMI4 encoding: " +
+                        "intervention target must use Q4_0_ROCMI4 or "
+                        "Q4_0_ROCMFP4_FAST encoding: " +
                         std::string(tensor_name));
                 }
             }
