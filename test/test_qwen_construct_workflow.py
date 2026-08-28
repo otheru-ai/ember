@@ -50,6 +50,33 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def test_dispatcher_disk_reclaim_is_exact_and_stops_at_floor(self) -> None:
+        body = DISPATCHER.read_text(encoding="utf-8")
+        self.assertIn("qwen-reclaim-dangling-build-images-20260828", body)
+        self.assertIn("required=$((1152 * 1024 * 1024 * 1024))", body)
+        for digest in (
+            "6bc8aa48fcf203d2d0a6b06c54df7b1816a1ad3127791fb64ecbbc5e3672ca16",
+            "cdca5af61a921a29ca7632643f836f494e462e4b74e7e7603de97b27960912a6",
+            "ffcb6c666ecc406bbbb579229602631d139c8518325e52d5ab19245f69ac1f80",
+        ):
+            self.assertIn(digest, body)
+        self.assertIn('image.get("RepoTags") not in (None, [])', body)
+        self.assertIn('docker ps -aq --filter ancestor="$image"', body)
+        self.assertIn('(( available >= required )) && break', body)
+        self.assertNotIn("docker system prune", body)
+        self.assertNotIn("docker volume prune", body)
+        for index, block in enumerate(workflow_run_blocks(body)):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            result = subprocess.run(
+                ["bash", "-n"], input=neutral, text=True, capture_output=True
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f"dispatcher run block {index}: {result.stderr}",
+            )
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, f"dispatcher-run-{index}-heredoc.py", "exec")
+
     def test_yaml_shell_and_embedded_python_parse(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         ruby = shutil.which("ruby")
