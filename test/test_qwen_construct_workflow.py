@@ -94,6 +94,8 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
             profile_path, profile = write("profile.json", {"fixture": True})
+            inventory_path, _inventory = write(
+                "inventory.json", {"fixture": "snapshot inventory"})
             configuration = {
                 "id": "lambda-0.25-band-10-42", "scale": 0.25,
                 "layer_policy": "band-10-42", "quantization_arm": "rocmi4-control",
@@ -142,7 +144,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                   mock.patch.object(candidate_request.bakeoff, "verify_plan",
                                     return_value=plan_value),
                   mock.patch.object(candidate_request.quant, "validate_profile",
-                                    return_value=({"intervention": {}}, {}, profile_path)),
+                                    return_value=({"intervention": {}}, {}, inventory_path)),
                   mock.patch.object(candidate_request.quant,
                                     "validate_intervention_manifest",
                                     return_value=({"kind": "directional_ablation"},

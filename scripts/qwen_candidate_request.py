@@ -149,8 +149,9 @@ def derive(intent_path: Path, intent_sha256: str,
     intervention_path = capture_path.parent / filename
     exact_intervention = evidence.exact_file(
         str(intervention_path), selected.get("sha256"), "selected intervention manifest")
-    profile_value, _inventory, profile_path = quant.validate_profile(
-        Path(plan["release_profile"]["path"]))
+    profile_path = Path(plan["release_profile"]["path"]).resolve()
+    profile_value, _inventory, _inventory_path = quant.validate_profile(
+        profile_path)
     if (quant.sha256_file(profile_path) != plan["release_profile"]["sha256"]):
         fail("selection plan release profile digest differs")
     manifest, validated = quant.validate_intervention_manifest(
