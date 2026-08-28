@@ -76,6 +76,8 @@ RUN command -v rocprofv3 >/dev/null 2>&1 \
  && rocprofv3 --version 2>&1 | grep -F 'rocm_version: 10.0.0' >/dev/null \
  && command -v rocprof-compute >/dev/null 2>&1 \
  && rocprof-compute --version 2>&1 | grep -F 'rocprofiler-compute version: 3.8.0' >/dev/null \
+ && install -d /opt/rocm/.info \
+ && printf '10.0.0\n' > /opt/rocm/.info/version \
  || { echo 'ROCm 10.0 profiling toolchain missing or version-mismatched' >&2; exit 1; }
 
 # Hyperloom (AMD-AGI): agentic inference-optimization toolkit -- TraceLens trace

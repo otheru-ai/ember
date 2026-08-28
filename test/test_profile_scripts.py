@@ -139,6 +139,8 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("rocm_version: 10.0.0", dev_stage)
         self.assertRegex(dev_stage, r"command -v rocprof-compute")
         self.assertIn("rocprofiler-compute version: 3.8.0", dev_stage)
+        self.assertIn("install -d /opt/rocm/.info", dev_stage)
+        self.assertIn("printf '10.0.0\\n' > /opt/rocm/.info/version", dev_stage)
 
     def test_default_profile_image_tracks_the_rocm_release(self):
         body = PROFILE_SH.read_text()
