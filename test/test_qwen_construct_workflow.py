@@ -52,15 +52,18 @@ def workflow_run_blocks(text: str) -> list[str]:
 class QwenConstructWorkflowTest(unittest.TestCase):
     def test_dispatcher_disk_reclaim_is_exact_and_stops_at_floor(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
-        self.assertIn("qwen-reclaim-dangling-build-images-20260828", body)
+        self.assertIn("qwen-reclaim-stale-builds-20260828", body)
         self.assertIn("required=$((1152 * 1024 * 1024 * 1024))", body)
         for digest in (
-            "6bc8aa48fcf203d2d0a6b06c54df7b1816a1ad3127791fb64ecbbc5e3672ca16",
-            "cdca5af61a921a29ca7632643f836f494e462e4b74e7e7603de97b27960912a6",
-            "ffcb6c666ecc406bbbb579229602631d139c8518325e52d5ab19245f69ac1f80",
+            "002443668dfcc518d1266aa4cee8a4bb03418cf388f4b0c9b95d4639adff61f7",
+            "61cb0f1c91a483dfd84f457f69ed1c2690b26682aeedd1d723931aafa25d0958",
+            "03ae476f355b9e1532733aefa3f200aac5fc4b1a138d466d9e106651a92eafbd",
+            "4b408febb40a9f7d64340523351f4f31d1e9ec8c4396b37ef51e1c8911ff9800",
         ):
             self.assertIn(digest, body)
-        self.assertIn('image.get("RepoTags") not in (None, [])', body)
+        self.assertIn("path_stat.st_uid != os.getuid()", body)
+        self.assertIn("path_stat.st_dev != root_stat.st_dev", body)
+        self.assertIn("shutil.rmtree(path)", body)
         self.assertIn('docker ps -aq --filter ancestor="$image"', body)
         self.assertIn('(( available >= required )) && break', body)
         self.assertNotIn("docker system prune", body)

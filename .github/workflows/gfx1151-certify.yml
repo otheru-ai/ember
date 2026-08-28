@@ -425,12 +425,12 @@ jobs:
             }
           done
 
-  qwen-reclaim-dangling-build-images:
+  qwen-reclaim-stale-builds:
     # One-shot, evidence-bound recovery for the 6.393 GiB shortfall reported by
     # runs 33136740998 and 33137503792. These are exact untagged Ember build
     # images, not model data, volumes, build cache, or a production image. Stop
     # as soon as the audited 1152 GiB floor is restored.
-    if: inputs.release_version == 'qwen-reclaim-dangling-build-images-20260828'
+    if: inputs.release_version == 'qwen-reclaim-stale-builds-20260828'
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 10
     env:
@@ -441,7 +441,7 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           persist-credentials: false
           fetch-depth: 1
-      - name: Reclaim only exact unused dangling Ember images
+      - name: Reclaim only exact obsolete Qwen tooling and images
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -453,36 +453,62 @@ jobs:
             echo "No reclaim needed: $before bytes are already free"
             exit 0
           }
-          images=(
-            sha256:6bc8aa48fcf203d2d0a6b06c54df7b1816a1ad3127791fb64ecbbc5e3672ca16
-            sha256:cdca5af61a921a29ca7632643f836f494e462e4b74e7e7603de97b27960912a6
-            sha256:ffcb6c666ecc406bbbb579229602631d139c8518325e52d5ab19245f69ac1f80
-          )
           available="$before"
-          for image in "${images[@]}"; do
-            inspect="$RUNNER_TEMP/qwen-dangling-${image#sha256:}.json"
-            docker image inspect "$image" >"$inspect"
-            python3 - "$inspect" "$image" <<'PY'
-          import json, sys
-          path, expected = sys.argv[1:]
-          rows = json.load(open(path, encoding="utf-8"))
-          if not isinstance(rows, list) or len(rows) != 1 or rows[0].get("Id") != expected:
-              raise SystemExit("dangling image identity differs")
-          image = rows[0]
-          if image.get("RepoTags") not in (None, []):
-              raise SystemExit("refusing to remove a tagged image")
-          labels = ((image.get("Config") or {}).get("Labels") or {})
-          if labels.get("org.opencontainers.image.source") != "https://github.com/otheru-ai/ember":
-              raise SystemExit("dangling image is not an Ember build")
+          stale_paths=(
+            /var/tmp/ember-qwen3.8-flash-next/tooling-candidate-4c69d0854467156554dad0c22cc646c7cfe3cc76
+            /var/tmp/ember-qwen3.8-flash-next/tooling-candidate-09de35a6d4b14c115addc359d46b581529971508
+            /var/tmp/ember-qwen3.8-flash-next/tooling
+          )
+          for path in "${stale_paths[@]}"; do
+            python3 - "$path" <<'PY'
+          import os, pathlib, shutil, stat, sys
+          path = pathlib.Path(sys.argv[1])
+          root = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next")
+          allowed = {
+              "tooling-candidate-4c69d0854467156554dad0c22cc646c7cfe3cc76",
+              "tooling-candidate-09de35a6d4b14c115addc359d46b581529971508",
+              "tooling",
+          }
+          root_stat = root.lstat()
+          path_stat = path.lstat()
+          if (path.parent != root or path.name not in allowed
+                  or not stat.S_ISDIR(root_stat.st_mode)
+                  or stat.S_ISLNK(root_stat.st_mode)
+                  or not stat.S_ISDIR(path_stat.st_mode)
+                  or stat.S_ISLNK(path_stat.st_mode)
+                  or path_stat.st_dev != root_stat.st_dev
+                  or path_stat.st_uid != os.getuid()):
+              raise SystemExit(f"refusing unsafe stale tooling path: {path}")
+          shutil.rmtree(path)
           PY
-            test -z "$(docker ps -aq --filter ancestor="$image")"
-            docker image rm "$image"
             available="$(df -B1 --output=avail /var/tmp/ember-qwen3.8-flash-next | tail -1)"
             [[ "$available" =~ ^[0-9]+$ ]]
             (( available >= required )) && break
           done
+          stale_images=(
+            'ghcr.io/otheru-ai/ember:dev-sha-09de35a6d4b1 sha256:002443668dfcc518d1266aa4cee8a4bb03418cf388f4b0c9b95d4639adff61f7'
+            'ghcr.io/otheru-ai/ember:sha-09de35a6d4b1 sha256:61cb0f1c91a483dfd84f457f69ed1c2690b26682aeedd1d723931aafa25d0958'
+            'ghcr.io/otheru-ai/ember:dev-sha-4c69d0854467 sha256:03ae476f355b9e1532733aefa3f200aac5fc4b1a138d466d9e106651a92eafbd'
+            'ghcr.io/otheru-ai/ember:sha-4c69d0854467 sha256:4b408febb40a9f7d64340523351f4f31d1e9ec8c4396b37ef51e1c8911ff9800'
+          )
+          if (( available < required )); then
+            for descriptor in "${stale_images[@]}"; do
+              read -r image expected_id <<<"$descriptor"
+              actual_id="$(docker image inspect --format '{{.Id}}' "$image")"
+              test "$actual_id" = "$expected_id"
+              source="$(docker image inspect --format \
+                '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")"
+              test "$source" = https://github.com/otheru-ai/ember
+              test -z "$(docker ps -aq --filter ancestor="$image")"
+              docker image rm "$image"
+              available="$(df -B1 --output=avail \
+                /var/tmp/ember-qwen3.8-flash-next | tail -1)"
+              [[ "$available" =~ ^[0-9]+$ ]]
+              (( available >= required )) && break
+            done
+          fi
           (( available >= required )) || {
-            echo "Exact dangling-image reclaim left only $available bytes free" >&2
+            echo "Exact stale-build reclaim left only $available bytes free" >&2
             exit 1
           }
           echo "free_before_bytes=$before"
