@@ -1,0 +1,16 @@
+{
+  "artifact_role": "independent_quality_judge",
+  "file_count": 1,
+  "files": [
+    {
+      "git_blob": "493783394e65e7be586050e3860af475ae1e87f8",
+      "path": "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf",
+      "sha256": "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
+      "size": 91547243200
+    }
+  ],
+  "repo_id": "otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF",
+  "revision": "75a4bed8e6762986d7b4169e1e1afbb57c482704",
+  "schema": "ember.qwen3.8.quality-judge-source.v1",
+  "total_bytes": 91547243200
+}

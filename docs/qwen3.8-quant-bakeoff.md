@@ -217,6 +217,20 @@ The judge is supplied through a separately hashed, fail-closed inventory:
 }
 ```
 
+The checked default independent judge source is
+`share/release_profiles/deepseek-v4-flash-strix-halo-quality-judge.json`:
+OtherU DeepSeek-V4-Flash at exact Hugging Face revision
+`75a4bed8e6762986d7b4169e1e1afbb57c482704`, artifact SHA-256
+`a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54`
+and 91,547,243,200 bytes. It is a different model family from the Qwen
+subject. The exact manual `gfx1151-certify.yml` release version
+`qwen-stage-quality-judge-v1-20260828` stages only that pinned file below the
+Qwen workset and emits the inventory above create-only. Staging leaves
+production online, uses idle I/O/CPU priority, verifies the large artifact with
+direct I/O, checks production health before and after, and cannot publish or
+delete. The mode is never selected by a prefix or by a quality run; the large
+transfer remains a separate explicit operator action.
+
 For a selection-corpus capture, the invocation shape is:
 
 ```sh

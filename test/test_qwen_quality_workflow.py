@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-quality-capture.yml"
 PLAN_WORKFLOW = ROOT / ".github/workflows/qwen-quality-plan.yml"
+DISPATCH_WORKFLOW = ROOT / ".github/workflows/gfx1151-certify.yml"
+JUDGE_SOURCE = ROOT / "share/release_profiles/deepseek-v4-flash-strix-halo-quality-judge.json"
 
 
 def shell_blocks(text: str) -> list[str]:
@@ -216,6 +218,57 @@ class QwenQualityWorkflowTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             for program in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", parsed, re.S):
                 compile(program, "quality-plan-heredoc.py", "exec")
+
+    def test_judge_staging_is_exact_create_only_and_keeps_production_online(self) -> None:
+        body = DISPATCH_WORKFLOW.read_text(encoding="utf-8")
+        start = body.index("  qwen-stage-quality-judge:")
+        end = body.index("\n  qwen-convert-control:", start)
+        stage = body[start:end]
+        self.assertIn(
+            "if: inputs.release_version == 'qwen-stage-quality-judge-v1-20260828'",
+            stage)
+        self.assertNotIn("startsWith(inputs.release_version", stage)
+        self.assertIn("75a4bed8e6762986d7b4169e1e1afbb57c482704", stage)
+        self.assertIn("a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
+                      stage)
+        self.assertIn("JUDGE_BYTES: '91547243200'", stage)
+        self.assertIn("--workers 1", stage)
+        self.assertIn("ionice -c 3 nice -n 19", stage)
+        self.assertIn("iflag=direct", stage)
+        self.assertIn("os.O_EXCL", stage)
+        self.assertIn("ember.qwen3.8.quality-judge-inventory.v1", stage)
+        self.assertGreaterEqual(stage.count("ember-cert-production is-active"), 2)
+        self.assertGreaterEqual(stage.count("http://127.0.0.1:8000/health"), 2)
+        for forbidden in ("ember-gpu-lock acquire", "ember-cert-production stop",
+                          "docker push", "huggingface-cli", "hf upload", "gh release",
+                          "/models/"):
+            self.assertNotIn(forbidden, stage)
+        for block in shell_blocks(stage):
+            parsed = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            result = subprocess.run(["bash", "-n"], input=parsed, text=True,
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for program in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", parsed, re.S):
+                compile(program, "judge-stage-heredoc.py", "exec")
+
+    def test_judge_source_inventory_is_one_exact_independent_artifact(self) -> None:
+        import json
+
+        value = json.loads(JUDGE_SOURCE.read_text(encoding="utf-8"))
+        self.assertEqual(value, {
+            "schema": "ember.qwen3.8.quality-judge-source.v1",
+            "artifact_role": "independent_quality_judge",
+            "repo_id": "otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF",
+            "revision": "75a4bed8e6762986d7b4169e1e1afbb57c482704",
+            "file_count": 1,
+            "total_bytes": 91547243200,
+            "files": [{
+                "path": "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf",
+                "size": 91547243200,
+                "sha256": "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
+                "git_blob": "493783394e65e7be586050e3860af475ae1e87f8",
+            }],
+        })
 
 
 if __name__ == "__main__":

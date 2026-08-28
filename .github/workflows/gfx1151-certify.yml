@@ -1334,6 +1334,177 @@ jobs:
             --output "$snapshot" --workers 4
           printf 'snapshot=%s\n' "$snapshot" >>"$GITHUB_STEP_SUMMARY"
 
+  qwen-stage-quality-judge:
+    # Fetch one revision- and digest-pinned, different-family judge into the
+    # Qwen workset without opening /models, taking the GPU lock, stopping
+    # production, publishing, or deleting anything. This mode is deliberately
+    # an exact release-version capability rather than a prefix match: staging a
+    # 85.26 GiB artifact must be an explicit operator action.
+    if: inputs.release_version == 'qwen-stage-quality-judge-v1-20260828'
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 720
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      JUDGE_REVISION: 75a4bed8e6762986d7b4169e1e1afbb57c482704
+      JUDGE_FILENAME: DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf
+      JUDGE_SHA256: a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
+      JUDGE_BYTES: '91547243200'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Bind the exact judge source and require healthy production
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git diff --quiet --exit-code
+          test -x /usr/local/sbin/ember-cert-production
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
+          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
+          inventory="$GITHUB_WORKSPACE/share/release_profiles/deepseek-v4-flash-strix-halo-quality-judge.json"
+          test -f "$inventory" && test ! -L "$inventory"
+          python3 - "$inventory" "$JUDGE_REVISION" "$JUDGE_FILENAME" \
+              "$JUDGE_SHA256" "$JUDGE_BYTES" <<'PY'
+          import json, pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          revision, filename, digest, size_raw = sys.argv[2:]
+          value = json.loads(path.read_text(encoding="utf-8"))
+          expected_keys = {"schema", "artifact_role", "repo_id", "revision",
+                           "file_count", "total_bytes", "files"}
+          if (set(value) != expected_keys
+                  or value.get("schema") != "ember.qwen3.8.quality-judge-source.v1"
+                  or value.get("artifact_role") != "independent_quality_judge"
+                  or value.get("repo_id") != "otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF"
+                  or value.get("revision") != revision
+                  or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+                  or value.get("file_count") != 1
+                  or value.get("total_bytes") != int(size_raw)):
+              raise SystemExit("quality judge source inventory identity differs")
+          rows = value.get("files")
+          if not isinstance(rows, list) or len(rows) != 1:
+              raise SystemExit("quality judge source must contain exactly one artifact")
+          row = rows[0]
+          if (not isinstance(row, dict)
+                  or set(row) != {"path", "size", "sha256", "git_blob"}
+                  or row.get("path") != filename or "/" in filename
+                  or row.get("size") != int(size_raw)
+                  or row.get("sha256") != digest
+                  or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                  or re.fullmatch(r"[0-9a-f]{40}", str(row.get("git_blob"))) is None):
+              raise SystemExit("quality judge artifact identity differs")
+          PY
+          printf 'JUDGE_SOURCE_INVENTORY=%s\n' "$inventory" >>"$GITHUB_ENV"
+
+      - name: Resumably stage and directly verify the pinned judge
+        run: |
+          set -euo pipefail
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          workset="$workspace/artifacts/qwen-workset"
+          judges="$workset/judges"
+          destination="$judges/deepseek-v4-flash-strix-halo-$JUDGE_REVISION"
+          test -d "$workspace" && test ! -L "$workspace"
+          test -d "$workspace/artifacts" && test ! -L "$workspace/artifacts"
+          test -d "$workset" && test ! -L "$workset"
+          if [[ ! -e "$judges" && ! -L "$judges" ]]; then
+            mkdir "$judges"
+          fi
+          test -d "$judges" && test ! -L "$judges"
+          if [[ ! -e "$destination" && ! -L "$destination" ]]; then
+            mkdir "$destination"
+          fi
+          test -d "$destination" && test ! -L "$destination"
+          artifact="$destination/$JUDGE_FILENAME"
+          partial="$destination/.$JUDGE_FILENAME.partial"
+          for path in "$artifact" "$partial"; do
+            if [[ -e "$path" || -L "$path" ]]; then
+              test -f "$path" && test ! -L "$path"
+            fi
+          done
+          if [[ ! -e "$artifact" ]]; then
+            partial_bytes=0
+            [[ ! -e "$partial" ]] || partial_bytes="$(stat -c %s "$partial")"
+            (( partial_bytes <= JUDGE_BYTES )) || {
+              echo 'partial judge artifact exceeds the pinned byte count' >&2
+              exit 1
+            }
+            available="$(df -B1 --output=avail "$judges" | tail -1)"
+            # Preserve 16 GiB of headroom beyond the unfinished payload. The
+            # transfer uses idle I/O and CPU priority while production remains
+            # resident and is health-checked again before the handoff exists.
+            required=$(( JUDGE_BYTES - partial_bytes + 16 * 1024 * 1024 * 1024 ))
+            (( available >= required )) || {
+              echo "judge staging requires $required free bytes; found $available" >&2
+              exit 1
+            }
+            ionice -c 3 nice -n 19 python3 scripts/qwen_snapshot_fetch.py \
+              --inventory "$JUDGE_SOURCE_INVENTORY" --output "$destination" --workers 1
+          fi
+          test -f "$artifact" && test ! -L "$artifact"
+          test "$(stat -c %s "$artifact")" = "$JUDGE_BYTES"
+          # Direct I/O is load-bearing here: buffered hashing of a 85.26 GiB
+          # file was measured to starve the following unified-memory residency
+          # even after POSIX_FADV_DONTNEED on the runner's model XFS volume.
+          actual="$(dd if="$artifact" iflag=direct bs=8M status=none | sha256sum | awk '{print $1}')"
+          test "$actual" = "$JUDGE_SHA256"
+          printf 'JUDGE_ARTIFACT=%s\n' "$artifact" >>"$GITHUB_ENV"
+
+      - name: Emit one create-only quality judge inventory after health proof
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
+          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
+          output="$(dirname "$JUDGE_ARTIFACT")/quality-judge-inventory.json"
+          inventory_sha="$(python3 - "$output" "$JUDGE_ARTIFACT" \
+              "$JUDGE_SHA256" "$JUDGE_BYTES" <<'PY'
+          import hashlib, json, os, pathlib, stat, sys
+          output, artifact = map(pathlib.Path, sys.argv[1:3])
+          digest, size_raw = sys.argv[3:]
+          value = {
+              "schema": "ember.qwen3.8.quality-judge-inventory.v1",
+              "artifact": {"path": str(artifact), "sha256": digest,
+                           "bytes": int(size_raw)},
+          }
+          raw = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+          flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+          try:
+              descriptor = os.open(output, flags, 0o644)
+          except FileExistsError:
+              info = output.lstat()
+              if (not stat.S_ISREG(info.st_mode) or output.is_symlink()
+                      or output.read_bytes() != raw):
+                  raise SystemExit("existing quality judge inventory differs")
+          else:
+              with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                  stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+              parent = os.open(output.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+              try: os.fsync(parent)
+              finally: os.close(parent)
+          print(hashlib.sha256(raw).hexdigest())
+          PY
+          )"
+          printf 'JUDGE_INVENTORY=%s\nJUDGE_INVENTORY_SHA256=%s\n' \
+            "$output" "$inventory_sha" >>"$GITHUB_ENV"
+
+      - name: Record the nonpublishing judge handoff
+        run: |
+          {
+            echo '## Qwen independent quality judge staged'
+            echo
+            echo "Source revision: \`$JUDGE_REVISION\`"
+            echo "Artifact: \`$JUDGE_ARTIFACT\`"
+            echo "Artifact SHA-256: \`$JUDGE_SHA256\`"
+            echo "Artifact bytes: \`$JUDGE_BYTES\`"
+            echo "Judge inventory: \`$JUDGE_INVENTORY\`"
+            echo "Judge inventory SHA-256: \`$JUDGE_INVENTORY_SHA256\`"
+            echo
+            echo 'Production remained online and healthy. No model or evidence was published or deleted.'
+          } >>"$GITHUB_STEP_SUMMARY"
+
   qwen-convert-control:
     # Build the exact, final-ineligible stock ROCMI4 control used for activation
     # capture and the measured format bakeoff.  Tool/image preparation leaves
