@@ -456,11 +456,25 @@ def validate_bf16_cache_manifest(
         "ple_cgroup_writeback_patch_sha256": tools["ple_cgroup_writeback_patch_sha256"],
         "gguf_split_bounded_copy_patch_sha256":
             tools["gguf_split_bounded_copy_patch_sha256"],
-        "gguf_splitter_sha256": tools.get("gguf_splitter_sha256"),
     }
-    if any(toolchain.get(key) != value for key, value in expected_toolchain.items()):
-        raise PipelineError("BF16 cache toolchain differs from the current pinned tools")
-    if (SHA256_RE.fullmatch(str(toolchain.get("converter_environment_lock_sha256", ""))) is None
+    mismatched = sorted(key for key, value in expected_toolchain.items()
+                        if toolchain.get(key) != value)
+    if mismatched:
+        raise PipelineError(
+            "BF16 cache toolchain differs from the current pinned tools: "
+            + ", ".join(mismatched))
+    # llama-gguf-split embeds its absolute revision-named build directory, so
+    # byte-identical pinned source can produce a different executable digest in
+    # a later Ember checkout.  The cache records the construction binary, while
+    # collect_tools() independently proves the current binary's pinned commit,
+    # audited bounded-copy source, and executable identity for the candidate
+    # build record.  Cache reuse rehashes and GGUF-validates every existing
+    # shard; requiring these two path-sensitive binary digests to match would
+    # add no content guarantee and would make the content-addressed cache
+    # revision-local.
+    if (SHA256_RE.fullmatch(str(toolchain.get("gguf_splitter_sha256", ""))) is None
+            or SHA256_RE.fullmatch(
+                str(toolchain.get("converter_environment_lock_sha256", ""))) is None
             or not isinstance(toolchain.get("converter_environment_lock_bytes"), int)
             or toolchain["converter_environment_lock_bytes"] < 1
             or re.fullmatch(r"sha256:[0-9a-f]{64}",

@@ -353,9 +353,24 @@ class CandidateBuilderTests(unittest.TestCase):
             validated = quant.validate_bf16_cache_manifest(
                 manifest_path, digest(manifest_path), profile, digest(fixture.profile), tools)
             self.assertEqual(validated["cache_id"], cache_id)
+            # The splitter embeds its absolute build directory.  Rebuilding
+            # pinned source in a new Ember revision may change only this binary
+            # digest; both construction and consumption identities remain
+            # recorded, while the cache shards are independently rehashed.
+            tools["gguf_splitter_sha256"] = "8" * 64
+            validated = quant.validate_bf16_cache_manifest(
+                manifest_path, digest(manifest_path), profile, digest(fixture.profile), tools)
+            self.assertEqual(validated["cache_id"], cache_id)
             manifest["toolchain"]["converter_sha256"] = "5" * 64
             write_json(manifest_path, manifest)
-            with self.assertRaisesRegex(quant.PipelineError, "toolchain"):
+            with self.assertRaisesRegex(quant.PipelineError, "converter_sha256"):
+                quant.validate_bf16_cache_manifest(
+                    manifest_path, digest(manifest_path), profile,
+                    digest(fixture.profile), tools)
+            manifest["toolchain"]["converter_sha256"] = tools["converter_sha256"]
+            manifest["toolchain"]["gguf_splitter_sha256"] = "malformed"
+            write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(quant.PipelineError, "provenance is malformed"):
                 quant.validate_bf16_cache_manifest(
                     manifest_path, digest(manifest_path), profile,
                     digest(fixture.profile), tools)
