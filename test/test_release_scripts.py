@@ -32,6 +32,52 @@ SMOKE = ROOT / "scripts" / "smoke_test.sh"
 
 class ReleaseScriptTests(unittest.TestCase):
     @staticmethod
+    def qwen_deployment_fixture(
+        root: pathlib.Path,
+    ) -> tuple[dict[str, str], dict[str, pathlib.Path]]:
+        names = {
+            "model": (
+                "Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-"
+                "00001-of-00002.gguf"
+            ),
+            "model_2": (
+                "Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-"
+                "00002-of-00002.gguf"
+            ),
+            "mtp": "Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf",
+            "mmproj": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+        }
+        paths = {key: root / name for key, name in names.items()}
+        for key, path in paths.items():
+            path.write_bytes(f"release-test-{key}".encode())
+        provider = root / "libember_qwen4exp_vision_provider.so"
+        provider.write_bytes(b"release-test-provider")
+        paths["provider"] = provider
+        checksums = root / "SHA256SUMS"
+        checksums.write_text("".join(
+            f"{hashlib.sha256(paths[key].read_bytes()).hexdigest()}  {names[key]}\n"
+            for key in ("model", "model_2", "mtp", "mmproj")
+        ))
+        paths["checksums"] = checksums
+        env = {
+            "EMBER_SKIP_DEVICE_CHECK": "1",
+            "EMBER_DEPLOYMENT_MODE": "qwen3.8-flash-next",
+            "EMBER_MODEL_DIR": str(root),
+            "EMBER_QWEN_MODEL": str(paths["model"]),
+            "EMBER_QWEN_SHA256SUMS": str(checksums),
+            "EMBER_QWEN_SHA256SUMS_SHA256": hashlib.sha256(
+                checksums.read_bytes()
+            ).hexdigest(),
+            "DFLASH_QWEN_MTP": str(paths["mtp"]),
+            "DFLASH_QWEN_MTP_DEPTH": "3",
+            "DFLASH_QWEN_VISION_MMPROJ": str(paths["mmproj"]),
+            "DFLASH_QWEN_VISION_PROVIDER": str(provider),
+            "EMBER_KV_CACHE_DIR": str(root),
+            "EMBER_SEGVTRACE": "",
+        }
+        return env, paths
+
+    @staticmethod
     def docker_stage(dockerfile: str, name: str) -> str:
         match = re.search(
             rf"^FROM\s+\S+\s+AS\s+{re.escape(name)}\s*$",
@@ -147,6 +193,22 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("$${EMBER_HOST:-127.0.0.1}", release_service)
         self.assertIn("target: release", build)
         self.assertIn("pull_policy: build", build)
+
+    def test_compose_exposes_explicit_qwen_deployment_contract(self) -> None:
+        release_service = COMPOSE.read_text().split("  ember-dev:", 1)[0]
+        self.assertIn(
+            "- EMBER_DEPLOYMENT_MODE=${EMBER_DEPLOYMENT_MODE:-deepseek-v4-flash}",
+            release_service,
+        )
+        for name in (
+            "EMBER_QWEN_MODEL",
+            "EMBER_QWEN_SHA256SUMS",
+            "EMBER_QWEN_SHA256SUMS_SHA256",
+            "DFLASH_QWEN_MTP",
+            "DFLASH_QWEN_MTP_DEPTH",
+            "DFLASH_QWEN_VISION_MMPROJ",
+        ):
+            self.assertIn(f"\n      - {name}\n", release_service)
 
     def test_container_publish_is_sha_and_hardware_gated(self) -> None:
         workflow = CONTAINER_WORKFLOW.read_text()
@@ -458,6 +520,100 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn("--no-progress-report 10", result.stdout)
             self.assertIn("--auto-answer-after-loop 11", result.stdout)
             self.assertIn("--ctx 42", result.stdout)
+
+    def test_qwen_mode_verifies_sealed_shards_and_exports_companions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env, paths = self.qwen_deployment_fixture(root)
+            fake_server = root / "fake-server"
+            fake_server.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'mtp=%s\\n' \"$DFLASH_QWEN_MTP\"\n"
+                "printf 'depth=%s\\n' \"$DFLASH_QWEN_MTP_DEPTH\"\n"
+                "printf 'mmproj=%s\\n' \"$DFLASH_QWEN_VISION_MMPROJ\"\n"
+                "printf 'provider=%s\\n' \"$DFLASH_QWEN_VISION_PROVIDER\"\n"
+                "printf 'argv='; printf ' <%s>' \"$@\"; printf '\\n'\n"
+            )
+            fake_server.chmod(0o755)
+            env |= {"EMBER_SERVER_BIN": str(fake_server)}
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT), "--ctx", "262144"],
+                env=os.environ | env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertIn("sealed Qwen3.8-Flash-Next artifact set verified", result.stdout)
+            self.assertIn(f"mtp={paths['mtp']}", result.stdout)
+            self.assertIn("depth=3", result.stdout)
+            self.assertIn(f"mmproj={paths['mmproj']}", result.stdout)
+            self.assertIn(f"provider={paths['provider']}", result.stdout)
+            self.assertIn(f" <-m> <{paths['model']}>", result.stdout)
+            self.assertIn(" <--ctx> <262144>", result.stdout)
+
+    def test_qwen_mode_rejects_unsealed_or_incomplete_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env, paths = self.qwen_deployment_fixture(root)
+            env["EMBER_SERVER_BIN"] = "/bin/true"
+            env["EMBER_VERIFY_EXISTING_SHA256"] = "0"
+
+            paths["model_2"].write_bytes(b"tampered-second-shard")
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=os.environ | env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 78)
+            self.assertIn("artifact-set SHA-256 verification failed", result.stderr)
+
+            env, paths = self.qwen_deployment_fixture(root)
+            lines = paths["checksums"].read_text().splitlines(keepends=True)
+            paths["checksums"].write_text("".join(
+                line for line in lines if paths["mtp"].name not in line
+            ))
+            env["EMBER_QWEN_SHA256SUMS_SHA256"] = hashlib.sha256(
+                paths["checksums"].read_bytes()
+            ).hexdigest()
+            env["EMBER_SERVER_BIN"] = "/bin/true"
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=os.environ | env,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 78)
+            self.assertIn("omits the selected MTP companion", result.stderr)
+
+    def test_qwen_mode_requires_first_shard_depth_and_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            env, paths = self.qwen_deployment_fixture(root)
+            env["EMBER_SERVER_BIN"] = "/bin/true"
+            cases = (
+                ("EMBER_QWEN_MODEL", str(paths["model_2"]), "must name shard 00001"),
+                ("DFLASH_QWEN_MTP_DEPTH", "0", "integer from 1 to 4"),
+                ("DFLASH_QWEN_VISION_PROVIDER", "", "is required"),
+            )
+            for key, value, message in cases:
+                with self.subTest(key=key):
+                    changed = env | {key: value}
+                    result = subprocess.run(
+                        ["bash", str(ENTRYPOINT)], env=os.environ | changed,
+                        text=True, capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 78)
+                    self.assertIn(message, result.stderr)
+
+    def test_entrypoint_rejects_unknown_deployment_mode(self) -> None:
+        result = subprocess.run(
+            ["bash", str(ENTRYPOINT)],
+            env=os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_DEPLOYMENT_MODE": "auto",
+            },
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("must be deepseek-v4-flash or qwen3.8-flash-next", result.stderr)
 
     def test_default_start_downloads_both_pinned_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

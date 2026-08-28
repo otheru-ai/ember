@@ -201,12 +201,37 @@ EMBER_MODELS_DIR=./models
 EMBER_CACHE_DIR=./cache
 ```
 
-Only the pinned quant and drafter are supported. They are not configurable,
-and Ember always verifies downloads before making them runnable. Existing
-artifacts are also re-hashed before every start by default; operators using a
-trusted, immutable model store may set `EMBER_VERIFY_EXISTING_SHA256=0` to skip
-that expensive startup scan. See [.env.example](.env.example) for every
-container setting.
+The default `deepseek-v4-flash` deployment uses only the pinned quant and
+drafter. They are not configurable, and Ember always verifies downloads before
+making them runnable. Existing DeepSeek artifacts are also re-hashed before
+every start by default; operators using a trusted, immutable model store may
+set `EMBER_VERIFY_EXISTING_SHA256=0` to skip that expensive startup scan.
+
+An explicit, local-artifact-only Qwen deployment boundary is also available for
+a completed Qwen3.8-Flash-Next candidate. It does not silently reuse the
+DeepSeek drafter or guess an MTP depth, and it does not download unpublished
+candidate files. Place the complete candidate package in the model directory,
+then set:
+
+```dotenv
+EMBER_DEPLOYMENT_MODE=qwen3.8-flash-next
+EMBER_QWEN_MODEL=/models/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-00001-of-000NN.gguf
+EMBER_QWEN_SHA256SUMS=/models/SHA256SUMS
+EMBER_QWEN_SHA256SUMS_SHA256=<digest-from-the-certified-release-evidence>
+DFLASH_QWEN_MTP=/models/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf
+DFLASH_QWEN_MTP_DEPTH=<certified-1-through-4>
+DFLASH_QWEN_VISION_MMPROJ=/models/Qwen3.8-Flash-Next-BF16-mmproj.gguf
+```
+
+Pass shard `00001`; the engine discovers every ordered sibling. Startup always
+verifies the checksum-list digest and every file named by that list, regardless
+of `EMBER_VERIFY_EXISTING_SHA256`, and requires the list to cover all main
+shards plus the selected MTP and BF16 mmproj. The release image supplies the
+pinned `DFLASH_QWEN_VISION_PROVIDER` shared object. Until a candidate has its
+real-weight text/vision differential and gfx1151 release evidence, this mode is
+an engineering deployment boundary rather than a multimodal certification
+claim. See [.env.example](.env.example) for every container setting and
+[the operations guide](docs/operations.md) for the fail-closed startup checks.
 
 ## Coding agents
 
