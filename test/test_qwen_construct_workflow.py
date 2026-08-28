@@ -24,6 +24,7 @@ REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
 DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
+import qwen_selection_corpus_stage as selection_stage  # noqa: E402
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -50,6 +51,70 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def selection_fixture(self, root: Path) -> tuple[Path, Path, str]:
+        source = root / "protected"
+        staged = root / "staged"
+        source.mkdir()
+        staged.mkdir(mode=0o700)
+        artifacts = []
+        for index, name in enumerate(selection_stage.ARTIFACT_NAMES):
+            path = source / name
+            path.write_text(json.dumps({"id": index}) + "\n", encoding="utf-8")
+            artifacts.append({"filename": name,
+                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                              "record_count": 1})
+        revision = "a" * 40
+        manifest = {"source": {"revision": revision},
+                    "partition": {"pairwise_request_overlap_count": 0},
+                    "artifacts": artifacts}
+        (source / selection_stage.MANIFEST_NAME).write_text(
+            json.dumps(manifest), encoding="utf-8")
+        contract = root / "contract.json"
+        contract.write_text(json.dumps({
+            "source": {"revision": revision},
+            "derived_artifacts": {
+                row["filename"]: {"sha256": row["sha256"],
+                                  "record_count": row["record_count"]}
+                for row in artifacts
+            },
+        }), encoding="utf-8")
+        return source, staged, revision
+
+    def test_selection_corpus_stage_is_exact_resumable_and_final_blind(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source, staged, revision = self.selection_fixture(root)
+            first = selection_stage.stage(source, staged, os.getuid(), os.getgid())
+            self.assertFalse(first["reused"])
+            self.assertEqual(set(path.name for path in staged.iterdir()),
+                             set(selection_stage.STAGED_NAMES))
+            self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o500)
+            for path in staged.iterdir():
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
+            second = selection_stage.stage(source, staged, os.getuid(), os.getgid())
+            self.assertTrue(second["reused"])
+            contract = root / "contract.json"
+            verified = selection_stage.verify(
+                contract, hashlib.sha256(contract.read_bytes()).hexdigest(),
+                staged, revision)
+            self.assertEqual(verified["status"], "complete")
+
+            staged.chmod(0o700)
+            (staged / "unexpected-heldout.jsonl").write_text("hidden\n", encoding="utf-8")
+            with self.assertRaisesRegex(selection_stage.SelectionCorpusError,
+                                        "unexpected corpus entry"):
+                selection_stage.verify(
+                    contract, hashlib.sha256(contract.read_bytes()).hexdigest(),
+                    staged, revision)
+
+    def test_selection_corpus_stage_rejects_partial_prior_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source, staged, _revision = self.selection_fixture(Path(raw))
+            (staged / selection_stage.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(selection_stage.SelectionCorpusError,
+                                        "partial or unexpected"):
+                selection_stage.stage(source, staged, os.getuid(), os.getgid())
+
     def test_dispatcher_disk_reclaim_is_exact_and_keeps_tooling_margin(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
         reclaim = body[
@@ -161,18 +226,18 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn('-v "$QWEN_WORKSPACE:$QWEN_WORKSPACE"', body)
         self.assertIn('-v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro"', body)
         # Nine build/runtime containers remain unprivileged and 125-GiB
-        # bounded.  The one capability-minimal 256-MiB root helper can mutate
-        # metadata on the completed fetch lock only; it is not a construction
-        # container and mounts neither the workset nor output directories.
-        self.assertEqual(body.count("docker run"), 10)
+        # bounded. Two capability-minimal 256-MiB root helpers cover only the
+        # completed fetch-lock inode and the four-file selection-corpus staging
+        # boundary; neither can read model weights or candidate outputs.
+        self.assertEqual(body.count("docker run"), 11)
         self.assertEqual(body.count("--memory 125g"), 9)
         self.assertEqual(body.count("--memory-swap 125g"), 9)
         self.assertEqual(body.count('--user "$uid:$gid"'), 9)
         self.assertEqual(
             body.count("--env USER=ember-qwen --env LOGNAME=ember-qwen"), 9
         )
-        self.assertEqual(body.count("--user 0:0"), 1)
-        self.assertIn("--memory 256m --memory-swap 256m", body)
+        self.assertEqual(body.count("--user 0:0"), 2)
+        self.assertEqual(body.count("--memory 256m --memory-swap 256m"), 2)
         self.assertGreaterEqual(body.count("--memory-limit-bytes 134217728000"), 3)
         self.assertNotIn("/qwen-work/", body)
         self.assertNotIn("--user root", body)
@@ -298,6 +363,18 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("QWEN_COMPANION_ROCMI4_OUTPUT_SHA256", body)
         self.assertIn("QWEN_COMPANION_FAST_OUTPUT_SHA256", body)
         self.assertIn("QWEN_SELECTION_PLAN_OUTPUT_SHA256", body)
+        self.assertIn("Stage only the digest-pinned selection corpus", body)
+        self.assertIn("scripts/qwen_selection_corpus_stage.py", body)
+        self.assertNotIn('"final-heldout.jsonl")', body[
+            body.index("Stage only the digest-pinned selection corpus"):
+            body.index("Prepare exact pinned conversion tools")
+        ])
+        stage_source = (ROOT / "scripts/qwen_selection_corpus_stage.py").read_text(
+            encoding="utf-8")
+        self.assertIn('"sweep-validation.jsonl"', stage_source)
+        self.assertNotIn('"final-heldout.jsonl"', stage_source)
+        self.assertIn("Reusing completed immutable companion export", body)
+        self.assertIn("Validated completed immutable companion inventory", body)
         self.assertIn("Companion construction descriptor SHA-256", body)
         self.assertIn("ROCMI4 inventory SHA-256", body)
         self.assertIn("ROCmFP4 FAST inventory SHA-256", body)

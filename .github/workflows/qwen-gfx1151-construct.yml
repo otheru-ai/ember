@@ -58,6 +58,8 @@ jobs:
       QWEN_REVISION: f5d08274bafd880402bd16f5e3e6c514136ec06c
       LLAMA_REVISION: abdc7a0bf815d3b83e26dd523c6960e4dd597e82
       ROCMFPX_REVISION: c49ebdbd5c9f01ec242369f9e7f7967855f80cba
+      OTHERU_REVISION: a3c6a728510f91394e991504951ac316cd3a89af
+      CORPUS_CONTRACT_SHA256: 19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d
       PLE_PATCH_SHA256: 606880dd1e23b4af9f2a6782d26e4db673c9db61ee315fa4e5e4c5c96af758fc
       SPLITTER_PATCH_SHA256: b174f2b2a0b11e78e812e5f31d9ac84deaa8f94f9650abdab3760655c3aebe38
     steps:
@@ -90,7 +92,8 @@ jobs:
           cache_root="$workset/bf16-cache"
           evidence="$workset/evidence"
           tooling="$workspace/tooling-candidate-$TARGET_SHA"
-          corpus=/srv/ember/qwen3.8-otheru-corpus-a3c6a728
+          corpus="/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}"
+          selection_corpus="$workset/selection-corpus"
           profile="$GITHUB_WORKSPACE/share/release_profiles/qwen3.8-flash-next-rocmi4-strix-halo.json"
           recipe="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-flash-next-bakeoff.json"
           for path in "$workspace" "$snapshot" "$corpus"; do
@@ -300,7 +303,8 @@ jobs:
           for pair in \
             "QWEN_WORKSPACE=$workspace" "QWEN_SNAPSHOT=$snapshot" "QWEN_WORKSET=$workset" \
             "QWEN_CACHE_ROOT=$cache_root" "QWEN_EVIDENCE=$evidence" "QWEN_TOOLING=$tooling" \
-            "QWEN_CORPUS_DIR=$corpus" "QWEN_PROFILE=$profile" "QWEN_RECIPE=$recipe" \
+            "QWEN_CORPUS_DIR=$corpus" "QWEN_SELECTION_CORPUS_DIR=$selection_corpus" \
+            "QWEN_PROFILE=$profile" "QWEN_RECIPE=$recipe" \
             "QWEN_BUILDER_IMAGE=$builder" "QWEN_BUILDER_IMAGE_DIGEST=$builder_digest" \
             "QWEN_RUNTIME_IMAGE=$runtime" "QWEN_RUNTIME_IMAGE_DIGEST=$runtime_digest" \
             "DOCKER_CONFIG=$docker_config"; do
@@ -333,6 +337,36 @@ jobs:
             scripts/qwen_snapshot_lock_handoff.py \
               --snapshot "$QWEN_SNAPSHOT" --runner-uid "$uid" --runner-gid "$gid" \
               --verify-only
+
+      - name: Stage only the digest-pinned selection corpus while production remains online
+        if: inputs.mode == 'prepare-companions'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          if [[ ! -e "$QWEN_SELECTION_CORPUS_DIR" && ! -L "$QWEN_SELECTION_CORPUS_DIR" ]]; then
+            install -d -m 700 "$QWEN_SELECTION_CORPUS_DIR"
+          fi
+          test -d "$QWEN_SELECTION_CORPUS_DIR" && test ! -L "$QWEN_SELECTION_CORPUS_DIR"
+          # The authoritative OtherU checkout is deliberately root-readable
+          # only.  Mirror the control-capture boundary: a capability-minimal
+          # helper may copy exactly the selection manifest and its three
+          # digest-pinned artifacts, but never the final-heldout partition.
+          docker run --rm --network none --read-only \
+            --memory 256m --memory-swap 256m \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt no-new-privileges --pids-limit 16 --user 0:0 \
+            -e RUNNER_UID="$uid" -e RUNNER_GID="$gid" \
+            -v "$QWEN_CORPUS_DIR:/source:ro" \
+            -v "$QWEN_SELECTION_CORPUS_DIR:/staged" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            --entrypoint /usr/bin/python3 "$QWEN_BUILDER_IMAGE" \
+            "$GITHUB_WORKSPACE/scripts/qwen_selection_corpus_stage.py" stage \
+              --source /source --destination /staged \
+              --runner-uid "$uid" --runner-gid "$gid"
+          contract="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-otheru-corpus-contract.json"
+          python3 scripts/qwen_selection_corpus_stage.py verify \
+            --contract "$contract" --contract-sha256 "$CORPUS_CONTRACT_SHA256" \
+            --corpus "$QWEN_SELECTION_CORPUS_DIR" --revision "$OTHERU_REVISION"
 
       - name: Prepare exact pinned conversion tools while production remains online
         if: inputs.mode != 'normalize-candidate'
@@ -448,6 +482,12 @@ jobs:
           for spec in 'ROCMI4 Q4_0_ROCMI4' 'ROCMFP4-FAST Q4_0_ROCMFP4_FAST'; do
             read -r label matrix <<<"$spec"
             directory="$QWEN_WORKSET/companions/$label"
+            inventory="$QWEN_WORKSET/companions/$label.json"
+            if [[ -e "$inventory" || -L "$inventory" ]]; then
+              test -f "$inventory" && test ! -L "$inventory"
+              echo "Reusing completed immutable companion export: $inventory"
+              continue
+            fi
             if [[ ! -e "$directory" && ! -L "$directory" ]]; then
               mkdir "$directory"
             fi
@@ -481,12 +521,19 @@ jobs:
             mtp="$directory/Qwen3.8-Flash-Next-MTP-$label.gguf"
             export_manifest="$directory/export.json"
             output="$QWEN_WORKSET/companions/$label.json"
+            destination="$output"
+            if [[ -e "$output" || -L "$output" ]]; then
+              test -f "$output" && test ! -L "$output"
+              destination="$RUNNER_TEMP/qwen-companion-$label-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+              test ! -e "$destination" && test ! -L "$destination"
+            fi
             name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-inventory-${label,,}"
             docker run --name "$name" --network none --ipc host \
               --memory 125g --memory-swap 125g --user "$uid:$gid" \
               --env USER=ember-qwen --env LOGNAME=ember-qwen \
               -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+              -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
               "$QWEN_BUILDER_IMAGE" "$GITHUB_WORKSPACE/scripts/qwen_candidate_builder.py" make-companion-inventory \
                 --profile "$QWEN_PROFILE" --quantization-arm "$arm" \
@@ -497,12 +544,24 @@ jobs:
                 --mtp-matrix-quant-contract "$matrix" \
                 --mtp-export-manifest "$export_manifest" \
                 --mtp-export-manifest-sha256 "$(sha256sum "$export_manifest" | awk '{print $1}')" \
-                --output "$output"
+                --output "$destination"
             docker rm "$name" >/dev/null
+            if [[ "$destination" != "$output" ]]; then
+              cmp "$destination" "$output"
+              echo "Validated completed immutable companion inventory: $output"
+            fi
           done
           plan="$QWEN_WORKSET/selection-plan.json"
-          test ! -e "$plan"
-          python3 scripts/qwen_bakeoff.py --corpus-dir "$QWEN_CORPUS_DIR" --output "$plan"
+          if [[ -e "$plan" || -L "$plan" ]]; then
+            test -f "$plan" && test ! -L "$plan"
+            expected_plan="$RUNNER_TEMP/qwen-selection-plan-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+            python3 scripts/qwen_bakeoff.py --corpus-dir "$QWEN_SELECTION_CORPUS_DIR" \
+              --output "$expected_plan"
+            cmp "$expected_plan" "$plan"
+          else
+            python3 scripts/qwen_bakeoff.py --corpus-dir "$QWEN_SELECTION_CORPUS_DIR" \
+              --output "$plan"
+          fi
           python3 scripts/qwen_bakeoff.py --plan "$plan" --stage verify \
             --output "$QWEN_EVIDENCE/selection-plan-verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           descriptor="$QWEN_EVIDENCE/companions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
