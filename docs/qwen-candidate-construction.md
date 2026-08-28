@@ -15,7 +15,7 @@ requires and records the one F32 PLE tensor; the final quantizer still proves
 that the PLE override emits the selected quant type (ROCMI4 in every declared
 arm). The separate vision mmproj remains BF16.
 
-`scripts/qwen_candidate_builder.py` has five lifecycle boundaries:
+`scripts/qwen_candidate_builder.py` has eight lifecycle boundaries:
 
 1. `prepare-cache` performs the pinned, patched llama.cpp conversion with
    `--use-temp-file`, splits the main GGUF at 48G, and separately runs the
@@ -46,7 +46,24 @@ arm). The separate vision mmproj remains BF16.
    inventory outside the candidate directory. Only a bundle marked unselected
    authorizes `delete-loser --execute`. Deletion removes only the inventoried
    quant shards and retains the build/intervention evidence plus an external
-   deletion tombstone. It is not recoverable.
+   deletion tombstone. This irreversible legacy boundary is not used by the
+   gfx1151 bakeoff.
+6. `authorize-rolling-retention` verifies the GitHub attestations over the
+   compact accumulator and every referenced assessment, rederives the selector
+   metrics from the exact selection plan, and emits only the newly displaced
+   candidate. Sweep retains the stock control plus its current top one; format
+   retains the two final-eligible arms needed by balanced confirmation.
+7. `authorize-sealed-retention` runs only after the completed format ledger is
+   GitHub-attested and verified. It reproduces the balanced selector, retains
+   its one winner, and authorizes retirement of the other live finalist.
+8. `retire-reconstructable` fsyncs an authorization outside the candidate,
+   proves the content-addressed BF16 cache and companions still exist, and
+   atomically quarantines and re-verifies each exact inventoried shard before
+   unlinking it. Its deterministic quarantine state is resumable after an
+   interrupted rename or unlink. `restore-reconstructable` accepts only a fresh, distinct,
+   same-filesystem rebuild with the same immutable construction contract and
+   every original shard size/hash; no-clobber renames are resumable after an
+   interrupted restore, and the final receipt remains outside both directories.
 
 Both conversion and candidate encoding require a cgroup-v2 boundary with
 `memory.max=134217728000` and `memory.swap.max=0`. The builder records
@@ -141,13 +158,23 @@ immediately preceding phase ledger.
 After production is active and healthy again on port 8000, the workflow runs
 `--stage assess` while the candidate shards still exist, GitHub-attests and
 locally verifies the compact assessment, and appends only its attestation
-descriptor to an attested accumulator. Phase ledgers are likewise attested and
-verified. A proven hard-gate failure or a nonwinner in a completed phase ledger
-may then pass through `record-assessment` and `delete-loser`; an as-yet passing
-candidate is retained provisionally because it is not truthful to call it a
-loser before the selector sees the complete phase. Operators must provide
-enough artifact spool for that provisional survivor, or explicitly reconstruct
-it from the immutable cache and pinned build record before final confirmation.
+descriptor to an attested accumulator. The builder independently verifies the
+accumulator and assessment attestations before deriving a prefix transition.
+This is not an early winner declaration: a candidate leaves the live set only
+when it cannot re-enter the required top set after later rows are appended.
+Sweep therefore holds the stock control plus one intervention candidate, and
+format holds exactly two final-eligible candidates through balanced
+confirmation. At the format boundary, only the verified completed ledger may
+collapse those two artifacts to its selected winner. Every eviction retains a
+reconstructable authorization/completion chain; the bakeoff never calls the
+irreversible `delete-loser` path.
+
+All per-dispatch measurements, assessments, attestations, accumulators,
+authorities, ledgers, and retirement records are run/attempt scoped. A retry
+therefore cannot overwrite evidence already named by an authorization. If the
+earlier attempt reached retirement, restore the candidate through
+`restore-reconstructable` before asking the workflow to measure that row again;
+the workflow does not pretend an absent quant artifact can be remeasured.
 
 ## Checked-in gfx1151 construction workflow
 

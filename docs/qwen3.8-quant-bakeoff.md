@@ -259,6 +259,17 @@ corpus directory is `/srv/ember/qwen3.8-otheru-corpus-a3c6a728`.
 Each measured candidate is reduced to a digest-bound assessment, and the
 externally attested ledgers are selected serially as `sweep`, `format`, then
 `mtp-depth`. The complete format-arm sweep is only the screening measurement.
+The attested accumulator also drives bounded, reconstructable artifact
+retention. After each serial append, the selector rederives the previous-prefix
+and current-prefix survivor sets: sweep keeps the stock control plus its exact
+top-one passing intervention, while format keeps its exact top-two passing,
+final-eligible arms. Only a candidate newly displaced by that transition is
+retired, so an already-absent historical loser is never targeted twice. The
+retirement command re-verifies the accumulator and assessment attestations,
+the immutable BF16 cache content address, build-record identity, and exact
+shards before deletion. After balanced confirmation, the separately attested
+format ledger seals the winner and authorizes reconstructable retirement of the
+runner-up; MTP-depth rows never delete their shared selected model bytes.
 Before the format ledger can name a winner, its two highest-ranked gate-passing
 arms require balanced confirmation in the plan-persisted counterbalanced order
 A/B, B/A, A/B (`ABBAAB`). Three sealed workload recipes each run once per arm

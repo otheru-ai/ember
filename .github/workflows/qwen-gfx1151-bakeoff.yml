@@ -246,7 +246,7 @@ jobs:
           done
           mkdir -p -- "$QWEN_BAKEOFF_EVIDENCE_ROOT"
           python3 scripts/qwen_bakeoff.py --plan "$SELECTION_PLAN" --stage verify \
-            --output "$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-selection-plan-verified.json"
+            --output "$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-selection-plan-verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           python3 - "$SELECTION_PLAN" "$QWEN_BAKEOFF_PHASE" "$CANDIDATE_ROW_ID" \
             "$prior_count" "$QWEN_RESULTS_ACCUMULATOR" "$SELECTION_PLAN_SHA256" \
             "$CORPUS_SHA256" <<'PY'
@@ -270,7 +270,7 @@ jobs:
           EFFECTIVE_PLAN="$SELECTION_PLAN"
           EFFECTIVE_PLAN_SHA256="$SELECTION_PLAN_SHA256"
           if [[ "$QWEN_BAKEOFF_PHASE" = final ]]; then
-            EFFECTIVE_PLAN="$QWEN_BAKEOFF_EVIDENCE_ROOT/final-$CANDIDATE_ROW_ID-plan.json"
+            EFFECTIVE_PLAN="$QWEN_BAKEOFF_EVIDENCE_ROOT/final-$CANDIDATE_ROW_ID-plan-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
             python3 scripts/qwen_bakeoff.py --plan "$SELECTION_PLAN" --stage unlock-final \
               --corpus-dir "$QWEN_CORPUS_DIR" --prior-ledger "$QWEN_PRIOR_LEDGER" \
               --prior-ledger-sha256 "$QWEN_PRIOR_LEDGER_SHA256" \
@@ -503,9 +503,9 @@ jobs:
       - name: Measure target-only then matching-MTP for the one live artifact
         run: |
           set -euo pipefail
-          target_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-target"
-          mtp_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-mtp"
-          legacy_manifest="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-gate-v2.json"
+          target_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-target-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mtp_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-mtp-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          legacy_manifest="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-gate-v2-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           python3 - "$CANDIDATE_MANIFEST" "$legacy_manifest" "$SELECTION_PLAN" \
             "$SELECTION_PLAN_SHA256" "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST" \
             "$RUNTIME_DEV_IMAGE" "$RUNTIME_DEV_IMAGE_DIGEST" <<'PY'
@@ -570,7 +570,7 @@ jobs:
             --mtp "${candidate[2]}" --mtp-sha256 "${candidate[3]}" --mtp-depth "${candidate[4]}" \
             --measurement-only --out-dir "$mtp_dir"
 
-          measurement="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-measurement.json"
+          measurement="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-measurement-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           python3 - "$CANDIDATE_MANIFEST" "$BUILDER_ATTESTATION" "$target_dir/complete.json" \
             "$mtp_dir/hardware-measured.json" "$measurement" "$TARGET_SHA" \
             "$RUNTIME_ENGINE_SHA256" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_FORMAT_SHA256" \
@@ -654,7 +654,7 @@ jobs:
       - name: Assess the candidate while its quantized artifact still exists
         run: |
           set -euo pipefail
-          assessment="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment.json"
+          assessment="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           python3 scripts/qwen_bakeoff.py --plan "$EFFECTIVE_PLAN" --stage assess \
             --results "$QWEN_MEASUREMENT" --output "$assessment"
           printf 'QWEN_ASSESSMENT=%s\n' "$assessment" >>"$GITHUB_ENV"
@@ -671,7 +671,7 @@ jobs:
           ACTION_BUNDLE: ${{ steps.attest_assessment.outputs.bundle-path }}
         run: |
           set -euo pipefail
-          bundle="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment.sigstore.json"
+          bundle="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.sigstore.json"
           install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
           gh attestation verify "$QWEN_ASSESSMENT" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
             --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
@@ -682,7 +682,7 @@ jobs:
       - name: Append only the externally-attested compact assessment descriptor
         run: |
           set -euo pipefail
-          accumulator="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-accumulator-$((QWEN_PRIOR_COUNT + 1)).json"
+          accumulator="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-accumulator-$((QWEN_PRIOR_COUNT + 1))-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
           python3 - "$QWEN_RESULTS_ACCUMULATOR" "$QWEN_ASSESSMENT" "$QWEN_ASSESSMENT_SHA256" \
             "$QWEN_ASSESSMENT_BUNDLE" "$QWEN_ASSESSMENT_BUNDLE_SHA256" "$accumulator" \
             "$QWEN_BAKEOFF_PHASE" "$SELECTION_PLAN_SHA256" <<'PY'
@@ -739,11 +739,64 @@ jobs:
           printf 'QWEN_ACCUMULATOR_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
           printf 'QWEN_ACCUMULATOR_BUNDLE_SHA256=%s\n' "$bundle_sha" >>"$GITHUB_ENV"
           printf 'QWEN_EXPECTED_COUNT=%s\n' "$expected" >>"$GITHUB_ENV"
+          if [[ "$QWEN_BAKEOFF_PHASE" = sweep || "$QWEN_BAKEOFF_PHASE" = format ]]; then
+            authority="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-rolling-retention-$current-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+            python3 scripts/qwen_candidate_builder.py authorize-rolling-retention \
+              --plan "$SELECTION_PLAN" --plan-sha256 "$SELECTION_PLAN_SHA256" \
+              --phase "$QWEN_BAKEOFF_PHASE" \
+              --accumulator "$QWEN_CURRENT_ACCUMULATOR" \
+              --accumulator-sha256 "$accumulator_sha" \
+              --accumulator-bundle "$bundle" --accumulator-bundle-sha256 "$bundle_sha" \
+              --output "$authority"
+            authority_sha="$(sha256sum "$authority" | awk '{print $1}')"
+            retirement_output="$(python3 - "$authority" "$QWEN_CURRENT_ACCUMULATOR" <<'PY'
+          import json,pathlib,sys
+          authority=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          accumulator=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          requested=set(authority["retire_candidate_ids"]); found={}
+          for descriptor in accumulator["assessments"]:
+              assessment=json.loads(pathlib.Path(descriptor["subject"]["path"]).read_text())
+              artifact=assessment["artifact_identity"]; candidate=artifact["candidate_id"]
+              if candidate in requested:
+                  if candidate in found: raise SystemExit("retired candidate appears more than once")
+                  found[candidate]=artifact["build_record_sha256"]
+          if set(found) != requested: raise SystemExit("retirement authority candidate is absent")
+          print(len(authority["retire_candidate_ids"]))
+          for candidate in authority["retire_candidate_ids"]:
+              print(candidate); print(found[candidate])
+          PY
+            )"
+            mapfile -t retirement_rows <<<"$retirement_output"
+            expected_retirements="${retirement_rows[0]}"
+            [[ "$expected_retirements" =~ ^[0-9]+$ ]]
+            retirement=("${retirement_rows[@]:1}")
+            (( ${#retirement[@]} == 2 * expected_retirements ))
+            completions=()
+            for ((index=0; index<${#retirement[@]}; index+=2)); do
+              retired_candidate="${retirement[index]}"
+              retired_record_sha="${retirement[index+1]}"
+              candidate_dir="$QWEN_WORKSET_ROOT/candidates/$retired_candidate"
+              retired_record="$candidate_dir/qwen-quant-build-record.json"
+              test -d "$candidate_dir" && test ! -L "$candidate_dir"
+              test -f "$retired_record" && test ! -L "$retired_record"
+              test "$(sha256sum "$retired_record" | awk '{print $1}')" = "$retired_record_sha"
+              retirement_record="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$retired_candidate-retirement-$current-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+              result="$(python3 scripts/qwen_candidate_builder.py retire-reconstructable \
+                --retention-authority "$authority" --retention-authority-sha256 "$authority_sha" \
+                --candidate-id "$retired_candidate" --candidate-dir "$candidate_dir" \
+                --build-record-sha256 "$retired_record_sha" --output "$retirement_record" --execute)"
+              completion="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["completion"])' "$result")"
+              completions+=("$completion")
+            done
+            printf 'QWEN_RETENTION_AUTHORITY=%s\n' "$authority" >>"$GITHUB_ENV"
+            printf 'QWEN_RETENTION_AUTHORITY_SHA256=%s\n' "$authority_sha" >>"$GITHUB_ENV"
+            printf 'QWEN_RETIREMENT_COMPLETIONS=%s\n' "${completions[*]}" >>"$GITHUB_ENV"
+          fi
           if (( current == expected )); then
-            ledger="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-ledger.json"
+            ledger="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-ledger-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
             selection_results="$QWEN_CURRENT_ACCUMULATOR"
             if [[ "$QWEN_BAKEOFF_PHASE" = format ]]; then
-              confirmation_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-balanced-confirmation"
+              confirmation_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-balanced-confirmation-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
               scripts/qwen_balanced_confirmation.sh \
                 --plan "$EFFECTIVE_PLAN" --plan-sha256 "$EFFECTIVE_PLAN_SHA256" \
                 --accumulator "$QWEN_CURRENT_ACCUMULATOR" \
@@ -754,7 +807,7 @@ jobs:
                 --engine-binary-sha256 "$RUNTIME_ENGINE_SHA256" \
                 --tensor-format-contract-sha256 "$RUNTIME_FORMAT_SHA256" \
                 --out-dir "$confirmation_dir"
-              selection_results="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-selection-input.json"
+              selection_results="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-selection-input-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
               python3 - "$QWEN_CURRENT_ACCUMULATOR" \
                 "$confirmation_dir/balanced-confirmation.json" "$selection_results" <<'PY'
           import json,pathlib,sys
@@ -802,76 +855,72 @@ jobs:
           install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
           gh attestation verify "$QWEN_LEDGER" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
             --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
-          printf 'QWEN_LEDGER_SHA256=%s\n' "$(sha256sum "$QWEN_LEDGER" | awk '{print $1}')" >>"$GITHUB_ENV"
+          ledger_sha="$(sha256sum "$QWEN_LEDGER" | awk '{print $1}')"
+          bundle_sha="$(sha256sum "$bundle" | awk '{print $1}')"
+          printf 'QWEN_LEDGER_SHA256=%s\n' "$ledger_sha" >>"$GITHUB_ENV"
           printf 'QWEN_LEDGER_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
-          printf 'QWEN_LEDGER_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+          printf 'QWEN_LEDGER_BUNDLE_SHA256=%s\n' "$bundle_sha" >>"$GITHUB_ENV"
+          if [[ "$QWEN_BAKEOFF_PHASE" = format ]]; then
+            authority="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-sealed-winner-retention-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+            result="$(python3 scripts/qwen_candidate_builder.py authorize-sealed-retention \
+              --plan "$SELECTION_PLAN" --plan-sha256 "$SELECTION_PLAN_SHA256" \
+              --ledger "$QWEN_LEDGER" --ledger-sha256 "$ledger_sha" \
+              --ledger-bundle "$bundle" --ledger-bundle-sha256 "$bundle_sha" \
+              --output "$authority")"
+            authority_sha="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["authority_sha256"])' "$result")"
+            retirement_output="$(python3 - "$authority" "$QWEN_LEDGER" <<'PY'
+          import json,pathlib,sys
+          authority=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          ledger=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          requested=set(authority["retire_candidate_ids"]); found={}
+          for assessment in ledger["assessments"]:
+              artifact=assessment["artifact_identity"]; candidate=artifact["candidate_id"]
+              if candidate in requested:
+                  if candidate in found: raise SystemExit("sealed loser appears more than once")
+                  found[candidate]=artifact["build_record_sha256"]
+          if set(found) != requested: raise SystemExit("sealed loser is absent from the ledger")
+          print(len(authority["retire_candidate_ids"]))
+          for candidate in authority["retire_candidate_ids"]:
+              print(candidate); print(found[candidate])
+          PY
+            )"
+            mapfile -t retirement_rows <<<"$retirement_output"
+            [[ "${retirement_rows[0]}" = 1 && ${#retirement_rows[@]} -eq 3 ]]
+            retired_candidate="${retirement_rows[1]}"; retired_record_sha="${retirement_rows[2]}"
+            candidate_dir="$QWEN_WORKSET_ROOT/candidates/$retired_candidate"
+            retired_record="$candidate_dir/qwen-quant-build-record.json"
+            test -d "$candidate_dir" && test ! -L "$candidate_dir"
+            test -f "$retired_record" && test ! -L "$retired_record"
+            test "$(sha256sum "$retired_record" | awk '{print $1}')" = "$retired_record_sha"
+            retirement_record="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-$retired_candidate-sealed-retirement-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+            python3 scripts/qwen_candidate_builder.py retire-reconstructable \
+              --retention-authority "$authority" --retention-authority-sha256 "$authority_sha" \
+              --candidate-id "$retired_candidate" --candidate-dir "$candidate_dir" \
+              --build-record-sha256 "$retired_record_sha" --output "$retirement_record" --execute
+            printf 'QWEN_SEALED_RETENTION_AUTHORITY=%s\n' "$authority" >>"$GITHUB_ENV"
+          fi
 
-      - name: Delete only a durably-assessed artifact proven to be a loser
+      - name: Preserve shared and non-rolling artifacts
         run: |
           set -euo pipefail
-          authority="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-assessment-authority.json"
-          disposition="$(python3 - "$QWEN_ASSESSMENT" "${QWEN_LEDGER:-}" \
-            "$QWEN_BAKEOFF_PHASE" "$QWEN_PRIOR_LEDGER" <<'PY'
-          import json, pathlib, sys
+          if [[ "$QWEN_BAKEOFF_PHASE" = sweep || "$QWEN_BAKEOFF_PHASE" = format ]]; then
+            test -n "$QWEN_RETENTION_AUTHORITY"
+            printf '%s\n' 'Rolling retention was derived from the verified accumulator; every eviction is reconstructable.'
+          elif [[ "$QWEN_BAKEOFF_PHASE" = mtp-depth ]]; then
+            python3 - "$QWEN_ASSESSMENT" "$QWEN_PRIOR_LEDGER" <<'PY'
+          import json,pathlib,sys
           assessment=json.loads(pathlib.Path(sys.argv[1]).read_text())
-          phase=sys.argv[3]
-          if phase == "mtp-depth":
-              # Every depth row reuses the format ledger's selected main model
-              # and companion bytes.  A losing depth is a runtime-label loss,
-              # never authority to delete the shared selected artifact.
-              prior=json.loads(pathlib.Path(sys.argv[4]).read_text())
-              artifact=assessment.get("artifact_identity")
-              selected=prior.get("selected_artifact_identity")
-              def without_depth(value):
-                  if not isinstance(value,dict):
-                      raise SystemExit("MTP-depth artifact identity is malformed")
-                  return {key:item for key,item in value.items() if key != "mtp_depth"}
-              if without_depth(artifact) != without_depth(selected):
-                  raise SystemExit("MTP-depth row is not the shared format-selected artifact")
-              print("shared-selected-retain")
-          elif sys.argv[2]:
-              ledger=json.loads(pathlib.Path(sys.argv[2]).read_text())
-              print("selected" if assessment["artifact_identity"] == ledger.get("selected_artifact_identity") else "loser")
-          elif assessment.get("observed_decision",{}).get("passes") is False:
-              print("loser")
-          else:
-              print("provisional-retain")
+          prior=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          artifact=assessment.get("artifact_identity"); selected=prior.get("selected_artifact_identity")
+          def without_depth(value):
+              if not isinstance(value,dict): raise SystemExit("MTP-depth artifact identity is malformed")
+              return {key:item for key,item in value.items() if key != "mtp_depth"}
+          if without_depth(artifact) != without_depth(selected):
+              raise SystemExit("MTP-depth row is not the shared format-selected artifact")
           PY
-          )"
-          python3 - "$authority" "$CANDIDATE_ARTIFACT_ID" "$QWEN_ASSESSMENT" \
-            "$QWEN_ASSESSMENT_SHA256" "$QWEN_ASSESSMENT_BUNDLE" "$QWEN_ASSESSMENT_BUNDLE_SHA256" \
-            "$disposition" <<'PY'
-          import json, pathlib, sys
-          output,candidate,subject,subject_sha,bundle,bundle_sha,disposition=sys.argv[1:]
-          value={"schema":"ember.qwen3.8.externally-attested-candidate-assessment.v1",
-                 "candidate_id":candidate,"disposition":disposition,
-                 "assessment":{"subject":{"path":str(pathlib.Path(subject).resolve()),"sha256":subject_sha,
-                                            "schema":"ember.qwen3.8.candidate-assessment.v2"},
-                               "bundle":{"path":str(pathlib.Path(bundle).resolve()),"sha256":bundle_sha},
-                               "repository":"OtherU-AI/ember",
-                               "signer_workflow":".github/workflows/qwen-gfx1151-bakeoff.yml"}}
-          pathlib.Path(output).write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
-          PY
-          if [[ "$disposition" = provisional-retain ]]; then
-            printf '%s\n' 'Passing candidate retained: it is not a loser until the phase ledger exists.'
-            exit 0
-          fi
-          if [[ "$disposition" = shared-selected-retain ]]; then
             printf '%s\n' 'MTP-depth row retained: every depth reuses the format-selected artifact bytes.'
-            exit 0
-          fi
-          candidate_dir="$(dirname -- "$BUILD_RECORD")"
-          lifecycle="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-artifact-lifecycle.json"
-          selected_arg=--no-selected
-          [[ "$disposition" = selected ]] && selected_arg=--selected
-          python3 scripts/qwen_candidate_builder.py record-assessment \
-            --candidate-id "$CANDIDATE_ARTIFACT_ID" --candidate-dir "$candidate_dir" \
-            --build-record-sha256 "$BUILD_RECORD_SHA256" --assessment "$authority" \
-            --assessment-sha256 "$(sha256sum "$authority" | awk '{print $1}')" "$selected_arg" \
-            --output "$lifecycle"
-          if [[ "$disposition" = loser ]]; then
-            python3 scripts/qwen_candidate_builder.py delete-loser --assessment-bundle "$lifecycle" \
-              --assessment-bundle-sha256 "$(sha256sum "$lifecycle" | awk '{print $1}')" --execute
+          else
+            printf '%s\n' 'Final confirmation retains the already-selected release artifact.'
           fi
 
       - name: Remove temporary registry credentials

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -557,6 +558,168 @@ class BakeoffTest(unittest.TestCase):
                 plan, self.assessment_input(root, plan, sweep_rows, "performance-first"))
             self.assertEqual(selected["selected_configuration_id"], faster["id"])
             self.assertEqual(selected["selected_metrics"]["decode_median_tps"], 42.0)
+
+    def test_rolling_sweep_retains_stock_and_evicts_each_candidate_once(self) -> None:
+        override_sha = "1" * 64
+        profile_sha = "2" * 64
+        plan = {
+            "stock_control": {"id": "stock"},
+            "sweep_configurations": [{
+                "id": item, "quantization_arm": "test-arm",
+                "quantization_overrides_sha256": override_sha,
+                "profile_sha256": profile_sha, "runtime_mode": "target",
+                "final_release_eligible": True,
+            } for item in ("s1", "s2", "s3")],
+            "format_arms": [],
+        }
+        plan_sha = qb.canonical_sha256(plan)
+        runtime = {"identity": "common-runtime"}
+        direction = {"identity": "common-direction"}
+        stock_artifact = {"candidate_id": "stock-candidate"}
+        rows = [
+            {"row_id": "stock", "stage": "stock",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "final_release_eligible": False, "runtime_identity": runtime,
+             "artifact_identity": stock_artifact},
+            {"row_id": "s1", "stage": "sweep", "configuration_id": "s1",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "runtime_mode": "target", "final_release_eligible": True,
+             "runtime_identity": runtime, "direction_identity": direction,
+             "quality_stock_identity": stock_artifact,
+             "artifact_identity": {
+                 "candidate_id": "candidate-1", "intervention_configuration_id": "s1",
+                 "quantization_arm": "test-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": True, "decode_median_tps": 40.0,
+                         "prefill_median_tps": 420.0, "quality_score": 0.8}},
+            {"row_id": "s2", "stage": "sweep", "configuration_id": "s2",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "runtime_mode": "target", "final_release_eligible": True,
+             "runtime_identity": runtime, "direction_identity": direction,
+             "quality_stock_identity": stock_artifact,
+             "artifact_identity": {
+                 "candidate_id": "candidate-2", "intervention_configuration_id": "s2",
+                 "quantization_arm": "test-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": True, "decode_median_tps": 41.0,
+                         "prefill_median_tps": 415.0, "quality_score": 0.7}},
+            {"row_id": "s3", "stage": "sweep", "configuration_id": "s3",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "runtime_mode": "target", "final_release_eligible": True,
+             "runtime_identity": runtime, "direction_identity": direction,
+             "quality_stock_identity": stock_artifact,
+             "artifact_identity": {
+                 "candidate_id": "candidate-3", "intervention_configuration_id": "s3",
+                 "quantization_arm": "test-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": False, "decode_median_tps": 45.0,
+                         "prefill_median_tps": 500.0, "quality_score": 1.0}},
+        ]
+        with (mock.patch.object(qb, "verify_plan", return_value=plan),
+              mock.patch.object(qb, "_metrics", side_effect=lambda row, _plan: row["metrics"])):
+            first = qb.rolling_retention_transition(plan, rows[:2], "sweep")
+            displaced = qb.rolling_retention_transition(plan, rows[:3], "sweep")
+            failed = qb.rolling_retention_transition(plan, rows, "sweep")
+        self.assertEqual(first["retained_candidate_ids"],
+                         ["stock-candidate", "candidate-1"])
+        self.assertEqual(first["retire_candidate_ids"], [])
+        self.assertEqual(displaced["retained_candidate_ids"],
+                         ["stock-candidate", "candidate-2"])
+        self.assertEqual(displaced["retire_candidate_ids"], ["candidate-1"])
+        self.assertEqual(failed["retire_candidate_ids"], ["candidate-3"])
+
+    def test_rolling_format_keeps_exact_two_eligible_finalists(self) -> None:
+        override_sha = "3" * 64
+        profile_sha = "4" * 64
+        plan = {
+            "stock_control": {"id": "stock"},
+            "sweep_configurations": [{"id": "winner"}],
+            "format_arms": [{
+                "id": item, "quantization_arm": "format-arm",
+                "quantization_overrides_sha256": override_sha,
+                "profile_sha256": profile_sha,
+                "mtp_matrix_quant_contract": "Q4_0_ROCMI4", "mtp_depth": 3,
+                "final_release_eligible": True,
+            } for item in ("a", "b", "c")],
+        }
+        plan_sha = qb.canonical_sha256(plan)
+        runtime = {"identity": "common-runtime"}
+        direction = {"identity": "common-direction"}
+        stock = {"candidate_id": "stock-candidate"}
+        rows = [
+            {"row_id": "a", "arm_id": "a", "stage": "format",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "configuration_id": "winner", "runtime_identity": runtime,
+             "direction_identity": direction, "quality_stock_identity": stock,
+             "mtp_matrix_quant_contract": "Q4_0_ROCMI4", "mtp_depth": 3,
+             "final_release_eligible": True,
+             "artifact_identity": {
+                 "candidate_id": "candidate-a", "intervention_configuration_id": "winner",
+                 "quantization_arm": "format-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": True, "decode_median_tps": 40.0,
+                         "prefill_median_tps": 420.0, "quality_score": 0.8}},
+            {"row_id": "b", "arm_id": "b", "stage": "format",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "configuration_id": "winner", "runtime_identity": runtime,
+             "direction_identity": direction, "quality_stock_identity": stock,
+             "mtp_matrix_quant_contract": "Q4_0_ROCMI4", "mtp_depth": 3,
+             "final_release_eligible": True,
+             "artifact_identity": {
+                 "candidate_id": "candidate-b", "intervention_configuration_id": "winner",
+                 "quantization_arm": "format-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": True, "decode_median_tps": 41.0,
+                         "prefill_median_tps": 415.0, "quality_score": 0.7}},
+            {"row_id": "c", "arm_id": "c", "stage": "format",
+             "selection_plan_sha256": plan_sha, "phase_plan_sha256": plan_sha,
+             "configuration_id": "winner", "runtime_identity": runtime,
+             "direction_identity": direction, "quality_stock_identity": stock,
+             "mtp_matrix_quant_contract": "Q4_0_ROCMI4", "mtp_depth": 3,
+             "final_release_eligible": True,
+             "artifact_identity": {
+                 "candidate_id": "candidate-c", "intervention_configuration_id": "winner",
+                 "quantization_arm": "format-arm",
+                 "quantization_overrides_sha256": override_sha,
+                 "profile_sha256": profile_sha},
+             "metrics": {"passes": True, "decode_median_tps": 42.0,
+                         "prefill_median_tps": 414.0, "quality_score": 0.6}},
+        ]
+        with (mock.patch.object(qb, "verify_plan", return_value=plan),
+              mock.patch.object(qb, "_metrics", side_effect=lambda row, _plan: row["metrics"])):
+            transition = qb.rolling_retention_transition(plan, rows, "format")
+        self.assertEqual(transition["retained_candidate_ids"],
+                         ["candidate-c", "candidate-b"])
+        self.assertEqual(transition["retire_candidate_ids"], ["candidate-a"])
+
+        mismatched = json.loads(json.dumps(rows))
+        mismatched[-1]["artifact_identity"]["quantization_arm"] = "other-arm"
+        with (mock.patch.object(qb, "verify_plan", return_value=plan),
+              mock.patch.object(qb, "_metrics",
+                                side_effect=lambda row, _plan: row["metrics"]),
+              self.assertRaisesRegex(qb.BakeoffError, "provenance differs")):
+            qb.rolling_retention_transition(plan, mismatched, "format")
+
+    def test_sealed_format_retention_collapses_only_to_ledger_winner(self) -> None:
+        plan = {"stock_control": {"id": "stock"}, "sweep_configurations": [],
+                "format_arms": []}
+        ledger = {
+            "phase": "format", "assessments": [],
+            "selected_artifact_identity": {"candidate_id": "candidate-b"},
+        }
+        rolling = {"retained_candidate_ids": ["candidate-a", "candidate-b"]}
+        with (mock.patch.object(qb, "verify_plan", return_value=plan),
+              mock.patch.object(qb, "verify_ledger_semantics"),
+              mock.patch.object(qb, "rolling_retention_transition",
+                                return_value=rolling)):
+            transition = qb.sealed_format_retention(plan, ledger)
+        self.assertEqual(transition["retained_candidate_ids"], ["candidate-b"])
+        self.assertEqual(transition["retire_candidate_ids"], ["candidate-a"])
 
     def test_missing_estimated_or_final_reselection_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

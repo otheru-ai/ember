@@ -1369,6 +1369,177 @@ def _winner_key(metrics: dict[str, Any], identifier: str) -> tuple[float, float,
     )
 
 
+def rolling_retention_transition(
+    plan: dict[str, Any], rows: list[dict[str, Any]], phase: str,
+) -> dict[str, Any]:
+    """Derive the one-time artifact eviction after appending one assessment.
+
+    A serial accumulator retains only the candidates that can still affect its
+    eventual selector.  Sweep keeps its stock control plus current top one,
+    while the format screen keeps the exact top two needed by balanced
+    confirmation.
+    The transition is intentionally derived from the previous prefix survivors
+    plus the newly appended row: candidates retired by an earlier prefix never
+    reappear in a later deletion authorization.
+    """
+    verified = verify_plan(plan)
+    if phase == "sweep":
+        expected = [verified["stock_control"]["id"], *[
+            item["id"] for item in verified["sweep_configurations"]]]
+        retain_count = 1
+        policy = "rolling_stock_plus_exact_winner_top1"
+    elif phase == "format":
+        expected = [item["id"] for item in verified["format_arms"]]
+        retain_count = 2
+        policy = "rolling_exact_finalists_top2"
+    else:
+        raise BakeoffError("rolling artifact retirement applies only to sweep or format")
+    if not rows or len(rows) > len(expected):
+        raise BakeoffError("rolling retention requires one nonempty canonical phase prefix")
+    if [row.get("row_id") for row in rows] != expected[:len(rows)]:
+        raise BakeoffError("rolling retention assessments are not the canonical phase prefix")
+    plan_sha256 = canonical_sha256(verified)
+    configurations = {
+        item["id"]: item for item in verified["sweep_configurations"]
+    }
+    runtime_identity = None
+    direction_identity = None
+    stock_identity = None
+    format_configuration = None
+    candidate_ids = []
+    for row in rows:
+        artifact = row.get("artifact_identity")
+        if not isinstance(artifact, dict):
+            raise BakeoffError("rolling retention assessment lacks its artifact identity")
+        candidate_id = artifact.get("candidate_id")
+        if (not isinstance(candidate_id, str) or not candidate_id
+                or row.get("selection_plan_sha256") != plan_sha256
+                or row.get("phase_plan_sha256") != plan_sha256):
+            raise BakeoffError("rolling retention assessment lacks its plan/candidate identity")
+        if phase == "sweep" and row.get("stage") == "stock":
+            stock = verified["stock_control"]
+            if (row.get("row_id") != stock["id"]
+                    or row.get("final_release_eligible") is not False
+                    or not isinstance(row.get("runtime_identity"), dict)):
+                raise BakeoffError("rolling stock assessment differs from the canonical plan")
+            stock_identity = artifact
+            runtime_identity = row.get("runtime_identity")
+        elif phase == "sweep":
+            configuration = next(
+                item for item in verified["sweep_configurations"]
+                if item["id"] == row.get("row_id"))
+            if (row.get("stage") != "sweep"
+                    or row.get("configuration_id") != configuration["id"]
+                    or artifact.get("intervention_configuration_id") != configuration["id"]
+                    or artifact.get("quantization_arm") != configuration["quantization_arm"]
+                    or artifact.get("quantization_overrides_sha256") !=
+                    configuration["quantization_overrides_sha256"]
+                    or artifact.get("profile_sha256") != configuration["profile_sha256"]
+                    or row.get("runtime_mode") != configuration["runtime_mode"]
+                    or row.get("final_release_eligible") !=
+                    configuration["final_release_eligible"]
+                    or row.get("runtime_identity") != runtime_identity
+                    or row.get("quality_stock_identity") != stock_identity
+                    or not isinstance(row.get("direction_identity"), dict)):
+                raise BakeoffError("rolling sweep assessment provenance differs from its plan")
+            if direction_identity is None:
+                direction_identity = row.get("direction_identity")
+            elif row.get("direction_identity") != direction_identity:
+                raise BakeoffError("rolling sweep assessments use different directions")
+        else:
+            arm = next(item for item in verified["format_arms"]
+                       if item["id"] == row.get("row_id"))
+            configuration_id = row.get("configuration_id")
+            if format_configuration is None:
+                format_configuration = configuration_id
+                runtime_identity = row.get("runtime_identity")
+                direction_identity = row.get("direction_identity")
+                stock_identity = row.get("quality_stock_identity")
+            if (row.get("stage") != "format" or row.get("arm_id") != arm["id"]
+                    or not isinstance(configuration_id, str) or not configuration_id
+                    or configuration_id not in configurations
+                    or configuration_id != format_configuration
+                    or artifact.get("intervention_configuration_id") != configuration_id
+                    or artifact.get("quantization_arm") != arm["quantization_arm"]
+                    or artifact.get("quantization_overrides_sha256") !=
+                    arm["quantization_overrides_sha256"]
+                    or artifact.get("profile_sha256") != arm["profile_sha256"]
+                    or row.get("mtp_matrix_quant_contract") != arm["mtp_matrix_quant_contract"]
+                    or row.get("mtp_depth") != arm["mtp_depth"]
+                    or row.get("final_release_eligible") != arm["final_release_eligible"]
+                    or row.get("runtime_identity") != runtime_identity
+                    or row.get("direction_identity") != direction_identity
+                    or row.get("quality_stock_identity") != stock_identity
+                    or not isinstance(runtime_identity, dict)
+                    or not isinstance(direction_identity, dict)
+                    or not isinstance(stock_identity, dict)):
+                raise BakeoffError("rolling format assessment provenance differs from its plan")
+        candidate_ids.append(candidate_id)
+    if len(set(candidate_ids)) != len(candidate_ids):
+        raise BakeoffError("rolling retention candidate identities are not unique")
+
+    def survivors(prefix: list[dict[str, Any]]) -> list[str]:
+        stock = []
+        ranked = []
+        for row in prefix:
+            if phase == "sweep" and row.get("stage") == "stock":
+                stock.append((row.get("artifact_identity") or {})["candidate_id"])
+                continue
+            if row.get("stage") != phase:
+                continue
+            metrics = _metrics(row, verified)
+            if not metrics["passes"]:
+                continue
+            if phase == "format" and row.get("final_release_eligible") is not True:
+                continue
+            identifier = row.get("row_id") if phase == "sweep" else row.get("arm_id")
+            artifact = row.get("artifact_identity") or {}
+            ranked.append((row, metrics, identifier, artifact["candidate_id"]))
+        ranked.sort(key=lambda item: _winner_key(item[1], item[2]))
+        return [*stock, *[item[3] for item in ranked[:retain_count]]]
+
+    previous = survivors(rows[:-1])
+    retained = survivors(rows)
+    live_before_decision = [*previous, candidate_ids[-1]]
+    retire = []
+    for candidate_id in live_before_decision:
+        if candidate_id not in retained and candidate_id not in retire:
+            retire.append(candidate_id)
+    return {
+        "phase": phase,
+        "selection_policy": policy,
+        "retained_candidate_ids": retained,
+        "retire_candidate_ids": retire,
+    }
+
+
+def sealed_format_retention(
+    plan: dict[str, Any], ledger: dict[str, Any],
+) -> dict[str, Any]:
+    """Collapse the two live format finalists to the attested ledger winner."""
+    verified = verify_plan(plan)
+    if ledger.get("phase") != "format":
+        raise BakeoffError("sealed format retention requires the completed format ledger")
+    verify_ledger_semantics(verified, ledger)
+    rows = ledger.get("assessments")
+    if not isinstance(rows, list):
+        raise BakeoffError("sealed format ledger has no compact assessments")
+    rolling = rolling_retention_transition(verified, rows, "format")
+    selected = ledger.get("selected_artifact_identity") or {}
+    selected_id = selected.get("candidate_id")
+    if (not isinstance(selected_id, str)
+            or selected_id not in rolling["retained_candidate_ids"]):
+        raise BakeoffError("sealed format winner was not one of the live finalists")
+    return {
+        "phase": "format",
+        "selection_policy": "sealed_balanced_format_winner_top1",
+        "retained_candidate_ids": [selected_id],
+        "retire_candidate_ids": [candidate_id for candidate_id in
+                                 rolling["retained_candidate_ids"]
+                                 if candidate_id != selected_id],
+    }
+
+
 def balanced_confirmation_plan(
     plan: dict[str, Any], rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -1380,7 +1551,8 @@ def balanced_confirmation_plan(
     confirmation result exists.
     """
     assessed = [(row, _metrics(row, plan)) for row in rows]
-    passing = [(row, metrics) for row, metrics in assessed if metrics["passes"]]
+    passing = [(row, metrics) for row, metrics in assessed
+               if metrics["passes"] and row.get("final_release_eligible") is True]
     if len(passing) < 2:
         raise BakeoffError("balanced confirmation requires two gate-passing format finalists")
     finalists = sorted(

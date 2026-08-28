@@ -21,6 +21,7 @@ import posixpath
 import resource
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -36,13 +37,41 @@ MMPROJ_BASENAME = "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
 VISION_VOCAB_BASENAME = "Qwen3.8-Flash-Next-vocab-only.gguf"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment-bundle.v1"
 TOMBSTONE_SCHEMA = "ember.qwen3.8.deleted-loser.v1"
+RECONSTRUCTABLE_RETIREMENT_SCHEMA = (
+    "ember.qwen3.8.reconstructable-candidate-retirement.v1")
+RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA = (
+    "ember.qwen3.8.reconstructable-candidate-retirement-complete.v1")
+RECONSTRUCTION_RECEIPT_SCHEMA = "ember.qwen3.8.candidate-reconstruction.v1"
+RETENTION_AUTHORITY_SCHEMA = "ember.qwen3.8.attested-rolling-retention.v1"
+SEALED_RETENTION_AUTHORITY_SCHEMA = "ember.qwen3.8.attested-sealed-retention.v1"
 STOCK_RETIRE_AUTH_SCHEMA = "ember.qwen3.8.stock-retirement-authorization.v1"
 STOCK_RETIRE_COMPLETE_SCHEMA = "ember.qwen3.8.stock-retirement-complete.v1"
 CONTAINER_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ATTEST_REPOSITORY = "OtherU-AI/ember"
+ATTEST_WORKFLOW = ".github/workflows/qwen-gfx1151-bakeoff.yml"
 
 
 class BuilderError(ValueError):
     pass
+
+
+def verify_external_attestation(
+    subject: Path, bundle: Path, repository: str, signer_workflow: str,
+) -> None:
+    command = ["gh", "attestation", "verify", str(subject), "--bundle", str(bundle),
+               "--repo", repository, "--signer-workflow", signer_workflow]
+    try:
+        completed = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False)
+    except OSError as exc:
+        raise BuilderError(f"cannot run external attestation verifier: {exc}") from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise BuilderError(f"external attestation verification failed: {detail}")
+
+
+ATTESTATION_VERIFIER = verify_external_attestation
 
 
 def canonical_sha256(value: Any) -> str:
@@ -71,6 +100,21 @@ def write_json_fsync(path: Path, value: dict[str, Any], *, create: bool = True) 
     finally:
         os.close(descriptor)
     quant.fsync_directory(path.parent)
+
+
+def write_json_atomic_noreplace(path: Path, value: dict[str, Any]) -> None:
+    """Publish critical lifecycle evidence without exposing a partial final file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_stage = tempfile.mkstemp(prefix=f".{path.name}.stage-", dir=path.parent)
+    os.close(descriptor)
+    stage = Path(raw_stage)
+    try:
+        write_json_fsync(stage, value, create=False)
+        quant.rename_directory_noreplace(stage, path)
+        quant.fsync_directory(path.parent)
+    finally:
+        if stage.exists() and not stage.is_symlink():
+            stage.unlink()
 
 
 class WorksetLease:
@@ -604,17 +648,36 @@ def build_candidate(args: argparse.Namespace) -> dict[str, Any]:
             raise
 
 
-def exact_candidate_shards(candidate_dir: Path, record: dict[str, Any]) -> list[dict[str, Any]]:
+def declared_candidate_shards(
+    candidate_dir: Path, record: dict[str, Any],
+) -> list[dict[str, Any]]:
     output = record.get("output")
-    if not isinstance(output, dict) or not isinstance(output.get("shards"), list):
+    if (not isinstance(output, dict) or not isinstance(output.get("shards"), list)
+            or not output["shards"]):
         raise BuilderError("candidate build record omits output shards")
     rows: list[dict[str, Any]] = []
+    paths: set[Path] = set()
     for index, row in enumerate(output["shards"]):
         if not isinstance(row, dict):
             raise BuilderError("candidate shard row is malformed")
         path = Path(str(row.get("path", ""))).absolute()
-        if path.parent != candidate_dir or PurePosixPath(path.name).name != path.name:
-            raise BuilderError("candidate shard escapes the candidate directory")
+        size_bytes = row.get("size_bytes")
+        sha256 = row.get("sha256")
+        if (path.parent != candidate_dir or PurePosixPath(path.name).name != path.name
+                or path in paths or not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool) or size_bytes < 1
+                or not isinstance(sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", sha256) is None):
+            raise BuilderError("candidate shard is duplicated, malformed, or escapes its directory")
+        paths.add(path)
+        rows.append({"path": str(path), "size_bytes": size_bytes, "sha256": sha256})
+    return rows
+
+
+def exact_candidate_shards(candidate_dir: Path, record: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(declared_candidate_shards(candidate_dir, record)):
+        path = Path(row["path"])
         try:
             evidence = quant.inspect_exact_file(
                 path, row.get("sha256"), row.get("size_bytes"), f"candidate shard {index}")
@@ -828,6 +891,591 @@ def delete_loser(args: argparse.Namespace) -> dict[str, Any]:
                 "tombstone_sha256": quant.sha256_file(tombstone), "recoverable": False}
 
 
+def _read_attested_json(
+    descriptor: Any, label: str, schema: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(descriptor, dict) or set(descriptor) != {
+            "subject", "bundle", "repository", "signer_workflow"}:
+        raise BuilderError(f"{label} attestation descriptor is malformed")
+    subject = descriptor.get("subject")
+    bundle = descriptor.get("bundle")
+    if (not isinstance(subject, dict) or set(subject) != {"path", "sha256", "schema"}
+            or subject.get("schema") != schema or not isinstance(bundle, dict)
+            or set(bundle) != {"path", "sha256"}
+            or descriptor.get("repository") != ATTEST_REPOSITORY
+            or descriptor.get("signer_workflow") != ATTEST_WORKFLOW):
+        raise BuilderError(f"{label} attestation signer/subject differs")
+    subject_path = Path(str(subject.get("path", ""))).absolute()
+    value, subject_evidence = quant.read_exact_json_file(
+        subject_path, subject.get("sha256"), label)
+    if value.get("schema") != schema:
+        raise BuilderError(f"{label} content schema differs")
+    bundle_path = Path(str(bundle.get("path", ""))).absolute()
+    try:
+        bundle_size = bundle_path.lstat().st_size
+    except OSError as exc:
+        raise BuilderError(f"cannot stat {label} attestation bundle: {exc}") from exc
+    bundle_evidence = quant.inspect_exact_file(
+        bundle_path, bundle.get("sha256"), bundle_size, f"{label} attestation bundle")
+    ATTESTATION_VERIFIER(subject_path, bundle_path, ATTEST_REPOSITORY, ATTEST_WORKFLOW)
+    return value, {
+        "subject": {**subject_evidence, "schema": schema},
+        "bundle": bundle_evidence,
+        "repository": ATTEST_REPOSITORY,
+        "signer_workflow": ATTEST_WORKFLOW,
+    }
+
+
+def _load_rolling_retention(
+    plan_path: Path, plan_sha256: str, accumulator_descriptor: Any, phase: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    if phase not in {"sweep", "format"}:
+        raise BuilderError("rolling retention phase must be sweep or format")
+    plan, plan_evidence = quant.read_exact_json_file(
+        plan_path.absolute(), plan_sha256, "rolling retention selection plan")
+    accumulator, accumulator_evidence = _read_attested_json(
+        accumulator_descriptor, "rolling accumulator",
+        "ember.qwen3.8.sequential-bakeoff-accumulator.v2")
+    if (accumulator.get("phase") != phase
+            or accumulator.get("plan_sha256") != plan_evidence["sha256"]
+            or accumulator.get("contains_raw_measurements") is not False
+            or accumulator.get("external_attestation_required") is not True
+            or accumulator.get("publication_allowed") is not False):
+        raise BuilderError("rolling accumulator lifecycle/plan differs")
+    descriptors = accumulator.get("assessments")
+    if not isinstance(descriptors, list) or not descriptors:
+        raise BuilderError("rolling accumulator has no assessment descriptors")
+    rows = []
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for descriptor in descriptors:
+        assessment, evidence = _read_attested_json(
+            descriptor, "candidate assessment", "ember.qwen3.8.candidate-assessment.v2")
+        artifact = assessment.get("artifact_identity")
+        candidate_id = artifact.get("candidate_id") if isinstance(artifact, dict) else None
+        if (not isinstance(candidate_id, str) or not candidate_id
+                or candidate_id in by_candidate
+                or assessment.get("artifact_may_be_deleted_after_external_attestation") is not True):
+            raise BuilderError("rolling assessment candidate identity/lifecycle differs")
+        rows.append(assessment)
+        by_candidate[candidate_id] = {"assessment": assessment, "evidence": evidence}
+    try:
+        import qwen_bakeoff as bakeoff
+        transition = bakeoff.rolling_retention_transition(plan, rows, phase)
+    except (ImportError, ValueError) as exc:
+        raise BuilderError(f"cannot derive rolling retention transition: {exc}") from exc
+    return transition, {
+        "selection_plan": plan_evidence,
+        "accumulator": accumulator_evidence,
+    }, by_candidate
+
+
+def authorize_rolling_retention(args: argparse.Namespace) -> dict[str, Any]:
+    accumulator_descriptor = {
+        "subject": {"path": str(args.accumulator.absolute()),
+                    "sha256": args.accumulator_sha256,
+                    "schema": "ember.qwen3.8.sequential-bakeoff-accumulator.v2"},
+        "bundle": {"path": str(args.accumulator_bundle.absolute()),
+                   "sha256": args.accumulator_bundle_sha256},
+        "repository": ATTEST_REPOSITORY,
+        "signer_workflow": ATTEST_WORKFLOW,
+    }
+    transition, evidence, _by_candidate = _load_rolling_retention(
+        args.plan, args.plan_sha256, accumulator_descriptor, args.phase)
+    payload = {
+        "schema": RETENTION_AUTHORITY_SCHEMA,
+        "status": "externally_attested_accumulator_verified",
+        **transition,
+        **evidence,
+        "reconstruction_required": True,
+        "publishes": False,
+    }
+    write_json_fsync(args.output.absolute(), payload)
+    return {"status": "complete", "authority": str(args.output.absolute()),
+            "authority_sha256": quant.sha256_file(args.output.absolute()),
+            **transition, "publishes": False}
+
+
+def _load_sealed_retention(
+    plan_path: Path, plan_sha256: str, ledger_descriptor: Any,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
+    plan, plan_evidence = quant.read_exact_json_file(
+        plan_path.absolute(), plan_sha256, "sealed retention selection plan")
+    ledger, ledger_evidence = _read_attested_json(
+        ledger_descriptor, "sealed format ledger",
+        "ember.qwen3.8.sequential-bakeoff-ledger.v3")
+    try:
+        import qwen_bakeoff as bakeoff
+        transition = bakeoff.sealed_format_retention(plan, ledger)
+    except (ImportError, ValueError) as exc:
+        raise BuilderError(f"cannot derive sealed format retention: {exc}") from exc
+    rows = ledger.get("assessments")
+    digests = ledger.get("assessment_sha256")
+    if (not isinstance(rows, list) or not isinstance(digests, list)
+            or len(rows) != len(digests)):
+        raise BuilderError("sealed format ledger assessment inventory differs")
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for row, digest in zip(rows, digests, strict=True):
+        artifact = row.get("artifact_identity") if isinstance(row, dict) else None
+        candidate_id = artifact.get("candidate_id") if isinstance(artifact, dict) else None
+        if (not isinstance(candidate_id, str) or candidate_id in by_candidate
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise BuilderError("sealed format ledger candidate identity differs")
+        by_candidate[candidate_id] = {
+            "assessment": row,
+            "evidence": {"embedded_in_ledger": ledger_evidence["subject"],
+                         "assessment_sha256": digest},
+        }
+    return transition, {
+        "selection_plan": plan_evidence,
+        "selection_ledger": ledger_evidence,
+    }, by_candidate
+
+
+def authorize_sealed_retention(args: argparse.Namespace) -> dict[str, Any]:
+    ledger_descriptor = {
+        "subject": {"path": str(args.ledger.absolute()), "sha256": args.ledger_sha256,
+                    "schema": "ember.qwen3.8.sequential-bakeoff-ledger.v3"},
+        "bundle": {"path": str(args.ledger_bundle.absolute()),
+                   "sha256": args.ledger_bundle_sha256},
+        "repository": ATTEST_REPOSITORY,
+        "signer_workflow": ATTEST_WORKFLOW,
+    }
+    transition, evidence, _by_candidate = _load_sealed_retention(
+        args.plan, args.plan_sha256, ledger_descriptor)
+    payload = {
+        "schema": SEALED_RETENTION_AUTHORITY_SCHEMA,
+        "status": "externally_attested_ledger_verified",
+        **transition,
+        **evidence,
+        "reconstruction_required": True,
+        "publishes": False,
+    }
+    write_json_fsync(args.output.absolute(), payload)
+    return {"status": "complete", "authority": str(args.output.absolute()),
+            "authority_sha256": quant.sha256_file(args.output.absolute()),
+            **transition, "publishes": False}
+
+
+def _validate_reconstruction_cache(
+    record: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    cache = record.get("bf16_cache")
+    manifest_desc = cache.get("manifest") if isinstance(cache, dict) else None
+    if (not isinstance(manifest_desc, dict)
+            or not isinstance(cache.get("cache_id"), str)):
+        raise BuilderError("candidate build record omits its reconstructable BF16 cache")
+    manifest_path = Path(str(manifest_desc.get("path", ""))).absolute()
+    manifest, manifest_evidence = quant.read_exact_json_file(
+        manifest_path, manifest_desc.get("sha256"), "immutable BF16 cache manifest")
+    if (manifest.get("schema") != quant.BF16_CACHE_SCHEMA
+            or manifest.get("cache_id") != cache.get("cache_id")):
+        raise BuilderError("immutable BF16 cache schema/content address differs")
+    main = manifest.get("main")
+    main_rows = main.get("shards") if isinstance(main, dict) else None
+    mmproj = manifest.get("vision_mmproj")
+    vocab = manifest.get("vision_vocab")
+    if (not isinstance(main_rows, list) or not main_rows
+            or not isinstance(mmproj, dict) or not isinstance(vocab, dict)):
+        raise BuilderError("immutable BF16 cache inventory is incomplete")
+    cache_dir = manifest_path.parent
+    normalized = []
+    names: set[str] = set()
+    for index, row in enumerate(main_rows):
+        if not isinstance(row, dict):
+            raise BuilderError("immutable BF16 cache shard row is malformed")
+        name = row.get("name")
+        if (not isinstance(name, str) or not name or PurePosixPath(name).name != name
+                or name in names):
+            raise BuilderError("immutable BF16 cache shard name is unsafe or duplicated")
+        names.add(name)
+        exact = quant.inspect_exact_file(
+            cache_dir / name, row.get("sha256"), row.get("size_bytes"),
+            f"immutable BF16 cache shard {index}")
+        normalized.append({"name": name, "size_bytes": exact["size_bytes"],
+                           "sha256": exact["sha256"]})
+    companions = []
+    for label, row in (("vision mmproj", mmproj), ("vision vocab", vocab)):
+        name = row.get("name")
+        if (not isinstance(name, str) or not name or PurePosixPath(name).name != name
+                or name in names):
+            raise BuilderError(f"immutable BF16 cache {label} name is unsafe or duplicated")
+        names.add(name)
+        exact = quant.inspect_exact_file(
+            cache_dir / name, row.get("sha256"), row.get("size_bytes"),
+            f"immutable BF16 cache {label}")
+        companions.append({"name": name, "size_bytes": exact["size_bytes"],
+                           "sha256": exact["sha256"]})
+    main_sha, cache_id = cache_content_address(normalized, companions[0], companions[1])
+    if (main.get("content_sha256") != main_sha or manifest.get("cache_id") != cache_id
+            or cache_dir.name != f"bf16-{cache_id}"):
+        raise BuilderError("immutable BF16 cache content address does not reproduce")
+    companion = record.get("companion_inventory")
+    companion_desc = companion.get("manifest") if isinstance(companion, dict) else None
+    if (not isinstance(companion_desc, dict)
+            or companion.get("status") != "verified_exact"):
+        raise BuilderError("candidate build record omits its exact companion inventory")
+    companion_path = Path(str(companion_desc.get("path", ""))).absolute()
+    companion_value, companion_evidence = quant.read_exact_json_file(
+        companion_path, companion_desc.get("sha256"), "immutable companion inventory")
+    rows = companion_value.get("companions")
+    if (companion_value.get("schema") != quant.COMPANION_INVENTORY_SCHEMA
+            or not isinstance(rows, list) or not rows):
+        raise BuilderError("immutable companion inventory schema/content differs")
+    roles: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict) or row.get("enabled") is not True:
+            raise BuilderError("reconstruction requires every declared companion enabled")
+        role = row.get("role")
+        if not isinstance(role, str) or role in roles:
+            raise BuilderError("immutable companion inventory role is malformed or duplicated")
+        roles.add(role)
+        path = Path(str(row.get("path", ""))).absolute()
+        quant.inspect_exact_file(path, row.get("sha256"), row.get("size_bytes"),
+                                 f"immutable {role} companion {index}")
+        if role == "mtp":
+            export_path = Path(str(row.get("export_manifest_path", ""))).absolute()
+            try:
+                export_size = export_path.lstat().st_size
+            except OSError as exc:
+                raise BuilderError(f"cannot stat immutable MTP export manifest: {exc}") from exc
+            quant.inspect_exact_file(
+                export_path, row.get("export_manifest_sha256"), export_size,
+                "immutable MTP export manifest")
+        text_model = row.get("text_model")
+        if text_model is not None:
+            if not isinstance(text_model, dict):
+                raise BuilderError("immutable vision text companion is malformed")
+            quant.inspect_exact_file(
+                Path(str(text_model.get("path", ""))).absolute(),
+                text_model.get("sha256"), text_model.get("size_bytes"),
+                "immutable vision vocab companion")
+    if roles != {"mtp", "vision_mmproj"}:
+        raise BuilderError("reconstruction companion roles are incomplete")
+    return manifest_evidence, companion_evidence, cache_dir.parent
+
+
+def _record_reconstruction_contract(record: dict[str, Any]) -> dict[str, Any]:
+    """Select immutable construction inputs while excluding paths and timings."""
+    cache = record.get("bf16_cache") or {}
+    companion = record.get("companion_inventory") or {}
+    tools = record.get("tools") or {}
+    recipe = record.get("quantization_recipe") or {}
+    intervention = record.get("intervention") or {}
+    profile = record.get("profile") or {}
+    snapshot = record.get("snapshot") or {}
+    return {
+        "bf16_cache": {"cache_id": cache.get("cache_id"),
+                       "manifest": cache.get("manifest")},
+        "companion_inventory_manifest": companion.get("manifest"),
+        "intervention": {key: intervention.get(key) for key in (
+            "manifest_sha256", "kind", "application_stage", "weight_intervention",
+            "target_names_sha256")},
+        "profile": {"sha256": profile.get("sha256")},
+        "snapshot": {key: snapshot.get(key) for key in ("repo_id", "revision")},
+        "quantization_recipe": {key: recipe.get(key) for key in (
+            "id", "formats", "per_tensor_overrides_sha256")},
+        "tools": {key: tools.get(key) for key in (
+            "ember_revision", "quantizer_sha256", "rocmfpx_revision")},
+    }
+
+
+def retire_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
+    """Retire exact shards under an attested rolling-selection authority."""
+    authority, authority_evidence = quant.read_exact_json_file(
+        args.retention_authority.absolute(), args.retention_authority_sha256,
+        "rolling retention authority")
+    schema = authority.get("schema")
+    common_keys = {"schema", "status", "phase", "selection_policy",
+                   "retained_candidate_ids", "retire_candidate_ids", "selection_plan",
+                   "reconstruction_required", "publishes"}
+    if (authority.get("publishes") is not False
+            or authority.get("reconstruction_required") is not True):
+        raise BuilderError("rolling retention authority lifecycle/schema differs")
+    retained = authority.get("retained_candidate_ids")
+    retired = authority.get("retire_candidate_ids")
+    if (not isinstance(retained, list) or not isinstance(retired, list)
+            or any(not isinstance(item, str) for item in [*retained, *retired])
+            or len(set(retained)) != len(retained) or len(set(retired)) != len(retired)
+            or set(retained) & set(retired) or args.candidate_id not in retired):
+        raise BuilderError("rolling retention authority does not retire this candidate")
+    plan_desc = authority.get("selection_plan")
+    if not isinstance(plan_desc, dict):
+        raise BuilderError("rolling retention authority omits its selection plan")
+    if (schema == RETENTION_AUTHORITY_SCHEMA
+            and set(authority) == common_keys | {"accumulator"}
+            and authority.get("status") == "externally_attested_accumulator_verified"):
+        transition, retention_evidence, candidates = _load_rolling_retention(
+            Path(str(plan_desc.get("path", ""))), plan_desc.get("sha256"),
+            authority.get("accumulator"), authority.get("phase"))
+        selection_evidence = retention_evidence["accumulator"]
+    elif (schema == SEALED_RETENTION_AUTHORITY_SCHEMA
+          and set(authority) == common_keys | {"selection_ledger"}
+          and authority.get("status") == "externally_attested_ledger_verified"):
+        transition, retention_evidence, candidates = _load_sealed_retention(
+            Path(str(plan_desc.get("path", ""))), plan_desc.get("sha256"),
+            authority.get("selection_ledger"))
+        selection_evidence = retention_evidence["selection_ledger"]
+    else:
+        raise BuilderError("retention authority lifecycle/schema differs")
+    if any(authority.get(key) != transition[key] for key in transition):
+        raise BuilderError("rolling retention authority does not rederive from attested evidence")
+
+    candidate_dir = args.candidate_dir.absolute()
+    if candidate_dir.is_symlink() or not candidate_dir.is_dir():
+        raise BuilderError("candidate directory must be one existing non-symlink directory")
+    record_path = candidate_dir / "qwen-quant-build-record.json"
+    record, record_evidence = quant.read_exact_json_file(
+        record_path, args.build_record_sha256, "candidate build record")
+    if record.get("status") != "complete":
+        raise BuilderError("only a completed candidate can be retired reconstructably")
+    candidate = candidates.get(args.candidate_id)
+    if candidate is None:
+        raise BuilderError("rolling accumulator does not identify the retired candidate")
+    assessment = candidate["assessment"]
+    assessment_evidence = candidate["evidence"]
+    artifact = assessment.get("artifact_identity") or {}
+    if artifact.get("build_record_sha256") != args.build_record_sha256:
+        raise BuilderError("attested candidate assessment does not bind this build record")
+    cache_evidence, companion_evidence, workset_root = _validate_reconstruction_cache(record)
+    if candidate_dir != workset_root.parent / "candidates" / safe_id(
+            args.candidate_id, "candidate id"):
+        raise BuilderError("candidate directory is not its canonical workset location")
+    output = args.output.absolute()
+    completion = output.with_name(output.name + ".complete.json")
+    if output.is_relative_to(candidate_dir) or completion.is_relative_to(candidate_dir):
+        raise BuilderError("candidate retirement evidence must live outside its candidate directory")
+    with WorksetLease(workset_root):
+        record, record_evidence = quant.read_exact_json_file(
+            record_path, args.build_record_sha256, "candidate build record")
+        cache_evidence, companion_evidence, current_workset_root = (
+            _validate_reconstruction_cache(record))
+        if current_workset_root != workset_root:
+            raise BuilderError("candidate reconstruction workset changed under its lease")
+        declared = declared_candidate_shards(candidate_dir, record)
+        quarantine = [{
+            "original_path": row["path"],
+            "path": str(candidate_dir / (
+                f".retiring-{args.retention_authority_sha256}-{index:04d}")),
+        } for index, row in enumerate(declared)]
+
+        def shard_present(path: Path, row: dict[str, Any], label: str) -> bool:
+            if path.is_symlink():
+                raise BuilderError(f"{label} was replaced by a symlink")
+            if not path.exists():
+                return False
+            quant.inspect_exact_file(path, row["sha256"], row["size_bytes"], label)
+            return True
+
+        states = []
+        for index, (row, quarantine_row) in enumerate(
+                zip(declared, quarantine, strict=True)):
+            original = shard_present(
+                Path(row["path"]), row, f"retirable candidate shard {index}")
+            staged = shard_present(
+                Path(quarantine_row["path"]), row,
+                f"quarantined candidate shard {index}")
+            if original and staged:
+                raise BuilderError("candidate shard exists at both original and quarantine paths")
+            states.append("original" if original else "quarantine" if staged else "deleted")
+        payload = {
+            "schema": RECONSTRUCTABLE_RETIREMENT_SCHEMA,
+            "status": "authorized_before_deletion",
+            "candidate_id": safe_id(args.candidate_id, "candidate id"),
+            "candidate_dir": str(candidate_dir), "workset_root": str(workset_root),
+            "retention_authority": authority_evidence,
+            "selection_evidence": selection_evidence,
+            "assessment": assessment_evidence,
+            "build_record": record_evidence,
+            "bf16_cache_manifest": cache_evidence,
+            "companion_inventory_manifest": companion_evidence,
+            "reconstruction_contract": _record_reconstruction_contract(record),
+            "shards": declared,
+            "quarantine": quarantine,
+            "total_artifact_bytes": sum(row["size_bytes"] for row in declared),
+            "recovery": "rebuild_from_immutable_bf16_cache_then_match_every_original_shard",
+            "publishes": False,
+        }
+        authorization_exists = output.exists() and not output.is_symlink()
+        if not authorization_exists and any(state != "original" for state in states):
+            raise BuilderError("cannot create retirement authorization after shards are missing")
+        if authorization_exists:
+            existing, _ = quant.read_exact_json_file(
+                output, quant.sha256_file(output), "existing reconstruction authorization")
+            if existing != payload:
+                raise BuilderError("existing reconstruction authorization differs")
+        elif output.is_symlink():
+            raise BuilderError("reconstruction authorization must not be a symlink")
+        else:
+            write_json_atomic_noreplace(output, payload)
+        output_sha256 = quant.sha256_file(output)
+        if not args.execute:
+            return {"status": "planned", "candidate_id": args.candidate_id,
+                    "would_delete": [row["path"] for row, state in
+                                     zip(declared, states, strict=True)
+                                     if state != "deleted"],
+                    "recoverable": True}
+        for index, (row, quarantine_row) in enumerate(
+                zip(declared, quarantine, strict=True)):
+            original_path = Path(row["path"])
+            quarantine_path = Path(quarantine_row["path"])
+            original = shard_present(
+                original_path, row, f"retirable candidate shard {index}")
+            staged = shard_present(
+                quarantine_path, row, f"quarantined candidate shard {index}")
+            if original and staged:
+                raise BuilderError("candidate shard exists at both original and quarantine paths")
+            if original:
+                # Move the directory entry first, then hash the entry actually
+                # moved. A concurrent pathname replacement is quarantined and
+                # rejected rather than being unlinked as the authorized shard.
+                quant.rename_directory_noreplace(original_path, quarantine_path)
+                quant.fsync_directory(candidate_dir)
+                shard_present(
+                    quarantine_path, row, f"newly quarantined candidate shard {index}")
+                staged = True
+            if staged:
+                # Revalidate immediately before unlink. The deterministic
+                # quarantine path makes a crash after rename resumable.
+                quant.inspect_exact_file(
+                    quarantine_path, row["sha256"], row["size_bytes"],
+                    f"deletable quarantined candidate shard {index}")
+                quarantine_path.unlink()
+                quant.fsync_directory(candidate_dir)
+        quant.fsync_directory(candidate_dir)
+        for row, quarantine_row in zip(declared, quarantine, strict=True):
+            for path in (Path(row["path"]), Path(quarantine_row["path"])):
+                if path.exists() or path.is_symlink():
+                    raise BuilderError(
+                        "candidate shard reappeared before retirement completion")
+        result = {
+            "schema": RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA,
+            "status": "complete", "candidate_id": args.candidate_id,
+            "authorization": {"path": str(output), "sha256": output_sha256},
+            "deleted_shards": declared, "deleted_bytes": payload["total_artifact_bytes"],
+            "build_record_retained": record_evidence,
+            "bf16_cache_manifest": cache_evidence,
+            "companion_inventory_manifest": companion_evidence,
+            "recoverable": True, "publishes": False,
+        }
+        if completion.exists() and not completion.is_symlink():
+            existing, _ = quant.read_exact_json_file(
+                completion, quant.sha256_file(completion), "existing retirement completion")
+            if existing != result:
+                raise BuilderError("existing retirement completion differs")
+        elif completion.is_symlink():
+            raise BuilderError("retirement completion must not be a symlink")
+        else:
+            write_json_atomic_noreplace(completion, result)
+        return {"status": "complete", "candidate_id": args.candidate_id,
+                "completion": str(completion),
+                "completion_sha256": quant.sha256_file(completion),
+                "deleted_bytes": result["deleted_bytes"], "recoverable": True}
+
+
+def restore_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
+    """Restore retired shard paths only from a byte-identical fresh rebuild."""
+    completion, completion_evidence = quant.read_exact_json_file(
+        args.retirement_completion.absolute(), args.retirement_completion_sha256,
+        "reconstructable retirement completion")
+    if (completion.get("schema") != RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA
+            or completion.get("status") != "complete"
+            or completion.get("recoverable") is not True
+            or completion.get("publishes") is not False):
+        raise BuilderError("retirement completion is not reconstructable")
+    authorization_desc = completion.get("authorization") or {}
+    authorization, authorization_evidence = quant.read_exact_json_file(
+        Path(str(authorization_desc.get("path", ""))).absolute(),
+        authorization_desc.get("sha256"), "reconstructable retirement authorization")
+    if (authorization.get("schema") != RECONSTRUCTABLE_RETIREMENT_SCHEMA
+            or authorization.get("candidate_id") != completion.get("candidate_id")):
+        raise BuilderError("retirement authorization and completion differ")
+    candidate_dir = Path(str(authorization.get("candidate_dir", ""))).absolute()
+    record_desc = authorization.get("build_record") or {}
+    original, original_evidence = quant.read_exact_json_file(
+        candidate_dir / "qwen-quant-build-record.json", record_desc.get("sha256"),
+        "retained original build record")
+    expected = declared_candidate_shards(candidate_dir, original)
+    if expected != authorization.get("shards"):
+        raise BuilderError("retirement authorization shard inventory differs from its build record")
+
+    rebuilt_dir = args.rebuilt_candidate_dir.absolute()
+    if rebuilt_dir.is_symlink() or not rebuilt_dir.is_dir() or rebuilt_dir == candidate_dir:
+        raise BuilderError("rebuilt candidate must be a distinct non-symlink directory")
+    rebuilt_record_path = rebuilt_dir / "qwen-quant-build-record.json"
+    rebuilt, rebuilt_evidence = quant.read_exact_json_file(
+        rebuilt_record_path, args.rebuilt_build_record_sha256,
+        "fresh reconstruction build record")
+    if rebuilt.get("status") != "complete":
+        raise BuilderError("fresh reconstruction build record is not complete")
+    contract = authorization.get("reconstruction_contract")
+    if (_record_reconstruction_contract(rebuilt) != contract
+            or _record_reconstruction_contract(original) != contract):
+        raise BuilderError("fresh rebuild construction inputs differ from the retired candidate")
+    rebuilt_rows = declared_candidate_shards(rebuilt_dir, rebuilt)
+    expected_bytes = [(row.get("size_bytes"), row.get("sha256")) for row in expected]
+    actual_bytes = [(row.get("size_bytes"), row.get("sha256")) for row in rebuilt_rows]
+    if actual_bytes != expected_bytes:
+        raise BuilderError("fresh rebuild does not reproduce every original shard byte hash")
+    if rebuilt_dir.stat().st_dev != candidate_dir.stat().st_dev:
+        raise BuilderError("reconstruction requires same-filesystem atomic shard moves")
+
+    output = args.output.absolute()
+    if output.is_relative_to(candidate_dir) or output.is_relative_to(rebuilt_dir):
+        raise BuilderError("reconstruction receipt must live outside both candidate directories")
+    workset_root = Path(str(authorization.get("workset_root", ""))).absolute()
+    with WorksetLease(workset_root):
+        _validate_reconstruction_cache(original)
+        for index, (rebuilt_row, expected_row) in enumerate(
+                zip(rebuilt_rows, expected, strict=True)):
+            source = Path(rebuilt_row["path"])
+            destination = Path(expected_row["path"])
+            source_present = source.exists() and not source.is_symlink()
+            destination_present = destination.exists() and not destination.is_symlink()
+            if source.is_symlink() or destination.is_symlink():
+                raise BuilderError("reconstruction shard path was replaced by a symlink")
+            if source_present and not destination_present:
+                quant.inspect_exact_file(source, rebuilt_row["sha256"],
+                                         rebuilt_row["size_bytes"],
+                                         f"fresh reconstruction shard {index}")
+                quant.rename_directory_noreplace(source, destination)
+            elif destination_present and not source_present:
+                quant.inspect_exact_file(destination, expected_row["sha256"],
+                                         expected_row["size_bytes"],
+                                         f"already restored candidate shard {index}")
+            else:
+                raise BuilderError("reconstruction requires exactly one source or restored shard")
+        quant.fsync_directory(candidate_dir)
+        quant.fsync_directory(rebuilt_dir)
+        for index, row in enumerate(expected):
+            quant.inspect_exact_file(Path(row["path"]), row["sha256"], row["size_bytes"],
+                                     f"restored candidate shard {index}")
+        receipt = {
+            "schema": RECONSTRUCTION_RECEIPT_SCHEMA,
+            "status": "byte_identical_restore_complete",
+            "candidate_id": completion["candidate_id"],
+            "retirement_completion": completion_evidence,
+            "retirement_authorization": authorization_evidence,
+            "original_build_record": original_evidence,
+            "reconstruction_build_record": rebuilt_evidence,
+            "restored_shards": expected,
+            "all_original_hashes_reproduced": True,
+            "publishes": False,
+        }
+        if output.exists() and not output.is_symlink():
+            existing, _ = quant.read_exact_json_file(
+                output, quant.sha256_file(output), "existing reconstruction receipt")
+            if existing != receipt:
+                raise BuilderError("existing reconstruction receipt differs")
+        elif output.is_symlink():
+            raise BuilderError("reconstruction receipt must not be a symlink")
+        else:
+            write_json_atomic_noreplace(output, receipt)
+        return {"status": "complete", "candidate_id": completion["candidate_id"],
+                "receipt": str(output), "receipt_sha256": quant.sha256_file(output),
+                "restored_bytes": sum(row["size_bytes"] for row in expected)}
+
+
 def add_cgroup_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--memory-limit-bytes", type=int, required=True)
     parser.add_argument("--cgroup-memory-max-path", type=Path,
@@ -926,6 +1574,41 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("--assessment-bundle", type=Path, required=True)
     delete.add_argument("--assessment-bundle-sha256", required=True)
     delete.add_argument("--execute", action="store_true")
+
+    authority = commands.add_parser("authorize-rolling-retention")
+    authority.add_argument("--plan", type=Path, required=True)
+    authority.add_argument("--plan-sha256", required=True)
+    authority.add_argument("--phase", choices=("sweep", "format"), required=True)
+    authority.add_argument("--accumulator", type=Path, required=True)
+    authority.add_argument("--accumulator-sha256", required=True)
+    authority.add_argument("--accumulator-bundle", type=Path, required=True)
+    authority.add_argument("--accumulator-bundle-sha256", required=True)
+    authority.add_argument("--output", type=Path, required=True)
+
+    sealed = commands.add_parser("authorize-sealed-retention")
+    sealed.add_argument("--plan", type=Path, required=True)
+    sealed.add_argument("--plan-sha256", required=True)
+    sealed.add_argument("--ledger", type=Path, required=True)
+    sealed.add_argument("--ledger-sha256", required=True)
+    sealed.add_argument("--ledger-bundle", type=Path, required=True)
+    sealed.add_argument("--ledger-bundle-sha256", required=True)
+    sealed.add_argument("--output", type=Path, required=True)
+
+    reconstructable = commands.add_parser("retire-reconstructable")
+    reconstructable.add_argument("--retention-authority", type=Path, required=True)
+    reconstructable.add_argument("--retention-authority-sha256", required=True)
+    reconstructable.add_argument("--candidate-id", required=True)
+    reconstructable.add_argument("--candidate-dir", type=Path, required=True)
+    reconstructable.add_argument("--build-record-sha256", required=True)
+    reconstructable.add_argument("--output", type=Path, required=True)
+    reconstructable.add_argument("--execute", action="store_true")
+
+    restore = commands.add_parser("restore-reconstructable")
+    restore.add_argument("--retirement-completion", type=Path, required=True)
+    restore.add_argument("--retirement-completion-sha256", required=True)
+    restore.add_argument("--rebuilt-candidate-dir", type=Path, required=True)
+    restore.add_argument("--rebuilt-build-record-sha256", required=True)
+    restore.add_argument("--output", type=Path, required=True)
     return result
 
 
@@ -944,6 +1627,14 @@ def main(argv: list[str] | None = None) -> int:
             value = retire_captured_stock(args)
         elif args.command == "delete-loser":
             value = delete_loser(args)
+        elif args.command == "authorize-rolling-retention":
+            value = authorize_rolling_retention(args)
+        elif args.command == "authorize-sealed-retention":
+            value = authorize_sealed_retention(args)
+        elif args.command == "retire-reconstructable":
+            value = retire_reconstructable(args)
+        elif args.command == "restore-reconstructable":
+            value = restore_reconstructable(args)
         else:
             raise BuilderError(f"unsupported command: {args.command}")
     except (BuilderError, quant.PipelineError, OSError) as exc:

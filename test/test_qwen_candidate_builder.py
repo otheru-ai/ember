@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -349,21 +350,68 @@ class CandidateBuilderTests(unittest.TestCase):
                     digest(fixture.profile), tools)
 
     def make_candidate(self, root: Path) -> tuple[Path, Path, str, Path, str]:
-        candidate = root / "candidate"
+        workset = root / "workset"
+        candidate = workset / "candidates" / "candidate-1"
         evidence = root / "evidence"
-        candidate.mkdir()
+        candidate.mkdir(parents=True)
         evidence.mkdir()
-        cache_dir = root / "cache" / ("bf16-" + "a" * 64)
+        main_bytes = b"immutable-main"
+        mmproj_bytes = b"immutable-mmproj"
+        vocab_bytes = b"immutable-vocab"
+        main_row = {"name": "main.gguf", "size_bytes": len(main_bytes),
+                    "sha256": hashlib.sha256(main_bytes).hexdigest()}
+        mmproj_row = {"name": "mmproj.gguf", "size_bytes": len(mmproj_bytes),
+                      "sha256": hashlib.sha256(mmproj_bytes).hexdigest()}
+        vocab_row = {"name": "vocab.gguf", "size_bytes": len(vocab_bytes),
+                     "sha256": hashlib.sha256(vocab_bytes).hexdigest()}
+        main_sha, cache_id = builder.cache_content_address(
+            [main_row], mmproj_row, vocab_row)
+        cache_dir = workset / "bf16-cache" / f"bf16-{cache_id}"
         cache_dir.mkdir(parents=True)
+        (cache_dir / main_row["name"]).write_bytes(main_bytes)
+        (cache_dir / mmproj_row["name"]).write_bytes(mmproj_bytes)
+        (cache_dir / vocab_row["name"]).write_bytes(vocab_bytes)
         cache_manifest = cache_dir / "bf16-cache-manifest.json"
-        cache_manifest.write_text("{}\n", encoding="utf-8")
+        write_json(cache_manifest, {
+            "schema": quant.BF16_CACHE_SCHEMA, "cache_id": cache_id,
+            "main": {"content_sha256": main_sha, "shards": [main_row]},
+            "vision_mmproj": mmproj_row, "vision_vocab": vocab_row,
+        })
+        companion_dir = workset / "companions"
+        companion_dir.mkdir()
+        mtp = companion_dir / "mtp.gguf"
+        mtp.write_bytes(b"immutable-mtp")
+        mtp_export = companion_dir / "mtp-export.json"
+        write_json(mtp_export, {"status": "complete"})
+        companion_manifest = companion_dir / "companion-inventory.json"
+        write_json(companion_manifest, {
+            "schema": quant.COMPANION_INVENTORY_SCHEMA,
+            "companions": [
+                {"role": "mtp", "enabled": True, "path": str(mtp),
+                 "size_bytes": mtp.stat().st_size, "sha256": digest(mtp),
+                 "export_manifest_path": str(mtp_export),
+                 "export_manifest_sha256": digest(mtp_export)},
+                {"role": "vision_mmproj", "enabled": True,
+                 "path": str(cache_dir / mmproj_row["name"]),
+                 "size_bytes": mmproj_row["size_bytes"],
+                 "sha256": mmproj_row["sha256"],
+                 "text_model": {"path": str(cache_dir / vocab_row["name"]),
+                                "size_bytes": vocab_row["size_bytes"],
+                                "sha256": vocab_row["sha256"]}},
+            ],
+        })
         shard = candidate / "candidate-00001-of-00001.gguf"
         shard.write_bytes(b"quantized-candidate")
         record = candidate / "qwen-quant-build-record.json"
         write_json(record, {
             "status": "complete",
-            "bf16_cache": {"manifest": {"path": str(cache_manifest),
+            "bf16_cache": {"cache_id": cache_id,
+                            "manifest": {"path": str(cache_manifest),
                                          "sha256": digest(cache_manifest)}},
+            "companion_inventory": {
+                "status": "verified_exact",
+                "manifest": {"path": str(companion_manifest),
+                             "sha256": digest(companion_manifest)}},
             "output": {"shards": [{"path": str(shard),
                                     "size_bytes": shard.stat().st_size,
                                     "sha256": digest(shard)}]},
@@ -422,6 +470,252 @@ class CandidateBuilderTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("--execute", completed.stdout)
+
+    def test_external_attestation_descriptor_is_verified_with_fixed_signer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subject = root / "assessment.json"
+            write_json(subject, {"schema": "ember.qwen3.8.candidate-assessment.v2"})
+            bundle = root / "assessment.sigstore.json"
+            bundle.write_bytes(b"signed")
+            descriptor = {
+                "subject": {"path": str(subject), "sha256": digest(subject),
+                            "schema": "ember.qwen3.8.candidate-assessment.v2"},
+                "bundle": {"path": str(bundle), "sha256": digest(bundle)},
+                "repository": builder.ATTEST_REPOSITORY,
+                "signer_workflow": builder.ATTEST_WORKFLOW,
+            }
+            calls = []
+            with mock.patch.object(
+                    builder, "ATTESTATION_VERIFIER",
+                    side_effect=lambda *args: calls.append(args)):
+                value, _evidence = builder._read_attested_json(
+                    descriptor, "candidate assessment",
+                    "ember.qwen3.8.candidate-assessment.v2")
+            self.assertEqual(value["schema"], "ember.qwen3.8.candidate-assessment.v2")
+            self.assertEqual(calls, [(subject, bundle, builder.ATTEST_REPOSITORY,
+                                      builder.ATTEST_WORKFLOW)])
+            descriptor["repository"] = "attacker/example"
+            with self.assertRaisesRegex(builder.BuilderError, "signer/subject"):
+                builder._read_attested_json(
+                    descriptor, "candidate assessment",
+                    "ember.qwen3.8.candidate-assessment.v2")
+
+    def make_rolling_authority(
+        self, root: Path, candidate_id: str, build_record_sha256: str,
+    ) -> tuple[Path, str]:
+        assessment = root / "evidence" / "rolling-assessment.json"
+        write_json(assessment, {
+            "schema": "ember.qwen3.8.candidate-assessment.v2",
+            "artifact_identity": {"candidate_id": candidate_id,
+                                  "build_record_sha256": build_record_sha256},
+            "artifact_may_be_deleted_after_external_attestation": True,
+        })
+        assessment_bundle = root / "evidence" / "rolling-assessment.sigstore.json"
+        assessment_bundle.write_bytes(b"signed-assessment")
+        accumulator = root / "evidence" / "rolling-accumulator.json"
+        write_json(accumulator, {
+            "schema": "ember.qwen3.8.sequential-bakeoff-accumulator.v2",
+            "assessments": [{
+                "subject": {"path": str(assessment), "sha256": digest(assessment),
+                            "schema": "ember.qwen3.8.candidate-assessment.v2"},
+                "bundle": {"path": str(assessment_bundle),
+                           "sha256": digest(assessment_bundle)},
+                "repository": "OtherU-AI/ember",
+                "signer_workflow": ".github/workflows/qwen-gfx1151-bakeoff.yml",
+            }],
+        })
+        accumulator_bundle = root / "evidence" / "rolling-accumulator.sigstore.json"
+        accumulator_bundle.write_bytes(b"signed-accumulator")
+        authority = root / "evidence" / "rolling-authority.json"
+        write_json(authority, {
+            "schema": builder.RETENTION_AUTHORITY_SCHEMA,
+            "status": "externally_attested_accumulator_verified",
+            "phase": "sweep",
+            "selection_plan": {"path": str(root / "evidence" / "plan.json"),
+                               "sha256": "9" * 64},
+            "accumulator": {
+                "subject": {"path": str(accumulator), "sha256": digest(accumulator),
+                            "schema": "ember.qwen3.8.sequential-bakeoff-accumulator.v2"},
+                "bundle": {"path": str(accumulator_bundle),
+                           "sha256": digest(accumulator_bundle)},
+                "repository": "OtherU-AI/ember",
+                "signer_workflow": ".github/workflows/qwen-gfx1151-bakeoff.yml",
+            },
+            "retained_candidate_ids": [],
+            "retire_candidate_ids": [candidate_id],
+            "selection_policy": "rolling_stock_plus_exact_winner_top1",
+            "reconstruction_required": True,
+            "publishes": False,
+        })
+        return authority, digest(authority)
+
+    def mocked_rolling_loader(self, build_record_sha256: str):
+        transition = {
+            "phase": "sweep",
+            "selection_policy": "rolling_stock_plus_exact_winner_top1",
+            "retained_candidate_ids": [],
+            "retire_candidate_ids": ["candidate-1"],
+        }
+        assessment = {
+            "artifact_identity": {"candidate_id": "candidate-1",
+                                  "build_record_sha256": build_record_sha256},
+            "artifact_may_be_deleted_after_external_attestation": True,
+        }
+        evidence = {"path": "/evidence/assessment.json", "sha256": "8" * 64}
+        return mock.patch.object(builder, "_load_rolling_retention", return_value=(
+            transition,
+            {"selection_plan": {"path": "/evidence/plan.json", "sha256": "9" * 64},
+             "accumulator": {"subject": evidence}},
+            {"candidate-1": {"assessment": assessment, "evidence": evidence}},
+        ))
+
+    def test_rolling_retirement_is_reconstructable_and_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            retirement = root / "evidence" / "candidate-1-retirement.json"
+            with self.mocked_rolling_loader(record_sha):
+                planned = builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha, output=retirement, execute=False,
+                ))
+                self.assertEqual(planned["status"], "planned")
+                self.assertTrue(shard.exists())
+                result = builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha, output=retirement, execute=True,
+                ))
+            self.assertTrue(result["recoverable"])
+            self.assertFalse(shard.exists())
+            self.assertTrue((candidate / "qwen-quant-build-record.json").is_file())
+
+            rebuilt = root / "rebuilt"
+            rebuilt.mkdir()
+            rebuilt_shard = rebuilt / shard.name
+            rebuilt_shard.write_bytes(b"quantized-candidate")
+            original_record = json.loads(
+                (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
+            rebuilt_record = rebuilt / "qwen-quant-build-record.json"
+            original_record["output"]["shards"][0]["path"] = str(rebuilt_shard)
+            write_json(rebuilt_record, original_record)
+            receipt = root / "evidence" / "candidate-1-reconstruction.json"
+            # Simulate a process interruption after the shard rename but
+            # before the durable reconstruction receipt was published.
+            quant.rename_directory_noreplace(rebuilt_shard, shard)
+            restored = builder.restore_reconstructable(argparse.Namespace(
+                retirement_completion=Path(result["completion"]),
+                retirement_completion_sha256=result["completion_sha256"],
+                rebuilt_candidate_dir=rebuilt,
+                rebuilt_build_record_sha256=digest(rebuilt_record), output=receipt,
+            ))
+            self.assertEqual(restored["restored_bytes"], len(b"quantized-candidate"))
+            self.assertEqual(shard.read_bytes(), b"quantized-candidate")
+            self.assertFalse(rebuilt_shard.exists())
+            self.assertTrue(receipt.is_file())
+
+    def test_reconstruction_rejects_nonidentical_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            retirement = root / "evidence" / "candidate-1-retirement.json"
+            with self.mocked_rolling_loader(record_sha):
+                result = builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha, output=retirement, execute=True,
+                ))
+            rebuilt = root / "rebuilt"
+            rebuilt.mkdir()
+            rebuilt_shard = rebuilt / shard.name
+            rebuilt_shard.write_bytes(b"different-quantized-candidate")
+            rebuilt_record = rebuilt / "qwen-quant-build-record.json"
+            original_record = json.loads(
+                (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
+            original_record["output"]["shards"][0] = {
+                "path": str(rebuilt_shard), "size_bytes": rebuilt_shard.stat().st_size,
+                "sha256": digest(rebuilt_shard),
+            }
+            write_json(rebuilt_record, original_record)
+            with self.assertRaisesRegex(builder.BuilderError, "does not reproduce"):
+                builder.restore_reconstructable(argparse.Namespace(
+                    retirement_completion=Path(result["completion"]),
+                    retirement_completion_sha256=result["completion_sha256"],
+                    rebuilt_candidate_dir=rebuilt,
+                    rebuilt_build_record_sha256=digest(rebuilt_record),
+                    output=root / "evidence" / "must-not-exist.json",
+                ))
+            self.assertFalse(shard.exists())
+
+    def test_retirement_rejects_missing_reconstruction_cache_content(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            record = json.loads(
+                (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
+            manifest_path = Path(record["bf16_cache"]["manifest"]["path"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            (manifest_path.parent / manifest["main"]["shards"][0]["name"]).unlink()
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            with self.mocked_rolling_loader(record_sha), self.assertRaisesRegex(
+                    quant.PipelineError, "immutable BF16 cache shard"):
+                builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha,
+                    output=root / "evidence" / "must-not-exist.json", execute=True,
+                ))
+            self.assertTrue(shard.exists())
+
+    def test_retirement_resumes_after_one_authorized_shard_was_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, first, _record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            second = candidate / "candidate-00002-of-00002.gguf"
+            second.write_bytes(b"second-quantized-shard")
+            record_path = candidate / "qwen-quant-build-record.json"
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            record["output"]["shards"].append({
+                "path": str(second), "size_bytes": second.stat().st_size,
+                "sha256": digest(second),
+            })
+            write_json(record_path, record)
+            record_sha = digest(record_path)
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            retirement = root / "evidence" / "partial-retirement.json"
+            arguments = argparse.Namespace(
+                retention_authority=authority,
+                retention_authority_sha256=authority_sha,
+                candidate_id="candidate-1", candidate_dir=candidate,
+                build_record_sha256=record_sha, output=retirement, execute=False,
+            )
+            with self.mocked_rolling_loader(record_sha):
+                builder.retire_reconstructable(arguments)
+                authorization = json.loads(retirement.read_text(encoding="utf-8"))
+                quarantine = Path(authorization["quarantine"][0]["path"])
+                # Simulate termination after the no-clobber quarantine rename
+                # but before the exact shard was unlinked.
+                quant.rename_directory_noreplace(first, quarantine)
+                quant.fsync_directory(candidate)
+                arguments.execute = True
+                result = builder.retire_reconstructable(arguments)
+            self.assertEqual(result["status"], "complete")
+            self.assertFalse(first.exists())
+            self.assertFalse(quarantine.exists())
+            self.assertFalse(second.exists())
+            self.assertTrue(Path(result["completion"]).is_file())
 
 
 if __name__ == "__main__":

@@ -351,21 +351,28 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn("Completed phase ledger SHA-256", body)
         self.assertIn("Ledger attestation bundle SHA-256", body)
 
-    def test_measure_assess_attest_then_delete_order_is_fail_closed(self) -> None:
+    def test_measure_attest_authorize_then_retire_order_is_fail_closed(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         target = body.index("scripts/qwen_target_only_gate.sh")
         mtp = body.index("scripts/qwen_real_weight_gate.sh")
         assess = body.index("--stage assess")
         attest = body.index("GitHub-attest candidate assessment")
-        durable = body.index("externally-attested-candidate-assessment.v1")
-        delete = body.index("scripts/qwen_candidate_builder.py delete-loser")
+        accumulator_attest = body.index("GitHub-attest compact accumulator")
+        authority = body.index("authorize-rolling-retention")
+        retire = body.index("retire-reconstructable")
         self.assertLess(target, mtp)
         self.assertLess(mtp, assess)
         self.assertLess(assess, attest)
-        self.assertLess(attest, durable)
-        self.assertLess(durable, delete)
-        self.assertIn("provisional-retain", body)
-        self.assertIn("it is not a loser until the phase ledger exists", body)
+        self.assertLess(attest, accumulator_attest)
+        self.assertLess(accumulator_attest, authority)
+        self.assertLess(authority, retire)
+        self.assertNotIn("scripts/qwen_candidate_builder.py delete-loser", body)
+        self.assertIn("QWEN_RETENTION_AUTHORITY_SHA256", body)
+        self.assertIn("every eviction is reconstructable", body)
+        self.assertNotIn("mapfile -t retirement < <(", body)
+        self.assertGreaterEqual(body.count('retirement_output="$(python3'), 2)
+        self.assertIn('2 * expected_retirements', body)
+        self.assertIn('$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json', body)
         self.assertIn("--measurement-only", body)
 
     def test_format_boundary_runs_balanced_confirmation_before_selection(self) -> None:
@@ -373,8 +380,14 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         runner = body.index("scripts/qwen_balanced_confirmation.sh")
         merge = body.index('value["balanced_confirmation"]')
         select = body.index('args=(--plan "$EFFECTIVE_PLAN" --results "$selection_results"')
+        ledger_verify = body.index('gh attestation verify "$QWEN_LEDGER"')
+        sealed = body.index("authorize-sealed-retention")
+        sealed_retire = body.index("retire-reconstructable", sealed)
         self.assertLess(runner, merge)
         self.assertLess(merge, select)
+        self.assertLess(select, ledger_verify)
+        self.assertLess(ledger_verify, sealed)
+        self.assertLess(sealed, sealed_retire)
         self.assertIn('if [[ "$QWEN_BAKEOFF_PHASE" = format ]]', body)
         self.assertIn('--accumulator-sha256 "$(sha256sum', body)
         self.assertIn('--engine-binary-sha256 "$RUNTIME_ENGINE_SHA256"', body)
@@ -419,12 +432,11 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         scripts = [script for block in workflow_run_blocks(body)
                    for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.S)]
         disposition = next(script for script in scripts
-                           if "shared-selected-retain" in script)
+                           if "without_depth" in script and "MTP-depth artifact" in script)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             assessment = root / "assessment.json"
             prior = root / "format-ledger.json"
-            phase = root / "mtp-depth-ledger.json"
             shared = {"candidate_id": "format-winner", "model_inventory_sha256": HEX,
                       "build_record_sha256": "2" * 64}
             assessment.write_text(json.dumps({
@@ -434,22 +446,19 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
             prior.write_text(json.dumps({
                 "selected_artifact_identity": shared | {"mtp_depth": 3},
             }), encoding="utf-8")
-            phase.write_text(json.dumps({
-                "selected_artifact_identity": shared | {"mtp_depth": 2},
-            }), encoding="utf-8")
             retained = subprocess.run(
-                [sys.executable, "-", str(assessment), str(phase), "mtp-depth", str(prior)],
+                [sys.executable, "-", str(assessment), str(prior)],
                 input=disposition, text=True, capture_output=True,
             )
             self.assertEqual(retained.returncode, 0, retained.stderr)
-            self.assertEqual(retained.stdout.strip(), "shared-selected-retain")
+            self.assertEqual(retained.stdout.strip(), "")
 
             prior.write_text(json.dumps({
                 "selected_artifact_identity": shared | {
                     "mtp_depth": 3, "model_inventory_sha256": "3" * 64},
             }), encoding="utf-8")
             rejected = subprocess.run(
-                [sys.executable, "-", str(assessment), "", "mtp-depth", str(prior)],
+                [sys.executable, "-", str(assessment), str(prior)],
                 input=disposition, text=True, capture_output=True,
             )
             self.assertNotEqual(rejected.returncode, 0)
