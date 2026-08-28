@@ -52,26 +52,34 @@ def workflow_run_blocks(text: str) -> list[str]:
 class QwenConstructWorkflowTest(unittest.TestCase):
     def test_dispatcher_disk_reclaim_is_exact_and_keeps_tooling_margin(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
-        self.assertIn("qwen-reclaim-stale-builds-v4-20260828", body)
+        reclaim = body[
+            body.index("  qwen-reclaim-stale-builds:"):
+            body.index("\n  certify:", body.index("  qwen-reclaim-stale-builds:"))
+        ]
+        self.assertIn("qwen-reclaim-stale-builds-v5-20260828", body)
         self.assertIn("construction_floor=$((1152 * 1024 * 1024 * 1024))", body)
         self.assertIn("required=$((1160 * 1024 * 1024 * 1024))", body)
-        for digest in (
-            "7ab721ddf095ecf0526a5cc2059c308e992e26f748f33de4b1b883cc46226ab3",
-            "1d6c71627ac657b5b36defddbde3b99d2099185ec4bbed9f69ee39e09b905cdb",
-            "f6661ec650a2957a1041b738b5326f296e610be6c802526b454c0fb6350ba19b",
-            "9251ec47dd52f54be017a4c551ccdf7300727bd3ef52b70cd5829b27f05f4bd8",
-            "fec837c44a735faccec88ba773d14208a47c9440548dce931f9a02756c49a424",
-            "500f0a6829d9848a0f81e4fa828c25dbd6853d9ed69ad0ebc010673269bc57e6",
-            "cdd549e22658b0a2bca0f125cf8c7a2a1cf9f85b3f867d11bd71fe5ce30cfae4",
-            "18e184ffa6075e6aecf701d683224508634e6d8049937f481bd5ed03bddb6ec6",
-            "b9936deb22bb4d7dff6ef4e6c61064987e433755557a51e080847dfa1cb07a54",
-            "b752d459c07d24a1af925c1e95ab0ee323fe017ec7195fc7298ec47aa0c0bdeb",
-            "8088484329554efff07ca3f68624d9b23bd7e20e18717f56e0e0875c07b0bbaa",
-            "f4e095c5d8de0aa0ad339ecb928bd1a6357714a354ae604bc0b1320a294f7fcb",
+        for tag, digest in (
+            ("10236b8489a3", "7ab721ddf095ecf0526a5cc2059c308e992e26f748f33de4b1b883cc46226ab3"),
+            ("2f99a12f8afd", "1d6c71627ac657b5b36defddbde3b99d2099185ec4bbed9f69ee39e09b905cdb"),
+            ("34f832863317", "f6661ec650a2957a1041b738b5326f296e610be6c802526b454c0fb6350ba19b"),
+            ("35eca745378a", "9251ec47dd52f54be017a4c551ccdf7300727bd3ef52b70cd5829b27f05f4bd8"),
+            ("3afa5b3d8a86", "fec837c44a735faccec88ba773d14208a47c9440548dce931f9a02756c49a424"),
+            ("3f4d1ee72b71", "500f0a6829d9848a0f81e4fa828c25dbd6853d9ed69ad0ebc010673269bc57e6"),
+            ("4af543cc1ad0", "cdd549e22658b0a2bca0f125cf8c7a2a1cf9f85b3f867d11bd71fe5ce30cfae4"),
+            ("6bc799ba9f22", "18e184ffa6075e6aecf701d683224508634e6d8049937f481bd5ed03bddb6ec6"),
+            ("78261de805a5", "b9936deb22bb4d7dff6ef4e6c61064987e433755557a51e080847dfa1cb07a54"),
+            ("90bf8f9f9096", "b752d459c07d24a1af925c1e95ab0ee323fe017ec7195fc7298ec47aa0c0bdeb"),
+            ("936ac6f1ec95", "8088484329554efff07ca3f68624d9b23bd7e20e18717f56e0e0875c07b0bbaa"),
+            ("9e44f17e8189", "f4e095c5d8de0aa0ad339ecb928bd1a6357714a354ae604bc0b1320a294f7fcb"),
         ):
-            self.assertIn(digest, body)
+            self.assertIn(f"dev-sha-{tag} sha256:{digest}", reclaim)
+        self.assertNotIn("dev-sha-051b43846756", reclaim)
+        self.assertNotIn("dev-sha-bc3b0999999b", reclaim)
         self.assertIn('docker ps -aq --filter ancestor="$image"', body)
         self.assertIn('docker ps -aq --filter ancestor="$expected_id"', body)
+        self.assertIn('^ghcr\\.io/otheru-ai/ember:dev-sha-[0-9a-f]{12}$', body)
+        self.assertIn('^sha256:[0-9a-f]{64}$', body)
         self.assertIn('dev-sha-${TARGET_SHA:0:12}', body)
         self.assertIn("Preserving in-use stale image", body)
         self.assertIn('(( available >= required )) && break', body)

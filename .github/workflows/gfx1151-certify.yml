@@ -431,7 +431,7 @@ jobs:
     # images, not model data, volumes, build cache, or a production image. Stop
     # at 1160 GiB so the audited 1152 GiB construction floor remains available
     # after the measured ~1.55 GiB revision-bound tooling tree is prepared.
-    if: inputs.release_version == 'qwen-reclaim-stale-builds-v4-20260828'
+    if: inputs.release_version == 'qwen-reclaim-stale-builds-v5-20260828'
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 10
     env:
@@ -474,12 +474,11 @@ jobs:
           if (( available < required )); then
             for descriptor in "${stale_images[@]}"; do
               read -r image expected_id <<<"$descriptor"
+              [[ "$image" =~ ^ghcr\.io/otheru-ai/ember:dev-sha-[0-9a-f]{12}$ ]]
+              [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]]
               actual_id="$(docker image inspect --format '{{.Id}}' "$image")"
               test "$actual_id" = "$expected_id"
               test "$image" != "ghcr.io/otheru-ai/ember:dev-sha-${TARGET_SHA:0:12}"
-              source="$(docker image inspect --format \
-                '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")"
-              test "$source" = "https://github.com/otheru-ai/ember"
               tag_consumers="$(docker ps -aq --filter ancestor="$image")"
               id_consumers="$(docker ps -aq --filter ancestor="$expected_id")"
               if [[ -n "$tag_consumers$id_consumers" ]]; then
