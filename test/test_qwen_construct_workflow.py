@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -25,6 +26,7 @@ DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 import qwen_selection_corpus_stage as selection_stage  # noqa: E402
+import qwen_candidate_request as candidate_request  # noqa: E402
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -51,6 +53,124 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def test_candidate_planner_derives_sweep_identity_from_pinned_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            requests = root / "operation-requests"
+            requests.mkdir()
+
+            def write(name: str, value: object) -> tuple[Path, dict[str, str]]:
+                path = root / name
+                if isinstance(value, bytes):
+                    path.write_bytes(value)
+                else:
+                    path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+                return path, {"path": str(path),
+                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+            profile_path, profile = write("profile.json", {"fixture": True})
+            configuration = {
+                "id": "lambda-0.25-band-10-42", "scale": 0.25,
+                "layer_policy": "band-10-42", "quantization_arm": "rocmi4-control",
+            }
+            plan_value = {
+                "recipe": {"sha256": "1" * 64},
+                "release_profile": {"path": str(profile_path),
+                                    "sha256": profile["sha256"]},
+                "sweep_configurations": [configuration],
+                "format_arms": [],
+            }
+            _plan_path, plan = write("plan.json", plan_value)
+            intervention_path = root / "capture" / "interventions" / (
+                configuration["id"] + ".json")
+            intervention_path.parent.mkdir(parents=True)
+            intervention_path.write_text('{"kind":"directional_ablation"}\n', encoding="utf-8")
+            intervention_sha = hashlib.sha256(intervention_path.read_bytes()).hexdigest()
+            capture_value = {
+                "schema": candidate_request.CAPTURE_SCHEMA, "status": "complete",
+                "publishes": False, "recipe_sha256": "1" * 64,
+                "interventions": [{"id": configuration["id"], "lambda": 0.25,
+                    "layer_policy": "band-10-42",
+                    "filename": "interventions/" + intervention_path.name,
+                    "sha256": intervention_sha, "target_count": 1}],
+            }
+            capture_path = root / "capture" / "capture-manifest.json"
+            capture_path.write_text(json.dumps(capture_value) + "\n", encoding="utf-8")
+            capture = {"path": str(capture_path),
+                       "sha256": hashlib.sha256(capture_path.read_bytes()).hexdigest()}
+            descriptors = {}
+            for name in ("cache", "rocmi4", "fast"):
+                _path, descriptors[name] = write(name + ".json", {"name": name})
+            output = requests / "construction-first-sweep.json"
+            intent_value = {
+                "schema": candidate_request.INTENT_SCHEMA,
+                "ember_revision": "a" * 40, "stage": "sweep",
+                "row_id": configuration["id"], "candidate_id": configuration["id"],
+                "capture_manifest": capture, "cache_manifest": descriptors["cache"],
+                "companion_rocmi4": descriptors["rocmi4"],
+                "companion_fast": descriptors["fast"], "selection_plan": plan,
+                "prior_ledger": None, "construction_request_output": str(output),
+                "publishes": False, "deletes": False,
+            }
+            intent_path, intent = write("intent.json", intent_value)
+            with (mock.patch.object(candidate_request, "REQUEST_ROOT", requests),
+                  mock.patch.object(candidate_request.bakeoff, "verify_plan",
+                                    return_value=plan_value),
+                  mock.patch.object(candidate_request.quant, "validate_profile",
+                                    return_value=({"intervention": {}}, {}, profile_path)),
+                  mock.patch.object(candidate_request.quant,
+                                    "validate_intervention_manifest",
+                                    return_value=({"kind": "directional_ablation"},
+                                                  {"target_count": 1}))):
+                request_value, actual = candidate_request.derive(
+                    intent_path, intent["sha256"], "a" * 40)
+            self.assertEqual(actual, output)
+            parameters = request_value["parameters"]
+            self.assertEqual(parameters["intervention_configuration_id"],
+                             configuration["id"])
+            self.assertEqual(parameters["quantization_arm"], "rocmi4-control")
+            self.assertEqual(parameters["mtp_matrix_quant_contract"], "Q4_0_ROCMI4")
+            self.assertEqual(parameters["intervention_manifest"]["sha256"],
+                             intervention_sha)
+
+    def test_candidate_plan_workflow_is_create_only_and_chains_to_constructor(self) -> None:
+        body = (ROOT / ".github/workflows/qwen-candidate-plan.yml").read_text(
+            encoding="utf-8")
+        self.assertIn("workflow_call:", body)
+        self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", body)
+        self.assertIn("qwen-candidate-plan-${{ github.run_id }}", body)
+        self.assertIn("O_EXCL", body)
+        self.assertIn("decoded candidate intent must contain 1..32768 bytes", body)
+        self.assertIn("scripts/qwen_candidate_request.py", body)
+        self.assertNotIn("ember-gpu-lock acquire", body)
+        for block in workflow_run_blocks(body):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            shell = subprocess.run(["bash", "-n"], input=neutral, text=True,
+                                   capture_output=True)
+            self.assertEqual(shell.returncode, 0, shell.stderr)
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, "candidate-plan-heredoc.py", "exec")
+
+    def test_candidate_planner_format_row_is_bound_to_attested_sweep_winner(self) -> None:
+        configuration = {"id": "lambda-0.50-upper-12"}
+        arm = {"id": "rocmi4-q6k-main-rocmi4-mtp-d3",
+               "quantization_arm": "rocmi4-q6k-embedding-head",
+               "mtp_matrix_quant_contract": "Q4_0_ROCMI4"}
+        plan = {"sweep_configurations": [configuration], "format_arms": [arm]}
+        intent = {"stage": "format", "row_id": arm["id"],
+                  "prior_ledger": {"attested": True}}
+        prior = {"selected_configuration_id": configuration["id"],
+                 "selected_configuration": configuration}
+        with mock.patch.object(candidate_request.bakeoff, "read_prior_ledger",
+                               return_value=(prior, "1" * 64)) as verifier:
+            selected, selected_arm, quant_arm, mtp = (
+                candidate_request.selected_configuration(intent, plan))
+        self.assertEqual(selected, configuration)
+        self.assertEqual(selected_arm, arm)
+        self.assertEqual(quant_arm, arm["quantization_arm"])
+        self.assertEqual(mtp, arm["mtp_matrix_quant_contract"])
+        verifier.assert_called_once_with(intent["prior_ledger"], "sweep", plan)
+
     def selection_fixture(self, root: Path) -> tuple[Path, Path, str]:
         source = root / "protected"
         staged = root / "staged"
@@ -506,6 +626,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                      (ROOT / ".github/workflows/qwen-gfx1151-vision.yml", 15),
                                      (ROOT / ".github/workflows/qwen-quality-capture.yml", 3),
                                      (ROOT / ".github/workflows/qwen-quality-plan.yml", 4),
+                                     (ROOT / ".github/workflows/qwen-candidate-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6)):
             called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:)",
                                path.read_text(encoding="utf-8"), re.S)
@@ -524,17 +645,22 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-gfx1151-vision.yml",
             "qwen-quality-capture.yml",
             "qwen-quality-plan.yml",
+            "qwen-candidate-plan.yml",
             "qwen-gfx1151-bakeoff.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 5)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 6)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 2)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-plan.yml"), 1)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-candidate-plan.yml"), 1)
         self.assertIn("qwen-call-planned-quality:", body)
         self.assertIn("needs: [qwen-dispatch-envelope, qwen-call-quality-plan]", body)
         self.assertIn("needs.qwen-call-quality-plan.outputs.phase_descriptor", body)
         self.assertIn("needs.qwen-call-quality-plan.outputs.phase_descriptor_sha256", body)
+        self.assertIn("qwen-call-planned-candidate:", body)
+        self.assertIn("needs: [qwen-dispatch-envelope, qwen-call-candidate-plan]", body)
+        self.assertIn("needs.qwen-call-candidate-plan.outputs.operation_request", body)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
@@ -675,6 +801,26 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             emitted = output.read_text(encoding="utf-8")
             self.assertIn("operation=quality-plan\n", emitted)
             self.assertIn("quality_request_output=/var/tmp/ember-", emitted)
+
+            output.unlink()
+            candidate_intent = b'{"schema":"fixture"}\n'
+            candidate_plan = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "candidate-plan",
+                "inputs": {
+                    "intent_payload_base64": base64.b64encode(candidate_intent).decode(),
+                    "intent_payload_sha256": hashlib.sha256(candidate_intent).hexdigest(),
+                    "intent_output": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/operation-requests/candidate-intent-first.json",
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_candidate_plan = invoke(candidate_plan)
+            self.assertEqual(accepted_candidate_plan.returncode, 0,
+                             accepted_candidate_plan.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=candidate-plan\n", emitted)
+            self.assertIn("candidate_intent_output=/var/tmp/ember-", emitted)
 
             output.unlink()
             invalid = dict(valid)

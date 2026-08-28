@@ -230,6 +230,19 @@ The four serial dispatch modes are:
    `ember.qwen3.8.candidate-normalization-request.v1` descriptor and emits a
    new v3 candidate manifest without taking the GPU or quiescing production.
 
+For intervention rows, the stable dispatcher also accepts a `candidate-plan`
+operation. Its nested `ember.qwen3.8.candidate-construction-intent.v1` payload
+pins the activation capture, BF16 cache, both companion inventories, selection
+plan, requested stage/row/candidate id, optional externally attested prior
+sweep ledger, and a new construction-request output. The runner-local planner
+rederives the sweep configuration or format arm, verifies the chosen manifest
+from the captured 4x4 intervention grid, and emits the ordinary
+`candidate-construction-request.v1`; the dispatcher passes that exact request
+directly to the reusable constructor. No operator has to copy an intervention
+pathname or digest out of the protected runner, and a format build cannot
+choose a different intervention than the attested sweep winner. Planning
+acquires no GPU and neither publishes nor deletes anything.
+
 For example, normalization is dispatched with this outer request (all paths
 are absolute runner paths and every digest is lowercase SHA-256):
 

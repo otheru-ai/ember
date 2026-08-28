@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Derive one intervention construction request from pinned runner evidence."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+import qwen_bakeoff as bakeoff
+import qwen_quality_descriptor as evidence
+import qwen_quantize as quant
+
+
+INTENT_SCHEMA = "ember.qwen3.8.candidate-construction-intent.v1"
+REQUEST_SCHEMA = "ember.qwen3.8.candidate-construction-request.v1"
+CAPTURE_SCHEMA = "ember.qwen3.8.stock-control-activation-capture.v1"
+SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+HEX40 = re.compile(r"[0-9a-f]{40}")
+REQUEST_ROOT = Path(
+    "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/"
+    "evidence/operation-requests")
+
+
+class CandidateRequestError(ValueError):
+    pass
+
+
+def fail(message: str) -> None:
+    raise CandidateRequestError(message)
+
+
+def pinned(value: Any, label: str) -> tuple[dict[str, str], dict[str, Any], Path]:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        fail(f"{label} descriptor differs")
+    path = Path(str(value.get("path", "")))
+    parsed, exact = evidence.exact_json(path, value.get("sha256"), label)
+    return {"path": str(exact), "sha256": value["sha256"]}, parsed, exact
+
+
+def selected_configuration(
+    intent: dict[str, Any], plan: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str, str]:
+    stage = intent.get("stage")
+    row_id = intent.get("row_id")
+    configurations = {row.get("id"): row for row in plan["sweep_configurations"]}
+    if stage == "sweep":
+        if intent.get("prior_ledger") is not None or row_id not in configurations:
+            fail("sweep intent is not one canonical configuration without a prior ledger")
+        configuration = configurations[row_id]
+        return configuration, configuration, "rocmi4-control", "Q4_0_ROCMI4"
+    if stage != "format":
+        fail("candidate construction intent stage must be sweep or format")
+    prior_descriptor = intent.get("prior_ledger")
+    if not isinstance(prior_descriptor, dict):
+        fail("format intent requires the attested sweep ledger")
+    try:
+        prior, _digest = bakeoff.read_prior_ledger(
+            prior_descriptor, "sweep", plan)
+    except (KeyError, OSError, TypeError, ValueError, bakeoff.BakeoffError) as exc:
+        fail(f"format prior ledger does not reproduce: {exc}")
+    configuration_id = prior.get("selected_configuration_id")
+    if (configuration_id not in configurations
+            or prior.get("selected_configuration") != configurations[configuration_id]):
+        fail("format prior ledger does not select one canonical intervention")
+    arms = {row.get("id"): row for row in plan["format_arms"]}
+    if row_id not in arms:
+        fail("format intent row is not one canonical format arm")
+    arm = arms[row_id]
+    return configurations[configuration_id], arm, arm["quantization_arm"], arm[
+        "mtp_matrix_quant_contract"]
+
+
+def derive(intent_path: Path, intent_sha256: str,
+           ember_revision: str) -> tuple[dict[str, Any], Path]:
+    intent, _ = evidence.exact_json(
+        intent_path, intent_sha256, "candidate construction intent")
+    expected = {
+        "schema", "ember_revision", "stage", "row_id", "candidate_id",
+        "capture_manifest", "cache_manifest", "companion_rocmi4",
+        "companion_fast", "selection_plan", "prior_ledger",
+        "construction_request_output", "publishes", "deletes",
+    }
+    if (set(intent) != expected or intent.get("schema") != INTENT_SCHEMA
+            or intent.get("publishes") is not False
+            or intent.get("deletes") is not False):
+        fail("candidate construction intent schema/lifecycle differs")
+    if (HEX40.fullmatch(ember_revision) is None
+            or intent.get("ember_revision") != ember_revision):
+        fail("candidate construction intent Ember revision differs")
+    for name in ("row_id", "candidate_id"):
+        if SAFE_ID.fullmatch(str(intent.get(name, ""))) is None:
+            fail(f"candidate construction intent {name} is malformed")
+
+    plan_desc, plan_raw, _plan_path = pinned(
+        intent.get("selection_plan"), "selection plan")
+    try:
+        plan = bakeoff.verify_plan(plan_raw)
+    except (KeyError, OSError, TypeError, ValueError, bakeoff.BakeoffError) as exc:
+        fail(f"selection plan does not reproduce: {exc}")
+    configuration, _row, arm, mtp_contract = selected_configuration(intent, plan)
+    capture_desc, capture, capture_path = pinned(
+        intent.get("capture_manifest"), "stock activation capture")
+    if (capture.get("schema") != CAPTURE_SCHEMA
+            or capture.get("status") != "complete"
+            or capture.get("publishes") is not False
+            or capture.get("recipe_sha256") != plan["recipe"]["sha256"]):
+        fail("stock activation capture lifecycle/recipe differs from the plan")
+    rows = capture.get("interventions")
+    matches = [row for row in rows if isinstance(row, dict)
+               and row.get("id") == configuration["id"]] if isinstance(rows, list) else []
+    if len(matches) != 1:
+        fail("capture does not contain exactly one selected intervention")
+    selected = matches[0]
+    filename = f"interventions/{configuration['id']}.json"
+    if (selected.get("filename") != filename
+            or selected.get("lambda") != configuration.get("scale")
+            or selected.get("layer_policy") != configuration.get("layer_policy")):
+        fail("captured intervention identity differs from the canonical configuration")
+    intervention_path = capture_path.parent / filename
+    exact_intervention = evidence.exact_file(
+        str(intervention_path), selected.get("sha256"), "selected intervention manifest")
+    profile_value, _inventory, profile_path = quant.validate_profile(
+        Path(plan["release_profile"]["path"]))
+    if (quant.sha256_file(profile_path) != plan["release_profile"]["sha256"]):
+        fail("selection plan release profile digest differs")
+    manifest, validated = quant.validate_intervention_manifest(
+        exact_intervention, profile_value)
+    if (validated.get("target_count") != selected.get("target_count")):
+        fail("captured intervention target count differs after validation")
+    # The quantizer repeats the complete plan-to-layer-scale authorization for
+    # ROCMI4 sweep rows; retain the parsed object here only to ensure validation
+    # cannot be optimized away as a digest-only check.
+    if manifest.get("kind") != "directional_ablation":
+        fail("selected intervention is not directional ablation")
+
+    cache_desc, _cache, _ = pinned(intent.get("cache_manifest"), "BF16 cache manifest")
+    rocmi4_desc, _rocmi4, _ = pinned(
+        intent.get("companion_rocmi4"), "ROCMI4 companion inventory")
+    fast_desc, _fast, _ = pinned(
+        intent.get("companion_fast"), "ROCmFP4 FAST companion inventory")
+    output = Path(str(intent.get("construction_request_output", "")))
+    if (not output.is_absolute() or output.parent != REQUEST_ROOT
+            or re.fullmatch(r"construction-[A-Za-z0-9._-]{1,80}\.json", output.name) is None):
+        fail("construction request output is not one safe child of the fixed request root")
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "mode": "build-candidate",
+        "parameters": {
+            "capture_manifest": capture_desc,
+            "cache_manifest": cache_desc,
+            "companion_rocmi4": rocmi4_desc,
+            "companion_fast": fast_desc,
+            "selection_plan": plan_desc,
+            "candidate_kind": "intervention",
+            "candidate_stage": intent["stage"],
+            "row_id": intent["row_id"],
+            "candidate_id": intent["candidate_id"],
+            "intervention_configuration_id": configuration["id"],
+            "intervention_manifest": {
+                "path": str(exact_intervention), "sha256": selected["sha256"]},
+            "quantization_arm": arm,
+            "mtp_matrix_quant_contract": mtp_contract,
+        },
+        "publishes": False,
+        "deletes": False,
+    }
+    evidence.write_new(output, request)
+    return request, output
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--intent", type=Path, required=True)
+    result.add_argument("--intent-sha256", required=True)
+    result.add_argument("--ember-revision", required=True)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    try:
+        request, output = derive(
+            args.intent.absolute(), args.intent_sha256, args.ember_revision)
+    except (CandidateRequestError, evidence.DescriptorError, quant.PipelineError,
+            OSError, ValueError) as exc:
+        print(f"qwen-candidate-request: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps({
+        "status": "complete", "mode": request["mode"],
+        "operation_request": {"path": str(output),
+                              "sha256": evidence.sha256_file(output)},
+        "publishes": False, "deletes": False,
+    }, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
