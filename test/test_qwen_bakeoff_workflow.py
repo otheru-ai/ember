@@ -247,7 +247,14 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
     def test_workflow_uses_v3_serial_immutable_workset_contract(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", body)
-        self.assertNotIn("workflow_call:", body)
+        self.assertIn("workflow_call:", body)
+        called = re.search(
+            r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:", body, re.S)
+        self.assertIsNotNone(called)
+        self.assertEqual(re.findall(r"^      ([a-z0-9_]+):$", called.group(1), re.M),
+                         ["commit_sha", "candidate_manifest",
+                          "candidate_manifest_sha256", "phase", "phase_request",
+                          "phase_request_sha256"])
         dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
         self.assertIsNotNone(dispatch)
         inputs = re.findall(r"^      ([a-z0-9_]+):$", dispatch.group(1), re.M)
@@ -255,6 +262,10 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
                                   "candidate_manifest_sha256", "phase",
                                   "phase_request", "phase_request_sha256"])
         self.assertLessEqual(len(inputs), 10)
+        self.assertIn(
+            "contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
+            body)
+        self.assertIn("qwen-bakeoff-called-{0}", body)
         self.assertIn("ember.qwen3.8.sequential-bakeoff-phase-request.v1", body)
         self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", body)
         self.assertIn("one-candidate-per-dispatch is required", body)

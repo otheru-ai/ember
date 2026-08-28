@@ -94,6 +94,13 @@ jobs:
       vision_vocab: ${{ steps.envelope.outputs.vision_vocab }}
       vision_vocab_sha256: ${{ steps.envelope.outputs.vision_vocab_sha256 }}
       vision_output: ${{ steps.envelope.outputs.vision_output }}
+      phase_descriptor: ${{ steps.envelope.outputs.phase_descriptor }}
+      phase_descriptor_sha256: ${{ steps.envelope.outputs.phase_descriptor_sha256 }}
+      candidate_manifest: ${{ steps.envelope.outputs.candidate_manifest }}
+      candidate_manifest_sha256: ${{ steps.envelope.outputs.candidate_manifest_sha256 }}
+      phase: ${{ steps.envelope.outputs.phase }}
+      phase_request: ${{ steps.envelope.outputs.phase_request }}
+      phase_request_sha256: ${{ steps.envelope.outputs.phase_request_sha256 }}
     steps:
       - name: Decode and validate exact branch-workflow dispatch envelope
         id: envelope
@@ -151,10 +158,14 @@ jobs:
                          "model_build_record", "model_build_record_sha256", "mtp",
                          "mtp_sha256", "mtp_depth", "mmproj", "mmproj_sha256",
                          "vision_vocab", "vision_vocab_sha256", "output"},
+              "quality": {"phase_descriptor", "phase_descriptor_sha256"},
+              "bakeoff": {"candidate_manifest", "candidate_manifest_sha256", "phase",
+                           "phase_request", "phase_request_sha256"},
           }
           if operation not in expected or set(inputs) != expected[operation]:
               fail("dispatch operation or input keys differ")
-          if value.get("deletes") is not (operation == "retire"):
+          destructive = operation in {"retire", "bakeoff"}
+          if value.get("deletes") is not destructive:
               fail("dispatch deletion lifecycle differs")
 
           def scalar(name):
@@ -220,7 +231,7 @@ jobs:
                   "capture_manifest_sha256": digest("capture_manifest_sha256"),
                   "authorization_output": absolute("authorization_output"),
                   "authorize": authorize})
-          else:
+          elif operation == "vision":
               runtime_image = scalar("runtime_image")
               runtime_dev_image = scalar("runtime_dev_image")
               image_pattern = r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}"
@@ -241,13 +252,29 @@ jobs:
                   "vision_vocab": absolute("vision_vocab"),
                   "vision_vocab_sha256": digest("vision_vocab_sha256"),
                   "vision_output": absolute("output")})
+          elif operation == "quality":
+              result.update({
+                  "phase_descriptor": absolute("phase_descriptor"),
+                  "phase_descriptor_sha256": digest("phase_descriptor_sha256"),
+              })
+          else:
+              phase = scalar("phase")
+              if phase not in ("sweep", "format", "mtp-depth", "final"):
+                  fail("bakeoff phase differs")
+              result.update({
+                  "candidate_manifest": absolute("candidate_manifest"),
+                  "candidate_manifest_sha256": digest("candidate_manifest_sha256"),
+                  "phase": phase,
+                  "phase_request": absolute("phase_request"),
+                  "phase_request_sha256": digest("phase_request_sha256"),
+              })
           result["operation"] = operation
           with open(output_path, "a", encoding="utf-8") as stream:
               for name, item in sorted(result.items()):
                   stream.write(f"{name}={item}\n")
           print(json.dumps({"status": "complete", "operation": operation,
                             "ember_revision": revision, "envelope_sha256": expected_sha,
-                            "publishes": False, "deletes": operation == "retire"},
+                            "publishes": False, "deletes": destructive},
                            sort_keys=True))
           PY
 
@@ -317,6 +344,41 @@ jobs:
       vision_vocab: ${{ needs.qwen-dispatch-envelope.outputs.vision_vocab }}
       vision_vocab_sha256: ${{ needs.qwen-dispatch-envelope.outputs.vision_vocab_sha256 }}
       output: ${{ needs.qwen-dispatch-envelope.outputs.vision_output }}
+    secrets: inherit
+
+  qwen-call-quality:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'quality'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/qwen-quality-capture.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      phase_descriptor: ${{ needs.qwen-dispatch-envelope.outputs.phase_descriptor }}
+      phase_descriptor_sha256: ${{ needs.qwen-dispatch-envelope.outputs.phase_descriptor_sha256 }}
+    secrets: inherit
+
+  qwen-call-bakeoff:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'bakeoff'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/qwen-gfx1151-bakeoff.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      candidate_manifest: ${{ needs.qwen-dispatch-envelope.outputs.candidate_manifest }}
+      candidate_manifest_sha256: ${{ needs.qwen-dispatch-envelope.outputs.candidate_manifest_sha256 }}
+      phase: ${{ needs.qwen-dispatch-envelope.outputs.phase }}
+      phase_request: ${{ needs.qwen-dispatch-envelope.outputs.phase_request }}
+      phase_request_sha256: ${{ needs.qwen-dispatch-envelope.outputs.phase_request_sha256 }}
     secrets: inherit
 
   qwen-inspect-control-residue:

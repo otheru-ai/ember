@@ -1,6 +1,26 @@
 name: Qwen gfx1151 sequential quant bakeoff
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      candidate_manifest:
+        required: true
+        type: string
+      candidate_manifest_sha256:
+        required: true
+        type: string
+      phase:
+        required: true
+        type: string
+      phase_request:
+        required: true
+        type: string
+      phase_request_sha256:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -37,7 +57,10 @@ permissions:
   artifact-metadata: write
 
 concurrency:
-  group: gfx1151-certification
+  # The stable default-branch dispatcher already owns the global hardware
+  # group.  A called workflow therefore needs a run-unique nested group while
+  # direct manual dispatches continue to serialize globally.
+  group: ${{ contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@') && format('qwen-bakeoff-called-{0}', github.run_id) || 'gfx1151-certification' }}
   cancel-in-progress: false
 
 jobs:

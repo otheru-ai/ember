@@ -503,7 +503,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertLessEqual(len(inputs), 10)
         for path, expected_count in ((REQUEST_BRIDGE, 5), (WORKFLOW, 4),
                                      (ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml", 10),
-                                     (ROOT / ".github/workflows/qwen-gfx1151-vision.yml", 15)):
+                                     (ROOT / ".github/workflows/qwen-gfx1151-vision.yml", 15),
+                                     (ROOT / ".github/workflows/qwen-quality-capture.yml", 3),
+                                     (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6)):
             called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:)",
                                path.read_text(encoding="utf-8"), re.S)
             self.assertIsNotNone(called)
@@ -519,17 +521,20 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-gfx1151-construct.yml",
             "qwen-gfx1151-retire-stock.yml",
             "qwen-gfx1151-vision.yml",
+            "qwen-quality-capture.yml",
+            "qwen-gfx1151-bakeoff.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 4)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 5)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 1)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
         self.assertIn("decoded dispatch envelope must contain 1..32768 bytes", body)
         self.assertIn("len(nested_payload) > 16384", body)
         self.assertIn("RETIRE_CAPTURED_STOCK_SHARDS", body)
-        self.assertIn("value.get(\"deletes\") is not (operation == \"retire\")", body)
+        self.assertIn('destructive = operation in {"retire", "bakeoff"}', body)
         for index, block in enumerate(workflow_run_blocks(body)):
             neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
             shell = subprocess.run(
@@ -606,6 +611,43 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             self.assertIn("operation=vision\n", emitted)
             self.assertIn("mtp_depth=2\n", emitted)
             self.assertIn("vision_output=/var/tmp/ember-qwen3.8-flash-next/", emitted)
+
+            output.unlink()
+            quality = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "quality",
+                "inputs": {
+                    "phase_descriptor": "/var/tmp/ember-qwen3.8-flash-next/quality.json",
+                    "phase_descriptor_sha256": "9" * 64,
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_quality = invoke(quality)
+            self.assertEqual(accepted_quality.returncode, 0, accepted_quality.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=quality\n", emitted)
+            self.assertIn("phase_descriptor_sha256=" + "9" * 64 + "\n", emitted)
+
+            output.unlink()
+            bakeoff = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "bakeoff",
+                "inputs": {
+                    "candidate_manifest": "/var/tmp/ember-qwen3.8-flash-next/candidate.json",
+                    "candidate_manifest_sha256": "a" * 64,
+                    "phase": "sweep",
+                    "phase_request": "/var/tmp/ember-qwen3.8-flash-next/phase.json",
+                    "phase_request_sha256": "b" * 64,
+                },
+                "publishes": False, "deletes": True,
+            }
+            accepted_bakeoff = invoke(bakeoff)
+            self.assertEqual(accepted_bakeoff.returncode, 0, accepted_bakeoff.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=bakeoff\n", emitted)
+            self.assertIn("phase=sweep\n", emitted)
 
             output.unlink()
             invalid = dict(valid)

@@ -62,9 +62,19 @@ class QwenQualityWorkflowTest(unittest.TestCase):
     def test_manual_serial_runner_and_permissions(self) -> None:
         body = self.body
         self.assertIn("workflow_dispatch:", body)
-        self.assertNotIn("workflow_call:", body)
+        self.assertIn("workflow_call:", body)
+        called = re.search(
+            r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:", body, re.S)
+        self.assertIsNotNone(called)
+        self.assertEqual(re.findall(r"^      ([a-z0-9_]+):$", called.group(1), re.M),
+                         ["commit_sha", "phase_descriptor",
+                          "phase_descriptor_sha256"])
         self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", body)
-        self.assertIn("group: gfx1151-certification", body)
+        self.assertIn(
+            "contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
+            body)
+        self.assertIn("qwen-quality-called-{0}", body)
+        self.assertIn("|| 'gfx1151-certification'", body)
         self.assertIn("cancel-in-progress: false", body)
         for permission in ("id-token: write", "attestations: write",
                            "artifact-metadata: write", "packages: read"):
