@@ -339,6 +339,8 @@ python3 scripts/qwen_release_package.py \
   --profile share/release_profiles/qwen3.8-flash-next-rocmi4-strix-halo.json \
   --artifact /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-00001-of-000NN.gguf \
   --artifact /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-00002-of-000NN.gguf \
+  --mtp /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf \
+  --mtp-sha256 <digest-from-the-sealed-final-bakeoff-evidence> \
   --mmproj /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-BF16-mmproj.gguf \
   --license /models/Qwen3.8-Flash-Next-source/LICENSE \
   --build-record /scratch/qwen3.8-rocmi4/qwen-quant-build-record.json \
@@ -351,7 +353,7 @@ The stdlib-only program requires the text artifacts and completed record to come
 from the same committed quantization directory. It copies every input through
 a pinned file descriptor into a private sibling of `--out-dir`, rejects an
 input whose inode, size, mtime, or ctime changes during the copy, and validates
-only those stable copies. It writes the GGUF shards, `README.md`, `LICENSE`,
+only those stable copies. It writes the GGUF shards, selected MTP, `README.md`, `LICENSE`,
 `artifact-manifest.json`, `SHA256SUMS`, `qwen-quant-build-record.json`,
 the byte-exact applied `qwen-intervention-manifest.json`,
 the separate BF16 mmproj, `release-profile.json`, and `upload-plan.json`, syncs them, then publishes the
@@ -378,6 +380,15 @@ identity, execution mode, and exact-dequant gate. Recorded output basename,
 size, and hash must match every supplied artifact. For split releases the
 manifest's singular compatibility field is an explicit aggregate shard-set
 summary (`sha256: null`); authoritative per-file hashes remain in `artifacts`.
+`SHA256SUMS` is the deployable runtime bundle boundary, not a recursive hash
+of mutable release metadata. It is GNU `sha256sum` text with safe basenames
+only, ordered as every selected main shard, the exact bakeoff-selected MTP,
+then the exact BF16 mmproj. Missing, reordered, duplicated, path-bearing, or
+otherwise unsafe names fail packaging. `artifact-manifest.json` records the
+checksum file's own SHA-256, exact ordered filenames, and entry count; the
+publication envelope reproduces this list and binds both companions to the
+final measured hardware evidence. The upload plan separately hashes every
+release-evidence file, avoiding a checksum cycle through the manifest.
 The generated model card states that this is an actual weight intervention and
 lists both pinned intervention tools; it does not infer “Heretic” from a name.
 

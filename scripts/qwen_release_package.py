@@ -33,8 +33,13 @@ import qwen_vision_inventory as vision_inventory
 
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
 OCI_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 CANDIDATE_REVISION = re.compile(r"^candidate/[A-Za-z0-9._-]+$")
+SAFE_RELEASE_BASENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+MTP_RELEASE_BASENAME = re.compile(
+    r"^Qwen3\.8-Flash-Next-MTP-[A-Za-z0-9][A-Za-z0-9._+-]*\.gguf$"
+)
 QWEN_QSA_LAYERS = {3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47}
 INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.weight$")
 
@@ -53,6 +58,42 @@ def sha256_file(path: Path) -> str:
 
 def write_text(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8", newline="\n")
+
+
+def require_safe_release_basename(value: Any, label: str) -> str:
+    """Accept only names that GNU sha256sum can represent without escaping."""
+    if (
+        not isinstance(value, str)
+        or SAFE_RELEASE_BASENAME.fullmatch(value) is None
+        or Path(value).name != value
+        or value in {".", ".."}
+    ):
+        raise PackageError(f"{label} must be a safe basename")
+    return value
+
+
+def render_selected_sha256sums(
+    entries: list[tuple[str, str]], required_order: list[str]
+) -> str:
+    """Render the exact selected runtime bundle as GNU SHA256SUMS text."""
+    names: list[str] = []
+    for index, (digest, raw_name) in enumerate(entries, 1):
+        if not isinstance(digest, str) or HEX64.fullmatch(digest) is None:
+            raise PackageError(f"SHA256SUMS entry {index} has an invalid digest")
+        names.append(require_safe_release_basename(
+            raw_name, f"SHA256SUMS entry {index} filename"
+        ))
+    expected = [
+        require_safe_release_basename(name, "required SHA256SUMS filename")
+        for name in required_order
+    ]
+    if len(names) != len(set(names)) or len(expected) != len(set(expected)):
+        raise PackageError("SHA256SUMS selected artifact names must be unique")
+    if names != expected:
+        raise PackageError(
+            "SHA256SUMS must contain every selected main shard, then MTP, then mmproj"
+        )
+    return "".join(f"{digest}  {name}\n" for digest, name in entries)
 
 
 def fsync_directory(path: Path) -> None:
@@ -685,14 +726,18 @@ def build_package_in_stage(
     source_artifact_paths = [path.resolve() for path in args.artifact]
     source_license_path = args.license.resolve()
     source_build_record_path = args.build_record.resolve()
+    source_mtp_path = args.mtp.absolute()
     profile_snapshot = out_dir / "release-profile.json"
     copy_stable_file(profile_path, profile_snapshot)
     profile = load_profile(profile_snapshot)
     companion_contract = profile["artifact"]["required_companion_artifacts"][0]
+    mmproj_name = require_safe_release_basename(
+        companion_contract.get("filename"), "vision mmproj filename"
+    )
     source_mmproj_path = (
         args.mmproj.absolute()
         if args.mmproj is not None
-        else source_build_record_path.parent / companion_contract["filename"]
+        else source_build_record_path.parent / mmproj_name
     )
     if not HEX40.fullmatch(args.engine_revision):
         raise PackageError("--engine-revision must be a lowercase 40-character commit")
@@ -716,7 +761,9 @@ def build_package_in_stage(
     if not CANDIDATE_REVISION.fullmatch(revision):
         raise PackageError("candidate revision must start with candidate/ and use ref-safe characters")
 
-    expected_name = profile["artifact"]["filename"]
+    expected_name = require_safe_release_basename(
+        profile["artifact"].get("filename"), "main artifact filename"
+    )
     if len(source_artifact_paths) == 1:
         destination_names = [expected_name]
     else:
@@ -728,6 +775,18 @@ def build_package_in_stage(
         numbers = [int(match.group(1)) for match in matches if match is not None]
         if any(match is None for match in matches) or counts != {len(source_artifact_paths)} or numbers != list(range(1, len(source_artifact_paths) + 1)):
             raise PackageError("multi-file artifacts must be a complete, ordered GGUF shard sequence")
+    destination_names = [
+        require_safe_release_basename(name, "main artifact filename")
+        for name in destination_names
+    ]
+    mtp_name = require_safe_release_basename(source_mtp_path.name, "selected MTP filename")
+    if MTP_RELEASE_BASENAME.fullmatch(mtp_name) is None:
+        raise PackageError(
+            "selected MTP filename must match the Qwen3.8-Flash-Next deployment contract"
+        )
+    selected_names = [*destination_names, mtp_name, mmproj_name]
+    if len(selected_names) != len(set(selected_names)):
+        raise PackageError("selected main, MTP, and mmproj artifact names must be unique")
     artifact_paths = [out_dir / destination for destination in destination_names]
     artifact_hashes = [
         copy_stable_file(source, destination)
@@ -743,18 +802,34 @@ def build_package_in_stage(
             artifact_paths, destination_names, artifact_hashes, strict=True
         )
     ]
-    mmproj_path = out_dir / companion_contract["filename"]
+    if not isinstance(args.mtp_sha256, str) or HEX64.fullmatch(args.mtp_sha256) is None:
+        raise PackageError("--mtp-sha256 must be a lowercase SHA-256")
+    mtp_path = out_dir / mtp_name
+    mtp_hash = copy_stable_file(source_mtp_path, mtp_path)
+    if mtp_hash != args.mtp_sha256:
+        raise PackageError(
+            "selected MTP SHA-256 differs from --mtp-sha256: "
+            f"expected {args.mtp_sha256}, got {mtp_hash}"
+        )
+    mtp_record = {
+        "role": "mtp",
+        "filename": mtp_name,
+        "size_bytes": mtp_path.stat().st_size,
+        "sha256": mtp_hash,
+    }
+    mmproj_path = out_dir / mmproj_name
     mmproj_hash = copy_stable_file(source_mmproj_path, mmproj_path)
     mmproj_inspection = inspect_bf16_qwen_mmproj(mmproj_path)
-    companion_records = [{
+    vision_record = {
         "role": companion_contract["role"],
-        "filename": companion_contract["filename"],
+        "filename": mmproj_name,
         "format": companion_contract["format"],
         "required_for": companion_contract["required_for"],
         "size_bytes": mmproj_path.stat().st_size,
         "sha256": mmproj_hash,
         "inspection": mmproj_inspection,
-    }]
+    }
+    companion_records = [mtp_record, vision_record]
     build_record_path = out_dir / "qwen-quant-build-record.json"
     copy_stable_file(source_build_record_path, build_record_path)
     try:
@@ -958,23 +1033,28 @@ def build_package_in_stage(
     checksums_path = out_dir / "SHA256SUMS"
     plan_path = out_dir / "upload-plan.json"
     build_record_out = build_record_path
+    selected_checksums = [
+        *((item["sha256"], item["filename"]) for item in artifact_records),
+        (mtp_record["sha256"], mtp_record["filename"]),
+        (vision_record["sha256"], vision_record["filename"]),
+    ]
+    checksum_text = render_selected_sha256sums(selected_checksums, selected_names)
+    write_text(checksums_path, checksum_text)
+    manifest["model_artifact_integrity"] = {
+        "checksum_filename": "SHA256SUMS",
+        "checksum_format": "gnu_sha256sum_text",
+        "sha256": sha256_file(checksums_path),
+        "basenames_only": True,
+        "ordered_filenames": selected_names,
+        "entry_count": len(selected_names),
+    }
     write_text(readme_path, render_card(profile, manifest))
     write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    checksums = [
-        *((item["sha256"], item["filename"]) for item in artifact_records),
-        *((item["sha256"], item["filename"]) for item in companion_records),
-        (sha256_file(license_out), "LICENSE"),
-        (sha256_file(readme_path), "README.md"),
-        (sha256_file(manifest_path), "artifact-manifest.json"),
-        (sha256_file(profile_snapshot), "release-profile.json"),
-    ]
-    checksums.append((sha256_file(build_record_out), "qwen-quant-build-record.json"))
-    checksums.append((sha256_file(intervention_path), profile["intervention"]["manifest_filename"]))
-    write_text(checksums_path, "".join(f"{digest}  {name}\n" for digest, name in checksums))
 
     upload_files = [
         *((path, destination) for path, destination in zip(artifact_paths, destination_names)),
-        (mmproj_path, companion_contract["filename"]),
+        (mtp_path, mtp_name),
+        (mmproj_path, mmproj_name),
         (readme_path, "README.md"),
         (license_out, "LICENSE"),
         (manifest_path, "artifact-manifest.json"),
@@ -1052,6 +1132,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=("separate BF16 vision GGUF; defaults to the required companion "
               "filename beside --build-record"),
     )
+    parser.add_argument("--mtp", type=Path, required=True,
+                        help="exact MTP GGUF selected by the sealed bakeoff")
+    parser.add_argument("--mtp-sha256", required=True,
+                        help="selected MTP digest from the sealed bakeoff evidence")
     parser.add_argument("--license", type=Path, required=True)
     parser.add_argument("--build-record", type=Path, required=True,
                         help="completed qwen_quantize.py build record to verify and include")

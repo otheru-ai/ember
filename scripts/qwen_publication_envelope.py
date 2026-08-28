@@ -29,6 +29,7 @@ HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 IMAGE = re.compile(r"([^\s@]+)@sha256:([0-9a-f]{64})")
 REVISION = re.compile(r"candidate/[A-Za-z0-9._-]+")
+SAFE_RELEASE_BASENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 EXPECTED_REPO = "otheru/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-GGUF"
 EXPECTED_ATTESTATION_REPOSITORY = "OtherU-AI/ember"
 # `gh attestation verify --signer-workflow` requires the fully qualified
@@ -190,6 +191,13 @@ def planned_json(files: list[dict[str, Any]], name: str) -> tuple[dict[str, Any]
     return read_json(Path(row["local_path"]), row["sha256"], name), row
 
 
+def planned_file(files: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    matches = [row for row in files if row["path_in_repo"] == name]
+    if len(matches) != 1:
+        raise EnvelopeError(f"package must contain exactly one {name}")
+    return matches[0]
+
+
 def reconstruct_measurement(assessment: dict[str, Any], manifest_path: Path,
                             manifest_sha: str, quality_path: Path,
                             quality_sha: str) -> dict[str, Any]:
@@ -335,6 +343,7 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
     build_record, build_row = planned_json(files, "qwen-quant-build-record.json")
     intervention, intervention_row = planned_json(files, "qwen-intervention-manifest.json")
     _profile, profile_row = planned_json(files, "release-profile.json")
+    checksums_row = planned_file(files, "SHA256SUMS")
     identity = ledger["selected_artifact_identity"]
     artifacts = artifact_manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
@@ -351,21 +360,64 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
         model_inventory.append({"index": index, "sha256": item["sha256"],
                                 "bytes": item["size_bytes"]})
     companions = artifact_manifest.get("companion_artifacts")
-    if not isinstance(companions, list) or len(companions) != 1:
-        raise EnvelopeError("artifact manifest must contain exactly the vision-mmproj companion")
-    vision = companions[0]
+    if not isinstance(companions, list) or len(companions) != 2:
+        raise EnvelopeError("artifact manifest must contain exactly MTP and vision-mmproj companions")
+    by_role = {
+        item.get("role"): item for item in companions if isinstance(item, dict)
+    }
+    if len(by_role) != 2 or set(by_role) != {"mtp", "vision_mmproj"}:
+        raise EnvelopeError("artifact manifest companion roles must be unique MTP and vision_mmproj")
+    mtp = by_role["mtp"]
+    vision = by_role["vision_mmproj"]
+    if set(mtp) != {"role", "filename", "size_bytes", "sha256"}:
+        raise EnvelopeError("artifact manifest MTP companion contract differs")
     if (not isinstance(vision, dict) or vision.get("role") != "vision_mmproj"
             or vision.get("format") != "BF16" or vision.get("required_for") != "multimodal"):
         raise EnvelopeError("artifact manifest vision companion contract differs")
+    mtp_row = planned.get(mtp.get("filename"))
     vision_row = planned.get(vision.get("filename"))
+    measured_mtp = ((measurement_manifest.get("artifacts") or {}).get("mtp")
+                    if isinstance(measurement_manifest, dict) else None)
     measured_vision = ((measurement_manifest.get("artifacts") or {}).get("vision_mmproj")
                        if isinstance(measurement_manifest, dict) else None)
+    if (mtp_row is None or not isinstance(measured_mtp, dict)
+            or (mtp_row["sha256"], mtp_row["size_bytes"]) !=
+            (mtp.get("sha256"), mtp.get("size_bytes"))
+            or (mtp_row["sha256"], mtp_row["size_bytes"]) !=
+            (measured_mtp.get("sha256"), measured_mtp.get("bytes"))):
+        raise EnvelopeError("packaged MTP companion differs from measured hardware evidence")
     if (vision_row is None or not isinstance(measured_vision, dict)
             or (vision_row["sha256"], vision_row["size_bytes"]) !=
             (vision.get("sha256"), vision.get("size_bytes"))
             or (vision_row["sha256"], vision_row["size_bytes"]) !=
             (measured_vision.get("sha256"), measured_vision.get("bytes"))):
         raise EnvelopeError("packaged vision companion differs from measured hardware evidence")
+    selected_names = [item["filename"] for item in artifacts]
+    selected_names.extend((mtp["filename"], vision["filename"]))
+    if (len(selected_names) != len(set(selected_names))
+            or any(SAFE_RELEASE_BASENAME.fullmatch(str(name)) is None
+                   for name in selected_names)):
+        raise EnvelopeError("selected package artifact names are unsafe or duplicated")
+    integrity = artifact_manifest.get("model_artifact_integrity")
+    expected_integrity = {
+        "checksum_filename": "SHA256SUMS",
+        "checksum_format": "gnu_sha256sum_text",
+        "sha256": checksums_row["sha256"],
+        "basenames_only": True,
+        "ordered_filenames": selected_names,
+        "entry_count": len(selected_names),
+    }
+    if integrity != expected_integrity:
+        raise EnvelopeError("artifact manifest SHA256SUMS release evidence differs")
+    selected_rows = [*artifacts, mtp, vision]
+    expected_checksums = "".join(
+        f"{item['sha256']}  {item['filename']}\n" for item in selected_rows
+    ).encode("utf-8")
+    actual_checksums = read_stable(
+        Path(checksums_row["local_path"]), checksums_row["sha256"], "SHA256SUMS"
+    )
+    if actual_checksums != expected_checksums:
+        raise EnvelopeError("SHA256SUMS does not exactly cover the selected runtime artifacts")
     if (sha256_bytes(canonical(model_inventory)) != identity.get("model_inventory_sha256")
             or sum(item["bytes"] for item in model_inventory) != identity.get("artifact_bytes")
             or build_row["sha256"] != identity.get("build_record_sha256")

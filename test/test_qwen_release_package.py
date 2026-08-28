@@ -24,6 +24,7 @@ qwen_release_package = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qwen_release_package)
 ENGINE_REVISION = "1" * 40
 CONTAINER_IMAGE = "ghcr.io/otheru/ember@sha256:" + "2" * 64
+MTP_NAME = "Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf"
 
 
 def write_mmproj_fixture(path: Path, mutation: str | None = None) -> None:
@@ -74,8 +75,14 @@ def write_mmproj_fixture(path: Path, mutation: str | None = None) -> None:
 
 class QwenReleasePackageTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
+        arguments = list(args)
+        if "--mtp" not in arguments and "--build-record" in arguments:
+            build_record = Path(arguments[arguments.index("--build-record") + 1])
+            mtp = build_record.parent / MTP_NAME
+            arguments.extend(("--mtp", str(mtp), "--mtp-sha256",
+                              hashlib.sha256(mtp.read_bytes()).hexdigest()))
         return subprocess.run(
-            [sys.executable, str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *arguments],
             cwd=ROOT,
             text=True,
             stdout=subprocess.PIPE,
@@ -94,6 +101,7 @@ class QwenReleasePackageTests(unittest.TestCase):
         profile_path.write_text(json.dumps(profile), encoding="utf-8")
         mmproj = directory / profile["artifact"]["required_companion_artifacts"][0]["filename"]
         write_mmproj_fixture(mmproj)
+        (directory / MTP_NAME).write_bytes(b"selected deterministic MTP fixture\n")
         target_names = ["blk.0.ssm_out.weight"]
         target_names_sha = hashlib.sha256("\n".join(target_names).encode()).hexdigest()
         direction_values = [1.0]
@@ -361,7 +369,7 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             artifact_name = json.loads(profile.read_text())["artifact"]["filename"]
             mmproj_name = "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
-            for name in ("README.md", "LICENSE", "artifact-manifest.json", "SHA256SUMS", "upload-plan.json", "qwen-quant-build-record.json", "qwen-intervention-manifest.json", "release-profile.json", artifact_name, mmproj_name):
+            for name in ("README.md", "LICENSE", "artifact-manifest.json", "SHA256SUMS", "upload-plan.json", "qwen-quant-build-record.json", "qwen-intervention-manifest.json", "release-profile.json", artifact_name, MTP_NAME, mmproj_name):
                 self.assertTrue((out / name).is_file(), name)
             manifest = json.loads((out / "artifact-manifest.json").read_text(encoding="utf-8"))
             plan = json.loads((out / "upload-plan.json").read_text(encoding="utf-8"))
@@ -378,13 +386,15 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertTrue(manifest["intervention"]["weight_intervention"])
             self.assertFalse(manifest["intervention"]["prompt_only"])
             self.assertTrue(manifest["intervention"]["quantizer_applied"])
-            self.assertEqual(manifest["companion_artifacts"][0]["role"], "vision_mmproj")
+            companions = {row["role"]: row for row in manifest["companion_artifacts"]}
+            self.assertEqual(set(companions), {"mtp", "vision_mmproj"})
+            self.assertEqual(companions["mtp"]["filename"], MTP_NAME)
             self.assertEqual(
-                manifest["companion_artifacts"][0]["inspection"]["metadata"]["general.file_type"],
+                companions["vision_mmproj"]["inspection"]["metadata"]["general.file_type"],
                 32,
             )
             self.assertEqual(
-                manifest["companion_artifacts"][0]["inspection"][
+                companions["vision_mmproj"]["inspection"][
                     "tensor_inventory_sha256"],
                 qwen_release_package.vision_inventory.load_contract()[
                     "tensor_inventory_sha256"],
@@ -406,9 +416,70 @@ class QwenReleasePackageTests(unittest.TestCase):
             destinations = {entry["path_in_repo"] for entry in plan["files"]}
             self.assertIn("Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo.gguf", destinations)
             self.assertIn("qwen-intervention-manifest.json", destinations)
+            self.assertIn(MTP_NAME, destinations)
             self.assertIn(mmproj_name, destinations)
             self.assertNotIn("upload-plan.json", destinations)
             self.assertFalse(plan["authentication"]["token_embedded"])
+            checksum_names = [line.split("  ", 1)[1] for line in
+                              (out / "SHA256SUMS").read_text().splitlines()]
+            self.assertEqual(checksum_names, [artifact_name, MTP_NAME, mmproj_name])
+            self.assertTrue(all(Path(name).name == name for name in checksum_names))
+            integrity = manifest["model_artifact_integrity"]
+            self.assertEqual(integrity["ordered_filenames"], checksum_names)
+            self.assertEqual(integrity["entry_count"], 3)
+            self.assertTrue(integrity["basenames_only"])
+            self.assertEqual(integrity["sha256"], hashlib.sha256(
+                (out / "SHA256SUMS").read_bytes()).hexdigest())
+
+    def test_sha256sums_rejects_omissions_duplicates_and_unsafe_names(self) -> None:
+        digest = "a" * 64
+        cases = (
+            ([(digest, "main.gguf"), (digest, "mtp.gguf")],
+             ["main.gguf", "mtp.gguf", "mmproj.gguf"], "every selected"),
+            ([(digest, "main.gguf"), (digest, "main.gguf"),
+              (digest, "mmproj.gguf")],
+             ["main.gguf", "main.gguf", "mmproj.gguf"], "unique"),
+            ([(digest, "main.gguf"), (digest, "../mtp.gguf"),
+              (digest, "mmproj.gguf")],
+             ["main.gguf", "../mtp.gguf", "mmproj.gguf"], "safe basename"),
+        )
+        for entries, required, expected in cases:
+            with self.subTest(expected=expected), self.assertRaisesRegex(
+                qwen_release_package.PackageError, expected
+            ):
+                qwen_release_package.render_selected_sha256sums(entries, required)
+
+    def test_rejects_selected_mtp_digest_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            profile, artifact, license_path, build_record = self.synthetic_inputs(tmp)
+            result = self.run_script(
+                "--profile", str(profile), "--artifact", str(artifact),
+                "--license", str(license_path), "--build-record", str(build_record),
+                "--mtp", str(tmp / MTP_NAME), "--mtp-sha256", "0" * 64,
+                "--engine-revision", ENGINE_REVISION,
+                "--container-image", CONTAINER_IMAGE, "--out-dir", str(tmp / "out"),
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("selected MTP SHA-256 differs", result.stderr)
+
+    def test_rejects_selected_mtp_with_undeployable_name(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            profile, artifact, license_path, build_record = self.synthetic_inputs(tmp)
+            source = tmp / MTP_NAME
+            renamed = tmp / "mtp.gguf"
+            source.rename(renamed)
+            result = self.run_script(
+                "--profile", str(profile), "--artifact", str(artifact),
+                "--license", str(license_path), "--build-record", str(build_record),
+                "--mtp", str(renamed), "--mtp-sha256",
+                hashlib.sha256(renamed.read_bytes()).hexdigest(),
+                "--engine-revision", ENGINE_REVISION,
+                "--container-image", CONTAINER_IMAGE, "--out-dir", str(tmp / "out"),
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Qwen3.8-Flash-Next deployment contract", result.stderr)
 
     def test_rejects_missing_or_non_qwen_bf16_mmproj(self) -> None:
         for mutation, expected in (("missing", "cannot inspect package input"),
@@ -630,6 +701,16 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertEqual(manifest["artifact"]["shard_count"], 2)
             destinations = [entry["path_in_repo"] for entry in plan["files"][:2]]
             self.assertEqual(destinations, [first.name, second.name])
+            checksum_names = [line.split("  ", 1)[1] for line in
+                              (out / "SHA256SUMS").read_text().splitlines()]
+            self.assertEqual(checksum_names, [
+                first.name, second.name, MTP_NAME,
+                "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+            ])
+            self.assertEqual(
+                manifest["model_artifact_integrity"]["ordered_filenames"],
+                checksum_names,
+            )
             self.assertTrue((out / "qwen-quant-build-record.json").is_file())
             self.assertIn("qwen-quant-build-record.json", {entry["path_in_repo"] for entry in plan["files"]})
 
@@ -726,6 +807,8 @@ class QwenReleasePackageTests(unittest.TestCase):
             args = qwen_release_package.parse_args([
                 "--profile", str(profile), "--artifact", str(artifact),
                 "--license", str(license_path), "--build-record", str(build_record),
+                "--mtp", str(tmp / MTP_NAME), "--mtp-sha256",
+                hashlib.sha256((tmp / MTP_NAME).read_bytes()).hexdigest(),
                 "--engine-revision", ENGINE_REVISION, "--container-image", CONTAINER_IMAGE,
                 "--out-dir", str(tmp / "out"),
             ])

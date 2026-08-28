@@ -37,6 +37,8 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
         engine_revision = "1" * 40
         model = package / "model.gguf"
         model.write_bytes(b"model-bytes")
+        mtp = package / "Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf"
+        mtp.write_bytes(b"mtp-bytes")
         mmproj = package / "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
         mmproj.write_bytes(b"vision-bytes")
         model_sha = digest(model)
@@ -62,7 +64,7 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
                    "container_digest": "sha256:" + "2" * 64,
                    "tensor_format_contract_sha256": "7" * 64}
         files = {
-            "README.md": b"card", "LICENSE": b"license", "SHA256SUMS": b"sums",
+            "README.md": b"card", "LICENSE": b"license",
             "release-profile.json": b"{}", "qwen-intervention-manifest.json":
                 json.dumps({"status": "complete"}).encode(),
             "qwen-quant-build-record.json":
@@ -82,10 +84,27 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
                       "container_image": runtime_image},
             "artifacts": [{"filename": model.name, "size_bytes": model.stat().st_size,
                            "sha256": model_sha}],
-            "companion_artifacts": [{
-                "role": "vision_mmproj", "filename": mmproj.name, "format": "BF16",
-                "required_for": "multimodal", "size_bytes": mmproj.stat().st_size,
-                "sha256": digest(mmproj)}],
+            "companion_artifacts": [
+                {"role": "mtp", "filename": mtp.name,
+                 "size_bytes": mtp.stat().st_size, "sha256": digest(mtp)},
+                {"role": "vision_mmproj", "filename": mmproj.name, "format": "BF16",
+                 "required_for": "multimodal", "size_bytes": mmproj.stat().st_size,
+                 "sha256": digest(mmproj)},
+            ],
+        }
+        checksum_bytes = (
+            f"{model_sha}  {model.name}\n"
+            f"{digest(mtp)}  {mtp.name}\n"
+            f"{digest(mmproj)}  {mmproj.name}\n"
+        ).encode()
+        (package / "SHA256SUMS").write_bytes(checksum_bytes)
+        artifact_manifest["model_artifact_integrity"] = {
+            "checksum_filename": "SHA256SUMS",
+            "checksum_format": "gnu_sha256sum_text",
+            "sha256": digest(package / "SHA256SUMS"),
+            "basenames_only": True,
+            "ordered_filenames": [model.name, mtp.name, mmproj.name],
+            "entry_count": 3,
         }
         (package / "artifact-manifest.json").write_text(json.dumps(artifact_manifest))
         planned = []
@@ -127,8 +146,11 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
             hardware_evidence=evidence_paths["hardware"],
             hardware_evidence_sha256=digest(evidence_paths["hardware"]),
             runtime_image=runtime_image)
-        measurement = {"artifacts": {"vision_mmproj": {
-            "sha256": digest(mmproj), "bytes": mmproj.stat().st_size}}}
+        measurement = {"artifacts": {
+            "mtp": {"sha256": digest(mtp), "bytes": mtp.stat().st_size},
+            "vision_mmproj": {
+                "sha256": digest(mmproj), "bytes": mmproj.stat().st_size},
+        }}
         return args, ledger, assessment, measurement
 
     def test_envelope_binds_package_runtime_and_forbids_promotion(self) -> None:
