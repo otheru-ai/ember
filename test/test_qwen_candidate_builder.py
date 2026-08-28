@@ -41,6 +41,17 @@ class CandidateBuilderTests(unittest.TestCase):
             "TORCHINDUCTOR_CACHE_DIR": str(temp_dir / "torchinductor_root"),
         })
 
+    def test_cache_split_prefix_produces_discoverable_shard_names(self) -> None:
+        base = Path("/cache") / builder.CACHE_BASENAME
+        prefix = quant.gguf_split_output_prefix(base)
+        self.assertEqual(prefix, base.with_suffix(""))
+        self.assertEqual(
+            prefix.with_name(f"{prefix.name}-00001-of-00002.gguf"),
+            base.with_name(f"{base.stem}-00001-of-00002.gguf"),
+        )
+        with self.assertRaisesRegex(quant.PipelineError, "must end in .gguf"):
+            quant.gguf_split_output_prefix(Path("/cache/Qwen3.8-BF16"))
+
     def test_cpp_inventory_include_is_generated_from_shared_descriptor(self) -> None:
         contract = quant.vision_inventory.load_contract()
         self.assertEqual(contract["tensor_count"], 334)

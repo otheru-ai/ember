@@ -2396,6 +2396,16 @@ def discover_gguf(base: Path) -> list[Path]:
     return matches
 
 
+def gguf_split_output_prefix(base: Path) -> Path:
+    """Return the literal llama-gguf-split prefix for a discoverable GGUF set."""
+    if base.suffix != ".gguf":
+        raise PipelineError("GGUF split discovery base must end in .gguf")
+    # Pinned llama.cpp tools/gguf-split/gguf-split.cpp llama_split_path()
+    # appends -NNNNN-of-NNNNN.gguf to the complete output prefix.  Strip the
+    # discovery base's suffix so discover_gguf() finds the resulting shards.
+    return base.with_suffix("")
+
+
 def expected_gguf_outputs(base: Path, shard_count: int) -> list[Path]:
     if shard_count < 1:
         raise PipelineError("GGUF output shard count must be positive")
@@ -2656,12 +2666,10 @@ def planned_commands(
     if convert is not None and unsplit is not None:
         convert.append("--use-temp-file")
         assert args.gguf_splitter is not None
-        # llama_split_path() appends -NNNNN-of-NNNNN.gguf to the literal
-        # output prefix.  Passing our discovery base's .gguf suffix would
-        # therefore create *.gguf-00001-of-NNNNN.gguf, which is undiscoverable.
         split = [
             str(args.gguf_splitter.resolve()), "--split-max-size",
-            args.split_max_size, str(unsplit), str(intermediate.with_suffix("")),
+            args.split_max_size, str(unsplit),
+            str(gguf_split_output_prefix(intermediate)),
         ]
     elif convert is not None and args.split_max_size != "0":
         convert.extend(["--split-max-size", args.split_max_size])

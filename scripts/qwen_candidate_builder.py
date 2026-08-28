@@ -270,7 +270,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                 ], env_overrides=converter_temp_env(temp_dir))
                 quant.run_checked([
                     str(args.gguf_splitter.resolve()), "--split-max-size", "48G",
-                    str(unsplit), str(main),
+                    str(unsplit), str(quant.gguf_split_output_prefix(main)),
                 ])
                 unsplit.unlink()
                 main_temp_cleanup = quant.cleanup_gguf_writer_temp(temp_dir)
