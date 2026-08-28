@@ -22,6 +22,7 @@
 #include <limits>
 
 using dflash::common::kQwen4ExpVisionProviderAbi;
+using dflash::common::kQwen4ExpVisionEmbeddingWidth;
 using dflash::common::qwen4exp_vision_provider_output_v1;
 using dflash::common::qwen4exp_vision_provider_v1;
 
@@ -30,6 +31,7 @@ namespace {
 struct Context {
     llama_model * vocab_model = nullptr;
     mtmd_context * mtmd = nullptr;
+    uint32_t embedding_width = 0;
 };
 
 void set_error(char * out, size_t cap, const char * message) {
@@ -55,6 +57,26 @@ void * create(const char * mmproj_path, const char * text_model_path, int gpu,
         llama_backend_free();
         return nullptr;
     }
+    // Pinned mtmd.h defines the output span as
+    // llama_model_n_embd_inp(model) * image-token-count floats, and mtmd_init
+    // rejects an mmproj whose projection width differs from this text-model
+    // value. Query that contract instead of assuming how many floats the mtmd
+    // output buffer contains.
+    const int32_t embedding_width = llama_model_n_embd_inp(ctx->vocab_model);
+    if (embedding_width <= 0 ||
+        static_cast<uint32_t>(embedding_width) !=
+            kQwen4ExpVisionEmbeddingWidth) {
+        char message[160]{};
+        std::snprintf(message, sizeof(message),
+                      "Qwen text embedding width mismatch: expected %u, got %d",
+                      kQwen4ExpVisionEmbeddingWidth, embedding_width);
+        set_error(error, error_cap, message);
+        llama_model_free(ctx->vocab_model);
+        delete ctx;
+        llama_backend_free();
+        return nullptr;
+    }
+    ctx->embedding_width = static_cast<uint32_t>(embedding_width);
     mtmd_context_params params = mtmd_context_params_default();
     params.use_gpu = true;
     params.warmup = false; // keep first-image residency lazy and bounded
@@ -138,8 +160,9 @@ bool encode(void * opaque, const uint8_t * encoded, size_t encoded_size,
         max_h = std::max(max_h, p.x);
         max_w = std::max(max_w, p.y);
     }
-    constexpr size_t width = 2560;
-    if (rows == 0 || rows > std::numeric_limits<size_t>::max() / width ||
+    const size_t width = ctx->embedding_width;
+    if (width != kQwen4ExpVisionEmbeddingWidth || rows == 0 ||
+        rows > std::numeric_limits<size_t>::max() / width / sizeof(float) ||
         max_t != 0 || max_h >= std::numeric_limits<uint32_t>::max() / 2 ||
         max_w >= std::numeric_limits<uint32_t>::max() / 2 ||
         static_cast<size_t>(max_h + 1) >
@@ -152,7 +175,8 @@ bool encode(void * opaque, const uint8_t * encoded, size_t encoded_size,
         return false;
     }
     const size_t values = rows * width;
-    float * result = static_cast<float *>(std::malloc(values * sizeof(float)));
+    const size_t result_bytes = values * sizeof(float);
+    float * result = static_cast<float *>(std::malloc(result_bytes));
     const float * source = mtmd_get_output_embd(ctx->mtmd);
     if (!result || !source) {
         std::free(result);
@@ -160,7 +184,7 @@ bool encode(void * opaque, const uint8_t * encoded, size_t encoded_size,
         set_error(error, error_cap, "Qwen vision output allocation failed");
         return false;
     }
-    std::memcpy(result, source, values * sizeof(float));
+    std::memcpy(result, source, result_bytes);
     out->grid_t = 1;
     // mtmd decoder positions are post-merger. Ember's provider contract keeps
     // the official pre-merger HF grid, so restore the 2x2 spatial factor.

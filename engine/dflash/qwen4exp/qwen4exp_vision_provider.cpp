@@ -7,6 +7,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 namespace dflash::common {
@@ -33,6 +34,10 @@ struct Qwen4ExpLazyVisionProvider::Impl {
     const qwen4exp_vision_provider_v1 * api = nullptr;
     void * context = nullptr;
     bool attempted = false;
+    // The provider owns one mutable mtmd context. The server may call this
+    // object from several resident-session workers before they enter the engine
+    // coordinator, so first load and every encode/free pair must be serialized.
+    std::mutex encode_mu;
 
     ~Impl() {
         if (api && api->destroy && context) api->destroy(context);
@@ -97,6 +102,7 @@ Qwen4ExpLazyVisionProvider::~Qwen4ExpLazyVisionProvider() = default;
 bool Qwen4ExpLazyVisionProvider::encode(
         const uint8_t * encoded, size_t encoded_size,
         EncodedVisionImage & out, std::string & error) {
+    std::lock_guard<std::mutex> lock(impl_->encode_mu);
     out = {};
     error.clear();
     if (!encoded || encoded_size == 0) {
@@ -121,7 +127,7 @@ bool Qwen4ExpLazyVisionProvider::encode(
     const size_t expected_rows = qwen4exp_vision_merged_tokens(grid);
     size_t value_count = 0;
     if (grid.t != 1 || expected_rows == 0 || raw.row_count != expected_rows ||
-        raw.embedding_width != Qwen4ExpVisionContract::output_hidden_size ||
+        raw.embedding_width != kQwen4ExpVisionEmbeddingWidth ||
         !checked_mul(raw.row_count, raw.embedding_width, value_count) ||
         (value_count != 0 && !raw.rows)) {
         error = "Qwen4Exp vision provider returned an invalid image embedding contract";

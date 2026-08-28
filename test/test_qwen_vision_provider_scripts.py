@@ -81,6 +81,10 @@ const struct api * qwen4exp_vision_provider_get_v1(void) { return &table; }
         source = (ROOT / "tools" / "qwen4exp_vision_provider_llamacpp.cpp").read_text()
         self.assertIn("model_params.vocab_only = true", source)
         self.assertIn("params.warmup = false", source)
+        self.assertIn("llama_model_n_embd_inp(ctx->vocab_model)", source)
+        self.assertIn("kQwen4ExpVisionEmbeddingWidth", source)
+        self.assertIn("const size_t width = ctx->embedding_width", source)
+        self.assertNotIn("constexpr size_t width = 2560", source)
         self.assertNotIn("llama_new_context_with_model", source)
 
 

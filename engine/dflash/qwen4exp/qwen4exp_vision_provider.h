@@ -20,6 +20,7 @@ namespace dflash::common {
 struct EncodedVisionImage;
 
 constexpr uint32_t kQwen4ExpVisionProviderAbi = 1;
+constexpr uint32_t kQwen4ExpVisionEmbeddingWidth = 2560;
 
 extern "C" {
 

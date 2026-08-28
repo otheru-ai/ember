@@ -214,6 +214,7 @@ bool Qwen4ExpBackend::encode_vision_image(
     // The released text and BF16 mmproj artifacts are separate. Constructing
     // this only for an image request preserves text-only residency on 128-GiB
     // UMA instead of eagerly consuming the tower's allocation.
+    std::lock_guard<std::mutex> lock(vision_provider_mu_);
     if (!vision_provider_)
         vision_provider_ = std::make_unique<Qwen4ExpLazyVisionProvider>(
             config_.model_path, config_.device.gpu);
@@ -790,7 +791,10 @@ int Qwen4ExpBackend::snapshot_cur_pos(int slot) const {
 }
 
 void Qwen4ExpBackend::shutdown() {
-    vision_provider_.reset();
+    {
+        std::lock_guard<std::mutex> lock(vision_provider_mu_);
+        vision_provider_.reset();
+    }
     for (Qwen4ExpSnapshot & snapshot : snapshots_) snapshot = {};
     for (MtpSnapshot & snapshot : mtp_snapshots_) snapshot = {};
     state_.clear(); logits_.clear(); mtp_state_.clear(); mtp_target_hc_.clear();

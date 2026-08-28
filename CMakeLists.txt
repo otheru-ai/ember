@@ -338,7 +338,8 @@ add_executable(test_qwen4exp_vision_provider
   engine/dflash/qwen4exp/qwen4exp_vision_provider.cpp)
 target_include_directories(test_qwen4exp_vision_provider PRIVATE
   engine/dflash engine/dflash/qwen4exp engine/ggml/include)
-target_link_libraries(test_qwen4exp_vision_provider PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(test_qwen4exp_vision_provider PRIVATE
+  ${CMAKE_DL_LIBS} Threads::Threads)
 add_dependencies(test_qwen4exp_vision_provider mock_qwen4exp_vision_provider)
 add_test(NAME qwen4exp_vision_provider
   COMMAND test_qwen4exp_vision_provider

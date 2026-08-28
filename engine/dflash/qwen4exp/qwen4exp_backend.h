@@ -12,6 +12,7 @@
 #include "qwen4exp_vision_provider.h"
 
 #include <array>
+#include <mutex>
 #include <random>
 #include <string>
 
@@ -72,6 +73,10 @@ private:
     std::array<MtpSnapshot, kMaxSlots> mtp_snapshots_;
     int mtp_depth_ = 0;
     uint64_t state_budget_bytes_ = 0;
+    // Image preprocessing happens before requests enter the resident batch
+    // coordinator. Batch workers therefore share this lazy provider directly;
+    // serialize construction and use of its single mtmd context here.
+    std::mutex vision_provider_mu_;
     std::unique_ptr<Qwen4ExpLazyVisionProvider> vision_provider_;
     std::string activation_dump_path_;
     mutable std::mt19937_64 rng_{0};
