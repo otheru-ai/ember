@@ -52,7 +52,7 @@ def workflow_run_blocks(text: str) -> list[str]:
 class QwenConstructWorkflowTest(unittest.TestCase):
     def test_dispatcher_disk_reclaim_is_exact_and_stops_at_floor(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
-        self.assertIn("qwen-reclaim-stale-builds-20260828", body)
+        self.assertIn("qwen-reclaim-stale-builds-v2-20260828", body)
         self.assertIn("required=$((1152 * 1024 * 1024 * 1024))", body)
         for digest in (
             "002443668dfcc518d1266aa4cee8a4bb03418cf388f4b0c9b95d4639adff61f7",

@@ -430,7 +430,7 @@ jobs:
     # runs 33136740998 and 33137503792. These are exact untagged Ember build
     # images, not model data, volumes, build cache, or a production image. Stop
     # as soon as the audited 1152 GiB floor is restored.
-    if: inputs.release_version == 'qwen-reclaim-stale-builds-20260828'
+    if: inputs.release_version == 'qwen-reclaim-stale-builds-v2-20260828'
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 10
     env:
@@ -455,9 +455,7 @@ jobs:
           }
           available="$before"
           stale_paths=(
-            /var/tmp/ember-qwen3.8-flash-next/tooling-candidate-4c69d0854467156554dad0c22cc646c7cfe3cc76
-            /var/tmp/ember-qwen3.8-flash-next/tooling-candidate-09de35a6d4b14c115addc359d46b581529971508
-            /var/tmp/ember-qwen3.8-flash-next/tooling
+            /var/tmp/ember-qwen3.8-flash-next/tooling-candidate-bc3b0999999bab3145719004ba8e3462156d52e9
           )
           for path in "${stale_paths[@]}"; do
             python3 - "$path" <<'PY'
@@ -465,9 +463,7 @@ jobs:
           path = pathlib.Path(sys.argv[1])
           root = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next")
           allowed = {
-              "tooling-candidate-4c69d0854467156554dad0c22cc646c7cfe3cc76",
-              "tooling-candidate-09de35a6d4b14c115addc359d46b581529971508",
-              "tooling",
+              "tooling-candidate-bc3b0999999bab3145719004ba8e3462156d52e9",
           }
           root_stat = root.lstat()
           path_stat = path.lstat()
