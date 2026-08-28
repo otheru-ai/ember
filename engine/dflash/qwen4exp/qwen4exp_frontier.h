@@ -216,6 +216,11 @@ bool qwen4exp_frontier_moe_q1(const Qwen4ExpWeights & weights, int layer,
                               const float * input, size_t input_count,
                               std::vector<float> & output,
                               std::string & error);
+// Non-timed, opt-in real-weight dispatch controls. This executes one ROCMI4
+// dense projection and one ROCMI4 routed-expert layer at q=1/4/5/16 so release
+// evidence cannot depend on speculative acceptance or a selected MTP depth.
+bool qwen4exp_frontier_run_rocmi4_dispatch_controls(
+    const Qwen4ExpWeights & weights, std::string & error);
 bool qwen4exp_frontier_gdn_q1(
     const Qwen4ExpWeights & weights, int layer, const float * input,
     size_t input_count, const float * conv_state, size_t conv_state_count,

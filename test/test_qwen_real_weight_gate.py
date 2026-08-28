@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 GATE = ROOT / "scripts/qwen_real_weight_gate.sh"
 PROFILE = ROOT / "scripts/profile_gpu.sh"
+DISPATCH = ROOT / "scripts/qwen_w4a8_dispatch_evidence.py"
 HEX = "1" * 64
 
 
@@ -126,72 +127,222 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertNotIn("--group-add video", body)
         self.assertNotIn("--group-add render", body)
         self.assertIn('docker logs "$CONTAINER" >"$OUT_DIR/timing-server.log"', body)
-        self.assertIn('"configured_mmq_mode": configured', body)
-        self.assertIn('"dispatch_confirmation": "startup_configuration_only"', body)
-        self.assertIn('"activation_prepack":', body)
-        self.assertIn('"lossy_w4a4_mmq" if w4a4', body)
-        self.assertIn("conflicting W4A8 variants", body)
+        self.assertIn("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE=1", body)
+        self.assertIn("qwen_w4a8_dispatch_evidence.py", body)
+        self.assertIn("--rocmi4-w4a8-iu4", body)
+        self.assertIn("check_rocmi4_w4a8_isa.py", body)
+        self.assertIn("llvm-objdump --disassemble --mcpu=gfx1151", body)
+        self.assertIn('build["build_mode"] != runtime["configured_mmq_mode"]', body)
         self.assertIn('"kernel_runtime": kernel_runtime', body)
+        self.assertIn('"kernel_build": kernel_build', body)
+        self.assertIn('"timing_kernel_mode": timing_kernel_mode', body)
+        self.assertIn("clean timing used {mode}, expected candidate mode", body)
+        self.assertIn("candidate_kernel_capability", body)
+        self.assertIn('"profile-default-rocmi4":"rocmi4_dense_and_routed"', body)
+        self.assertIn('"rocmi4-control":"rocmi4_dense_and_routed"', body)
         self.assertIn('"timing_server_log":', body)
+        self.assertIn('"dispatch_server_log":', body)
+        frontier = (ROOT / "engine/dflash/qwen4exp/qwen4exp_frontier.cpp").read_text(
+            encoding="utf-8")
+        self.assertIn("qwen4exp_frontier_run_rocmi4_dispatch_controls", frontier)
+        self.assertIn('capability=%s dense_q=1,4,5,16 routed_expert_q=%s', frontier)
+        self.assertIn("target_weight=%s", frontier)
+        self.assertIn("event=post_compute", frontier)
+        dockerfile = (ROOT / "docker/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4=OFF", dockerfile)
+        self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF", dockerfile)
+        self.assertIn("ARG EMBER_HIP_EXPORT_METRICS=OFF", dockerfile)
 
-    def test_kernel_runtime_evidence_distinguishes_configured_startup_modes(self) -> None:
-        body = GATE.read_text(encoding="utf-8")
-        marker = ('python3 - "$OUT_DIR/timing-server.log" '
-                  '"$OUT_DIR/kernel-runtime-evidence.json" <<\'PY\'\n')
-        start = body.index(marker) + len(marker)
-        parser = body[start:body.index("\nPY\n", start)]
-
-        cases = {
-            "unmarked startup": ("exact_int8_mmq_control", None),
-            ("ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0; "
-             "activation_prepack=off\n"): ("w4a8_iu4_register_pack", False),
-            ("ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 3; "
-             "activation_prepack=on\n"): ("w4a8_iu4_prepack", True),
-            "ROCmI4 W4A4: enabled for device 0 (lossy prompt-processing path)\n":
-                ("lossy_w4a4_mmq", None),
-        }
+    def test_kernel_runtime_evidence_requires_actual_dispatch_controls(self) -> None:
+        startup = (
+            "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0; "
+            "activation_prepack=off\n")
+        route = ("[rocmi4-w4a8-dispatch] event=route op={} physical_q={} "
+                 "type=Q4_0_ROCMI4 path={} weight={} dst=d\n")
+        kernel = ("[rocmi4-w4a8-dispatch] event=kernel "
+                  "variant=w4a8_iu4_register_pack op={} physical_q={} "
+                  "type=Q4_0_ROCMI4 weight={} device=0 arch=gfx1151\n")
+        logical = ("[rocmi4-w4a8-dispatch] event=logical_scope op=dense "
+                   "logical_q={} physical_q={} type=Q4_0_ROCMI4 "
+                   "execution=completed weight=w\n")
+        control = ("[rocmi4-w4a8-dispatch] event=control control_id={} "
+                   "op={} logical_q={} target_weight={} phase={}\n")
+        post = ("[rocmi4-w4a8-dispatch] event=post_compute control_id={} "
+                "op={} logical_q={} physical_q={} target_weight={} "
+                "execution=completed\n")
+        def bounded(control_id: str, op: str, logical_q: int,
+                    physical_q: int, weight: str, *body: str) -> str:
+            return "".join((control.format(
+                                control_id, op, logical_q, weight, "begin"),
+                            *body,
+                            post.format(control_id, op, logical_q, physical_q,
+                                        weight),
+                            control.format(control_id, op, logical_q, weight,
+                                           "completed")))
+        extra_graph = "".join((
+            route.format("dense", 16, "mmq", "shared.weight"),
+            kernel.format("dense", 16, "shared.weight"),
+            logical.format(16, 16).replace("weight=w", "weight=shared.weight"),
+        ))
+        complete = startup + "".join((
+            bounded("dense-q1", "dense", 1, 1, "dense.weight",
+                    route.format("dense", 1, "mmvq", "dense.weight"),
+                    logical.format(1, 1).replace("weight=w", "weight=dense.weight")),
+            bounded("dense-q4", "dense", 4, 5, "dense.weight",
+                    route.format("dense", 5, "mmq", "dense.weight"),
+                    kernel.format("dense", 5, "dense.weight"),
+                    logical.format(4, 5)),
+            bounded("dense-q5", "dense", 5, 5, "dense.weight",
+                    route.format("dense", 5, "mmq", "dense.weight"),
+                    kernel.format("dense", 5, "dense.weight"),
+                    logical.format(5, 5)),
+            bounded("dense-q16", "dense", 16, 16, "dense.weight",
+                    route.format("dense", 16, "mmq", "dense.weight"),
+                    kernel.format("dense", 16, "dense.weight"),
+                    logical.format(16, 16)),
+            bounded("routed-expert-q1", "routed_expert", 1, 1,
+                    "expert.weight", extra_graph,
+                    route.format("routed_expert", 1, "mmvq", "expert.weight")),
+            bounded("routed-expert-q5", "routed_expert", 5, 5,
+                    "expert.weight", extra_graph,
+                    route.format("routed_expert", 5, "mmvq", "expert.weight")),
+            bounded("routed-expert-q16", "routed_expert", 16, 16,
+                    "expert.weight", extra_graph,
+                    route.format("routed_expert", 16, "mmq", "expert.weight"),
+                    kernel.format("routed_expert", 16, "expert.weight")),
+            ("[rocmi4-w4a8-dispatch] event=control_suite "
+             "capability=rocmi4_dense_and_routed dense_q=1,4,5,16 "
+             "routed_expert_q=1,5,16 "
+             "execution=completed\n"),
+        ))
         with tempfile.TemporaryDirectory() as temporary:
-            for index, (log, expected) in enumerate(cases.items()):
-                log_path = Path(temporary) / f"server-{index}.log"
-                out_path = Path(temporary) / f"evidence-{index}.json"
-                log_path.write_text(log, encoding="utf-8")
-                result = subprocess.run(
-                    [sys.executable, "-c", parser, str(log_path), str(out_path)],
-                    text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                evidence = json.loads(out_path.read_text(encoding="utf-8"))
-                self.assertEqual(evidence["configured_mmq_mode"], expected[0])
-                self.assertEqual(evidence["dispatch_confirmation"],
-                                 "startup_configuration_only")
-                self.assertEqual(evidence["activation_prepack"], expected[1])
-
-            conflict = Path(temporary) / "conflict.log"
-            conflict.write_text(
-                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0; "
-                "activation_prepack=off\n"
-                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 1; "
-                "activation_prepack=on\n",
-                encoding="utf-8")
+            log_path = Path(temporary) / "dispatch.log"
+            out_path = Path(temporary) / "evidence.json"
+            log_path.write_text(complete, encoding="utf-8")
             result = subprocess.run(
-                [sys.executable, "-c", parser, str(conflict),
-                 str(Path(temporary) / "conflict.json")],
+                [sys.executable, str(DISPATCH), "--log", str(log_path),
+                 "--output", str(out_path)],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["dispatch_confirmation"],
+                             "actual_real_weight_dense_and_routed_launches")
+            self.assertEqual(evidence["candidate_kernel_capability"],
+                             "rocmi4_dense_and_routed")
+            self.assertTrue(all(evidence["positive_controls"].values()))
+            self.assertTrue(all(evidence["negative_controls"].values()))
+            self.assertEqual(evidence["isa_contract"]["opcode"], 69)
+            self.assertEqual(len(evidence["ordered_control_ids"]), 7)
+
+            missing = Path(temporary) / "missing.log"
+            missing.write_text(complete.replace(
+                kernel.format("dense", 16, "dense.weight"), "", 1),
+                               encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(missing),
+                 "--output", str(Path(temporary) / "missing.json")],
                 text=True, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("conflicting W4A8 variants", result.stderr)
+            self.assertIn("ordered dispatch evidence mismatch", result.stderr)
 
-            for index, malformed in enumerate((
-                "ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device 0\n",
-                "ROCmI4 W4A8 IU4: unsupported on device 0; using exact int8 MMQ\n",
-                "ROCmI4 W4A4: enabled for device zero (lossy prompt-processing path)\n",
-            )):
-                malformed_log = Path(temporary) / f"malformed-{index}.log"
-                malformed_log.write_text(malformed, encoding="utf-8")
-                result = subprocess.run(
-                    [sys.executable, "-c", parser, str(malformed_log),
-                     str(Path(temporary) / f"malformed-{index}.json")],
-                    text=True, capture_output=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("unrecognized ROCmI4 mode markers", result.stderr)
+            out_of_order = Path(temporary) / "out-of-order.log"
+            dense_q4_ordered = "".join((
+                route.format("dense", 5, "mmq", "dense.weight"),
+                kernel.format("dense", 5, "dense.weight")))
+            dense_q4_reversed = "".join((
+                kernel.format("dense", 5, "dense.weight"),
+                route.format("dense", 5, "mmq", "dense.weight")))
+            out_of_order.write_text(
+                complete.replace(dense_q4_ordered, dense_q4_reversed, 1),
+                encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(out_of_order),
+                 "--output", str(Path(temporary) / "out-of-order.json")],
+                text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ordered dispatch evidence mismatch", result.stderr)
+
+            mixed = Path(temporary) / "mixed-control.log"
+            mixed.write_text(complete.replace(
+                kernel.format("dense", 5, "dense.weight"),
+                kernel.format("dense", 16, "dense.weight"), 1),
+                encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(mixed),
+                 "--output", str(Path(temporary) / "mixed-control.json")],
+                text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ordered dispatch evidence mismatch", result.stderr)
+
+            wrong_weight = Path(temporary) / "wrong-weight.log"
+            wrong_weight.write_text(complete.replace(
+                kernel.format("dense", 16, "dense.weight"),
+                kernel.format("dense", 16, "shared.weight"), 1), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(wrong_weight),
+                 "--output", str(Path(temporary) / "wrong-weight.json")],
+                text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("target kernel", result.stderr)
+
+            dense_suite = complete[:complete.index(
+                control.format("routed-expert-q1", "routed_expert", 1,
+                               "expert.weight", "begin"))]
+            dense_suite += ("[rocmi4-w4a8-dispatch] event=control_suite "
+                            "capability=rocmi4_dense_only dense_q=1,4,5,16 "
+                            "routed_expert_q=none execution=completed\n")
+            dense_path = Path(temporary) / "dense-only.log"
+            dense_out = Path(temporary) / "dense-only.json"
+            dense_path.write_text(dense_suite, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(dense_path),
+                 "--output", str(dense_out)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            dense_value = json.loads(dense_out.read_text(encoding="utf-8"))
+            self.assertEqual(dense_value["candidate_kernel_capability"],
+                             "rocmi4_dense_only")
+            self.assertEqual(len(dense_value["ordered_control_ids"]), 4)
+
+            na_path = Path(temporary) / "not-applicable.log"
+            na_out = Path(temporary) / "not-applicable.json"
+            na_path.write_text(
+                "[rocmi4-w4a8-dispatch] event=control_suite "
+                "capability=no_eligible_rocmi4_mmq dense_q=none "
+                "routed_expert_q=none execution=completed\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(na_path),
+                 "--output", str(na_out)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            na_value = json.loads(na_out.read_text(encoding="utf-8"))
+            self.assertEqual(na_value["candidate_timing_kernel_mode"],
+                             "not_applicable_no_eligible_rocmi4_mmq")
+            self.assertEqual(na_value["ordered_control_ids"], [])
+
+    def test_kernel_runtime_control_mode_does_not_claim_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "control.log"
+            out_path = Path(temporary) / "control.json"
+            log_path.write_text("ordinary exact int8 startup\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(log_path),
+                 "--output", str(out_path)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["dispatch_confirmation"],
+                             "not_applicable_w4a8_not_configured")
+
+    def test_compile_evidence_triggers_cover_all_production_tu_inputs(self) -> None:
+        workflow = (ROOT / ".github/workflows/rocmi4-w4a8-compile-evidence.yml").read_text(
+            encoding="utf-8")
+        self.assertEqual(workflow.count("'engine/ggml/src/ggml-cuda/**'"), 2)
+        self.assertEqual(workflow.count("'engine/ggml/rocmfpx/**'"), 2)
+        for path in ("'engine/CMakeLists.txt'", "'engine/ggml/src/CMakeLists.txt'",
+                     "'engine/ggml/cmake/**'"):
+            self.assertEqual(workflow.count(path), 2)
+        ci_doc = (ROOT / "docs/ci.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "saved-ISA ROCMI4 W4A8 compile-evidence gate is intentionally GitHub-only",
+            ci_doc)
 
     def test_candidate_and_profiler_images_are_exactly_bound(self) -> None:
         body = GATE.read_text(encoding="utf-8")

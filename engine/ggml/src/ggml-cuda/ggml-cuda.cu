@@ -95,6 +95,31 @@
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
+static bool ggml_cuda_rocmi4_dispatch_evidence_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv(
+            "DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static void ggml_cuda_log_rocmi4_route(const ggml_tensor * weight,
+                                       const ggml_tensor * dst,
+                                       int64_t physical_q,
+                                       const char * op,
+                                       const char * path) {
+    if (!ggml_cuda_rocmi4_dispatch_evidence_enabled() || !weight ||
+        weight->type != GGML_TYPE_Q4_0_ROCMI4) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[rocmi4-w4a8-dispatch] event=route op=%s physical_q=%lld "
+                 "type=%s path=%s weight=%s dst=%s\n",
+                 op, (long long) physical_q, ggml_type_name(weight->type),
+                 path, weight->name, dst ? dst->name : "");
+}
+
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
     int id = -1; // in case cudaGetDevice fails
@@ -2589,6 +2614,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         // [K/group,N,group] source layout.
         GGML_ASSERT(!split);
         GGML_ASSERT(use_mul_mat_q);
+        ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
@@ -2597,8 +2623,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     } else if (!split && use_mul_mat_f) {
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_q) {
+        ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmvq");
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_q) {
+        ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
@@ -2607,8 +2635,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     } else if (use_mul_mat_vec_f) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_f, nullptr);
     } else if (use_mul_mat_vec_q) {
+        ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmvq");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
     } else if (use_mul_mat_q) {
+        ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
@@ -2634,6 +2664,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int mmvq_mmid_max = ggml_is_quantized(src0->type)
         ? get_mmvq_mmid_max_batch(src0->type, cc) : 0;
     const auto log_dispatch = [&](const char * path) {
+        ggml_cuda_log_rocmi4_route(src0, dst, ne2, "routed_expert", path);
         if (mmid_telemetry) {
             std::fprintf(stderr,
                 "[dflash-mmid] event=dispatch name=%s type=%s ne11=%lld width=%lld pairs=%lld "

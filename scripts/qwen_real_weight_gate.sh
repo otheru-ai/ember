@@ -13,6 +13,7 @@ PRODUCTION=/usr/local/sbin/ember-cert-production
 PRODUCTION_HEALTH=http://127.0.0.1:8000/health
 PROFILE_SCRIPT="$REPO/scripts/profile_gpu.sh"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
+DISPATCH_EVIDENCE="$REPO/scripts/qwen_w4a8_dispatch_evidence.py"
 
 IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
 MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
@@ -137,7 +138,8 @@ command -v dd >/dev/null || die "dd is required for O_DIRECT integrity reads"
 command -v stat >/dev/null || die "stat is required for numeric GPU device groups"
 [[ -x "$GPU_LOCK" ]] || die "missing fixed-purpose GPU lock wrapper: $GPU_LOCK"
 [[ -x "$PRODUCTION" ]] || die "missing production wrapper: $PRODUCTION"
-[[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" ]] || die "gate dependencies are missing"
+[[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" && -f "$DISPATCH_EVIDENCE" ]] ||
+  die "gate dependencies are missing"
 [[ -f "$MODEL" && -f "$MODEL_BUILD_RECORD" && -f "$MTP" ]] ||
   die "model, quant build record, or MTP companion does not exist"
 [[ -r /dev/kfd && -d /dev/dri ]] || die "this gate must run on the gfx1151 host"
@@ -238,6 +240,82 @@ with open(sys.argv[1], "x", encoding="utf-8") as stream:
                "byte_identical": True}, stream, indent=2, sort_keys=True)
     stream.write("\n")
 PY
+
+# Bind any enabled W4A8 runtime to the saved production assembly and encoded
+# object from the byte-identical dev image. A startup marker cannot substitute
+# for this ISA gate, and compile-resource output is never timing evidence.
+mapfile -t w4a8_build < <(docker run --rm --entrypoint /bin/sh "$PROFILE_IMAGE" -c '
+  for key in GGML_HIP_ROCMI4_W4A4 GGML_HIP_ROCMI4_W4A8_IU4 GGML_HIP_ROCMI4_W4A8_IU4_PREPACK GGML_HIP_EXPORT_METRICS; do
+    awk -F= -v key="$key:BOOL" '\''$1 == key { print $2 }'\'' /ember/build-rocm/CMakeCache.txt
+  done
+')
+((${#w4a8_build[@]} == 4)) || die "profiler image lacks ROCMI4 CMake identity"
+case "${w4a8_build[0]}:${w4a8_build[1]}:${w4a8_build[2]}:${w4a8_build[3]}" in
+  OFF:OFF:OFF:*) w4a8_build_mode=exact_int8_mmq_control ;;
+  ON:OFF:OFF:*) w4a8_build_mode=lossy_w4a4_mmq ;;
+  OFF:ON:OFF:ON) w4a8_build_mode=w4a8_iu4_register_pack ;;
+  OFF:ON:ON:ON) w4a8_build_mode=w4a8_iu4_prepack ;;
+  *) die "profiler image has an ineligible W4A8/export-metrics build combination" ;;
+esac
+if [[ "$w4a8_build_mode" == w4a8_* ]]; then
+  case "$w4a8_build_mode" in
+    w4a8_iu4_register_pack) w4a8_variant=register ;;
+    w4a8_iu4_prepack) w4a8_variant=prepack ;;
+  esac
+  docker run --rm --entrypoint /bin/bash "$PROFILE_IMAGE" -c '
+    set -euo pipefail
+    base=/ember/build-rocm/engine/ggml/src/ggml-hip/mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151
+    /opt/rocm/llvm/bin/llvm-objdump --disassemble --mcpu=gfx1151 "$base.o" >/tmp/rocmi4-w4a8.disasm
+    python3 /ember/scripts/check_rocmi4_w4a8_isa.py "$base.s" \
+      --disassembly /tmp/rocmi4-w4a8.disasm \
+      --cmake-cache /ember/build-rocm/CMakeCache.txt --variant "$1"
+  ' qwen-w4a8-isa-gate "$w4a8_variant" >"$OUT_DIR/w4a8-isa-gate.txt" ||
+    die "byte-identical profiler image failed the exact gfx1151 W4A8 ISA gate"
+else
+  printf '%s\n' 'not applicable: exact int8 MMQ control build' >"$OUT_DIR/w4a8-isa-gate.txt"
+fi
+python3 - "$OUT_DIR/w4a8-build-evidence.json" "$w4a8_build_mode" \
+  "$OUT_DIR/w4a8-isa-gate.txt" "$candidate_binary_sha" <<'PY'
+import hashlib, json, sys
+output, mode, report, binary_sha = sys.argv[1:]
+raw = open(report, "rb").read()
+with open(output, "x", encoding="utf-8") as stream:
+    json.dump({
+        "schema": "ember.qwen3.8.w4a8-build-evidence.v1",
+        "build_mode": mode,
+        "candidate_and_profiler_binary_sha256": binary_sha,
+        "saved_isa_gate": {
+            "path": "w4a8-isa-gate.txt",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "passed": mode.startswith("w4a8_iu4_"),
+        },
+    }, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+W4A8_RUNTIME_ARGS=()
+W4A8_DISPATCH_ARGS=()
+W4A8_PROFILE_ARGS=()
+candidate_kernel_capability="$(python3 - "$OUT_DIR/qwen-quant-build-record.json" <<'PY'
+import json,sys
+arm=(json.load(open(sys.argv[1],encoding="utf-8")).get("quantization_recipe") or {}).get("id")
+mapping={
+ "profile-default-rocmi4":"rocmi4_dense_and_routed",
+ "rocmi4-control":"rocmi4_dense_and_routed",
+ "rocmi4-q6k-embedding-head":"rocmi4_dense_and_routed",
+ "rocmfp4-fast-routed-experts-q6k-embedding-head":"rocmi4_dense_only",
+ "rocmfp4-fast-matrix-q6k-embedding-head":"no_eligible_rocmi4_mmq",
+}
+if arm not in mapping: raise SystemExit(f"unknown candidate kernel capability: {arm!r}")
+print(mapping[arm])
+PY
+)"
+if [[ "$w4a8_build_mode" == w4a8_* ]]; then
+  W4A8_DISPATCH_ARGS=(-e DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE=1)
+  if [[ "$candidate_kernel_capability" != no_eligible_rocmi4_mmq ]]; then
+    W4A8_RUNTIME_ARGS=(-e DFLASH_ROCMI4_W4A8_IU4=1)
+    W4A8_PROFILE_ARGS=(--rocmi4-w4a8-iu4)
+  fi
+fi
 
 GPU_ARGS=(
   --device /dev/kfd --device /dev/dri
@@ -389,6 +467,7 @@ PY
 log "running q=1/native-batch snapshot differential"
 CONTAINER="qwen-real-gate-validate-$$"
 docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
+  "${W4A8_RUNTIME_ARGS[@]}" "${W4A8_DISPATCH_ARGS[@]}" \
   -v "$(dirname "$MODEL"):/gate/model:ro" \
   -v "$MTP:/gate/mtp.gguf:ro" \
   -v "$OUT_DIR/validation-prompt.txt:/gate/prompt.txt:ro" \
@@ -397,7 +476,8 @@ docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
   --entrypoint "$BINARY" "$IMAGE" \
   -m "/gate/model/$(basename "$MODEL")" --max-ctx 8192 \
   --validate-prompt /gate/prompt.txt --validate-tokens 64 \
-  >"$OUT_DIR/differential.json"
+  >"$OUT_DIR/differential.json" \
+  2>"$OUT_DIR/differential-dispatch-server.log"
 docker rm "$CONTAINER" >/dev/null
 CONTAINER=""
 python3 - "$OUT_DIR/differential.json" <<'PY'
@@ -413,10 +493,29 @@ if not isinstance(rate, (int, float)) or not 0.0 <= rate < 1.0:
         "differential did not exercise a rejected candidate/strict replay; "
         f"accept_rate={rate!r}")
 PY
+python3 "$DISPATCH_EVIDENCE" \
+  --log "$OUT_DIR/differential-dispatch-server.log" \
+  --output "$OUT_DIR/kernel-runtime-evidence.json"
+python3 - "$OUT_DIR/w4a8-build-evidence.json" \
+  "$OUT_DIR/kernel-runtime-evidence.json" <<'PY'
+import json, sys
+build = json.load(open(sys.argv[1], encoding="utf-8"))
+runtime = json.load(open(sys.argv[2], encoding="utf-8"))
+not_applicable = (runtime.get("candidate_kernel_capability") ==
+                  "no_eligible_rocmi4_mmq")
+if not not_applicable and build["build_mode"] != runtime["configured_mmq_mode"]:
+    raise SystemExit(
+        "W4A8 build/runtime evidence mismatch: "
+        f"{build['build_mode']} != {runtime['configured_mmq_mode']}")
+if (not not_applicable and build["build_mode"].startswith("w4a8_iu4_") and not (
+        build["saved_isa_gate"]["passed"] and runtime["passed"])):
+    raise SystemExit("enabled W4A8 variant lacks ISA or dispatch proof")
+PY
 
 log "starting exact candidate for clean hard-gate timing"
 CONTAINER="qwen-real-gate-timing-$$"
 docker run -d --name "$CONTAINER" --network host "${GPU_ARGS[@]}" \
+  "${W4A8_RUNTIME_ARGS[@]}" \
   -v "$(dirname "$MODEL"):/gate/model:ro" -v "$MTP:/gate/mtp.gguf:ro" \
   -e DFLASH_QWEN_MTP=/gate/mtp.gguf \
   -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH" \
@@ -445,47 +544,48 @@ if ! python3 "$BENCHMARK" "${benchmark_args[@]}"; then
 fi
 docker logs "$CONTAINER" >"$OUT_DIR/timing-server.log" 2>&1 ||
   die "could not capture the timing server log"
-python3 - "$OUT_DIR/timing-server.log" "$OUT_DIR/kernel-runtime-evidence.json" <<'PY'
+python3 - "$OUT_DIR/timing-server.log" "$OUT_DIR/kernel-runtime-evidence.json" \
+  "$OUT_DIR/timing-kernel-mode.json" <<'PY'
 import json, re, sys
-
 log = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 marker_lines = [line[line.index("ROCmI4"):].strip()
                 for line in log.splitlines() if "ROCmI4 W4A" in line]
-known_marker = re.compile(
+known = re.compile(
     r"ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device [0-9]+; "
     r"activation_prepack=(?:on|off)|"
     r"ROCmI4 W4A4: enabled for device [0-9]+ "
     r"\(lossy prompt-processing path\)")
-unknown_markers = [line for line in marker_lines
-                   if known_marker.fullmatch(line) is None]
-if unknown_markers:
-    raise SystemExit(f"timing server logged unrecognized ROCmI4 mode markers: "
-                     f"{unknown_markers}")
-prepack_states = set(re.findall(
+unknown = [line for line in marker_lines if known.fullmatch(line) is None]
+if unknown:
+    raise SystemExit(f"timing server logged unrecognized ROCmI4 markers: {unknown}")
+states = set(re.findall(
     r"ROCmI4 W4A8 IU4: exact experimental MMQ enabled for device [0-9]+; "
     r"activation_prepack=(on|off)", log))
-if len(prepack_states) > 1:
-    raise SystemExit(
-        f"timing server logged conflicting W4A8 variants: {prepack_states}")
-state = next(iter(prepack_states), None)
+if len(states) > 1:
+    raise SystemExit(f"timing server logged conflicting W4A8 variants: {states}")
 w4a4 = bool(re.search(r"ROCmI4 W4A4: enabled for device [0-9]+", log))
-if state is not None and w4a4:
-    raise SystemExit("timing server logged mutually exclusive W4A4 and W4A8 MMQ")
-configured = ({"on": "w4a8_iu4_prepack",
-               "off": "w4a8_iu4_register_pack"}.get(
-                 state, "lossy_w4a4_mmq" if w4a4 else
-                 "exact_int8_mmq_control"))
-with open(sys.argv[2], "x", encoding="utf-8") as stream:
-    json.dump({
-        "schema": "ember.qwen3.8.kernel-runtime-evidence.v1",
-        "configured_mmq_mode": configured,
-        "dispatch_confirmation": "startup_configuration_only",
-        "w4a8_iu4_runtime_enabled": state is not None,
-        "activation_prepack": (True if configured == "w4a8_iu4_prepack" else
-                               False if configured == "w4a8_iu4_register_pack" else
-                               None),
-        "source": "timing-server.log",
-    }, stream, indent=2, sort_keys=True)
+if states and w4a4:
+    raise SystemExit("timing server logged mutually exclusive W4A4 and W4A8")
+runtime = json.load(open(sys.argv[2], encoding="utf-8"))
+capability = runtime.get("candidate_kernel_capability")
+if capability == "no_eligible_rocmi4_mmq":
+    if states or w4a4:
+        raise SystemExit("not-applicable candidate enabled a ROCMI4 timing kernel")
+    mode = "not_applicable_no_eligible_rocmi4_mmq"
+else:
+    state = next(iter(states), None)
+    mode = ({"on": "w4a8_iu4_prepack",
+             "off": "w4a8_iu4_register_pack"}.get(
+                state, "lossy_w4a4_mmq" if w4a4 else
+                "exact_int8_mmq_control"))
+if mode != runtime["candidate_timing_kernel_mode"]:
+    raise SystemExit(
+        f"clean timing used {mode}, expected candidate mode "
+        f"{runtime['candidate_timing_kernel_mode']}")
+with open(sys.argv[3], "x", encoding="utf-8") as stream:
+    json.dump({"configured_mmq_mode": mode,
+               "confirmation": "clean_timing_startup_marker",
+               "passed": True}, stream, indent=2, sort_keys=True)
     stream.write("\n")
 PY
 python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" \
@@ -533,7 +633,7 @@ done
 log "running separate trace/counter passes (never timing evidence)"
 "$PROFILE_SCRIPT" --no-quiesce --image "$PROFILE_IMAGE" --binary "$BINARY" \
   --model "$MODEL" --mtp "$MTP" --mtp-depth "$MTP_DEPTH" --port "$PORT" \
-  --out-dir "$OUT_DIR/profile"
+  "${W4A8_PROFILE_ARGS[@]}" --out-dir "$OUT_DIR/profile"
 
 # Restore production and release the ownership lock before granting approval.
 # A failed restore is a failed gate and therefore cannot leave a publish marker.
@@ -555,6 +655,8 @@ def sha(path):
 inventory = json.load(open(os.path.join(out, "model-inventory.json"), encoding="utf-8"))
 memory = json.load(open(os.path.join(out, "memory-evidence.json"), encoding="utf-8"))
 kernel_runtime = json.load(open(os.path.join(out, "kernel-runtime-evidence.json"), encoding="utf-8"))
+kernel_build = json.load(open(os.path.join(out, "w4a8-build-evidence.json"), encoding="utf-8"))
+timing_kernel_mode = json.load(open(os.path.join(out, "timing-kernel-mode.json"), encoding="utf-8"))
 passed = bool(memory["performance"].get("passed") and memory["hard_fit"].get("passed"))
 record = {
     "schema": "ember.qwen3.8.real-weight-gate.v2",
@@ -578,6 +680,8 @@ record = {
                    "memory": memory["hard_fit"]},
     "resources": memory["resources"],
     "kernel_runtime": kernel_runtime,
+    "kernel_build": kernel_build,
+    "timing_kernel_mode": timing_kernel_mode,
     "evidence": {
         "differential": {"path": "differential.json",
                          "sha256": sha(os.path.join(out, "differential.json"))},
@@ -587,6 +691,14 @@ record = {
                    "sha256": sha(os.path.join(out, "memory-evidence.json"))},
         "kernel_runtime": {"path": "kernel-runtime-evidence.json",
                    "sha256": sha(os.path.join(out, "kernel-runtime-evidence.json"))},
+        "kernel_build": {"path": "w4a8-build-evidence.json",
+                   "sha256": sha(os.path.join(out, "w4a8-build-evidence.json"))},
+        "kernel_isa_gate": {"path": "w4a8-isa-gate.txt",
+                   "sha256": sha(os.path.join(out, "w4a8-isa-gate.txt"))},
+        "timing_kernel_mode": {"path": "timing-kernel-mode.json",
+                   "sha256": sha(os.path.join(out, "timing-kernel-mode.json"))},
+        "dispatch_server_log": {"path": "differential-dispatch-server.log",
+                   "sha256": sha(os.path.join(out, "differential-dispatch-server.log"))},
         "timing_server_log": {"path": "timing-server.log",
                    "sha256": sha(os.path.join(out, "timing-server.log"))},
         "model_inventory": {"path": "model-inventory.json",

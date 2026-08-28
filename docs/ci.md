@@ -39,6 +39,17 @@ candidate passes the hosted and container gates. The one ROCm failure mode
 hosted CI can catch cheaply is source-list drift between the two hand-maintained
 CMake lists — see `ci/check_invariants.py`.
 
+The saved-ISA ROCMI4 W4A8 compile-evidence gate is intentionally GitHub-only.
+It builds both packing variants in AMD's pinned ROCm 10.0 development container
+and retains their assembly, object, disassembly, and CMake contract as GitHub
+release evidence. Every change below `engine/ggml/src/ggml-cuda/` or
+`engine/ggml/rocmfpx/` triggers it. Forgejo remains the source and GPU-free CI
+gate, but does not duplicate this multi-gigabyte ROCm artifact job: the mirrored
+commit cannot enter GitHub publication or gfx1151 certification until GitHub's
+compile-evidence workflow passes. This is an intentional artifact-retention and
+publisher boundary, not a claim that the Forgejo CPU suite proves the production
+HIP translation unit.
+
 ## Jobs
 
 Ordered cheapest-first so a break reports in seconds.

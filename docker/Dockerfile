@@ -55,6 +55,9 @@ FROM toolchain AS dev
 
 ARG EMBER_VERSION
 ARG EMBER_VCS_REF
+ARG EMBER_ROCMI4_W4A8_IU4=OFF
+ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF
+ARG EMBER_HIP_EXPORT_METRICS=OFF
 LABEL org.opencontainers.image.title="Ember development toolchain" \
       org.opencontainers.image.description="ROCm development and profiling image for Ember on AMD Strix Halo" \
       org.opencontainers.image.version="${EMBER_VERSION}" \
@@ -135,6 +138,9 @@ RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharin
       -DEMBER_ENGINE=ON \
       -DEMBER_CONFIGURED_GIT_HEAD="${EMBER_VCS_REF}" \
       -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_HIP_ROCMI4_W4A8_IU4="${EMBER_ROCMI4_W4A8_IU4}" \
+      -DGGML_HIP_ROCMI4_W4A8_IU4_PREPACK="${EMBER_ROCMI4_W4A8_IU4_PREPACK}" \
+      -DGGML_HIP_EXPORT_METRICS="${EMBER_HIP_EXPORT_METRICS}" \
  && cmake --build /ember/build-rocm \
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
       ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench \

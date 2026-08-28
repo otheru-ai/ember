@@ -1,0 +1,99 @@
+{
+  "architecture": {
+    "id": 9,
+    "name": "AMD RDNA 3.5",
+    "target": "amdgcn-amd-amdhsa--gfx1151",
+    "wave_size": 32
+  },
+  "instruction": {
+    "assembly_mnemonic": "v_wmma_i32_16x16x16_iu4",
+    "encoding": {
+      "bit_count": 64,
+      "encoding_tag": {
+        "bit_count": 8,
+        "bit_offset": 24,
+        "value": 204
+      },
+      "name": "ENC_VOP3P",
+      "opcode": {
+        "bit_count": 7,
+        "bit_offset": 16,
+        "value": 69
+      }
+    },
+    "modifiers": {
+      "canonical_assembly": {
+        "signed_high": "neg_lo:[1,1,0]",
+        "unsigned_low": "neg_lo:[1,0,0]"
+      },
+      "clamp": {
+        "bit_count": 1,
+        "bit_offset": 15,
+        "expected": 0
+      },
+      "neg": {
+        "bit_count": 3,
+        "bit_offset": 61,
+        "signed_high": 3,
+        "unsigned_low": 1
+      },
+      "neg_hi": {
+        "bit_count": 3,
+        "bit_offset": 8,
+        "expected": 0
+      },
+      "op_sel": {
+        "bit_count": 3,
+        "bit_offset": 11,
+        "expected": 0
+      },
+      "op_sel_hi_ranges": [
+        {
+          "bit_count": 2,
+          "bit_offset": 59,
+          "expected": 3
+        },
+        {
+          "bit_count": 1,
+          "bit_offset": 14,
+          "expected": 1
+        }
+      ]
+    },
+    "name": "V_WMMA_I32_16X16X16_IU4",
+    "operands": {
+      "SRC0": {
+        "bit_count": 64,
+        "data_format": "FMT_WMMA_AB_16X16_IU4",
+        "register_count": 2
+      },
+      "SRC1": {
+        "bit_count": 64,
+        "data_format": "FMT_WMMA_AB_16X16_IU4",
+        "register_count": 2
+      },
+      "SRC2": {
+        "bit_count": 256,
+        "data_format": "FMT_WMMA_DC_16X16_I32",
+        "register_count": 8
+      },
+      "VDST": {
+        "bit_count": 256,
+        "data_format": "FMT_WMMA_DC_16X16_I32",
+        "register_count": 8
+      }
+    },
+    "wave32_ab_matrix_copies": 2
+  },
+  "provenance": {
+    "archive_entry": "amdgpu_isa_rdna3_5.xml",
+    "archive_entry_sha256": "c36b6d79b1e940d74107221c985f5a7fde248025da251d2c6ef756c4cd31391a",
+    "archive_entry_timestamp": "2026-08-04T04:53:21Z",
+    "archive_sha256": "82404f1126761b7877595b622afa7e1f311f2f41e89a3abe9aaf8ad045c082e2",
+    "downloaded_utc": "2026-08-27",
+    "release_date": "2026-02-20",
+    "schema_version": "1.1.1",
+    "source_url": "https://gpuopen.com/download/machine-readable-isa/latest/"
+  },
+  "schema": "ember.amd-machine-readable-isa-derived.v1"
+}

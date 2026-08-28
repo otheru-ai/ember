@@ -5,12 +5,40 @@
 
 #if GGML_ROCMI4_W4A8_IU4
 static bool ggml_cuda_rocmi4_w4a8_iu4_enabled() {
-    const char * value = getenv("DFLASH_ROCMI4_W4A8_IU4");
-    if (!rocmi4_w4a8_iu4_requested(value)) {
+    static const bool requested = [] {
+        return rocmi4_w4a8_iu4_requested(getenv("DFLASH_ROCMI4_W4A8_IU4"));
+    }();
+    if (!requested) {
         return false;
     }
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
     return GGML_CUDA_CC_IS_GFX1151(cc);
+}
+
+static bool ggml_cuda_rocmi4_w4a8_dispatch_evidence_enabled() {
+    static const bool enabled = [] {
+        const char * value = getenv("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE");
+        return value != nullptr && strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+static void ggml_cuda_log_rocmi4_w4a8_dispatch(const mmq_args & args) {
+    if (!ggml_cuda_rocmi4_w4a8_dispatch_evidence_enabled()) {
+        return;
+    }
+#if GGML_ROCMI4_W4A8_IU4_PREPACK
+    const char * variant = "w4a8_iu4_prepack";
+#else
+    const char * variant = "w4a8_iu4_register_pack";
+#endif
+    const int device = ggml_cuda_get_device();
+    fprintf(stderr,
+            "[rocmi4-w4a8-dispatch] event=kernel variant=%s op=%s "
+            "physical_q=%lld type=%s weight=%s device=%d arch=gfx1151\n",
+            variant, args.ids_dst ? "routed_expert" : "dense",
+            (long long) args.ncols_max, ggml_type_name(args.type_x),
+            args.weight_name ? args.weight_name : "", device);
 }
 #endif
 
@@ -37,6 +65,7 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
         case GGML_TYPE_Q4_0_ROCMI4:
 #if GGML_ROCMI4_W4A8_IU4
             if (ggml_cuda_rocmi4_w4a8_iu4_enabled()) {
+                ggml_cuda_log_rocmi4_w4a8_dispatch(args);
                 mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4, true>(ctx, args, stream);
                 break;
             }
@@ -240,7 +269,7 @@ static void ggml_cuda_mul_mat_q_impl(
         const int64_t s13 = ne12*s12;
 
         const mmq_args args = {
-            src0_d, src0->type, (const int *) src1_q8_1.ptr, nullptr, nullptr, dst_d,
+            src0_d, src0->name, src0->type, (const int *) src1_q8_1.ptr, nullptr, nullptr, dst_d,
             ne00, ne01, ne1, s01, ne11, s1,
             ne02, ne12, s02, s12, s2,
             ne03, ne13, s03, s13, s3,
@@ -249,6 +278,7 @@ static void ggml_cuda_mul_mat_q_impl(
         if (src0_pair) {
             mmq_args pair_args = args;
             pair_args.x = (const char *) src0_pair->data;
+            pair_args.weight_name = src0_pair->name;
             pair_args.dst = (float *) dst_pair->data;
             ggml_cuda_mul_mat_q_switch_type(ctx, pair_args, stream);
         }
@@ -310,7 +340,7 @@ static void ggml_cuda_mul_mat_q_impl(
 
     // Note that ne02 is used instead of ne12 because the number of y channels determines the z dimension of the CUDA grid.
     const mmq_args args = {
-        src0_d, src0->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), dst_d,
+        src0_d, src0->name, src0->type, (const int *) src1_q8_1.get(), ids_dst.get(), expert_bounds.get(), dst_d,
         ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
@@ -320,6 +350,7 @@ static void ggml_cuda_mul_mat_q_impl(
     if (src0_pair) {
         mmq_args pair_args = args;
         pair_args.x = (const char *) src0_pair->data;
+        pair_args.weight_name = src0_pair->name;
         pair_args.dst = (float *) dst_pair->data;
         ggml_cuda_mul_mat_q_switch_type(ctx, pair_args, stream);
     }
@@ -377,7 +408,7 @@ void ggml_cuda_op_mul_mat_q(
                             || GGML_CUDA_CC_IS_CDNA(cc))
                             && src1_ncols == ne11;
     const mmq_args args = {
-        src0_dd_i, src0->type, (const int *) src1_ddq_i, nullptr, nullptr, dst_dd_i,
+        src0_dd_i, src0->name, src0->type, (const int *) src1_ddq_i, nullptr, nullptr, dst_dd_i,
         ne00, row_diff, src1_ncols, stride01, ne11, nrows_dst,
         1, 1, 0, 0, 0,
         1, 1, 0, 0, 0,

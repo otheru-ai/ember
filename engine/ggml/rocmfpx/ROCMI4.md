@@ -55,6 +55,17 @@ remain exact-int8 negative dispatch controls. The startup warning records
 must retain that log so two compiler variants cannot be mistaken for one
 another.
 
+`DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE=1` enables launch evidence for a
+non-timed real-weight differential pass. It records the selected ROCMI4 route
+and, from inside the exact gfx1151 runtime guard, every actual W4A8 kernel
+launch. The release parser requires dense logical q=4 (which intentionally
+uses the cached physical q=5 graph), dense q=5 and q=16, and routed-expert q=16
+positive controls. It also requires q=1 dense/routed and q=5 routed-expert MMVQ
+negative controls and rejects any W4A8 launch for those widths. This telemetry
+is never enabled during clean timing; profiler passes opt into the same runtime
+variant separately. A startup warning alone is configuration, not dispatch
+evidence, and neither kind of evidence is a performance result.
+
 For the screened ROCm 10 gfx1151 compiler images, prepacking reduces the saved
 assembly's VGPR counts from 183/190 to 143/141 for unchecked/checked kernels.
 That is a compile-resource observation, not a throughput result. Each block's
@@ -71,24 +82,49 @@ internal release date 2026-02-20; schema 1.1.1; RDNA 3.5 architecture ID 9).
 It defines
 `V_WMMA_I32_16X16X16_IU4` as a VOP3P WMMA instruction with 64-bit A/B lane
 operands and a 256-bit I32 accumulator, and requires two replicated A/B copies
-in wave32. Do not substitute the RDNA4 fragment layout on gfx1151.
+in wave32. The checked-in, reviewable derivation used by the offline gate is
+`rdna3_5_iu4_isa_facts.json`; it pins the archive and XML-entry hashes, VOP3P
+opcode 69, operand sizes, and modifier bit fields. Do not substitute the RDNA4
+fragment layout on gfx1151.
 
 Provenance and commit pins are recorded in `engine/VENDOR.md`. The storage
 contract test is `test/test_rocmi4.c`; the exhaustive mixed-signedness algebra
 and fragment-packing oracle is `test/test_rocmi4_q8_i4_exact.cpp`.
 
 After every ROCm or compiler change, emit the gfx1151 assembly with
-`GGML_HIP_EXPORT_METRICS=ON` and run:
+`GGML_HIP_EXPORT_METRICS=ON`, disassemble the matching object with the same
+pinned ROCm toolchain, and run the variant-specific gate. For the register-pack
+build:
 
 ```bash
+/opt/rocm/lib/llvm/bin/llvm-objdump -d --mcpu=gfx1151 \
+  build-rocm/engine/ggml/src/ggml-hip/\
+mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.o \
+  > build-rocm/rocmi4-w4a8.disasm
 python3 scripts/check_rocmi4_w4a8_isa.py \
   build-rocm/engine/ggml/src/ggml-hip/\
-mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.s
+mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.s \
+  --disassembly build-rocm/rocmi4-w4a8.disasm \
+  --cmake-cache build-rocm/CMakeCache.txt \
+  --variant register
 ```
 
-The gate requires both boundary-check variants, the official RDNA 3.5 signed
-and unsigned IU4 operand modifiers, the shifted-high dependency order,
-`mmq_x=32`, no private segment or scratch instructions, and the screened
-VGPR/SGPR ceilings. Passing the source-level oracle without this production
-assembly gate is not sufficient to make the experiment eligible for A/B
-timing.
+Use `--variant prepack` for a build configured with
+`GGML_HIP_ROCMI4_W4A8_IU4_PREPACK=ON`. The gate binds the requested variant to
+`CMakeCache.txt`, requires both boundary-check variants, checks the assembled
+VOP3P opcode and modifier fields against the official derivation, proves the
+shifted-high dependency order, requires `mmq_x=32`, rejects private segments or
+scratch, and applies the screened per-variant VGPR/SGPR/occupancy bounds.
+Passing the source-level oracle without this production assembly-and-object
+gate is not sufficient to make the experiment eligible for A/B timing. Neither
+gate is device execution or a performance result.
+
+The container build exposes the same opt-in controls as
+`EMBER_ROCMI4_W4A8_IU4`, `EMBER_ROCMI4_W4A8_IU4_PREPACK`, and
+`EMBER_HIP_EXPORT_METRICS` build arguments. A qualifying register-pack or
+prepack release/dev image pair sets W4A8 and export-metrics ON (and prepack as
+appropriate); ordinary images keep all three OFF. The real-weight gate reads
+the dev image's CMake cache, re-runs the saved-assembly plus encoded-object
+gate inside that exact image, and requires its installed executable to be
+byte-identical to the release candidate before accepting runtime dispatch
+evidence.

@@ -62,6 +62,14 @@ is strict:
    screen two K16 slices before four, rejecting any occupancy loss or changed
    scale/float-accumulation contract.
 
+The real-weight gate now records those dispatch controls in a separate
+differential run. `scripts/qwen_w4a8_dispatch_evidence.py` fails closed when an
+enabled startup variant lacks an actual exact-gfx1151 launch, when q=4 is not
+bound to its completed cached-q5 dense scope, or when the q=1/q=5 negative
+controls enter W4A8. That proves routing and launch selection only. Clean
+timing and counter passes remain separate and are the only sources of
+performance evidence.
+
 The source-reported four-slice IU4 result (94.044 TOPS versus its 84.560-TOPS
 one-slice control) is evidence for that schedule experiment, not an Ember speed
 claim. Saved ROCm 10 gfx1151 assembly shows that activation prepacking reduces

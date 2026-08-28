@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <unordered_set>
 
@@ -195,6 +196,13 @@ bool Qwen4ExpBackend::init() {
                                           : error));
             return false;
         }
+    }
+    const char * dispatch_evidence =
+        std::getenv("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE");
+    if (dispatch_evidence && std::strcmp(dispatch_evidence, "1") == 0 &&
+        !qwen4exp_frontier_run_rocmi4_dispatch_controls(weights_, error)) {
+        set_last_error("Qwen4Exp ROCMI4 dispatch controls failed: " + error);
+        return false;
     }
     std::fprintf(stderr,
                  "[qwen4exp] text AR initialized: layers=48 ctx=%d yarn=%s; "

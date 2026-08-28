@@ -30,6 +30,36 @@ bool env_enabled(const char * name, bool fallback) {
            std::strcmp(value, "off") != 0;
 }
 
+bool rocmi4_dispatch_evidence_enabled() {
+    static const bool enabled =
+        env_enabled("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE", false);
+    return enabled;
+}
+
+void log_rocmi4_dispatch_control(const char * control_id, const char * op,
+                                 int logical_q, const char * phase,
+                                 const ggml_tensor * target_weight) {
+    if (!rocmi4_dispatch_evidence_enabled()) return;
+    std::fprintf(stderr,
+                 "[rocmi4-w4a8-dispatch] event=control control_id=%s "
+                 "op=%s logical_q=%d target_weight=%s phase=%s\n",
+                 control_id, op, logical_q,
+                 target_weight ? target_weight->name : "none", phase);
+}
+
+void log_rocmi4_dispatch_post_compute(const char * control_id,
+                                      const char * op, int logical_q,
+                                      int physical_q,
+                                      const ggml_tensor * target_weight) {
+    if (!rocmi4_dispatch_evidence_enabled()) return;
+    std::fprintf(stderr,
+                 "[rocmi4-w4a8-dispatch] event=post_compute control_id=%s "
+                 "op=%s logical_q=%d physical_q=%d target_weight=%s "
+                 "execution=completed\n",
+                 control_id, op, logical_q, physical_q,
+                 target_weight ? target_weight->name : "none");
+}
+
 bool tensor_shape(const ggml_tensor * tensor, int dimensions,
                   int64_t ne0, int64_t ne1, int64_t ne2 = 1) {
     const int actual_dimensions = tensor ? ggml_n_dims(tensor) : 0;
@@ -398,6 +428,15 @@ bool qwen4exp_frontier_dense_eval(
         GGML_STATUS_SUCCESS) {
         error = "Qwen4Exp persistent dense graph execution failed";
         return false;
+    }
+    if (rocmi4_dispatch_evidence_enabled() &&
+        weight->type == GGML_TYPE_Q4_0_ROCMI4) {
+        std::fprintf(stderr,
+                     "[rocmi4-w4a8-dispatch] event=logical_scope op=dense "
+                     "logical_q=%d physical_q=%d type=%s execution=completed "
+                     "weight=%s\n",
+                     n_tokens, graph_width, ggml_type_name(weight->type),
+                     weight->name);
     }
     const size_t full_output_values = static_cast<size_t>(weight->ne[1]) *
                                       static_cast<size_t>(graph_width);
@@ -1686,6 +1725,110 @@ bool qwen4exp_frontier_moe_q1(const Qwen4ExpWeights & weights, int layer,
     return qwen4exp_frontier_moe_eval(
         weights.frontier->moe[static_cast<size_t>(layer)][1], input,
         input_count, output, error);
+}
+
+bool qwen4exp_frontier_run_rocmi4_dispatch_controls(
+        const Qwen4ExpWeights & weights, std::string & error) {
+    if (!weights.backend || !weights.dense_cache || !weights.frontier) {
+        error = "Qwen4Exp ROCMI4 dispatch controls require initialized frontiers";
+        return false;
+    }
+    ggml_tensor * dense_weight = nullptr;
+    int moe_layer = -1;
+    for (size_t index = 0; index < weights.layers.size(); ++index) {
+        const Qwen4ExpLayer & layer = weights.layers[index];
+        if (!dense_weight && layer.attn_qkv &&
+            layer.attn_qkv->type == GGML_TYPE_Q4_0_ROCMI4) {
+            dense_weight = layer.attn_qkv;
+        }
+        const ggml_tensor * expert = layer.experts_gate_up_tensor
+            ? layer.experts_gate_up_tensor : layer.experts_gate_tensor;
+        if (moe_layer < 0 && expert &&
+            expert->type == GGML_TYPE_Q4_0_ROCMI4 &&
+            qwen4exp_frontier_moe_available(
+                weights, static_cast<int>(index))) {
+            moe_layer = static_cast<int>(index);
+        }
+    }
+    const ggml_tensor * expert_weight = nullptr;
+    if (moe_layer >= 0) {
+        const Qwen4ExpLayer & layer =
+            weights.layers[static_cast<size_t>(moe_layer)];
+        expert_weight = layer.experts_gate_up_tensor
+            ? layer.experts_gate_up_tensor : layer.experts_gate_tensor;
+    }
+    if (!dense_weight && !expert_weight) {
+        std::fprintf(stderr,
+                     "[rocmi4-w4a8-dispatch] event=control_suite "
+                     "capability=no_eligible_rocmi4_mmq dense_q=none "
+                     "routed_expert_q=none execution=completed\n");
+        return true;
+    }
+    if (!dense_weight && expert_weight) {
+        error = "Qwen4Exp ROCMI4 routed-only dispatch capability is unsupported";
+        return false;
+    }
+
+    std::vector<float> input(16U * 2560U, 0.0f);
+    std::vector<float> output;
+    for (const int q : {1, 4, 5, 16}) {
+        const std::string control_id = "dense-q" + std::to_string(q);
+        log_rocmi4_dispatch_control(
+            control_id.c_str(), "dense", q, "begin", dense_weight);
+        if (!qwen4exp_frontier_dense_eval(
+                weights.dense_cache, weights.backend, dense_weight,
+                input.data(), 2560, q, output, error)) {
+            error = "Qwen4Exp dense dispatch control q=" +
+                    std::to_string(q) + " failed: " + error;
+            return false;
+        }
+        log_rocmi4_dispatch_post_compute(
+            control_id.c_str(), "dense", q,
+            qwen4exp_frontier_dense_cached_width(q), dense_weight);
+        log_rocmi4_dispatch_control(
+            control_id.c_str(), "dense", q, "completed", dense_weight);
+    }
+    if (expert_weight) {
+        log_rocmi4_dispatch_control(
+            "routed-expert-q1", "routed_expert", 1, "begin",
+            expert_weight);
+        if (!qwen4exp_frontier_moe_q1(
+                weights, moe_layer, input.data(), 2560, output, error)) {
+            error = "Qwen4Exp routed-expert dispatch control q=1 failed: " + error;
+            return false;
+        }
+        log_rocmi4_dispatch_post_compute(
+            "routed-expert-q1", "routed_expert", 1, 1, expert_weight);
+        log_rocmi4_dispatch_control(
+            "routed-expert-q1", "routed_expert", 1, "completed",
+            expert_weight);
+        for (const int q : {5, 16}) {
+            const std::string control_id =
+                "routed-expert-q" + std::to_string(q);
+            log_rocmi4_dispatch_control(
+                control_id.c_str(), "routed_expert", q, "begin",
+                expert_weight);
+            if (!qwen4exp_frontier_moe_batch(
+                    weights, moe_layer, input.data(),
+                    static_cast<size_t>(q) * 2560U, q, output, error)) {
+                error = "Qwen4Exp routed-expert dispatch control q=" +
+                        std::to_string(q) + " failed: " + error;
+                return false;
+            }
+            log_rocmi4_dispatch_post_compute(
+                control_id.c_str(), "routed_expert", q, q, expert_weight);
+            log_rocmi4_dispatch_control(
+                control_id.c_str(), "routed_expert", q, "completed",
+                expert_weight);
+        }
+    }
+    std::fprintf(stderr,
+                 "[rocmi4-w4a8-dispatch] event=control_suite "
+                 "capability=%s dense_q=1,4,5,16 routed_expert_q=%s "
+                 "execution=completed\n",
+                 expert_weight ? "rocmi4_dense_and_routed" : "rocmi4_dense_only",
+                 expert_weight ? "1,5,16" : "none");
+    return true;
 }
 
 bool qwen4exp_frontier_gdn_q1(

@@ -1,0 +1,97 @@
+name: ROCMI4 W4A8 compile evidence
+
+on:
+  push:
+    paths:
+      - '.github/workflows/rocmi4-w4a8-compile-evidence.yml'
+      - 'CMakeLists.txt'
+      - 'docker/Dockerfile'
+      - 'engine/CMakeLists.txt'
+      - 'engine/ggml/CMakeLists.txt'
+      - 'engine/ggml/cmake/**'
+      - 'engine/ggml/rocmfpx/**'
+      - 'engine/ggml/src/CMakeLists.txt'
+      - 'engine/ggml/src/ggml-cuda/**'
+      - 'engine/ggml/src/ggml-hip/CMakeLists.txt'
+      - 'scripts/check_rocmi4_w4a8_isa.py'
+      - 'test/test_rocmi4_w4a8_isa_gate.py'
+  pull_request:
+    paths:
+      - '.github/workflows/rocmi4-w4a8-compile-evidence.yml'
+      - 'CMakeLists.txt'
+      - 'docker/Dockerfile'
+      - 'engine/CMakeLists.txt'
+      - 'engine/ggml/CMakeLists.txt'
+      - 'engine/ggml/cmake/**'
+      - 'engine/ggml/rocmfpx/**'
+      - 'engine/ggml/src/CMakeLists.txt'
+      - 'engine/ggml/src/ggml-cuda/**'
+      - 'engine/ggml/src/ggml-hip/CMakeLists.txt'
+      - 'scripts/check_rocmi4_w4a8_isa.py'
+      - 'test/test_rocmi4_w4a8_isa_gate.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-evidence:
+    name: ${{ matrix.variant }} pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: register
+            prepack: 'OFF'
+          - variant: prepack
+            prepack: 'ON'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake python3
+
+      - name: Configure exact gfx1151 experiment
+        run: |
+          cmake -S . -B "build-isa-${{ matrix.variant }}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEMBER_ENGINE=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_HIP_EXPORT_METRICS=ON \
+            -DGGML_HIP_ROCMI4_W4A8_IU4=ON \
+            -DGGML_HIP_ROCMI4_W4A8_IU4_PREPACK=${{ matrix.prepack }}
+
+      - name: Build production HIP translation unit
+        run: |
+          cmake --build "build-isa-${{ matrix.variant }}" \
+            --target ggml-hip -j"$(nproc)"
+
+      - name: Validate saved assembly and assembled opcode
+        run: |
+          artifact_dir="build-isa-${{ matrix.variant }}/engine/ggml/src/ggml-hip"
+          stem="mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151"
+          /opt/rocm/lib/llvm/bin/llvm-objdump -d --mcpu=gfx1151 \
+            "$artifact_dir/$stem.o" > "$artifact_dir/$stem.disasm"
+          python3 scripts/check_rocmi4_w4a8_isa.py \
+            "$artifact_dir/$stem.s" \
+            --disassembly "$artifact_dir/$stem.disasm" \
+            --cmake-cache "build-isa-${{ matrix.variant }}/CMakeCache.txt" \
+            --variant "${{ matrix.variant }}"
+
+      - name: Retain compile evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocmi4-w4a8-${{ matrix.variant }}-compile-evidence
+          if-no-files-found: error
+          path: |
+            build-isa-${{ matrix.variant }}/CMakeCache.txt
+            build-isa-${{ matrix.variant }}/engine/ggml/src/ggml-hip/mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.s
+            build-isa-${{ matrix.variant }}/engine/ggml/src/ggml-hip/mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.o
+            build-isa-${{ matrix.variant }}/engine/ggml/src/ggml-hip/mmq-instance-q4_0_rocmi4-hip-amdgcn-amd-amdhsa-gfx1151.disasm
