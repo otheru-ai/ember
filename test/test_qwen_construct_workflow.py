@@ -50,19 +50,30 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
-    def test_dispatcher_disk_reclaim_is_exact_and_stops_at_floor(self) -> None:
+    def test_dispatcher_disk_reclaim_is_exact_and_keeps_tooling_margin(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
-        self.assertIn("qwen-reclaim-stale-builds-v3-20260828", body)
-        self.assertIn("required=$((1152 * 1024 * 1024 * 1024))", body)
+        self.assertIn("qwen-reclaim-stale-builds-v4-20260828", body)
+        self.assertIn("construction_floor=$((1152 * 1024 * 1024 * 1024))", body)
+        self.assertIn("required=$((1160 * 1024 * 1024 * 1024))", body)
         for digest in (
-            "922adf2cc9338b7699d83e140112b0cad2953de739887b6a7ebbcaf9f180711f",
-            "5a806d7118d132eddd471d7dbfd792709c5c639c6298d8f2aa0e10d42dfad686",
+            "7ab721ddf095ecf0526a5cc2059c308e992e26f748f33de4b1b883cc46226ab3",
+            "1d6c71627ac657b5b36defddbde3b99d2099185ec4bbed9f69ee39e09b905cdb",
+            "f6661ec650a2957a1041b738b5326f296e610be6c802526b454c0fb6350ba19b",
+            "9251ec47dd52f54be017a4c551ccdf7300727bd3ef52b70cd5829b27f05f4bd8",
+            "fec837c44a735faccec88ba773d14208a47c9440548dce931f9a02756c49a424",
+            "500f0a6829d9848a0f81e4fa828c25dbd6853d9ed69ad0ebc010673269bc57e6",
+            "cdd549e22658b0a2bca0f125cf8c7a2a1cf9f85b3f867d11bd71fe5ce30cfae4",
+            "18e184ffa6075e6aecf701d683224508634e6d8049937f481bd5ed03bddb6ec6",
+            "b9936deb22bb4d7dff6ef4e6c61064987e433755557a51e080847dfa1cb07a54",
+            "b752d459c07d24a1af925c1e95ab0ee323fe017ec7195fc7298ec47aa0c0bdeb",
+            "8088484329554efff07ca3f68624d9b23bd7e20e18717f56e0e0875c07b0bbaa",
+            "f4e095c5d8de0aa0ad339ecb928bd1a6357714a354ae604bc0b1320a294f7fcb",
         ):
             self.assertIn(digest, body)
-        self.assertIn("path_stat.st_uid != os.getuid()", body)
-        self.assertIn("path_stat.st_dev != root_stat.st_dev", body)
-        self.assertIn("shutil.rmtree(path)", body)
         self.assertIn('docker ps -aq --filter ancestor="$image"', body)
+        self.assertIn('docker ps -aq --filter ancestor="$expected_id"', body)
+        self.assertIn('dev-sha-${TARGET_SHA:0:12}', body)
+        self.assertIn("Preserving in-use stale image", body)
         self.assertIn('(( available >= required )) && break', body)
         self.assertNotIn("docker system prune", body)
         self.assertNotIn("docker volume prune", body)

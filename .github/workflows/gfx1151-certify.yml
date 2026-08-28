@@ -426,11 +426,12 @@ jobs:
           done
 
   qwen-reclaim-stale-builds:
-    # One-shot, evidence-bound recovery for the 6.393 GiB shortfall reported by
-    # runs 33136740998 and 33137503792. These are exact stale Ember build
+    # One-shot, evidence-bound recovery for the construction shortfall reported
+    # by runs 33136740998 and 33137503792. These are exact stale Ember build
     # images, not model data, volumes, build cache, or a production image. Stop
-    # as soon as the audited 1152 GiB floor is restored.
-    if: inputs.release_version == 'qwen-reclaim-stale-builds-v3-20260828'
+    # at 1160 GiB so the audited 1152 GiB construction floor remains available
+    # after the measured ~1.55 GiB revision-bound tooling tree is prepared.
+    if: inputs.release_version == 'qwen-reclaim-stale-builds-v4-20260828'
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 10
     env:
@@ -446,7 +447,9 @@ jobs:
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          required=$((1152 * 1024 * 1024 * 1024))
+          construction_floor=$((1152 * 1024 * 1024 * 1024))
+          required=$((1160 * 1024 * 1024 * 1024))
+          (( required > construction_floor ))
           before="$(df -B1 --output=avail /var/tmp/ember-qwen3.8-flash-next | tail -1)"
           [[ "$before" =~ ^[0-9]+$ ]]
           (( before < required )) || {
@@ -454,44 +457,35 @@ jobs:
             exit 0
           }
           available="$before"
-          stale_paths=()
-          for path in "${stale_paths[@]}"; do
-            python3 - "$path" <<'PY'
-          import os, pathlib, shutil, stat, sys
-          path = pathlib.Path(sys.argv[1])
-          root = pathlib.Path("/var/tmp/ember-qwen3.8-flash-next")
-          allowed = {
-              "tooling-candidate-bc3b0999999bab3145719004ba8e3462156d52e9",
-          }
-          root_stat = root.lstat()
-          path_stat = path.lstat()
-          if (path.parent != root or path.name not in allowed
-                  or not stat.S_ISDIR(root_stat.st_mode)
-                  or stat.S_ISLNK(root_stat.st_mode)
-                  or not stat.S_ISDIR(path_stat.st_mode)
-                  or stat.S_ISLNK(path_stat.st_mode)
-                  or path_stat.st_dev != root_stat.st_dev
-                  or path_stat.st_uid != os.getuid()):
-              raise SystemExit(f"refusing unsafe stale tooling path: {path}")
-          shutil.rmtree(path)
-          PY
-            available="$(df -B1 --output=avail /var/tmp/ember-qwen3.8-flash-next | tail -1)"
-            [[ "$available" =~ ^[0-9]+$ ]]
-            (( available >= required )) && break
-          done
           stale_images=(
-            'ghcr.io/otheru-ai/ember:dev-sha-051b43846756 sha256:922adf2cc9338b7699d83e140112b0cad2953de739887b6a7ebbcaf9f180711f'
-            'ghcr.io/otheru-ai/ember:sha-051b43846756 sha256:5a806d7118d132eddd471d7dbfd792709c5c639c6298d8f2aa0e10d42dfad686'
+            'ghcr.io/otheru-ai/ember:dev-sha-10236b8489a3 sha256:7ab721ddf095ecf0526a5cc2059c308e992e26f748f33de4b1b883cc46226ab3'
+            'ghcr.io/otheru-ai/ember:dev-sha-2f99a12f8afd sha256:1d6c71627ac657b5b36defddbde3b99d2099185ec4bbed9f69ee39e09b905cdb'
+            'ghcr.io/otheru-ai/ember:dev-sha-34f832863317 sha256:f6661ec650a2957a1041b738b5326f296e610be6c802526b454c0fb6350ba19b'
+            'ghcr.io/otheru-ai/ember:dev-sha-35eca745378a sha256:9251ec47dd52f54be017a4c551ccdf7300727bd3ef52b70cd5829b27f05f4bd8'
+            'ghcr.io/otheru-ai/ember:dev-sha-3afa5b3d8a86 sha256:fec837c44a735faccec88ba773d14208a47c9440548dce931f9a02756c49a424'
+            'ghcr.io/otheru-ai/ember:dev-sha-3f4d1ee72b71 sha256:500f0a6829d9848a0f81e4fa828c25dbd6853d9ed69ad0ebc010673269bc57e6'
+            'ghcr.io/otheru-ai/ember:dev-sha-4af543cc1ad0 sha256:cdd549e22658b0a2bca0f125cf8c7a2a1cf9f85b3f867d11bd71fe5ce30cfae4'
+            'ghcr.io/otheru-ai/ember:dev-sha-6bc799ba9f22 sha256:18e184ffa6075e6aecf701d683224508634e6d8049937f481bd5ed03bddb6ec6'
+            'ghcr.io/otheru-ai/ember:dev-sha-78261de805a5 sha256:b9936deb22bb4d7dff6ef4e6c61064987e433755557a51e080847dfa1cb07a54'
+            'ghcr.io/otheru-ai/ember:dev-sha-90bf8f9f9096 sha256:b752d459c07d24a1af925c1e95ab0ee323fe017ec7195fc7298ec47aa0c0bdeb'
+            'ghcr.io/otheru-ai/ember:dev-sha-936ac6f1ec95 sha256:8088484329554efff07ca3f68624d9b23bd7e20e18717f56e0e0875c07b0bbaa'
+            'ghcr.io/otheru-ai/ember:dev-sha-9e44f17e8189 sha256:f4e095c5d8de0aa0ad339ecb928bd1a6357714a354ae604bc0b1320a294f7fcb'
           )
           if (( available < required )); then
             for descriptor in "${stale_images[@]}"; do
               read -r image expected_id <<<"$descriptor"
               actual_id="$(docker image inspect --format '{{.Id}}' "$image")"
               test "$actual_id" = "$expected_id"
+              test "$image" != "ghcr.io/otheru-ai/ember:dev-sha-${TARGET_SHA:0:12}"
               source="$(docker image inspect --format \
                 '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")"
-              test "$source" = https://github.com/otheru-ai/ember
-              test -z "$(docker ps -aq --filter ancestor="$image")"
+              test "$source" = "https://github.com/otheru-ai/ember"
+              tag_consumers="$(docker ps -aq --filter ancestor="$image")"
+              id_consumers="$(docker ps -aq --filter ancestor="$expected_id")"
+              if [[ -n "$tag_consumers$id_consumers" ]]; then
+                echo "Preserving in-use stale image: $image ($expected_id)"
+                continue
+              fi
               docker image rm "$image"
               available="$(df -B1 --output=avail \
                 /var/tmp/ember-qwen3.8-flash-next | tail -1)"
