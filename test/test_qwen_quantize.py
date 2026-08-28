@@ -520,6 +520,20 @@ class Fixture:
                     "schema_version": 2,
                 },
             },
+            "extraction": {
+                "semantic_capture_point": "decoder_layer.residual_writer.output",
+                "transformers_hook_module": (
+                    "model.language_model.layers.N."
+                    "{linear_attn.out_proj|self_attn.o_proj}"
+                ),
+                "transformers_hook_value": "forward_output[:,-1,:]",
+                "hidden_states_api_used": False,
+                "policy_evidence": {
+                    "source_revision": "a3c6a728510f91394e991504951ac316cd3a89af",
+                    "deepseek_reference_band": "10-42",
+                    "qwen_status": "exploratory_transfer_hypothesis",
+                },
+            },
             "corpora": [{
                 "id": "fixture-refusal-pairs",
                 "class": "bad_target",
@@ -595,6 +609,7 @@ class Fixture:
         direction_basis = {
             "source": manifest["source"],
             "tooling": manifest["tooling"],
+            "extraction": manifest["extraction"],
             "corpora": [{key: corpus.get(key) for key in (
                 "class", "role", "sha256", "record_count")}
                         for corpus in manifest["corpora"]],
@@ -894,7 +909,7 @@ class QwenQuantizeTests(unittest.TestCase):
 
     def test_rocmi4_sweep_control_rejects_loose_or_mismatched_authority(self) -> None:
         cases = ("missing", "one-sided", "bad-digest", "legacy-schema",
-                 "wrong-scale", "stock", "other-arm")
+                 "wrong-extraction", "wrong-scale", "stock", "other-arm")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
                 fixture = Fixture(Path(raw))
@@ -903,6 +918,11 @@ class QwenQuantizeTests(unittest.TestCase):
                     schema_version=(1 if case == "legacy-schema" else
                                     qwen_quantize.SELECTION_PLAN_SCHEMA_VERSION),
                 )
+                if case == "wrong-extraction":
+                    value = json.loads(plan.read_text(encoding="utf-8"))
+                    value["sweep_configurations"][0]["direction_basis"][
+                        "extraction"]["hidden_states_api_used"] = True
+                    plan.write_text(json.dumps(value), encoding="utf-8")
                 command = [*fixture.command(), "--quantization-arm", "rocmi4-control"]
                 if case == "one-sided":
                     command += ["--bakeoff-plan", str(plan)]
@@ -923,6 +943,7 @@ class QwenQuantizeTests(unittest.TestCase):
                     "one-sided": "required together",
                     "bad-digest": "SHA-256 mismatch",
                     "legacy-schema": "selection-only canonical plan",
+                    "wrong-extraction": "exactly one canonical sweep configuration",
                     "wrong-scale": "exactly one canonical sweep configuration",
                     "stock": "applies only to non-stock",
                     "other-arm": "applies only to non-stock",

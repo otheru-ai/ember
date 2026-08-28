@@ -1365,9 +1365,15 @@ def validate_rocmi4_sweep_authorization(
         if match is None:
             raise PipelineError("rocmi4-control intervention contains an unvalidated target")
         actual_scales[str(int(match.group(1)))] = float(target["scale"])
+    extraction = require_mapping(
+        intervention_manifest.get("extraction"), "intervention.extraction")
     expected_basis = {
         "source": intervention_manifest.get("source"),
         "tooling": intervention_manifest.get("tooling"),
+        "extraction": {key: extraction.get(key) for key in (
+            "semantic_capture_point", "transformers_hook_module",
+            "transformers_hook_value", "hidden_states_api_used",
+            "policy_evidence")},
         "corpora": [{key: corpus.get(key) for key in (
             "class", "role", "sha256", "record_count")}
                     for corpus in intervention_manifest.get("corpora", [])],

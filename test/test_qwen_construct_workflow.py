@@ -148,7 +148,14 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                   mock.patch.object(candidate_request.quant,
                                     "validate_intervention_manifest",
                                     return_value=({"kind": "directional_ablation"},
-                                                  {"target_count": 1}))):
+                                                  {"target_count": 1})),
+                  mock.patch.object(candidate_request.quant,
+                                    "validated_quantization_arms",
+                                    return_value={"rocmi4-control": {}}),
+                  mock.patch.object(candidate_request.quant,
+                                    "validate_rocmi4_sweep_authorization",
+                                    return_value={"configuration_id":
+                                                  configuration["id"]})):
                 request_value, actual = candidate_request.derive(
                     intent_path, intent["sha256"], "a" * 40)
             self.assertEqual(actual, output)

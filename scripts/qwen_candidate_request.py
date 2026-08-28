@@ -163,6 +163,15 @@ def derive(intent_path: Path, intent_sha256: str,
     # cannot be optimized away as a digest-only check.
     if manifest.get("kind") != "directional_ablation":
         fail("selected intervention is not directional ablation")
+    if arm == "rocmi4-control":
+        quant_arm = quant.validated_quantization_arms(profile_value).get(arm)
+        if quant_arm is None:
+            fail("selection profile omits the ROCMI4 control arm")
+        authorization = quant.validate_rocmi4_sweep_authorization(
+            _plan_path, plan_desc["sha256"], profile_path,
+            plan["release_profile"]["sha256"], quant_arm, manifest)
+        if authorization.get("configuration_id") != configuration["id"]:
+            fail("ROCMI4 sweep authorization selected a different configuration")
 
     cache_desc, _cache, _ = pinned(intent.get("cache_manifest"), "BF16 cache manifest")
     rocmi4_desc, _rocmi4, _ = pinned(
