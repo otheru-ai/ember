@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Stage and verify only Qwen's digest-pinned selection-phase corpus.
 
-The authoritative OtherU checkout is root-readable on the gfx1151 host.  This
-helper is run once in a capability-minimal root container to copy four exact
-files into a durable runner-owned directory, then unprivileged to bind those
-bytes to Ember's pinned corpus contract.  The final-heldout partition is never
-opened or named by this selection-only capability boundary.
+The authoritative OtherU artifacts are root-readable on the gfx1151 host. This
+helper is run once in a capability-minimal root container to copy three exact
+artifacts and synthesize their phase manifest from Ember's pinned corpus
+contract, then unprivileged to bind those bytes back to that contract. The
+protected combined manifest is deliberately not required: the Actions runner
+and Docker daemon can have different mount namespaces for that file. The
+final-heldout partition is never opened or named by this selection capability.
 """
 
 from __future__ import annotations
@@ -81,10 +83,43 @@ def write_all(descriptor: int, block: bytes) -> None:
         remaining = remaining[written:]
 
 
-def stage(source: Path, destination: Path, runner_uid: int, runner_gid: int) -> dict[str, Any]:
+def selection_manifest(contract_path: Path, contract_sha256: str,
+                       revision: str) -> bytes:
+    regular_file(contract_path, "corpus contract")
+    if sha256(contract_path) != contract_sha256:
+        raise SelectionCorpusError("corpus contract digest differs")
+    contract = read_object(contract_path, "corpus contract")
+    derived = contract.get("derived_artifacts")
+    if (contract.get("source", {}).get("revision") != revision
+            or contract.get("pairwise_request_overlap_count") != 0
+            or not isinstance(derived, dict)):
+        raise SelectionCorpusError("corpus contract does not define the pinned partition")
+    artifacts = []
+    for name in ARTIFACT_NAMES:
+        row = derived.get(name)
+        if (not isinstance(row, dict) or set(row) != {"sha256", "record_count"}
+                or not isinstance(row.get("sha256"), str)
+                or len(row["sha256"]) != 64
+                or isinstance(row.get("record_count"), bool)
+                or not isinstance(row.get("record_count"), int)
+                or row["record_count"] <= 0):
+            raise SelectionCorpusError(f"corpus contract artifact is malformed: {name}")
+        artifacts.append({"filename": name, **row})
+    value = {
+        "schema_version": 1,
+        "source": contract["source"],
+        "partition": {"pairwise_request_overlap_count": 0},
+        "artifacts": artifacts,
+    }
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def stage(source: Path, destination: Path, runner_uid: int, runner_gid: int,
+          contract_path: Path, contract_sha256: str, revision: str) -> dict[str, Any]:
     """Copy the exact selection inventory or validate a complete prior stage."""
     exact_directory(source, "protected selection corpus")
     exact_directory(destination, "durable selection corpus")
+    manifest_bytes = selection_manifest(contract_path, contract_sha256, revision)
     try:
         present = list(destination.iterdir())
     except OSError as exc:
@@ -95,24 +130,29 @@ def stage(source: Path, destination: Path, runner_uid: int, runner_gid: int) -> 
 
     for name in STAGED_NAMES:
         source_path = source / name
-        source_info = regular_file(source_path, f"protected selection source {name}")
+        source_info = (regular_file(source_path, f"protected selection source {name}")
+                       if name != MANIFEST_NAME else None)
         output = destination / name
         if not present:
             source_fd = -1
             output_fd = -1
             try:
-                source_fd = os.open(
-                    source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                opened = os.fstat(source_fd)
-                if ((opened.st_dev, opened.st_ino) !=
-                        (source_info.st_dev, source_info.st_ino)
-                        or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
-                    raise SelectionCorpusError(
-                        f"protected selection source changed while opening: {name}")
                 output_fd = os.open(
                     output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
-                while block := os.read(source_fd, COPY_CHUNK):
-                    write_all(output_fd, block)
+                if name == MANIFEST_NAME:
+                    write_all(output_fd, manifest_bytes)
+                else:
+                    source_fd = os.open(
+                        source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                    opened = os.fstat(source_fd)
+                    assert source_info is not None
+                    if ((opened.st_dev, opened.st_ino) !=
+                            (source_info.st_dev, source_info.st_ino)
+                            or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1):
+                        raise SelectionCorpusError(
+                            f"protected selection source changed while opening: {name}")
+                    while block := os.read(source_fd, COPY_CHUNK):
+                        write_all(output_fd, block)
                 os.fchown(output_fd, runner_uid, runner_gid)
                 os.fchmod(output_fd, 0o400)
                 os.fsync(output_fd)
@@ -127,6 +167,9 @@ def stage(source: Path, destination: Path, runner_uid: int, runner_gid: int) -> 
                 or stat.S_IMODE(staged.st_mode) != 0o400):
             raise SelectionCorpusError(
                 f"durable selection artifact metadata differs: {name}")
+        if (name == MANIFEST_NAME
+                and sha256(output) != hashlib.sha256(manifest_bytes).hexdigest()):
+            raise SelectionCorpusError("durable selection manifest differs from the contract")
 
     os.chown(destination, runner_uid, runner_gid, follow_symlinks=False)
     os.chmod(destination, 0o500, follow_symlinks=False)
@@ -197,6 +240,9 @@ def parser() -> argparse.ArgumentParser:
     staging.add_argument("--destination", type=Path, required=True)
     staging.add_argument("--runner-uid", type=int, required=True)
     staging.add_argument("--runner-gid", type=int, required=True)
+    staging.add_argument("--contract", type=Path, required=True)
+    staging.add_argument("--contract-sha256", required=True)
+    staging.add_argument("--revision", required=True)
     validation = commands.add_parser("verify")
     validation.add_argument("--contract", type=Path, required=True)
     validation.add_argument("--contract-sha256", required=True)
@@ -210,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "stage":
             result = stage(args.source.absolute(), args.destination.absolute(),
-                           args.runner_uid, args.runner_gid)
+                           args.runner_uid, args.runner_gid, args.contract.absolute(),
+                           args.contract_sha256, args.revision)
         else:
             result = verify(args.contract.absolute(), args.contract_sha256,
                             args.corpus.absolute(), args.revision)

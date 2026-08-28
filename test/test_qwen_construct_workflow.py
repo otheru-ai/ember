@@ -72,6 +72,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         contract = root / "contract.json"
         contract.write_text(json.dumps({
             "source": {"revision": revision},
+            "pairwise_request_overlap_count": 0,
             "derived_artifacts": {
                 row["filename"]: {"sha256": row["sha256"],
                                   "record_count": row["record_count"]}
@@ -84,19 +85,25 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source, staged, revision = self.selection_fixture(root)
-            first = selection_stage.stage(source, staged, os.getuid(), os.getgid())
+            contract = root / "contract.json"
+            contract_sha = hashlib.sha256(contract.read_bytes()).hexdigest()
+            # The Docker daemon's protected /srv view exposes the artifacts but
+            # not the Actions-host phase manifest. The helper must not depend
+            # on that namespace-sensitive source file.
+            (source / selection_stage.MANIFEST_NAME).unlink()
+            first = selection_stage.stage(
+                source, staged, os.getuid(), os.getgid(), contract, contract_sha, revision)
             self.assertFalse(first["reused"])
             self.assertEqual(set(path.name for path in staged.iterdir()),
                              set(selection_stage.STAGED_NAMES))
             self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o500)
             for path in staged.iterdir():
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o400)
-            second = selection_stage.stage(source, staged, os.getuid(), os.getgid())
+            second = selection_stage.stage(
+                source, staged, os.getuid(), os.getgid(), contract, contract_sha, revision)
             self.assertTrue(second["reused"])
-            contract = root / "contract.json"
             verified = selection_stage.verify(
-                contract, hashlib.sha256(contract.read_bytes()).hexdigest(),
-                staged, revision)
+                contract, contract_sha, staged, revision)
             self.assertEqual(verified["status"], "complete")
 
             staged.chmod(0o700)
@@ -104,16 +111,19 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             with self.assertRaisesRegex(selection_stage.SelectionCorpusError,
                                         "unexpected corpus entry"):
                 selection_stage.verify(
-                    contract, hashlib.sha256(contract.read_bytes()).hexdigest(),
-                    staged, revision)
+                    contract, contract_sha, staged, revision)
 
     def test_selection_corpus_stage_rejects_partial_prior_output(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            source, staged, _revision = self.selection_fixture(Path(raw))
+            root = Path(raw)
+            source, staged, revision = self.selection_fixture(root)
+            contract = root / "contract.json"
             (staged / selection_stage.MANIFEST_NAME).write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(selection_stage.SelectionCorpusError,
                                         "partial or unexpected"):
-                selection_stage.stage(source, staged, os.getuid(), os.getgid())
+                selection_stage.stage(
+                    source, staged, os.getuid(), os.getgid(), contract,
+                    hashlib.sha256(contract.read_bytes()).hexdigest(), revision)
 
     def test_dispatcher_disk_reclaim_is_exact_and_keeps_tooling_margin(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")

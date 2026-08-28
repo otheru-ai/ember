@@ -347,10 +347,12 @@ jobs:
             install -d -m 700 "$QWEN_SELECTION_CORPUS_DIR"
           fi
           test -d "$QWEN_SELECTION_CORPUS_DIR" && test ! -L "$QWEN_SELECTION_CORPUS_DIR"
-          # The authoritative OtherU checkout is deliberately root-readable
-          # only.  Mirror the control-capture boundary: a capability-minimal
-          # helper may copy exactly the selection manifest and its three
-          # digest-pinned artifacts, but never the final-heldout partition.
+          contract="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-otheru-corpus-contract.json"
+          # The authoritative OtherU artifacts are deliberately root-readable
+          # only. Mirror the control-capture boundary: a capability-minimal
+          # helper copies exactly three digest-pinned artifacts and synthesizes
+          # their manifest from the checked-in contract. It never opens the
+          # final-heldout partition or the namespace-sensitive combined manifest.
           docker run --rm --network none --read-only \
             --memory 256m --memory-swap 256m \
             --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
@@ -362,8 +364,9 @@ jobs:
             --entrypoint /usr/bin/python3 "$QWEN_BUILDER_IMAGE" \
             "$GITHUB_WORKSPACE/scripts/qwen_selection_corpus_stage.py" stage \
               --source /source --destination /staged \
-              --runner-uid "$uid" --runner-gid "$gid"
-          contract="$GITHUB_WORKSPACE/share/quant_eval/qwen3.8-otheru-corpus-contract.json"
+              --runner-uid "$uid" --runner-gid "$gid" \
+              --contract "$contract" --contract-sha256 "$CORPUS_CONTRACT_SHA256" \
+              --revision "$OTHERU_REVISION"
           python3 scripts/qwen_selection_corpus_stage.py verify \
             --contract "$contract" --contract-sha256 "$CORPUS_CONTRACT_SHA256" \
             --corpus "$QWEN_SELECTION_CORPUS_DIR" --revision "$OTHERU_REVISION"
