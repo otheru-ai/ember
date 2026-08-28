@@ -333,8 +333,9 @@ class CandidateBuilderTests(unittest.TestCase):
                                "gguf_writer_temp_cleanup": {
                                    "policy": "exact_converter_private_tmp_residue_v3",
                                    "main_removed": [], "mmproj_removed": []}},
-                "resources": {"free_bytes": 1152 * quant.GIB,
-                              "physical_ram_bytes": 120 * quant.GIB},
+                "resources": {"free_disk_bytes": 1152 * quant.GIB,
+                              "physical_ram_bytes": 120 * quant.GIB,
+                              "minimum_free_gib": 1152, "minimum_ram_gib": 120},
                 "measurement": {"status": "measured_target_cgroup_v2",
                                 "memory_limit_bytes": builder.MEMORY_LIMIT_BYTES,
                                 "swap_limit_bytes": 0, "cgroup_peak_bytes": 1234},
@@ -389,6 +390,14 @@ class CandidateBuilderTests(unittest.TestCase):
                     digest(fixture.profile), tools)
             manifest["conversion"]["gguf_writer_temp_cleanup"]["main_removed"] = [
                 tree_cleanup]
+            write_json(manifest_path, manifest)
+            manifest["resources"]["minimum_free_gib"] = 1151
+            write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(quant.PipelineError, "construction preflight"):
+                quant.validate_bf16_cache_manifest(
+                    manifest_path, digest(manifest_path), profile,
+                    digest(fixture.profile), tools)
+            manifest["resources"]["minimum_free_gib"] = 1152
             write_json(manifest_path, manifest)
             # The splitter embeds its absolute build directory.  Rebuilding
             # pinned source in a new Ember revision may change only this binary

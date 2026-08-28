@@ -540,9 +540,16 @@ def validate_bf16_cache_manifest(
     for label in ("main_removed", "mmproj_removed"):
         validate_gguf_writer_temp_cleanup_rows(cleanup.get(label))
     resources = require_mapping(manifest.get("resources"), "BF16 cache resources")
-    if (not isinstance(resources.get("free_bytes"), int)
-            or resources.get("free_bytes", 0) < 1152 * GIB
+    require_exact_keys(resources, {
+        "free_disk_bytes", "physical_ram_bytes", "minimum_free_gib", "minimum_ram_gib",
+    }, "BF16 cache resources")
+    if (resources.get("minimum_free_gib") != 1152
+            or resources.get("minimum_ram_gib") != 120
+            or not isinstance(resources.get("free_disk_bytes"), int)
+            or isinstance(resources.get("free_disk_bytes"), bool)
+            or resources.get("free_disk_bytes", 0) < 1152 * GIB
             or not isinstance(resources.get("physical_ram_bytes"), int)
+            or isinstance(resources.get("physical_ram_bytes"), bool)
             or resources.get("physical_ram_bytes", 0) < 120 * GIB):
         raise PipelineError("BF16 cache lacks the pinned disk/RAM construction preflight")
     measurement = require_mapping(manifest.get("measurement"), "BF16 cache measurement")
