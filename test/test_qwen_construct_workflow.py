@@ -56,7 +56,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             body.index("  qwen-reclaim-stale-builds:"):
             body.index("\n  certify:", body.index("  qwen-reclaim-stale-builds:"))
         ]
-        self.assertIn("qwen-reclaim-stale-builds-v5-20260828", body)
+        self.assertIn("qwen-reclaim-stale-builds-v6-20260828", body)
         self.assertIn('CALLER_SHA: ${{ github.sha }}', reclaim)
         self.assertIn('test "$CALLER_SHA" = "$TARGET_SHA"', reclaim)
         self.assertNotIn("actions/checkout", reclaim)
@@ -81,6 +81,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertNotIn("dev-sha-bc3b0999999b", reclaim)
         self.assertIn('docker ps -aq --filter ancestor="$image"', body)
         self.assertIn('docker ps -aq --filter ancestor="$expected_id"', body)
+        self.assertIn('Already absent stale image:', body)
         self.assertIn('^ghcr\\.io/otheru-ai/ember:dev-sha-[0-9a-f]{12}$', body)
         self.assertIn('^sha256:[0-9a-f]{64}$', body)
         self.assertIn('dev-sha-${TARGET_SHA:0:12}', body)
