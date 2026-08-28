@@ -26,7 +26,7 @@ ENGINE_REVISION = "1" * 40
 CONTAINER_IMAGE = "ghcr.io/otheru/ember@sha256:" + "2" * 64
 
 
-def write_mmproj_fixture(path: Path) -> None:
+def write_mmproj_fixture(path: Path, mutation: str | None = None) -> None:
     metadata = [
         ("general.architecture", 8, "clip"),
         ("general.file_type", 4, 32),
@@ -35,7 +35,17 @@ def write_mmproj_fixture(path: Path) -> None:
         ("clip.vision.projection_dim", 4, 2560),
         ("clip.vision.spatial_merge_size", 4, 2),
     ]
-    payload = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, len(metadata)))
+    tensors = [dict(name=row["name"], shape=list(row["shape"]))
+               for row in qwen_release_package.vision_inventory.load_contract()["tensors"]]
+    if mutation == "missing":
+        tensors.pop()
+    elif mutation == "duplicate":
+        tensors[-1]["name"] = tensors[0]["name"]
+    elif mutation == "wrong_shape":
+        tensors[0]["shape"][0] += 1
+    elif mutation is not None:
+        raise ValueError(f"unknown mmproj fixture mutation: {mutation}")
+    payload = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(metadata)))
 
     def add_string(value: str) -> None:
         encoded = value.encode()
@@ -51,8 +61,12 @@ def write_mmproj_fixture(path: Path) -> None:
             payload.extend(struct.pack("<I", value))
         elif kind == 7:
             payload.extend(struct.pack("<?", value))
-    add_string("v.patch_embd.weight")
-    payload.extend(struct.pack("<IQIQ", 1, 1, 30, 0))
+    for tensor in tensors:
+        add_string(tensor["name"])
+        payload.extend(struct.pack("<I", len(tensor["shape"])))
+        payload.extend(struct.pack("<" + "Q" * len(tensor["shape"]),
+                                   *tensor["shape"]))
+        payload.extend(struct.pack("<IQ", 30, 0))
     payload.extend(b"\0" * ((-len(payload)) % 32))
     payload.extend(b"\0\0")
     path.write_bytes(payload)
@@ -369,6 +383,12 @@ class QwenReleasePackageTests(unittest.TestCase):
                 manifest["companion_artifacts"][0]["inspection"]["metadata"]["general.file_type"],
                 32,
             )
+            self.assertEqual(
+                manifest["companion_artifacts"][0]["inspection"][
+                    "tensor_inventory_sha256"],
+                qwen_release_package.vision_inventory.load_contract()[
+                    "tensor_inventory_sha256"],
+            )
             self.assertFalse(
                 manifest["certification"]["vision"]["real_weight_differential_certified"]
             )
@@ -409,6 +429,25 @@ class QwenReleasePackageTests(unittest.TestCase):
                     "--profile", str(profile), "--artifact", str(artifact),
                     "--license", str(license_path), "--build-record", str(build_record),
                     "--engine-revision", ENGINE_REVISION, "--container-image", CONTAINER_IMAGE,
+                    "--out-dir", str(tmp / "out"),
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected, result.stderr)
+
+    def test_rejects_inexact_mmproj_tensor_inventory(self) -> None:
+        for mutation, expected in (("missing", "count mismatch"),
+                                   ("duplicate", "duplicate"),
+                                   ("wrong_shape", "shape mismatch")):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                profile, artifact, license_path, build_record = self.synthetic_inputs(tmp)
+                mmproj = tmp / "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
+                write_mmproj_fixture(mmproj, mutation)
+                result = self.run_script(
+                    "--profile", str(profile), "--artifact", str(artifact),
+                    "--license", str(license_path), "--build-record", str(build_record),
+                    "--engine-revision", ENGINE_REVISION,
+                    "--container-image", CONTAINER_IMAGE,
                     "--out-dir", str(tmp / "out"),
                 )
                 self.assertEqual(result.returncode, 2)

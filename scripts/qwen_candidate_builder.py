@@ -344,7 +344,10 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
     mmproj_path = cache_dir / str(mmproj.get("name", ""))
     mmproj_exact = quant.inspect_exact_file(
         mmproj_path, mmproj.get("sha256"), mmproj.get("size_bytes"), "vision mmproj")
-    quant.validate_bf16_qwen_mmproj_gguf(mmproj_path)
+    mmproj_gguf = quant.validate_bf16_qwen_mmproj_gguf(mmproj_path)
+    recorded_gguf = mmproj.get("gguf")
+    if recorded_gguf is not None and recorded_gguf != mmproj_gguf:
+        raise BuilderError("cached vision mmproj inventory differs from its creation record")
     mtp_exact = quant.inspect_exact_file(
         args.mtp.absolute(), args.mtp_sha256, args.mtp_bytes, "MTP companion")
     quant.validate_mtp_companion_gguf(
@@ -368,7 +371,8 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
              "export_manifest_sha256": export_evidence["sha256"]},
             {"role": "vision_mmproj", "enabled": True,
              "path": mmproj_exact["path"], "size_bytes": mmproj_exact["size_bytes"],
-             "sha256": mmproj_exact["sha256"], "format": "BF16"},
+             "sha256": mmproj_exact["sha256"], "format": "BF16",
+             "tensor_inventory_sha256": mmproj_gguf["tensor_inventory_sha256"]},
         ],
     }
     write_json_fsync(output, payload)

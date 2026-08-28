@@ -19,6 +19,7 @@ import sys
 from typing import Any
 
 import qwen_bakeoff as bakeoff
+import qwen_vision_inventory as vision_inventory
 
 
 CONSTRUCTION_SCHEMA = "ember.qwen3.8.candidate-construction.v1"
@@ -179,7 +180,10 @@ def validate_companion_inventory(
     exact_file(mtp.get("path"), mtp.get("sha256"), "MTP companion", mtp.get("size_bytes"))
     export = exact_file(mtp.get("export_manifest_path"), mtp.get("export_manifest_sha256"),
                         "MTP export manifest")
-    if mmproj.get("enabled") is not True or mmproj.get("format") != "BF16":
+    vision_contract = vision_inventory.load_contract()
+    if (mmproj.get("enabled") is not True or mmproj.get("format") != "BF16"
+            or mmproj.get("tensor_inventory_sha256") !=
+               vision_contract["tensor_inventory_sha256"]):
         fail("vision companion must be enabled BF16")
     exact_file(mmproj.get("path"), mmproj.get("sha256"), "vision mmproj",
                mmproj.get("size_bytes"))
@@ -212,8 +216,10 @@ def validate_build_companion(
             mtp.get("export_manifest_sha256")):
         fail("build-record MTP provenance differs from canonical inventory")
     expected_mmproj = build_roles["vision_mmproj"]
-    if any(expected_mmproj.get(key) != mmproj.get(key)
-           for key in ("path", "sha256", "size_bytes", "format")):
+    if (any(expected_mmproj.get(key) != mmproj.get(key)
+            for key in ("path", "sha256", "size_bytes", "format"))
+            or (expected_mmproj.get("gguf_contract") or {}).get(
+                "tensor_inventory_sha256") != mmproj.get("tensor_inventory_sha256")):
         fail("build-record mmproj provenance differs from canonical inventory")
 
 

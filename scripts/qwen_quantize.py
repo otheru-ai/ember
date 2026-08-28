@@ -32,6 +32,11 @@ import tempfile
 import time
 from typing import Any, BinaryIO
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+import qwen_vision_inventory as vision_inventory
+
 
 GIB = 1024 ** 3
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -735,7 +740,8 @@ def validate_companion_inventory(
         })
     else:
         require_exact_keys(
-            mmproj, {"role", "enabled", "path", "size_bytes", "sha256", "format"},
+            mmproj, {"role", "enabled", "path", "size_bytes", "sha256", "format",
+                     "tensor_inventory_sha256"},
             "enabled vision_mmproj companion",
         )
         required_companions = profile["artifact"].get("required_companion_artifacts")
@@ -754,6 +760,9 @@ def validate_companion_inventory(
             "vision_mmproj companion",
         )
         mmproj_gguf = validate_bf16_qwen_mmproj_gguf(Path(mmproj_path))
+        if (mmproj.get("tensor_inventory_sha256") !=
+                mmproj_gguf["tensor_inventory_sha256"]):
+            raise PipelineError("vision_mmproj tensor inventory digest differs")
         normalized_roles.append({
             "role": "vision_mmproj", "enabled": True, "artifact_present": True,
             "format": mmproj["format"], "gguf_contract": mmproj_gguf,
@@ -2231,12 +2240,18 @@ def validate_bf16_qwen_mmproj_gguf(path: Path) -> dict[str, Any]:
     }
     if any(metadata.get(key, {}).get("value") != value for key, value in expected.items()):
         raise PipelineError("vision mmproj GGUF metadata is not the pinned Qwen3.8 BF16 tower")
+    try:
+        inventory = vision_inventory.validate_inventory(inspected["tensors"])
+    except vision_inventory.VisionInventoryError as exc:
+        raise PipelineError(str(exc)) from exc
     tensor_types = {item["type"] for item in inspected["tensors"]}
     if 30 not in tensor_types or not tensor_types.issubset({0, 30}):
         raise PipelineError("vision mmproj tensor inventory is not unquantized BF16/F32")
     return {
         "version": inspected["version"], "tensor_count": len(inspected["tensors"]),
         "tensor_types": sorted(tensor_types), "metadata": expected,
+        "tensor_inventory_contract": inventory["contract_schema"],
+        "tensor_inventory_sha256": inventory["tensor_inventory_sha256"],
     }
 
 

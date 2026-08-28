@@ -26,6 +26,11 @@ import sys
 import tempfile
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+import qwen_vision_inventory as vision_inventory
+
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 OCI_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -177,17 +182,18 @@ def inspect_bf16_qwen_mmproj(path: Path) -> dict[str, Any]:
             parsed = value(kind, key in wanted)
             if key in wanted:
                 metadata[key] = parsed
+        tensors: list[dict[str, Any]] = []
         tensor_types: set[int] = set()
         offsets: list[int] = []
         for _ in range(tensor_count):
-            string()
+            name = string()
             dimensions = integer("<I")
             if dimensions > 8:
                 raise PackageError("vision mmproj tensor rank exceeds the audit bound")
-            for _ in range(dimensions):
-                integer("<Q")
+            shape = [integer("<Q") for _ in range(dimensions)]
             tensor_types.add(integer("<I"))
             offsets.append(integer("<Q"))
+            tensors.append({"name": name, "shape": shape})
         data_start = (stream.tell() + 31) & ~31
         file_size = path.stat().st_size
         if data_start >= file_size or any(offset >= file_size - data_start for offset in offsets):
@@ -203,6 +209,10 @@ def inspect_bf16_qwen_mmproj(path: Path) -> dict[str, Any]:
     }
     if any(metadata.get(key) != expected_value for key, expected_value in expected.items()):
         raise PackageError("vision mmproj metadata is not the pinned Qwen3.8 BF16 tower")
+    try:
+        inventory = vision_inventory.validate_inventory(tensors)
+    except vision_inventory.VisionInventoryError as exc:
+        raise PackageError(str(exc)) from exc
     if 30 not in tensor_types or not tensor_types.issubset({0, 30}):
         raise PackageError("vision mmproj tensor inventory is not unquantized BF16/F32")
     return {
@@ -210,6 +220,8 @@ def inspect_bf16_qwen_mmproj(path: Path) -> dict[str, Any]:
         "tensor_count": tensor_count,
         "tensor_types": sorted(tensor_types),
         "metadata": metadata,
+        "tensor_inventory_contract": inventory["contract_schema"],
+        "tensor_inventory_sha256": inventory["tensor_inventory_sha256"],
     }
 
 

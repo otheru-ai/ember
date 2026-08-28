@@ -111,7 +111,7 @@ def make_mtp_companion(path: Path, source_revision: str, matrix_contract: str) -
     path.write_bytes(output)
 
 
-def make_mmproj_companion(path: Path) -> None:
+def make_mmproj_companion(path: Path, mutation: str | None = None) -> None:
     def string(value: str) -> bytes:
         encoded = value.encode("utf-8")
         return struct.pack("<Q", len(encoded)) + encoded
@@ -124,7 +124,17 @@ def make_mmproj_companion(path: Path) -> None:
         ("clip.vision.projection_dim", 4, 2560),
         ("clip.vision.spatial_merge_size", 4, 2),
     )
-    output = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 1, len(metadata)))
+    tensors = [dict(name=row["name"], shape=list(row["shape"]))
+               for row in qwen_quantize.vision_inventory.load_contract()["tensors"]]
+    if mutation == "missing":
+        tensors.pop()
+    elif mutation == "duplicate":
+        tensors[-1]["name"] = tensors[0]["name"]
+    elif mutation == "wrong_shape":
+        tensors[0]["shape"][0] += 1
+    elif mutation is not None:
+        raise ValueError(f"unknown mmproj fixture mutation: {mutation}")
+    output = bytearray(b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(metadata)))
     for key, kind, value in metadata:
         output += string(key) + struct.pack("<I", kind)
         if kind == 8:
@@ -133,8 +143,11 @@ def make_mmproj_companion(path: Path) -> None:
             output += struct.pack("<?", value)
         else:
             output += struct.pack("<I", value)
-    output += string("vision.proj.weight") + struct.pack("<IQIQ", 1, 32, 30, 0)
-    output += b"\0" * ((-len(output)) % 32) + b"\0" * 64
+    for tensor in tensors:
+        output += string(tensor["name"]) + struct.pack("<I", len(tensor["shape"]))
+        output += struct.pack("<" + "Q" * len(tensor["shape"]), *tensor["shape"])
+        output += struct.pack("<IQ", 30, 0)
+    output += b"\0" * ((-len(output)) % 32) + b"\0"
     path.write_bytes(output)
 
 
@@ -614,6 +627,9 @@ class Fixture:
                 "role": "vision_mmproj", "enabled": True, "path": str(mmproj),
                 "size_bytes": mmproj.stat().st_size, "sha256": sha256(mmproj),
                 "format": "BF16",
+                "tensor_inventory_sha256":
+                    qwen_quantize.vision_inventory.load_contract()[
+                        "tensor_inventory_sha256"],
             })
         else:
             rows.append({"role": "vision_mmproj", "enabled": False})

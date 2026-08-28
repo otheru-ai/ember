@@ -81,6 +81,8 @@ class Fixture:
         self.mtp = root / "companions" / "mtp.gguf"; self.mtp.parent.mkdir(parents=True)
         self.mtp.write_bytes(b"mtp")
         self.mmproj = root / "companions" / "mmproj.gguf"; self.mmproj.write_bytes(b"mmproj")
+        self.mmproj_inventory_sha = manifest.vision_inventory.load_contract()[
+            "tensor_inventory_sha256"]
         self.export = write(root / "companions" / "export.json", {"status": "complete"})
         self.mtp_fast = root / "companions" / "mtp-fast.gguf"
         self.mtp_fast.write_bytes(b"mtp-fast")
@@ -97,7 +99,8 @@ class Fixture:
                  "export_manifest_sha256": digest(self.export)},
                 {"role": "vision_mmproj", "enabled": True, "path": str(self.mmproj),
                  "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
-                 "format": "BF16"},
+                 "format": "BF16",
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha},
             ],
         })
         self.fast = write(root / "companions" / "fast.json", {
@@ -112,7 +115,8 @@ class Fixture:
                  "export_manifest_sha256": digest(self.export_fast)},
                 {"role": "vision_mmproj", "enabled": True, "path": str(self.mmproj),
                  "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
-                 "format": "BF16"},
+                 "format": "BF16",
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha},
             ],
         })
         self.quality = write(root / "quality.json", {"audited": True})
@@ -136,7 +140,8 @@ class Fixture:
              "export_manifest": {"path": str(self.export), "sha256": digest(self.export)}},
             {"role": "vision_mmproj", "path": str(self.mmproj),
              "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
-             "format": "BF16"},
+             "format": "BF16", "gguf_contract": {
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha}},
         ]
         record = write(candidate / "qwen-quant-build-record.json", {
             "status": "complete", "mode": "execute", "tools": {"ember_revision": self.hex40},

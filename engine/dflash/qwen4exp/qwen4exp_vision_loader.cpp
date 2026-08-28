@@ -197,49 +197,8 @@ bool qwen4exp_patchify_normalized_rgb(
 }
 
 std::vector<Qwen4ExpVisionTensorSpec> qwen4exp_vision_tensor_contract() {
-    constexpr int64_t hidden = Qwen4ExpVisionContract::hidden_size;
-    constexpr int64_t intermediate =
-        Qwen4ExpVisionContract::intermediate_size;
-    constexpr int64_t merged = hidden *
-        Qwen4ExpVisionContract::spatial_merge_size *
-        Qwen4ExpVisionContract::spatial_merge_size;
-
     std::vector<Qwen4ExpVisionTensorSpec> tensors;
-    tensors.reserve(334);
-    // Qwen3VLVisionModel.modify_tensors splits Conv3D temporal planes 0 and 1.
-    tensors.push_back(tensor("v.patch_embd.weight", {16, 16, 3, hidden}));
-    tensors.push_back(tensor("v.patch_embd.weight.1", {16, 16, 3, hidden}));
-    tensors.push_back(tensor("v.patch_embd.bias", {hidden}));
-    tensors.push_back(tensor("v.position_embd.weight", {hidden, 2304}));
-
-    for (uint32_t layer = 0; layer < Qwen4ExpVisionContract::depth; ++layer) {
-        const std::string prefix = "v.blk." + std::to_string(layer) + ".";
-        tensors.push_back(tensor(prefix + "ln1.weight", {hidden}));
-        tensors.push_back(tensor(prefix + "ln1.bias", {hidden}));
-        tensors.push_back(tensor(prefix + "attn_qkv.weight",
-                                 {hidden, hidden * 3}));
-        tensors.push_back(tensor(prefix + "attn_qkv.bias", {hidden * 3}));
-        tensors.push_back(tensor(prefix + "attn_out.weight", {hidden, hidden}));
-        tensors.push_back(tensor(prefix + "attn_out.bias", {hidden}));
-        tensors.push_back(tensor(prefix + "ln2.weight", {hidden}));
-        tensors.push_back(tensor(prefix + "ln2.bias", {hidden}));
-        tensors.push_back(tensor(prefix + "ffn_up.weight",
-                                 {hidden, intermediate}));
-        tensors.push_back(tensor(prefix + "ffn_up.bias", {intermediate}));
-        tensors.push_back(tensor(prefix + "ffn_down.weight",
-                                 {intermediate, hidden}));
-        tensors.push_back(tensor(prefix + "ffn_down.bias", {hidden}));
-    }
-
-    // Merger norm is applied before reshaping four rows into 4608 features.
-    tensors.push_back(tensor("v.post_ln.weight", {hidden}));
-    tensors.push_back(tensor("v.post_ln.bias", {hidden}));
-    tensors.push_back(tensor("mm.0.weight", {merged, merged}));
-    tensors.push_back(tensor("mm.0.bias", {merged}));
-    tensors.push_back(tensor("mm.2.weight",
-                             {merged, Qwen4ExpVisionContract::output_hidden_size}));
-    tensors.push_back(tensor("mm.2.bias",
-                             {Qwen4ExpVisionContract::output_hidden_size}));
+#include "qwen4exp_vision_inventory.inc"
     return tensors;
 }
 

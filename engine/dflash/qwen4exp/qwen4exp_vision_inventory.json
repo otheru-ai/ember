@@ -1,0 +1,50 @@
+{
+  "schema": "ember.qwen3.8.vision-mmproj-inventory-contract.v1",
+  "provenance": {
+    "checkpoint_revision": "f5d08274bafd880402bd16f5e3e6c514136ec06c",
+    "llama_cpp_pr_27742_head": "035e22731a7fd70b9854b3a2d64ec68e9b1a45d3",
+    "dimension_order": "GGML logical order"
+  },
+  "constants": {
+    "depth": 27,
+    "hidden_size": 1152,
+    "intermediate_size": 4304,
+    "spatial_merge_size": 2,
+    "output_hidden_size": 2560,
+    "position_embeddings": 2304
+  },
+  "fixed_before_layers": [
+    {"name": "v.patch_embd.weight", "shape": [16, 16, 3, 1152]},
+    {"name": "v.patch_embd.weight.1", "shape": [16, 16, 3, 1152]},
+    {"name": "v.patch_embd.bias", "shape": [1152]},
+    {"name": "v.position_embd.weight", "shape": [1152, 2304]}
+  ],
+  "layer": {
+    "prefix": "v.blk.{layer}.",
+    "count": 27,
+    "tensors": [
+      {"suffix": "ln1.weight", "shape": [1152]},
+      {"suffix": "ln1.bias", "shape": [1152]},
+      {"suffix": "attn_qkv.weight", "shape": [1152, 3456]},
+      {"suffix": "attn_qkv.bias", "shape": [3456]},
+      {"suffix": "attn_out.weight", "shape": [1152, 1152]},
+      {"suffix": "attn_out.bias", "shape": [1152]},
+      {"suffix": "ln2.weight", "shape": [1152]},
+      {"suffix": "ln2.bias", "shape": [1152]},
+      {"suffix": "ffn_up.weight", "shape": [1152, 4304]},
+      {"suffix": "ffn_up.bias", "shape": [4304]},
+      {"suffix": "ffn_down.weight", "shape": [4304, 1152]},
+      {"suffix": "ffn_down.bias", "shape": [1152]}
+    ]
+  },
+  "fixed_after_layers": [
+    {"name": "v.post_ln.weight", "shape": [1152]},
+    {"name": "v.post_ln.bias", "shape": [1152]},
+    {"name": "mm.0.weight", "shape": [4608, 4608]},
+    {"name": "mm.0.bias", "shape": [4608]},
+    {"name": "mm.2.weight", "shape": [4608, 2560]},
+    {"name": "mm.2.bias", "shape": [2560]}
+  ],
+  "tensor_count": 334,
+  "tensor_inventory_sha256": "b95562c75ece0f19c4ec4e6404edd1ee8b904d735eab9c2843c5c5d35473fc65"
+}

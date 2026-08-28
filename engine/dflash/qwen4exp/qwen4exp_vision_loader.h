@@ -50,7 +50,9 @@ bool qwen4exp_patchify_normalized_rgb(
     std::string & error);
 
 // Exact 334-tensor mmproj inventory emitted by llama.cpp PR #27742 for the
-// pinned checkpoint.  These are logical GGML dimensions, not PyTorch order.
+// pinned checkpoint. These are logical GGML dimensions, not PyTorch order.
+// The generated implementation is checked against qwen4exp_vision_inventory.json,
+// which is also consumed by candidate construction and release packaging.
 std::vector<Qwen4ExpVisionTensorSpec> qwen4exp_vision_tensor_contract();
 
 // Input may be in any order but must contain every contract tensor exactly

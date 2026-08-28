@@ -32,6 +32,14 @@ def write_json(path: Path, value: dict) -> None:
 
 
 class CandidateBuilderTests(unittest.TestCase):
+    def test_cpp_inventory_include_is_generated_from_shared_descriptor(self) -> None:
+        contract = quant.vision_inventory.load_contract()
+        self.assertEqual(contract["tensor_count"], 334)
+        self.assertEqual(
+            quant.vision_inventory.generate_cpp_include(contract),
+            quant.vision_inventory.CPP_INCLUDE_PATH.read_text(encoding="utf-8"),
+        )
+
     def test_build_source_is_exactly_intervention_or_stock_capture(self) -> None:
         parser = builder.parser()
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -184,6 +192,43 @@ class CandidateBuilderTests(unittest.TestCase):
             self.assertEqual([row["role"] for row in roles], ["mtp", "vision_mmproj"])
             self.assertEqual(roles[0]["matrix_quant_contract"], "Q4_0_ROCMI4")
             self.assertEqual(roles[1]["sha256"], digest(mmproj))
+            self.assertEqual(
+                roles[1]["tensor_inventory_sha256"],
+                quant.vision_inventory.load_contract()["tensor_inventory_sha256"],
+            )
+
+    def test_companion_inventory_rejects_inexact_mmproj_inventory(self) -> None:
+        for mutation, message in (("missing", "count mismatch"),
+                                  ("duplicate", "duplicate"),
+                                  ("wrong_shape", "shape mismatch")):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                fixture = Fixture(root)
+                fixture.companion_args(enable_mmproj=True)
+                mmproj = root / builder.MMPROJ_BASENAME
+                make_mmproj_companion(mmproj, mutation)
+                cache_manifest = root / "bf16-cache-manifest.json"
+                write_json(cache_manifest, {
+                    "schema": quant.BF16_CACHE_SCHEMA,
+                    "vision_mmproj": {"name": mmproj.name,
+                                      "size_bytes": mmproj.stat().st_size,
+                                      "sha256": digest(mmproj)},
+                })
+                mtp = root / "Qwen3.8-Flash-Next-MTP.gguf"
+                mtp_export = root / "Qwen3.8-Flash-Next-MTP.export.json"
+                with self.assertRaisesRegex(ValueError, message):
+                    builder.make_companion_inventory(argparse.Namespace(
+                        profile=fixture.profile,
+                        quantization_arm=quant.DEFAULT_QUANTIZATION_ARM,
+                        bf16_cache_manifest=cache_manifest,
+                        bf16_cache_manifest_sha256=digest(cache_manifest),
+                        mtp=mtp, mtp_bytes=mtp.stat().st_size,
+                        mtp_sha256=digest(mtp),
+                        mtp_matrix_quant_contract="Q4_0_ROCMI4",
+                        mtp_export_manifest=mtp_export,
+                        mtp_export_manifest_sha256=digest(mtp_export),
+                        output=root / "companions.json",
+                    ))
 
     def test_bf16_cache_reuse_revalidates_content_address_and_toolchain(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
