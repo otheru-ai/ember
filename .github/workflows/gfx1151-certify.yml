@@ -431,7 +431,7 @@ jobs:
     # images, not model data, volumes, build cache, or a production image. Stop
     # at 1160 GiB so the audited 1152 GiB construction floor remains available
     # after the measured ~1.55 GiB revision-bound tooling tree is prepared.
-    if: inputs.release_version == 'qwen-reclaim-stale-builds-v6-20260828'
+    if: inputs.release_version == 'qwen-reclaim-stale-builds-v7-20260828'
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 10
     env:
@@ -453,7 +453,36 @@ jobs:
             exit 0
           }
           available="$before"
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          stale_tooling_revisions=(
+            '126c4ff8284ef99e399d366aec6275a5df5b7c0f'
+            'd3990664c3ba8ef2cb368cf4e7aff8baf1c06e20'
+            '13e272f1bcab35b2e133cb2d0c040fdc7f7bc9b1'
+            '4b038f692cd83e405da4b9834b88f4e113158e43'
+          )
+          for revision in "${stale_tooling_revisions[@]}"; do
+            (( available < required )) || break
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            test "$revision" != "$TARGET_SHA"
+            tooling="$workspace/tooling-candidate-$revision"
+            if [[ ! -e "$tooling" && ! -L "$tooling" ]]; then
+              echo "Already absent stale tooling: $tooling"
+              continue
+            fi
+            test -d "$tooling" && test ! -L "$tooling"
+            for child in llama.cpp ROCmFPX converter-venv; do
+              test -d "$tooling/$child" && test ! -L "$tooling/$child"
+            done
+            rm -rf -- "$tooling"
+            test ! -e "$tooling" && test ! -L "$tooling"
+            available="$(df -B1 --output=avail "$workspace" | tail -1)"
+            [[ "$available" =~ ^[0-9]+$ ]]
+          done
           stale_images=(
+            'ghcr.io/otheru-ai/ember:dev-sha-126c4ff8284e sha256:d984841feb9eff702289f11bc205a4b8b19075020a2fd235cb143bb9f70efe91'
+            'ghcr.io/otheru-ai/ember:dev-sha-d3990664c3ba sha256:6e4ef001fd48230a24a7d1d198776b372b92d1af05d5822f965fd62b232b8811'
+            'ghcr.io/otheru-ai/ember:dev-sha-13e272f1bcab sha256:bd3114ba77156629e7d1698acde34b1d2d70f5c559151b7e4bcb690df4c2e7fd'
+            'ghcr.io/otheru-ai/ember:dev-sha-4b038f692cd8 sha256:8ec766f37ebd68c6ce7a5eda4ed2a1d76c6f856e37b87d4a1ae0c37df648f995'
             'ghcr.io/otheru-ai/ember:dev-sha-10236b8489a3 sha256:7ab721ddf095ecf0526a5cc2059c308e992e26f748f33de4b1b883cc46226ab3'
             'ghcr.io/otheru-ai/ember:dev-sha-2f99a12f8afd sha256:1d6c71627ac657b5b36defddbde3b99d2099185ec4bbed9f69ee39e09b905cdb'
             'ghcr.io/otheru-ai/ember:dev-sha-34f832863317 sha256:f6661ec650a2957a1041b738b5326f296e610be6c802526b454c0fb6350ba19b'
