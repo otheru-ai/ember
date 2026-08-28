@@ -436,17 +436,13 @@ jobs:
     timeout-minutes: 10
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
+      CALLER_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ inputs.commit_sha }}
-          persist-credentials: false
-          fetch-depth: 1
       - name: Reclaim only exact obsolete Qwen tooling and images
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$CALLER_SHA" = "$TARGET_SHA"
           construction_floor=$((1152 * 1024 * 1024 * 1024))
           required=$((1160 * 1024 * 1024 * 1024))
           (( required > construction_floor ))

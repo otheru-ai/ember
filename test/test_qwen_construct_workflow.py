@@ -57,6 +57,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             body.index("\n  certify:", body.index("  qwen-reclaim-stale-builds:"))
         ]
         self.assertIn("qwen-reclaim-stale-builds-v5-20260828", body)
+        self.assertIn('CALLER_SHA: ${{ github.sha }}', reclaim)
+        self.assertIn('test "$CALLER_SHA" = "$TARGET_SHA"', reclaim)
+        self.assertNotIn("actions/checkout", reclaim)
         self.assertIn("construction_floor=$((1152 * 1024 * 1024 * 1024))", body)
         self.assertIn("required=$((1160 * 1024 * 1024 * 1024))", body)
         for tag, digest in (
