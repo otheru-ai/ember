@@ -158,6 +158,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertEqual(body.count("--memory 125g"), 9)
         self.assertEqual(body.count("--memory-swap 125g"), 9)
         self.assertEqual(body.count('--user "$uid:$gid"'), 9)
+        self.assertEqual(
+            body.count("--env USER=ember-qwen --env LOGNAME=ember-qwen"), 9
+        )
         self.assertEqual(body.count("--user 0:0"), 1)
         self.assertIn("--memory 256m --memory-swap 256m", body)
         self.assertGreaterEqual(body.count("--memory-limit-bytes 134217728000"), 3)

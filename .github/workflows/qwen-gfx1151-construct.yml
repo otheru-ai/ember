@@ -148,15 +148,21 @@ jobs:
           runtime_digest="${image_identity[1]}"
           builder="$repository@$builder_digest"
           runtime="$repository@$runtime_digest"
+          # The self-hosted runner UID is intentionally absent from the image's
+          # passwd database. PyTorch imports torch._dynamo during conversion,
+          # whose getpass.getuser() requires one of these deterministic names.
           embedded="$(docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             --entrypoint /bin/sh "$builder" -c \
             'awk -F= '\''$1 == "EMBER_CONFIGURED_GIT_HEAD:STRING" { print $2 }'\'' /ember/build-rocm/CMakeCache.txt')"
           test "$embedded" = "$TARGET_SHA"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$builder")" = "$TARGET_SHA"
           docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             --entrypoint /bin/sh "$builder" -c \
             'test -x /ember/build-rocm/ember-gguf-quantize'
           docker run --rm --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             --entrypoint /bin/sh "$runtime" -c \
             'test -x /usr/local/bin/ember-dflash'
 
@@ -365,6 +371,7 @@ jobs:
           echo "fc6fc7103959763791d49e338916dd020429b1948ad357a5e5e54d54137be321  $QWEN_TOOLING/llama.cpp/tools/gguf-split/gguf-split.cpp" | sha256sum -c -
           uid="$(id -u)"; gid="$(id -g)"
           docker run --rm --network host --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
             --entrypoint /bin/bash "$QWEN_BUILDER_IMAGE" -c '
               set -euo pipefail
@@ -414,6 +421,7 @@ jobs:
           name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-cache"
           docker run --name "$name" --network none --ipc host \
             --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
             --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
@@ -447,6 +455,7 @@ jobs:
             name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-mtp-${label,,}"
             docker run --name "$name" --network none --ipc host \
               --memory 125g --memory-swap 125g --user "$uid:$gid" \
+              --env USER=ember-qwen --env LOGNAME=ember-qwen \
               -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
               --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
@@ -475,6 +484,7 @@ jobs:
             name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-inventory-${label,,}"
             docker run --name "$name" --network none --ipc host \
               --memory 125g --memory-swap 125g --user "$uid:$gid" \
+              --env USER=ember-qwen --env LOGNAME=ember-qwen \
               -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
               --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
@@ -530,6 +540,7 @@ jobs:
           fi
           docker run --name "$name" --network none --ipc host \
             --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
             --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
@@ -564,6 +575,7 @@ jobs:
           name="qwen-construct-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-stock"
           docker run --name "$name" --network none --ipc host \
             --memory 125g --memory-swap 125g --user "$uid:$gid" \
+            --env USER=ember-qwen --env LOGNAME=ember-qwen \
             -v "$QWEN_WORKSPACE:$QWEN_WORKSPACE" \
             -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
             --entrypoint "$QWEN_TOOLING/converter-venv/bin/python" \
