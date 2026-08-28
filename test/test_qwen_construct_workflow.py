@@ -52,13 +52,11 @@ def workflow_run_blocks(text: str) -> list[str]:
 class QwenConstructWorkflowTest(unittest.TestCase):
     def test_dispatcher_disk_reclaim_is_exact_and_stops_at_floor(self) -> None:
         body = DISPATCHER.read_text(encoding="utf-8")
-        self.assertIn("qwen-reclaim-stale-builds-v2-20260828", body)
+        self.assertIn("qwen-reclaim-stale-builds-v3-20260828", body)
         self.assertIn("required=$((1152 * 1024 * 1024 * 1024))", body)
         for digest in (
-            "002443668dfcc518d1266aa4cee8a4bb03418cf388f4b0c9b95d4639adff61f7",
-            "61cb0f1c91a483dfd84f457f69ed1c2690b26682aeedd1d723931aafa25d0958",
-            "03ae476f355b9e1532733aefa3f200aac5fc4b1a138d466d9e106651a92eafbd",
-            "4b408febb40a9f7d64340523351f4f31d1e9ec8c4396b37ef51e1c8911ff9800",
+            "922adf2cc9338b7699d83e140112b0cad2953de739887b6a7ebbcaf9f180711f",
+            "5a806d7118d132eddd471d7dbfd792709c5c639c6298d8f2aa0e10d42dfad686",
         ):
             self.assertIn(digest, body)
         self.assertIn("path_stat.st_uid != os.getuid()", body)
