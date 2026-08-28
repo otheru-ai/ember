@@ -80,6 +80,10 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn('runtime="$repository@$runtime_digest"', body)
         self.assertIn("converter-requirements.freeze.txt", body)
         self.assertIn("QWEN_CONVERTER_LOCK_SHA256", body)
+        # The unprivileged construction container cannot use the dev image's
+        # root-owned ccache directory. Conversion tooling is pinned and built
+        # once, so disable auto-detected ccache instead of weakening ownership.
+        self.assertIn("-DGGML_CCACHE=OFF", body)
         self.assertIn('test "$(git rev-parse HEAD)" = "$TARGET_SHA"', body)
         self.assertIn("org.opencontainers.image.revision", body)
 

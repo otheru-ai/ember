@@ -343,7 +343,8 @@ jobs:
               set -euo pipefail
               cmake -S "$1/llama.cpp" -B "$1/llama.cpp/build" \
                 -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
-                -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF
+                -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+                -DBUILD_SHARED_LIBS=OFF -DGGML_CCACHE=OFF
               cmake --build "$1/llama.cpp/build" --target llama-gguf-split -j"$(nproc)"
               lock="$1/converter-requirements.freeze.txt"
               if [[ ! -d "$1/converter-venv" ]]; then
