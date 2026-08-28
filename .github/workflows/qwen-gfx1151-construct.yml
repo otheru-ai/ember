@@ -505,7 +505,8 @@ jobs:
           python3 scripts/qwen_bakeoff.py --corpus-dir "$QWEN_CORPUS_DIR" --output "$plan"
           python3 scripts/qwen_bakeoff.py --plan "$plan" --stage verify \
             --output "$QWEN_EVIDENCE/selection-plan-verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
-          python3 - "$QWEN_EVIDENCE/companions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \
+          descriptor="$QWEN_EVIDENCE/companions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          python3 - "$descriptor" \
             "$QWEN_CACHE_MANIFEST" "$QWEN_CACHE_MANIFEST_SHA256" "$plan" \
             "$QWEN_WORKSET/companions/ROCMI4.json" "$QWEN_WORKSET/companions/ROCMFP4-FAST.json" <<'PY'
           import hashlib,json,os,pathlib,sys
@@ -513,13 +514,57 @@ jobs:
           plan=pathlib.Path(sys.argv[4]);inventories=list(map(pathlib.Path,sys.argv[5:]))
           def item(path): return {"path":str(path.resolve()),"sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
           value={"schema":"ember.qwen3.8.companion-construction.v1","status":"complete",
-                 "publishes":False,"cache":{"path":str(cache.resolve()),"sha256":cache_sha},
+                 "publishes":False,"deletes":False,
+                 "cache":{"path":str(cache.resolve()),"sha256":cache_sha},
                  "selection_plan":item(plan),"inventories":{
                    "ROCMI4":item(inventories[0]),"ROCMFP4-FAST":item(inventories[1])}}
           fd=os.open(output,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
           with os.fdopen(fd,"w") as stream:
               json.dump(value,stream,indent=2,sort_keys=True);stream.write("\n");stream.flush();os.fsync(stream.fileno())
+          directory=os.open(str(output.parent),os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
+          try: os.fsync(directory)
+          finally: os.close(directory)
           PY
+          descriptor_sha="$(sha256sum "$descriptor" | awk '{print $1}')"
+          mapfile -t companion_handoff < <(python3 - "$descriptor" "$descriptor_sha" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          path=pathlib.Path(sys.argv[1]); supplied_sha=sys.argv[2]
+          if re.fullmatch(r"[0-9a-f]{64}",supplied_sha) is None:
+              raise SystemExit("companion construction descriptor digest is malformed")
+          if hashlib.sha256(path.read_bytes()).hexdigest()!=supplied_sha:
+              raise SystemExit("companion construction descriptor digest differs")
+          value=json.loads(path.read_text())
+          if (set(value)!={"schema","status","publishes","deletes","cache","selection_plan","inventories"}
+                  or value.get("schema")!="ember.qwen3.8.companion-construction.v1"
+                  or value.get("status")!="complete" or value.get("publishes") is not False
+                  or value.get("deletes") is not False
+                  or set(value.get("inventories",{}))!={"ROCMI4","ROCMFP4-FAST"}):
+              raise SystemExit("companion construction descriptor lifecycle/schema differs")
+          def exact(item,label):
+              if (not isinstance(item,dict) or set(item)!={"path","sha256"}
+                      or not isinstance(item.get("path"),str) or not item["path"].startswith("/")
+                      or re.fullmatch(r"[0-9a-f]{64}",str(item.get("sha256"))) is None):
+                  raise SystemExit(f"{label} descriptor is malformed")
+              subject=pathlib.Path(item["path"])
+              if not subject.is_file() or subject.is_symlink():
+                  raise SystemExit(f"{label} is not one regular non-symlink file")
+              if hashlib.sha256(subject.read_bytes()).hexdigest()!=item["sha256"]:
+                  raise SystemExit(f"{label} digest differs")
+              print(item["path"]);print(item["sha256"])
+          exact(value["inventories"]["ROCMI4"],"ROCMI4 inventory")
+          exact(value["inventories"]["ROCMFP4-FAST"],"ROCmFP4 FAST inventory")
+          exact(value["selection_plan"],"selection plan")
+          PY
+          )
+          (( ${#companion_handoff[@]} == 6 ))
+          printf 'QWEN_COMPANION_CONSTRUCTION=%s\nQWEN_COMPANION_CONSTRUCTION_SHA256=%s\n' \
+            "$descriptor" "$descriptor_sha" >>"$GITHUB_ENV"
+          printf 'QWEN_COMPANION_ROCMI4_OUTPUT=%s\nQWEN_COMPANION_ROCMI4_OUTPUT_SHA256=%s\n' \
+            "${companion_handoff[0]}" "${companion_handoff[1]}" >>"$GITHUB_ENV"
+          printf 'QWEN_COMPANION_FAST_OUTPUT=%s\nQWEN_COMPANION_FAST_OUTPUT_SHA256=%s\n' \
+            "${companion_handoff[2]}" "${companion_handoff[3]}" >>"$GITHUB_ENV"
+          printf 'QWEN_SELECTION_PLAN_OUTPUT=%s\nQWEN_SELECTION_PLAN_OUTPUT_SHA256=%s\n' \
+            "${companion_handoff[4]}" "${companion_handoff[5]}" >>"$GITHUB_ENV"
 
       - name: Build one intervention candidate from the immutable cache
         if: inputs.mode == 'build-candidate' && env.QWEN_CANDIDATE_KIND == 'intervention'
@@ -723,6 +768,16 @@ jobs:
             echo "Mode: \`$CONSTRUCTION_MODE\`"
             echo "Builder SHA: \`$TARGET_SHA\`"
             echo "Builder image: \`$QWEN_BUILDER_IMAGE_DIGEST\`"
+            if [[ -n "${QWEN_COMPANION_CONSTRUCTION:-}" ]]; then
+              echo "Companion construction descriptor: \`$QWEN_COMPANION_CONSTRUCTION\`"
+              echo "Companion construction descriptor SHA-256: \`$QWEN_COMPANION_CONSTRUCTION_SHA256\`"
+              echo "ROCMI4 inventory: \`$QWEN_COMPANION_ROCMI4_OUTPUT\`"
+              echo "ROCMI4 inventory SHA-256: \`$QWEN_COMPANION_ROCMI4_OUTPUT_SHA256\`"
+              echo "ROCmFP4 FAST inventory: \`$QWEN_COMPANION_FAST_OUTPUT\`"
+              echo "ROCmFP4 FAST inventory SHA-256: \`$QWEN_COMPANION_FAST_OUTPUT_SHA256\`"
+              echo "Selection plan: \`$QWEN_SELECTION_PLAN_OUTPUT\`"
+              echo "Selection plan SHA-256: \`$QWEN_SELECTION_PLAN_OUTPUT_SHA256\`"
+            fi
             if [[ -n "${QWEN_CONSTRUCTION_DESCRIPTOR:-}" ]]; then
               echo "Descriptor: \`$QWEN_CONSTRUCTION_DESCRIPTOR\`"
               echo "Descriptor SHA-256: \`$QWEN_CONSTRUCTION_DESCRIPTOR_SHA256\`"

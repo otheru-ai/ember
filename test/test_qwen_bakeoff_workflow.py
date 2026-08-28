@@ -344,6 +344,12 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn('"mtp_depth":c["mtp_depth"]', body)
         self.assertIn("Retain and verify completed phase ledger", body)
         self.assertIn("subject-path: ${{ env.QWEN_ASSESSMENT }}", body)
+        self.assertIn("QWEN_CURRENT_ACCUMULATOR_SHA256", body)
+        self.assertIn("QWEN_LEDGER_SHA256", body)
+        self.assertIn("Attested compact accumulator SHA-256", body)
+        self.assertIn("Accumulator attestation bundle SHA-256", body)
+        self.assertIn("Completed phase ledger SHA-256", body)
+        self.assertIn("Ledger attestation bundle SHA-256", body)
 
     def test_measure_assess_attest_then_delete_order_is_fail_closed(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

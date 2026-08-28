@@ -191,7 +191,10 @@ The four serial dispatch modes are:
 2. `prepare-companions`, which creates both homogeneous `Q4_0_ROCMI4` and
    `Q4_0_ROCMFP4_FAST` MTP exports, binds each to the shared BF16 mmproj in a
    canonical `{schema, source, companions}` inventory, and writes the verified
-   selection plan;
+   selection plan. Its post-operation summary reports an exact path/SHA-256
+   pair for the durable companion-construction descriptor and for both
+   inventories plus the selection plan. The descriptor is fsynced and binds
+   all three child path/digest pairs with `publishes:false` and `deletes:false`;
 3. `build-candidate`, which builds exactly one stock or intervention candidate.
    The stock dispatch consumes the exact activation-capture manifest and must
    reproduce its shard bytes from the cache before it receives a builder
@@ -225,6 +228,12 @@ forbid prior ledgers, format requires the sweep ledger, MTP-depth requires the
 format ledger, and final requires both the MTP-depth ledger and the separately
 unlocked final plan. A prior accumulator is optional only when the row is first
 in its canonical phase order.
+
+Every sequential bakeoff summary similarly reports the exact subject and
+attestation-bundle path/SHA-256 pairs for the new compact accumulator. At a
+completed phase boundary it also reports both pairs for the new phase ledger,
+so the next digest-bound `phase_request` can be assembled without inferring a
+digest from a filename or from console output.
 
 The workflow resolves the matching development and release tags to exact OCI
 repository digests and runs subsequent containers by `repository@sha256:...`.

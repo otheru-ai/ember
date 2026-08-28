@@ -283,6 +283,15 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("Q4_0_ROCMFP4_FAST", body)
         self.assertIn("scripts/qwen_candidate_builder.py\" make-companion-inventory", body)
         self.assertIn('"schema":"ember.qwen3.8.companion-construction.v1"', body)
+        self.assertIn('"publishes":False,"deletes":False', body)
+        self.assertIn("QWEN_COMPANION_CONSTRUCTION_SHA256", body)
+        self.assertIn("QWEN_COMPANION_ROCMI4_OUTPUT_SHA256", body)
+        self.assertIn("QWEN_COMPANION_FAST_OUTPUT_SHA256", body)
+        self.assertIn("QWEN_SELECTION_PLAN_OUTPUT_SHA256", body)
+        self.assertIn("Companion construction descriptor SHA-256", body)
+        self.assertIn("ROCMI4 inventory SHA-256", body)
+        self.assertIn("ROCmFP4 FAST inventory SHA-256", body)
+        self.assertIn("Selection plan SHA-256", body)
         self.assertEqual(body.count('scripts/qwen_candidate_builder.py" build-candidate'), 2)
         self.assertIn("--stock-control", body)
         self.assertIn("--stock-capture-manifest", body)
@@ -534,6 +543,50 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                 text=True, capture_output=True,
             )
             self.assertNotEqual(malformed.returncode, 0)
+
+    def test_companion_handoff_rehashes_every_exposed_child(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        scripts = [script for block in workflow_run_blocks(body)
+                   for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", block, re.S)]
+        validator = next(script for script in scripts
+                         if "companion construction descriptor lifecycle/schema differs" in script)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subjects = {}
+            for name in ("rocmi4", "fast", "plan"):
+                path = root / f"{name}.json"
+                path.write_text(json.dumps({"name": name}) + "\n", encoding="utf-8")
+                subjects[name] = {"path": str(path),
+                                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            descriptor = root / "companions.json"
+            value = {
+                "schema": "ember.qwen3.8.companion-construction.v1",
+                "status": "complete", "publishes": False, "deletes": False,
+                "cache": {"path": "/cache/manifest.json", "sha256": "0" * 64},
+                "selection_plan": subjects["plan"],
+                "inventories": {"ROCMI4": subjects["rocmi4"],
+                                "ROCMFP4-FAST": subjects["fast"]},
+            }
+            descriptor.write_text(json.dumps(value) + "\n", encoding="utf-8")
+            descriptor_sha = hashlib.sha256(descriptor.read_bytes()).hexdigest()
+            valid = subprocess.run(
+                [sys.executable, "-", str(descriptor), descriptor_sha], input=validator,
+                text=True, capture_output=True,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertEqual(valid.stdout.splitlines(), [
+                subjects["rocmi4"]["path"], subjects["rocmi4"]["sha256"],
+                subjects["fast"]["path"], subjects["fast"]["sha256"],
+                subjects["plan"]["path"], subjects["plan"]["sha256"],
+            ])
+
+            Path(subjects["fast"]["path"]).write_text("tampered\n", encoding="utf-8")
+            tampered = subprocess.run(
+                [sys.executable, "-", str(descriptor), descriptor_sha], input=validator,
+                text=True, capture_output=True,
+            )
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn("ROCmFP4 FAST inventory digest differs", tampered.stderr)
 
     def test_lock_restore_and_health_are_fail_closed(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

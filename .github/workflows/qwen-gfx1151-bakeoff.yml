@@ -721,6 +721,8 @@ jobs:
           install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
           gh attestation verify "$QWEN_CURRENT_ACCUMULATOR" --bundle "$bundle" \
             --repo "$ATTEST_REPOSITORY" --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          accumulator_sha="$(sha256sum "$QWEN_CURRENT_ACCUMULATOR" | awk '{print $1}')"
+          bundle_sha="$(sha256sum "$bundle" | awk '{print $1}')"
           mapfile -t counts < <(python3 - "$SELECTION_PLAN" "$QWEN_BAKEOFF_PHASE" "$QWEN_CURRENT_ACCUMULATOR" <<'PY'
           import json, pathlib, sys
           plan=json.loads(pathlib.Path(sys.argv[1]).read_text()); phase=sys.argv[2]
@@ -733,8 +735,9 @@ jobs:
           )
           current="${counts[0]}"; expected="${counts[1]}"
           (( current <= expected ))
+          printf 'QWEN_CURRENT_ACCUMULATOR_SHA256=%s\n' "$accumulator_sha" >>"$GITHUB_ENV"
           printf 'QWEN_ACCUMULATOR_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
-          printf 'QWEN_ACCUMULATOR_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+          printf 'QWEN_ACCUMULATOR_BUNDLE_SHA256=%s\n' "$bundle_sha" >>"$GITHUB_ENV"
           printf 'QWEN_EXPECTED_COUNT=%s\n' "$expected" >>"$GITHUB_ENV"
           if (( current == expected )); then
             ledger="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-ledger.json"
@@ -799,6 +802,7 @@ jobs:
           install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
           gh attestation verify "$QWEN_LEDGER" --bundle "$bundle" --repo "$ATTEST_REPOSITORY" \
             --signer-workflow "$ATTEST_WORKFLOW" >/dev/null
+          printf 'QWEN_LEDGER_SHA256=%s\n' "$(sha256sum "$QWEN_LEDGER" | awk '{print $1}')" >>"$GITHUB_ENV"
           printf 'QWEN_LEDGER_BUNDLE=%s\n' "$bundle" >>"$GITHUB_ENV"
           printf 'QWEN_LEDGER_BUNDLE_SHA256=%s\n' "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
 
@@ -889,6 +893,15 @@ jobs:
             echo "Runtime engine revision: \`$TARGET_SHA\`"
             echo "Candidate artifact: \`$CANDIDATE_ARTIFACT_ID\`"
             echo "Attested compact accumulator: \`$QWEN_CURRENT_ACCUMULATOR\`"
+            echo "Attested compact accumulator SHA-256: \`$QWEN_CURRENT_ACCUMULATOR_SHA256\`"
+            echo "Accumulator attestation bundle: \`$QWEN_ACCUMULATOR_BUNDLE\`"
+            echo "Accumulator attestation bundle SHA-256: \`$QWEN_ACCUMULATOR_BUNDLE_SHA256\`"
+            if [[ "${QWEN_LEDGER_PRESENT:-no}" = yes ]]; then
+              echo "Completed phase ledger: \`$QWEN_LEDGER\`"
+              echo "Completed phase ledger SHA-256: \`$QWEN_LEDGER_SHA256\`"
+              echo "Ledger attestation bundle: \`$QWEN_LEDGER_BUNDLE\`"
+              echo "Ledger attestation bundle SHA-256: \`$QWEN_LEDGER_BUNDLE_SHA256\`"
+            fi
             echo 'Prefill is the exact-2074 three-sample peak; decode is the three-sample median.'
             echo 'The final-heldout corpus is inaccessible until unlock-final verifies the attested MTP-depth ledger.'
             echo 'No model or evidence artifact was published.'
