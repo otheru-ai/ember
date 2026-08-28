@@ -395,6 +395,21 @@ jobs:
           for path in / /scratch /models /srv/models; do
             [[ ! -e "$path" ]] || df -B1 --output=source,size,avail,target "$path"
           done
+          workspace=/var/tmp/ember-qwen3.8-flash-next
+          if [[ -d "$workspace" && ! -L "$workspace" ]]; then
+            echo 'qwen workspace bytes (same-filesystem, bounded depth):'
+            du -x -B1 --max-depth=1 "$workspace" | sort -n
+            for path in "$workspace"/tooling-candidate-* \
+                "$workspace"/artifacts/qwen-workset/bf16-cache \
+                "$workspace"/artifacts/qwen-workset/candidates \
+                "$workspace"/artifacts/qwen-workset/companions; do
+              [[ ! -e "$path" && ! -L "$path" ]] || du -x -B1 -s "$path"
+            done | sort -n
+          fi
+          echo 'docker storage accounting:'
+          docker system df || true
+          docker image ls --no-trunc --format \
+            '{{.Repository}} {{.Tag}} {{.ID}} {{.Size}}' | sort || true
           printf 'kfd_readable=%s dri_present=%s\n' \
             "$([[ -r /dev/kfd ]] && echo true || echo false)" \
             "$([[ -d /dev/dri ]] && echo true || echo false)"
