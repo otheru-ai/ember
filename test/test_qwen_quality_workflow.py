@@ -82,7 +82,8 @@ class QwenQualityWorkflowTest(unittest.TestCase):
         for permission in ("id-token: write", "attestations: write",
                            "artifact-metadata: write", "packages: read"):
             self.assertIn(permission, body)
-        self.assertIn('[[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]', body)
+        self.assertIn('[[ "${GITHUB_REPOSITORY,,}" = otheru-ai/ember ]]', body)
+        self.assertNotIn('[[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]', body)
         self.assertIn('test "$(git rev-parse HEAD)" = "$TARGET_SHA"', body)
         self.assertIn("git diff --quiet --exit-code", body)
         self.assertIn("qwen-quality-binding-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", body)
@@ -237,6 +238,7 @@ class QwenQualityWorkflowTest(unittest.TestCase):
         self.assertIn("iflag=direct", stage)
         self.assertIn("os.O_EXCL", stage)
         self.assertIn("ember.qwen3.8.quality-judge-inventory.v1", stage)
+        self.assertIn('[[ "${GITHUB_REPOSITORY,,}" = otheru-ai/ember ]]', stage)
         self.assertGreaterEqual(stage.count("ember-cert-production is-active"), 2)
         self.assertGreaterEqual(stage.count("http://127.0.0.1:8000/health"), 2)
         for forbidden in ("ember-gpu-lock acquire", "ember-cert-production stop",

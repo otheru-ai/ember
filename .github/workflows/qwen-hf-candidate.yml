@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           set +x
-          [[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]
+          [[ "${GITHUB_REPOSITORY,,}" = otheru-ai/ember ]]
           [[ "$GITHUB_REF" = refs/heads/main ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"

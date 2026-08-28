@@ -266,6 +266,8 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
             self.assertIn(required, body)
         self.assertEqual(body.count("gh attestation verify"), 2)
         self.assertIn("vision_attestation_workflow", body)
+        self.assertIn('[[ "${GITHUB_REPOSITORY,,}" = otheru-ai/ember ]]', body)
+        self.assertNotIn('[[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]', body)
         self.assertIn('--source-digest "$VISION_SOURCE_DIGEST"', body)
         self.assertIn('--signer-digest "$VISION_SIGNER_DIGEST"', body)
         for forbidden in ("HF_TOKEN: ${{ secrets", "pip install", "curl -LsSf",

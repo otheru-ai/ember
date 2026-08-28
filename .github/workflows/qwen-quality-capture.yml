@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           set +x
-          [[ "$GITHUB_REPOSITORY" = OtherU-AI/ember ]]
+          [[ "${GITHUB_REPOSITORY,,}" = otheru-ai/ember ]]
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git diff --quiet --exit-code
