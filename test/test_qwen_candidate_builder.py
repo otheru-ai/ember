@@ -353,6 +353,43 @@ class CandidateBuilderTests(unittest.TestCase):
             validated = quant.validate_bf16_cache_manifest(
                 manifest_path, digest(manifest_path), profile, digest(fixture.profile), tools)
             self.assertEqual(validated["cache_id"], cache_id)
+            tree_cleanup = {
+                "name": "torchinductor_root",
+                "kind": "bounded_torchinductor_cache_tree",
+                "entries": 1,
+                "size_bytes": 0,
+                "inventory_sha256": hashlib.sha256(
+                    b'[{"kind":"directory","mode":448,"path":"torchinductor_root"}]'
+                ).hexdigest(),
+            }
+            manifest["conversion"]["gguf_writer_temp_cleanup"]["main_removed"] = [
+                tree_cleanup]
+            write_json(manifest_path, manifest)
+            validated = quant.validate_bf16_cache_manifest(
+                manifest_path, digest(manifest_path), profile, digest(fixture.profile), tools)
+            self.assertEqual(
+                validated["conversion"]["gguf_writer_temp_cleanup"]["main_removed"],
+                [tree_cleanup],
+            )
+            manifest["conversion"]["gguf_writer_temp_cleanup"]["main_removed"] = [
+                tree_cleanup, tree_cleanup]
+            write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(quant.PipelineError, "cleanup rows are malformed"):
+                quant.validate_bf16_cache_manifest(
+                    manifest_path, digest(manifest_path), profile,
+                    digest(fixture.profile), tools)
+            manifest["conversion"]["gguf_writer_temp_cleanup"]["main_removed"] = [{
+                **tree_cleanup,
+                "entries": quant.TORCHINDUCTOR_CACHE_MAX_ENTRIES + 1,
+            }]
+            write_json(manifest_path, manifest)
+            with self.assertRaisesRegex(quant.PipelineError, "cleanup rows are malformed"):
+                quant.validate_bf16_cache_manifest(
+                    manifest_path, digest(manifest_path), profile,
+                    digest(fixture.profile), tools)
+            manifest["conversion"]["gguf_writer_temp_cleanup"]["main_removed"] = [
+                tree_cleanup]
+            write_json(manifest_path, manifest)
             # The splitter embeds its absolute build directory.  Rebuilding
             # pinned source in a new Ember revision may change only this binary
             # digest; both construction and consumption identities remain

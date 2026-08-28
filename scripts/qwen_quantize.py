@@ -76,6 +76,9 @@ COMPANION_INVENTORY_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
 COMPANION_ROLES = ("mtp", "vision_mmproj")
 BF16_CACHE_SCHEMA = "ember.qwen3.8-flash-next.bf16-cache.v1"
 GGUF_WRITER_TEMP_NAME_RE = re.compile(r"^tmp[a-z0-9_]{8}$")
+TORCHINDUCTOR_CACHE_MAX_ENTRIES = 4096
+TORCHINDUCTOR_CACHE_MAX_DEPTH = 8
+TORCHINDUCTOR_CACHE_MAX_BYTES = 512 * 1024 * 1024
 TTM_PAGE_BYTES = 4096
 CANONICAL_TTM_PAGES_LIMIT = Path("/sys/module/ttm/parameters/pages_limit")
 DIRECT_IO_MIN_BYTES = 512 * 1024 * 1024
@@ -116,6 +119,41 @@ ROCMFP4_FAST_ROUTED_EXPERT_PATTERN = (
 
 class PipelineError(ValueError):
     pass
+
+
+def validate_gguf_writer_temp_cleanup_rows(value: Any) -> None:
+    """Validate the exact bounded cleanup evidence emitted by the converter."""
+    if not isinstance(value, list):
+        raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
+    names: set[str] = set()
+    for row in value:
+        if not isinstance(row, dict):
+            raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
+        name = row.get("name")
+        if not isinstance(name, str) or name in names:
+            raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
+        names.add(name)
+        if name == "torchinductor_root":
+            if (set(row) != {"name", "kind", "entries", "size_bytes",
+                             "inventory_sha256"}
+                    or row.get("kind") != "bounded_torchinductor_cache_tree"
+                    or not isinstance(row.get("entries"), int)
+                    or isinstance(row.get("entries"), bool)
+                    or not 1 <= row["entries"] <= TORCHINDUCTOR_CACHE_MAX_ENTRIES
+                    or not isinstance(row.get("size_bytes"), int)
+                    or isinstance(row.get("size_bytes"), bool)
+                    or not 0 <= row["size_bytes"] <= TORCHINDUCTOR_CACHE_MAX_BYTES
+                    or SHA256_RE.fullmatch(
+                        str(row.get("inventory_sha256", ""))) is None):
+                raise PipelineError(
+                    "BF16 cache GGUFWriter temp cleanup rows are malformed")
+            continue
+        if (set(row) != {"name", "size_bytes", "mode"}
+                or GGUF_WRITER_TEMP_NAME_RE.fullmatch(name) is None
+                or not isinstance(row.get("size_bytes"), int)
+                or isinstance(row.get("size_bytes"), bool)
+                or row["size_bytes"] < 0 or row.get("mode") != 0o600):
+            raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
 
 
 def read_cgroup_counter(path: Path, label: str) -> int:
@@ -500,16 +538,7 @@ def validate_bf16_cache_manifest(
             or cleanup.get("policy") != "exact_converter_private_tmp_residue_v3"):
         raise PipelineError("BF16 cache lacks its exact GGUFWriter temp cleanup evidence")
     for label in ("main_removed", "mmproj_removed"):
-        rows = cleanup.get(label)
-        if (not isinstance(rows, list)
-                or any(not isinstance(row, dict)
-                       or set(row) != {"name", "size_bytes", "mode"}
-                       or GGUF_WRITER_TEMP_NAME_RE.fullmatch(str(row.get("name", ""))) is None
-                       or not isinstance(row.get("size_bytes"), int)
-                       or isinstance(row.get("size_bytes"), bool)
-                       or row["size_bytes"] < 0 or row.get("mode") != 0o600
-                       for row in rows)):
-            raise PipelineError("BF16 cache GGUFWriter temp cleanup rows are malformed")
+        validate_gguf_writer_temp_cleanup_rows(cleanup.get(label))
     resources = require_mapping(manifest.get("resources"), "BF16 cache resources")
     if (not isinstance(resources.get("free_bytes"), int)
             or resources.get("free_bytes", 0) < 1152 * GIB
@@ -1397,10 +1426,6 @@ def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
     owner = os.geteuid()
     rows: list[dict[str, Any]] = []
     total_bytes = 0
-    max_entries = 4096
-    max_depth = 8
-    max_bytes = 512 * 1024 * 1024
-
     def safe_mode(metadata: os.stat_result, *, directory: bool) -> None:
         mode = stat.S_IMODE(metadata.st_mode)
         expected_kind = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(
@@ -1413,7 +1438,7 @@ def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
 
     def visit(parent: int, entry: str, relative: str, depth: int) -> None:
         nonlocal total_bytes
-        if depth > max_depth:
+        if depth > TORCHINDUCTOR_CACHE_MAX_DEPTH:
             raise PipelineError("converter torchinductor cache exceeds the depth limit")
         before = os.stat(entry, dir_fd=parent, follow_symlinks=False)
         if stat.S_ISDIR(before.st_mode):
@@ -1431,7 +1456,7 @@ def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
                         "converter torchinductor directory changed during validation")
                 rows.append({"path": relative, "kind": "directory",
                              "mode": stat.S_IMODE(opened.st_mode)})
-                if len(rows) > max_entries:
+                if len(rows) > TORCHINDUCTOR_CACHE_MAX_ENTRIES:
                     raise PipelineError(
                         "converter torchinductor cache exceeds the entry limit")
                 for child in sorted(os.listdir(descriptor)):
@@ -1448,7 +1473,7 @@ def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
                 os.close(descriptor)
             return
         safe_mode(before, directory=False)
-        if total_bytes + before.st_size > max_bytes:
+        if total_bytes + before.st_size > TORCHINDUCTOR_CACHE_MAX_BYTES:
             raise PipelineError("converter torchinductor cache exceeds the byte limit")
         try:
             descriptor = os.open(entry, file_flags, dir_fd=parent)
@@ -1482,7 +1507,7 @@ def remove_private_torch_cache(parent_fd: int, name: str) -> dict[str, Any]:
                          "mode": stat.S_IMODE(opened.st_mode), "size_bytes": size,
                          "sha256": digest.hexdigest()})
             total_bytes += size
-            if len(rows) > max_entries:
+            if len(rows) > TORCHINDUCTOR_CACHE_MAX_ENTRIES:
                 raise PipelineError("converter torchinductor cache exceeds the entry limit")
             os.unlink(entry, dir_fd=parent)
         finally:
