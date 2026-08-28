@@ -301,6 +301,33 @@ jobs:
             printf '%s\n' "$pair" >>"$GITHUB_ENV"
           done
 
+      - name: Hand off only the completed snapshot coordination inode
+        if: inputs.mode != 'normalize-candidate'
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"; gid="$(id -g)"
+          # Snapshot fetch may have run as root, but all candidate construction
+          # remains unprivileged.  This capability-minimal helper mounts only
+          # the snapshot and exact checkout, validates the singly-linked lock
+          # inode, and must acquire its nonblocking exclusive flock before it
+          # changes that inode's owner/mode.  It never enumerates model files.
+          PYTHONDONTWRITEBYTECODE=1 docker run --rm --network none --read-only \
+            --memory 256m --memory-swap 256m \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --security-opt no-new-privileges --pids-limit 16 --user 0:0 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" \
+            -v "$QWEN_SNAPSHOT:$QWEN_SNAPSHOT" \
+            --entrypoint python3 "$QWEN_BUILDER_IMAGE" \
+            "$GITHUB_WORKSPACE/scripts/qwen_snapshot_lock_handoff.py" \
+              --snapshot "$QWEN_SNAPSHOT" --runner-uid "$uid" --runner-gid "$gid"
+          # Re-open, exclusively lease, and verify the exact inode as the
+          # unprivileged runner before any converter or cache transaction.
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            scripts/qwen_snapshot_lock_handoff.py \
+              --snapshot "$QWEN_SNAPSHOT" --runner-uid "$uid" --runner-gid "$gid" \
+              --verify-only
+
       - name: Prepare exact pinned conversion tools while production remains online
         if: inputs.mode != 'normalize-candidate'
         run: |

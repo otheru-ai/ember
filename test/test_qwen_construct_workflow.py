@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-gfx1151-construct.yml"
 REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
 DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
+sys.path.insert(0, str(ROOT / "scripts"))
+import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -95,13 +100,117 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("workspace=/var/tmp/ember-qwen3.8-flash-next", body)
         self.assertIn('-v "$QWEN_WORKSPACE:$QWEN_WORKSPACE"', body)
         self.assertIn('-v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro"', body)
-        self.assertEqual(body.count("docker run"), 9)
-        self.assertEqual(body.count("--memory 125g"), body.count("docker run"))
-        self.assertEqual(body.count("--memory-swap 125g"), body.count("docker run"))
-        self.assertEqual(body.count('--user "$uid:$gid"'), body.count("docker run"))
+        # Nine build/runtime containers remain unprivileged and 125-GiB
+        # bounded.  The one capability-minimal 256-MiB root helper can mutate
+        # metadata on the completed fetch lock only; it is not a construction
+        # container and mounts neither the workset nor output directories.
+        self.assertEqual(body.count("docker run"), 10)
+        self.assertEqual(body.count("--memory 125g"), 9)
+        self.assertEqual(body.count("--memory-swap 125g"), 9)
+        self.assertEqual(body.count('--user "$uid:$gid"'), 9)
+        self.assertEqual(body.count("--user 0:0"), 1)
+        self.assertIn("--memory 256m --memory-swap 256m", body)
         self.assertGreaterEqual(body.count("--memory-limit-bytes 134217728000"), 3)
         self.assertNotIn("/qwen-work/", body)
         self.assertNotIn("--user root", body)
+
+    def test_snapshot_lock_handoff_is_exact_idle_and_precedes_construction(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        handoff = body.index("Hand off only the completed snapshot coordination inode")
+        tools = body.index("Prepare exact pinned conversion tools")
+        exclusive = body.index("Acquire exclusive UMA ownership")
+        construction = body.index("Prepare one immutable content-addressed BF16 cache")
+        self.assertLess(handoff, tools)
+        self.assertLess(handoff, exclusive)
+        self.assertLess(handoff, construction)
+        self.assertIn("scripts/qwen_snapshot_lock_handoff.py", body)
+        self.assertIn('-v "$QWEN_SNAPSHOT:$QWEN_SNAPSHOT"', body)
+        self.assertNotIn('-v "$QWEN_WORKSPACE:$QWEN_WORKSPACE"', body[handoff:tools])
+        self.assertIn("--cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE", body)
+        self.assertIn("--security-opt no-new-privileges --pids-limit 16 --user 0:0", body)
+        self.assertIn("--verify-only", body[handoff:tools])
+
+        source = (ROOT / "scripts/qwen_snapshot_lock_handoff.py").read_text(
+            encoding="utf-8"
+        )
+        flock = source.index("fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)")
+        mutation = source.index("os.fchown(descriptor, runner_uid, runner_gid)")
+        self.assertLess(flock, mutation)
+        for required in (
+            "os.O_NOFOLLOW", "stat.S_ISREG", "metadata.st_nlink != 1",
+            "os.fchmod(descriptor, 0o600)", "_same_inode(opened, named)",
+            "model_bytes_touched\": 0",
+        ):
+            self.assertIn(required, source)
+        for forbidden in ("os.walk", "os.listdir", "glob(", "rglob(", "read_bytes"):
+            self.assertNotIn(forbidden, source)
+
+    def test_snapshot_lock_handoff_rejects_leases_links_and_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            snapshot = Path(raw) / "snapshot"
+            snapshot.mkdir()
+            payload = snapshot / "model-00001-of-00001.safetensors"
+            payload.write_bytes(b"model payload must remain untouched")
+            payload_before = payload.stat()
+            payload_digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            lock = snapshot / snapshot_handoff.LOCK_NAME
+            lock.write_bytes(b"")
+            lock.chmod(0o640)
+            inode = (lock.stat().st_dev, lock.stat().st_ino)
+            runner_uid = os.getuid() if os.getuid() > 0 else 12345
+            runner_gid = os.getgid() if os.getgid() > 0 else 12345
+
+            result = snapshot_handoff.handoff_snapshot_lock(
+                snapshot, runner_uid=runner_uid, runner_gid=runner_gid,
+            )
+            self.assertEqual(result["status"], "handed_off")
+            self.assertTrue(result["exclusive_idle_proof"])
+            self.assertEqual(result["model_bytes_touched"], 0)
+            self.assertEqual((lock.stat().st_dev, lock.stat().st_ino), inode)
+            self.assertEqual(lock.stat().st_nlink, 1)
+            self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
+            verified = snapshot_handoff.handoff_snapshot_lock(
+                snapshot, runner_uid=runner_uid, runner_gid=runner_gid, verify_only=True,
+            )
+            self.assertEqual(verified["inode"], inode[1])
+
+            with lock.open("r+b") as active_fetch:
+                fcntl.flock(active_fetch, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                        snapshot_handoff.HandoffError, "active fetch or read lease"):
+                    snapshot_handoff.handoff_snapshot_lock(
+                        snapshot, runner_uid=runner_uid, runner_gid=runner_gid)
+                fcntl.flock(active_fetch, fcntl.LOCK_UN)
+
+            with lock.open("r+b") as active_reader:
+                fcntl.flock(active_reader, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                        snapshot_handoff.HandoffError, "active fetch or read lease"):
+                    snapshot_handoff.handoff_snapshot_lock(
+                        snapshot, runner_uid=runner_uid, runner_gid=runner_gid)
+                fcntl.flock(active_reader, fcntl.LOCK_UN)
+
+            alias = snapshot / "lock-alias"
+            os.link(lock, alias)
+            with self.assertRaisesRegex(snapshot_handoff.HandoffError, "one hard link"):
+                snapshot_handoff.handoff_snapshot_lock(
+                    snapshot, runner_uid=runner_uid, runner_gid=runner_gid)
+            alias.unlink()
+
+            lock.unlink()
+            lock.symlink_to(payload.name)
+            with self.assertRaisesRegex(snapshot_handoff.HandoffError, "non-symlink"):
+                snapshot_handoff.handoff_snapshot_lock(
+                    snapshot, runner_uid=runner_uid, runner_gid=runner_gid)
+
+            payload_after = payload.stat()
+            self.assertEqual(hashlib.sha256(payload.read_bytes()).hexdigest(), payload_digest)
+            self.assertEqual(
+                (payload_after.st_dev, payload_after.st_ino, payload_after.st_size,
+                 payload_after.st_mode, payload_after.st_mtime_ns),
+                (payload_before.st_dev, payload_before.st_ino, payload_before.st_size,
+                 payload_before.st_mode, payload_before.st_mtime_ns),
+            )
 
     def test_modes_prepare_shared_inputs_and_build_one_candidate(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
