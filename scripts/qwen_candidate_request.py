@@ -24,6 +24,18 @@ REQUEST_ROOT = Path(
     "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/"
     "evidence/operation-requests")
 
+# Capture run 33122633860 used the checked-in recipe at 35eca745.  The only
+# later recipe change before the current selection plan added ``vision_vocab``
+# to the release companion inventory (fe2ad51); it did not change the input
+# read by qwen_capture_control.py:generate_manifests.  Bind that predecessor's
+# complete file digest to the exact capture-relevant projection so unrelated
+# release-policy enrichment cannot invalidate already-measured activations,
+# while any intervention-grid drift still fails closed.
+CAPTURE_RECIPE_PROJECTIONS = {
+    "4f9ec83bdd22bf0213179c657b3408edbcf9075958d4e9037ac5c0b6f0f5c634":
+        "cb2e37e0460d0b5bcb62b61458d52372209b4bb429c66959b50799370b7c30de",
+}
+
 
 class CandidateRequestError(ValueError):
     pass
@@ -39,6 +51,19 @@ def pinned(value: Any, label: str) -> tuple[dict[str, str], dict[str, Any], Path
     path = Path(str(value.get("path", "")))
     parsed, exact = evidence.exact_json(path, value.get("sha256"), label)
     return {"path": str(exact), "sha256": value["sha256"]}, parsed, exact
+
+
+def capture_recipe_compatible(capture_sha256: Any,
+                              plan_recipe: Any) -> bool:
+    if not isinstance(plan_recipe, dict):
+        return False
+    if capture_sha256 == plan_recipe.get("sha256"):
+        return True
+    expected_projection = CAPTURE_RECIPE_PROJECTIONS.get(capture_sha256)
+    value = plan_recipe.get("value")
+    intervention = value.get("intervention_sweep") if isinstance(value, dict) else None
+    return (expected_projection is not None and isinstance(intervention, dict)
+            and bakeoff.canonical_sha256(intervention) == expected_projection)
 
 
 def selected_configuration(
@@ -107,7 +132,8 @@ def derive(intent_path: Path, intent_sha256: str,
     if (capture.get("schema") != CAPTURE_SCHEMA
             or capture.get("status") != "complete"
             or capture.get("publishes") is not False
-            or capture.get("recipe_sha256") != plan["recipe"]["sha256"]):
+            or not capture_recipe_compatible(
+                capture.get("recipe_sha256"), plan.get("recipe"))):
         fail("stock activation capture lifecycle/recipe differs from the plan")
     rows = capture.get("interventions")
     matches = [row for row in rows if isinstance(row, dict)

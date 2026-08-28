@@ -53,6 +53,31 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
+        predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
+        intervention = {
+            "lambdas": [0.25, 0.5, 0.75, 1.0],
+            "layer_policies": {
+                "band-10-42": "10-42; exploratory transfer hypothesis from the pinned OtherU DeepSeek result",
+                "upper-24": "24-47", "upper-12": "36-47",
+                "non-qsa-band-10-42": "non-QSA layers within the exploratory DeepSeek-derived 10-42 band",
+            },
+            "artifact_format": "Q4_0_ROCMI4", "runtime_mode": "exact_dequant",
+            "may_select_recipe": True, "final_release_eligible": False,
+        }
+        recipe = {"sha256": "9" * 64,
+                  "value": {"intervention_sweep": intervention}}
+        self.assertTrue(candidate_request.capture_recipe_compatible(
+            predecessor, recipe))
+        self.assertFalse(candidate_request.capture_recipe_compatible(
+            "8" * 64, recipe))
+        changed = json.loads(json.dumps(recipe))
+        changed["value"]["intervention_sweep"]["lambdas"][0] = 0.20
+        self.assertFalse(candidate_request.capture_recipe_compatible(
+            predecessor, changed))
+        self.assertTrue(candidate_request.capture_recipe_compatible(
+            recipe["sha256"], changed))
+
     def test_candidate_planner_derives_sweep_identity_from_pinned_capture(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

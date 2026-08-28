@@ -243,6 +243,15 @@ pathname or digest out of the protected runner, and a format build cannot
 choose a different intervention than the attested sweep winner. Planning
 acquires no GPU and neither publishes nor deletes anything.
 
+Activation capture run `33122633860` predates the sealed-vision recipe's
+addition of the `vision_vocab` companion requirement. Candidate planning
+accepts that one complete predecessor recipe digest only when the canonical
+`intervention_sweep` projection still equals the captured projection; the
+capture generator reads that projection to produce its deterministic 4x4
+grid. An unknown recipe digest or any intervention-policy drift fails closed,
+so unrelated release-inventory enrichment does not discard measured
+activations and cannot silently authorize a different intervention.
+
 For example, normalization is dispatched with this outer request (all paths
 are absolute runner paths and every digest is lowercase SHA-256):
 
