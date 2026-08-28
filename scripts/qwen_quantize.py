@@ -72,6 +72,10 @@ QWEN_INTERVENTION_POLICY_EVIDENCE = {
 }
 INTERVENTION_TARGET_RE = re.compile(r"^blk\.([0-9]+)\.(attn_output|ssm_out)\.weight$")
 DEFAULT_QUANTIZATION_ARM = "profile-default-rocmi4"
+# Keep this synchronized with qwen_bakeoff.PLAN_SCHEMA_VERSION.  The quantizer
+# intentionally does not import the selector (which loads assessment/runtime
+# helpers), but its ROCMI4 sweep authorization consumes that exact contract.
+SELECTION_PLAN_SCHEMA_VERSION = 2
 COMPANION_INVENTORY_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
 COMPANION_ROLES = ("mtp", "vision_mmproj")
 BF16_CACHE_SCHEMA = "ember.qwen3.8-flash-next.bf16-cache.v1"
@@ -1337,7 +1341,8 @@ def validate_rocmi4_sweep_authorization(
             "non-stock rocmi4-control requires an exact canonical bakeoff plan descriptor")
     plan, evidence = read_exact_json_file(
         plan_path.resolve(), plan_sha256, "ROCMI4 sweep bakeoff plan")
-    if (plan.get("schema_version") != 1 or plan.get("phase_scope") != "selection"
+    if (plan.get("schema_version") != SELECTION_PLAN_SCHEMA_VERSION
+            or plan.get("phase_scope") != "selection"
             or plan.get("status") != "planned_unmeasured"
             or plan.get("publication_allowed") is not False):
         raise PipelineError("rocmi4-control authorization requires the selection-only canonical plan")

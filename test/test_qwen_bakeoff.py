@@ -17,6 +17,11 @@ SPEC = importlib.util.spec_from_file_location("qwen_bakeoff", ROOT / "scripts" /
 assert SPEC is not None and SPEC.loader is not None
 qb = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(qb)
+QUANT_SPEC = importlib.util.spec_from_file_location(
+    "qwen_quantize_contract", ROOT / "scripts" / "qwen_quantize.py")
+assert QUANT_SPEC is not None and QUANT_SPEC.loader is not None
+quant = importlib.util.module_from_spec(QUANT_SPEC)
+QUANT_SPEC.loader.exec_module(quant)
 
 
 def digest(path: Path) -> str:
@@ -24,6 +29,10 @@ def digest(path: Path) -> str:
 
 
 class BakeoffTest(unittest.TestCase):
+    def test_quantizer_authorization_tracks_current_selection_plan_schema(self) -> None:
+        self.assertEqual(quant.SELECTION_PLAN_SCHEMA_VERSION,
+                         qb.PLAN_SCHEMA_VERSION)
+
     def setUp(self) -> None:
         self.quality_results: dict[tuple[str, str], dict] = {}
         self.original_quality_evaluator = qb.QUALITY_EVALUATOR

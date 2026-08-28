@@ -583,7 +583,10 @@ class Fixture:
             "--min-free-gib", "0", "--min-ram-gib", "0", "--threads", "7",
         ]
 
-    def rocmi4_sweep_plan(self, *, scale: float = 1.0) -> Path:
+    def rocmi4_sweep_plan(
+        self, *, scale: float = 1.0,
+        schema_version: int = qwen_quantize.SELECTION_PLAN_SCHEMA_VERSION,
+    ) -> Path:
         profile = json.loads(self.profile.read_text(encoding="utf-8"))
         manifest = json.loads(self.intervention_manifest.read_text(encoding="utf-8"))
         arm = qwen_quantize.validated_quantization_arms(profile)["rocmi4-control"]
@@ -598,7 +601,8 @@ class Fixture:
         }
         plan = self.root / f"sweep-plan-{scale}.json"
         plan.write_text(json.dumps({
-            "schema_version": 1, "phase_scope": "selection",
+            "schema_version": schema_version,
+            "phase_scope": "selection",
             "status": "planned_unmeasured", "publication_allowed": False,
             "release_profile": {"path": str(self.profile.resolve()),
                                 "sha256": sha256(self.profile)},
@@ -889,11 +893,16 @@ class QwenQuantizeTests(unittest.TestCase):
             self.assertFalse(record["sweep_authorization"]["final_release_eligible"])
 
     def test_rocmi4_sweep_control_rejects_loose_or_mismatched_authority(self) -> None:
-        cases = ("missing", "one-sided", "bad-digest", "wrong-scale", "stock", "other-arm")
+        cases = ("missing", "one-sided", "bad-digest", "legacy-schema",
+                 "wrong-scale", "stock", "other-arm")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
                 fixture = Fixture(Path(raw))
-                plan = fixture.rocmi4_sweep_plan(scale=0.5 if case == "wrong-scale" else 1.0)
+                plan = fixture.rocmi4_sweep_plan(
+                    scale=0.5 if case == "wrong-scale" else 1.0,
+                    schema_version=(1 if case == "legacy-schema" else
+                                    qwen_quantize.SELECTION_PLAN_SCHEMA_VERSION),
+                )
                 command = [*fixture.command(), "--quantization-arm", "rocmi4-control"]
                 if case == "one-sided":
                     command += ["--bakeoff-plan", str(plan)]
@@ -913,6 +922,7 @@ class QwenQuantizeTests(unittest.TestCase):
                     "missing": "exact canonical bakeoff plan descriptor",
                     "one-sided": "required together",
                     "bad-digest": "SHA-256 mismatch",
+                    "legacy-schema": "selection-only canonical plan",
                     "wrong-scale": "exactly one canonical sweep configuration",
                     "stock": "applies only to non-stock",
                     "other-arm": "applies only to non-stock",
