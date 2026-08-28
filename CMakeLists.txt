@@ -609,6 +609,11 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_provider_scripts.py)
   set_tests_properties(qwen_vision_provider_scripts PROPERTIES TIMEOUT 20)
   add_test(
+    NAME qwen_vision_hardware_gate
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_hardware_gate.py)
+  set_tests_properties(qwen_vision_hardware_gate PROPERTIES TIMEOUT 20)
+  add_test(
     NAME qwen_quantize_pipeline
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)

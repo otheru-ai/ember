@@ -10,6 +10,7 @@ image.  It never contacts Hugging Face and never reads a credential.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -21,9 +22,10 @@ import sys
 from typing import Any
 
 import qwen_bakeoff as bakeoff
+import qwen_vision_differential as vision_gate
 
 
-SCHEMA = "ember.qwen3.8.hf-publication-envelope.v1"
+SCHEMA = "ember.qwen3.8.hf-publication-envelope.v3"
 RECEIPT_SCHEMA = "ember.qwen3.8.hf-candidate-verification.v1"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -36,6 +38,9 @@ EXPECTED_ATTESTATION_REPOSITORY = "OtherU-AI/ember"
 # owner/repository/workflow path, not merely the repository-relative filename.
 EXPECTED_ATTESTATION_WORKFLOW = (
     "OtherU-AI/ember/.github/workflows/qwen-gfx1151-bakeoff.yml"
+)
+EXPECTED_VISION_ATTESTATION_WORKFLOW = (
+    "OtherU-AI/ember/.github/workflows/qwen-gfx1151-vision.yml"
 )
 
 
@@ -112,6 +117,35 @@ def read_json(path: Path, expected: str, label: str) -> dict[str, Any]:
 def file_descriptor(path: Path, expected: str, label: str) -> dict[str, Any]:
     raw = read_stable(path, expected, label)
     return {"path": str(path), "sha256": expected, "size_bytes": len(raw)}
+
+
+def validate_attestation_subject(path: Path, expected: str, subject_sha256: str,
+                                 label: str) -> None:
+    """Bind a retained Sigstore bundle to its one in-toto SHA-256 subject.
+
+    Signature/certificate identity is verified twice by `gh attestation verify`:
+    immediately on the gfx1151 runner and again before publication OIDC. This
+    offline parser prevents swapping in a valid bundle for a different subject.
+    """
+    bundle = read_json(path.absolute(), expected, label)
+    envelope = bundle.get("dsseEnvelope")
+    if (not isinstance(envelope, dict)
+            or envelope.get("payloadType") != "application/vnd.in-toto+json"
+            or not isinstance(envelope.get("signatures"), list)
+            or not envelope["signatures"]):
+        raise EnvelopeError(f"{label} is not one signed in-toto DSSE bundle")
+    try:
+        statement = json.loads(base64.b64decode(
+            envelope.get("payload", ""), validate=True))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EnvelopeError(f"{label} payload is malformed") from exc
+    subjects = statement.get("subject") if isinstance(statement, dict) else None
+    if (not isinstance(subjects, list) or len(subjects) != 1
+            or not isinstance(subjects[0], dict)
+            or not isinstance(subjects[0].get("name"), str)
+            or not subjects[0]["name"]
+            or subjects[0].get("digest") != {"sha256": subject_sha256}):
+        raise EnvelopeError(f"{label} authenticates a different subject")
 
 
 def exact_descriptor(value: Any, label: str) -> tuple[Path, str]:
@@ -242,7 +276,7 @@ def reconstruct_measurement(assessment: dict[str, Any], manifest_path: Path,
 
 
 def validate_evidence(args: argparse.Namespace, runtime_image: str) -> tuple[
-        dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     ledger_path = args.final_ledger.absolute()
     ledger = read_json(ledger_path, args.final_ledger_sha256, "final ledger")
     expected_ledger_keys = {
@@ -323,7 +357,45 @@ def validate_evidence(args: argparse.Namespace, runtime_image: str) -> tuple[
     if (hardware.get("schema") != "ember.qwen3.8.real-weight-gate.v2"
             or hardware.get("publish_approved") is not False):
         raise EnvelopeError("hardware evidence is not the non-promoting real-weight gate")
-    return ledger, assessment, manifest, hardware
+    vision_path = args.vision_evidence.absolute()
+    vision = read_json(vision_path, args.vision_evidence_sha256, "vision evidence")
+    validate_attestation_subject(
+        args.vision_attestation.absolute(), args.vision_attestation_sha256,
+        args.vision_evidence_sha256, "vision evidence attestation")
+    try:
+        vision_gate.verify(vision, runtime.get("ember_revision"))
+    except vision_gate.VisionEvidenceError as exc:
+        raise EnvelopeError(f"real-weight vision evidence does not verify: {exc}") from exc
+    vision_identity = vision["identity"]
+    vision_runtime = vision_identity["runtime"]
+    artifacts = manifest.get("artifacts") or {}
+    measured_mtp = artifacts.get("mtp") or {}
+    measured_mmproj = artifacts.get("vision_mmproj") or {}
+    measured_vocab = artifacts.get("vision_vocab") or {}
+    hardware_shards = (((hardware.get("model") or {}).get("ordered_inventory") or {})
+                       .get("shards"))
+    if not isinstance(hardware_shards, list) or not hardware_shards:
+        raise EnvelopeError("hardware evidence lacks the first measured model shard")
+    measured_first_shard_sha = ((hardware_shards[0] or {}).get("sha256")
+                                if isinstance(hardware_shards[0], dict) else None)
+    if (vision_runtime.get("image") != runtime_image
+            or vision_runtime.get("ember_revision") != runtime.get("ember_revision")
+            or vision_runtime.get("engine_binary_sha256") != runtime.get("engine_binary_sha256")
+            or vision_identity["model"].get("model_inventory_sha256") !=
+                artifact_identity.get("model_inventory_sha256")
+            or vision_identity["model"].get("build_record_sha256") !=
+                artifact_identity.get("build_record_sha256")
+            or vision_identity["model"].get("first_shard_sha256") !=
+                measured_first_shard_sha
+            or vision_identity["mtp"].get("sha256") != measured_mtp.get("sha256")
+            or vision_identity["mtp"].get("size_bytes") != measured_mtp.get("bytes")
+            or vision_identity["mtp"].get("depth") != assessment.get("mtp_depth")
+            or vision_identity["vision_mmproj"].get("sha256") != measured_mmproj.get("sha256")
+            or vision_identity["vision_mmproj"].get("size_bytes") != measured_mmproj.get("bytes")
+            or vision_identity["vision_vocab"].get("sha256") != measured_vocab.get("sha256")
+            or vision_identity["vision_vocab"].get("size_bytes") != measured_vocab.get("bytes")):
+        raise EnvelopeError("vision evidence substitutes runtime or companion artifact bytes")
+    return ledger, assessment, manifest, hardware, vision
 
 
 def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
@@ -337,7 +409,7 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
     if parsed_time.tzinfo is None:
         raise EnvelopeError("created-at must include a timezone")
     plan, files = validate_upload_plan(args.upload_plan.absolute(), args.upload_plan_sha256)
-    ledger, assessment, measurement_manifest, _hardware = validate_evidence(
+    ledger, assessment, measurement_manifest, _hardware, vision_evidence = validate_evidence(
         args, args.runtime_image)
     artifact_manifest, _ = planned_json(files, "artifact-manifest.json")
     build_record, build_row = planned_json(files, "qwen-quant-build-record.json")
@@ -359,27 +431,40 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
             raise EnvelopeError("artifact manifest differs from planned model bytes")
         model_inventory.append({"index": index, "sha256": item["sha256"],
                                 "bytes": item["size_bytes"]})
+    if (not model_inventory or model_inventory[0]["sha256"] !=
+            vision_evidence["identity"]["model"]["first_shard_sha256"]):
+        raise EnvelopeError("packaged first model shard differs from vision evidence")
     companions = artifact_manifest.get("companion_artifacts")
-    if not isinstance(companions, list) or len(companions) != 2:
-        raise EnvelopeError("artifact manifest must contain exactly MTP and vision-mmproj companions")
+    if not isinstance(companions, list) or len(companions) != 3:
+        raise EnvelopeError("artifact manifest must contain exactly MTP, vision-mmproj, and vision-vocab companions")
     by_role = {
         item.get("role"): item for item in companions if isinstance(item, dict)
     }
-    if len(by_role) != 2 or set(by_role) != {"mtp", "vision_mmproj"}:
-        raise EnvelopeError("artifact manifest companion roles must be unique MTP and vision_mmproj")
+    if len(by_role) != 3 or set(by_role) != {"mtp", "vision_mmproj", "vision_vocab"}:
+        raise EnvelopeError("artifact manifest companion roles differ")
     mtp = by_role["mtp"]
     vision = by_role["vision_mmproj"]
+    vocab = by_role["vision_vocab"]
     if set(mtp) != {"role", "filename", "size_bytes", "sha256"}:
         raise EnvelopeError("artifact manifest MTP companion contract differs")
     if (not isinstance(vision, dict) or vision.get("role") != "vision_mmproj"
             or vision.get("format") != "BF16" or vision.get("required_for") != "multimodal"):
         raise EnvelopeError("artifact manifest vision companion contract differs")
+    if (not isinstance(vocab, dict) or vocab.get("role") != "vision_vocab"
+            or vocab.get("format") != "GGUF_VOCAB_ONLY"
+            or vocab.get("required_for") != "multimodal"
+            or (vocab.get("inspection") or {}).get("metadata_sha256") !=
+               vision_evidence["identity"]["vision_vocab"]["metadata_sha256"]):
+        raise EnvelopeError("artifact manifest vision vocab contract differs")
     mtp_row = planned.get(mtp.get("filename"))
     vision_row = planned.get(vision.get("filename"))
+    vocab_row = planned.get(vocab.get("filename"))
     measured_mtp = ((measurement_manifest.get("artifacts") or {}).get("mtp")
                     if isinstance(measurement_manifest, dict) else None)
     measured_vision = ((measurement_manifest.get("artifacts") or {}).get("vision_mmproj")
                        if isinstance(measurement_manifest, dict) else None)
+    measured_vocab = ((measurement_manifest.get("artifacts") or {}).get("vision_vocab")
+                      if isinstance(measurement_manifest, dict) else None)
     if (mtp_row is None or not isinstance(measured_mtp, dict)
             or (mtp_row["sha256"], mtp_row["size_bytes"]) !=
             (mtp.get("sha256"), mtp.get("size_bytes"))
@@ -392,8 +477,17 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
             or (vision_row["sha256"], vision_row["size_bytes"]) !=
             (measured_vision.get("sha256"), measured_vision.get("bytes"))):
         raise EnvelopeError("packaged vision companion differs from measured hardware evidence")
+    if (vocab_row is None or not isinstance(measured_vocab, dict)
+            or (vocab_row["sha256"], vocab_row["size_bytes"]) !=
+            (vocab.get("sha256"), vocab.get("size_bytes"))
+            or (vocab_row["sha256"], vocab_row["size_bytes"]) !=
+            (measured_vocab.get("sha256"), measured_vocab.get("bytes"))
+            or (vocab_row["sha256"], vocab_row["size_bytes"]) !=
+            (vision_evidence["identity"]["vision_vocab"]["sha256"],
+             vision_evidence["identity"]["vision_vocab"]["size_bytes"])):
+        raise EnvelopeError("packaged vision vocab differs from measured hardware evidence")
     selected_names = [item["filename"] for item in artifacts]
-    selected_names.extend((mtp["filename"], vision["filename"]))
+    selected_names.extend((mtp["filename"], vision["filename"], vocab["filename"]))
     if (len(selected_names) != len(set(selected_names))
             or any(SAFE_RELEASE_BASENAME.fullmatch(str(name)) is None
                    for name in selected_names)):
@@ -409,7 +503,7 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
     }
     if integrity != expected_integrity:
         raise EnvelopeError("artifact manifest SHA256SUMS release evidence differs")
-    selected_rows = [*artifacts, mtp, vision]
+    selected_rows = [*artifacts, mtp, vision, vocab]
     expected_checksums = "".join(
         f"{item['sha256']}  {item['filename']}\n" for item in selected_rows
     ).encode("utf-8")
@@ -469,10 +563,19 @@ def assemble(args: argparse.Namespace, created_at: str) -> dict[str, Any]:
                 "quality contract"),
             "hardware": file_descriptor(args.hardware_evidence.absolute(),
                                         args.hardware_evidence_sha256, "hardware evidence"),
+            "vision": file_descriptor(args.vision_evidence.absolute(),
+                                      args.vision_evidence_sha256, "vision evidence"),
+            "vision_attestation": file_descriptor(
+                args.vision_attestation.absolute(), args.vision_attestation_sha256,
+                "vision evidence attestation"),
         },
         "attestation_policy": {
             "repository": EXPECTED_ATTESTATION_REPOSITORY,
             "signer_workflow": EXPECTED_ATTESTATION_WORKFLOW,
+            "vision_signer_workflow": EXPECTED_VISION_ATTESTATION_WORKFLOW,
+            "vision_subject_sha256": args.vision_evidence_sha256,
+            "vision_source_digest": runtime["ember_revision"],
+            "vision_signer_digest": runtime["ember_revision"],
             "verification_required_before_oidc_exchange": True,
         },
         "authorization": {
@@ -514,6 +617,8 @@ def arguments_from_envelope(value: dict[str, Any]) -> argparse.Namespace:
     measurement, measurement_sha = source("measurement_manifest")
     quality, quality_sha = source("quality_contract")
     hardware, hardware_sha = source("hardware")
+    vision, vision_sha = source("vision")
+    vision_attestation, vision_attestation_sha = source("vision_attestation")
     return argparse.Namespace(
         upload_plan=upload, upload_plan_sha256=upload_sha,
         final_ledger=ledger, final_ledger_sha256=ledger_sha,
@@ -522,6 +627,9 @@ def arguments_from_envelope(value: dict[str, Any]) -> argparse.Namespace:
         measurement_manifest=measurement, measurement_manifest_sha256=measurement_sha,
         quality_contract=quality, quality_contract_sha256=quality_sha,
         hardware_evidence=hardware, hardware_evidence_sha256=hardware_sha,
+        vision_evidence=vision, vision_evidence_sha256=vision_sha,
+        vision_attestation=vision_attestation,
+        vision_attestation_sha256=vision_attestation_sha,
         runtime_image=runtime.get("image"))
 
 
@@ -567,7 +675,8 @@ def verify_remote(value: dict[str, Any], root: Path, commit: str) -> dict[str, A
 
 def add_sources(parser: argparse.ArgumentParser) -> None:
     for name in ("upload-plan", "final-ledger", "final-ledger-attestation",
-                 "measurement-manifest", "quality-contract", "hardware-evidence"):
+                 "measurement-manifest", "quality-contract", "hardware-evidence",
+                 "vision-evidence", "vision-attestation"):
         parser.add_argument(f"--{name}", type=Path, required=True)
         parser.add_argument(f"--{name}-sha256", required=True)
     parser.add_argument("--runtime-image", required=True)

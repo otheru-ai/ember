@@ -33,6 +33,7 @@ MEMORY_LIMIT_BYTES = 134217728000  # docker --memory 125g
 SWAP_LIMIT_BYTES = 0
 CACHE_BASENAME = "Qwen3.8-Flash-Next-BF16.gguf"
 MMPROJ_BASENAME = "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
+VISION_VOCAB_BASENAME = "Qwen3.8-Flash-Next-vocab-only.gguf"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment-bundle.v1"
 TOMBSTONE_SCHEMA = "ember.qwen3.8.deleted-loser.v1"
 STOCK_RETIRE_AUTH_SCHEMA = "ember.qwen3.8.stock-retirement-authorization.v1"
@@ -133,11 +134,16 @@ def finish_measurement(args: argparse.Namespace, start: float, before: dict[str,
     }
 
 
-def cache_content_address(main_rows: list[dict[str, Any]], mmproj: dict[str, Any]) -> tuple[str, str]:
+def cache_content_address(
+    main_rows: list[dict[str, Any]], mmproj: dict[str, Any],
+    vision_vocab: dict[str, Any],
+) -> tuple[str, str]:
     main_digest = canonical_sha256(main_rows)
     cache_id = canonical_sha256({
         "main_content_sha256": main_digest,
         "vision_mmproj": {key: mmproj[key] for key in ("name", "size_bytes", "sha256")},
+        "vision_vocab": {
+            key: vision_vocab[key] for key in ("name", "size_bytes", "sha256")},
     })
     return main_digest, cache_id
 
@@ -240,8 +246,17 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                 if not mmproj.is_file():
                     raise BuilderError("pinned converter did not produce the named BF16 mmproj")
                 mmproj_gguf = quant.validate_bf16_qwen_mmproj_gguf(mmproj)
+                vision_vocab = transaction / VISION_VOCAB_BASENAME
+                quant.run_checked([
+                    sys.executable, str(converter), str(args.snapshot_dir.resolve()),
+                    "--outfile", str(vision_vocab), "--vocab-only",
+                ])
+                if not vision_vocab.is_file():
+                    raise BuilderError(
+                        "pinned converter did not produce the named vision vocab companion")
+                vision_vocab_gguf = quant.validate_qwen_vocab_only_gguf(vision_vocab)
                 measurement = finish_measurement(args, started, cgroup)
-                quant.sync_verified_outputs([*main_paths, mmproj])
+                quant.sync_verified_outputs([*main_paths, mmproj, vision_vocab])
                 main_rows = [{"name": Path(row["path"]).name,
                               "size_bytes": row["size_bytes"],
                               "sha256": row["sha256"]}
@@ -249,7 +264,15 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                 mmproj_row = {"name": mmproj.name, "size_bytes": mmproj.stat().st_size,
                               "sha256": quant.sha256_file(mmproj), "format": "BF16",
                               "gguf": mmproj_gguf}
-                main_digest, cache_id = cache_content_address(main_rows, mmproj_row)
+                vision_vocab_row = {
+                    "name": vision_vocab.name,
+                    "size_bytes": vision_vocab.stat().st_size,
+                    "sha256": quant.sha256_file(vision_vocab),
+                    "format": "GGUF_VOCAB_ONLY",
+                    "gguf": vision_vocab_gguf,
+                }
+                main_digest, cache_id = cache_content_address(
+                    main_rows, mmproj_row, vision_vocab_row)
                 manifest = {
                     "schema": quant.BF16_CACHE_SCHEMA,
                     "cache_id": cache_id,
@@ -280,6 +303,8 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                             "F32_streamed_to_temp_file_then_release_quant_override",
                         "ple_ggml_tensor_type": 0,
                         "mmproj": {"outtype": "bf16", "converter_option": "--mmproj"},
+                        "vision_vocab": {
+                            "converter_option": "--vocab-only", "tensor_count": 0},
                         "gguf_writer_temp_cleanup": {
                             "policy": "exact_converter_private_tmp_residue_v3",
                             "main_removed": main_temp_cleanup,
@@ -295,10 +320,11 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                             "tensor_count", "tensor_names_sha256", "tensor_type_counts")},
                     },
                     "vision_mmproj": mmproj_row,
+                    "vision_vocab": vision_vocab_row,
                 }
                 manifest_path = transaction / "bf16-cache-manifest.json"
                 write_json_fsync(manifest_path, manifest)
-                for path in [*main_paths, mmproj, manifest_path]:
+                for path in [*main_paths, mmproj, vision_vocab, manifest_path]:
                     path.chmod(0o444)
                 final = root / f"bf16-{cache_id}"
                 quant.rename_directory_noreplace(transaction, final)
@@ -348,6 +374,17 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
     recorded_gguf = mmproj.get("gguf")
     if recorded_gguf is not None and recorded_gguf != mmproj_gguf:
         raise BuilderError("cached vision mmproj inventory differs from its creation record")
+    vision_vocab = manifest.get("vision_vocab")
+    if not isinstance(vision_vocab, dict):
+        raise BuilderError("BF16 cache omits vision_vocab")
+    vision_vocab_path = cache_dir / str(vision_vocab.get("name", ""))
+    vision_vocab_exact = quant.inspect_exact_file(
+        vision_vocab_path, vision_vocab.get("sha256"),
+        vision_vocab.get("size_bytes"), "vision vocab companion")
+    vision_vocab_gguf = quant.validate_qwen_vocab_only_gguf(vision_vocab_path)
+    if vision_vocab.get("gguf") is not None and vision_vocab.get("gguf") != vision_vocab_gguf:
+        raise BuilderError(
+            "cached vision vocab inventory differs from its creation record")
     mtp_exact = quant.inspect_exact_file(
         args.mtp.absolute(), args.mtp_sha256, args.mtp_bytes, "MTP companion")
     quant.validate_mtp_companion_gguf(
@@ -372,7 +409,14 @@ def make_companion_inventory(args: argparse.Namespace) -> dict[str, Any]:
             {"role": "vision_mmproj", "enabled": True,
              "path": mmproj_exact["path"], "size_bytes": mmproj_exact["size_bytes"],
              "sha256": mmproj_exact["sha256"], "format": "BF16",
-             "tensor_inventory_sha256": mmproj_gguf["tensor_inventory_sha256"]},
+             "tensor_inventory_sha256": mmproj_gguf["tensor_inventory_sha256"],
+             "text_model": {
+                 "path": vision_vocab_exact["path"],
+                 "size_bytes": vision_vocab_exact["size_bytes"],
+                 "sha256": vision_vocab_exact["sha256"],
+                 "format": "GGUF_VOCAB_ONLY",
+                 "metadata_sha256": vision_vocab_gguf["metadata_sha256"],
+             }},
         ],
     }
     write_json_fsync(output, payload)

@@ -165,6 +165,9 @@ RUN gcc -shared -fPIC -O2 -g \
       /usr/local/lib/libsegvtrace.so \
       /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so \
       /opt/rocm/bin/rocminfo \
+ && install -Dm0644 /opt/qwen-vision-provider/LLAMA_CPP_REVISION \
+      /ember-runtime/opt/qwen-vision-provider/LLAMA_CPP_REVISION \
+ && install -Dm0644 /opt/rocm/.info/version /ember-runtime/opt/rocm/.info/version \
  && rocblas_kpack="$(find /opt/rocm -type f \
       -path '*/.kpack/blas_lib_gfx1151.kpack' -print -quit)" \
  && test -n "$rocblas_kpack" \

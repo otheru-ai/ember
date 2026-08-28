@@ -420,7 +420,7 @@ def validate_bf16_cache_manifest(
     require_exact_keys(
         manifest,
         {"schema", "cache_id", "source", "profile", "toolchain", "conversion",
-         "resources", "measurement", "main", "vision_mmproj"},
+         "resources", "measurement", "main", "vision_mmproj", "vision_vocab"},
         "BF16 cache manifest",
     )
     if manifest.get("schema") != BF16_CACHE_SCHEMA:
@@ -478,6 +478,7 @@ def validate_bf16_cache_manifest(
             "F32_streamed_to_temp_file_then_release_quant_override",
         "ple_ggml_tensor_type": 0,
         "mmproj": {"outtype": "bf16", "converter_option": "--mmproj"},
+        "vision_vocab": {"converter_option": "--vocab-only", "tensor_count": 0},
     }:
         raise PipelineError("BF16 cache conversion recipe is not canonical")
     if (not isinstance(cleanup, dict)
@@ -599,10 +600,27 @@ def validate_bf16_cache_manifest(
     mmproj_gguf = validate_bf16_qwen_mmproj_gguf(cache_dir / name)
     if mmproj.get("gguf") != mmproj_gguf:
         raise PipelineError("BF16 cache mmproj GGUF inventory differs from its creation record")
+    vocab = require_mapping(manifest.get("vision_vocab"), "BF16 cache vision_vocab")
+    require_exact_keys(vocab, {"name", "size_bytes", "sha256", "format", "gguf"},
+                       "BF16 cache vision_vocab")
+    vocab_contract = profile["artifact"]["required_companion_artifacts"][1]
+    vocab_name = vocab.get("name")
+    if (not isinstance(vocab_name, str) or PurePosixPath(vocab_name).name != vocab_name
+            or vocab_name != vocab_contract.get("filename")
+            or vocab.get("format") != "GGUF_VOCAB_ONLY"):
+        raise PipelineError("BF16 cache vision vocab filename/format differs from the profile")
+    vocab_evidence = inspect_exact_file(
+        cache_dir / vocab_name, vocab.get("sha256"), vocab.get("size_bytes"),
+        "BF16 cache vision vocab")
+    vocab_gguf = validate_qwen_vocab_only_gguf(cache_dir / vocab_name)
+    if vocab.get("gguf") != vocab_gguf:
+        raise PipelineError("BF16 cache vision vocab GGUF inventory differs from its creation record")
     cache_address = hashlib.sha256(json.dumps({
         "main_content_sha256": content_sha256,
         "vision_mmproj": {"name": name, "size_bytes": mmproj["size_bytes"],
                            "sha256": mmproj["sha256"]},
+        "vision_vocab": {"name": vocab_name, "size_bytes": vocab["size_bytes"],
+                          "sha256": vocab["sha256"]},
     }, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
     if cache_id != cache_address or path.absolute().parent.name != f"bf16-{cache_id}":
         raise PipelineError("BF16 cache directory is not its exact content address")
@@ -613,6 +631,7 @@ def validate_bf16_cache_manifest(
         "resources": resources, "measurement": measurement,
         "main": {**main, "shards": normalized_shards, "gguf": gguf},
         "vision_mmproj": {**mmproj, **mmproj_evidence, "gguf": mmproj_gguf},
+        "vision_vocab": {**vocab, **vocab_evidence, "gguf": vocab_gguf},
     }
 
 
@@ -741,14 +760,16 @@ def validate_companion_inventory(
     else:
         require_exact_keys(
             mmproj, {"role", "enabled", "path", "size_bytes", "sha256", "format",
-                     "tensor_inventory_sha256"},
+                     "tensor_inventory_sha256", "text_model"},
             "enabled vision_mmproj companion",
         )
         required_companions = profile["artifact"].get("required_companion_artifacts")
-        if (not isinstance(required_companions, list) or len(required_companions) != 1
-                or required_companions[0].get("role") != "vision_mmproj"):
-            raise PipelineError("profile vision_mmproj artifact contract is malformed")
+        if (not isinstance(required_companions, list) or len(required_companions) != 2
+                or [row.get("role") for row in required_companions]
+                    != ["vision_mmproj", "vision_vocab"]):
+            raise PipelineError("profile vision artifact contracts are malformed")
         expected_mmproj = required_companions[0]
+        expected_vocab = required_companions[1]
         mmproj_path = mmproj.get("path")
         if not isinstance(mmproj_path, str) or not mmproj_path:
             raise PipelineError("vision_mmproj path must be a non-empty absolute string")
@@ -763,9 +784,28 @@ def validate_companion_inventory(
         if (mmproj.get("tensor_inventory_sha256") !=
                 mmproj_gguf["tensor_inventory_sha256"]):
             raise PipelineError("vision_mmproj tensor inventory digest differs")
+        text_model = require_mapping(mmproj.get("text_model"),
+                                     "vision_mmproj text_model")
+        require_exact_keys(
+            text_model, {"path", "size_bytes", "sha256", "format",
+                         "metadata_sha256"}, "vision_mmproj text_model")
+        text_path = text_model.get("path")
+        if (not isinstance(text_path, str) or not text_path
+                or Path(text_path).name != expected_vocab.get("filename")
+                or text_model.get("format") != expected_vocab.get("format")):
+            raise PipelineError("vision vocab companion differs from the release profile")
+        text_evidence = inspect_exact_file(
+            Path(text_path), text_model.get("sha256"), text_model.get("size_bytes"),
+            "vision vocab companion")
+        text_gguf = validate_qwen_vocab_only_gguf(Path(text_path))
+        if text_model.get("metadata_sha256") != text_gguf["metadata_sha256"]:
+            raise PipelineError("vision vocab companion metadata digest differs")
         normalized_roles.append({
             "role": "vision_mmproj", "enabled": True, "artifact_present": True,
             "format": mmproj["format"], "gguf_contract": mmproj_gguf,
+            "text_model": {**text_model, **text_evidence,
+                           "gguf_contract": text_gguf},
+            "associated_artifact_bytes": text_evidence["size_bytes"],
             **mmproj_evidence,
         })
 
@@ -786,7 +826,9 @@ def validate_companion_inventory(
         raise PipelineError("live TTM pages_limit does not match the pinned 124 GiB certification cap")
     enabled_roles = [row["role"] for row in normalized_roles if row["enabled"]]
     disabled_roles = [row["role"] for row in normalized_roles if not row["enabled"]]
-    enabled_bytes = sum(row["size_bytes"] for row in normalized_roles if row["enabled"])
+    enabled_bytes = sum(
+        row["size_bytes"] + row.get("associated_artifact_bytes", 0)
+        for row in normalized_roles if row["enabled"])
     pages_path_absolute = pages_limit_path.absolute()
     authoritative_live_gtt = pages_path_absolute == CANONICAL_TTM_PAGES_LIMIT
     pending_release_evidence: list[str] = []
@@ -1710,6 +1752,35 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
     artifact_repo = str(profile["artifact"].get("repo_id", ""))
     if "Heretic" not in artifact_name or "Heretic" not in artifact_repo:
         raise PipelineError("required directional-ablation artifact must carry the Heretic release name")
+    required_companions = profile["artifact"].get("required_companion_artifacts")
+    expected_companions = [
+        {
+            "role": "vision_mmproj",
+            "filename": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+            "format": "BF16",
+            "required_for": "multimodal",
+        },
+        {
+            "role": "vision_vocab",
+            "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+            "format": "GGUF_VOCAB_ONLY",
+            "required_for": "multimodal",
+        },
+    ]
+    if required_companions != expected_companions:
+        raise PipelineError(
+            "release profile must declare the exact ordered BF16 mmproj and "
+            "vocab-only vision companion contracts")
+    vocab_companion = (
+        profile["quantization"].get("vision_artifact") or {}
+    ).get("vocab_companion")
+    if (not isinstance(vocab_companion, dict)
+            or required_companions[1]["filename"] != vocab_companion.get("filename")
+            or required_companions[1]["format"] != vocab_companion.get("format")
+            or required_companions[1]["required_for"]
+                != vocab_companion.get("required_for")):
+        raise PipelineError(
+            "release profile vision vocab artifact and converter contracts differ")
     if quantization.get("w4a4_enabled") is not False or quantizer.get("w4a4_default") is not False:
         raise PipelineError("conversion pipeline is exact-dequant only; W4A4 must remain disabled")
     memory_gate = quantization.get("native_262k_memory_gate")
@@ -1725,7 +1796,7 @@ def validate_profile(profile_path: Path) -> tuple[dict[str, Any], dict[str, Any]
         or memory_gate.get("certification_host_rule")
         != "artifact_bytes + runtime_reserve_bytes + enabled_companion_artifact_bytes <= certification_host_memtotal_bytes"
         or memory_gate.get("companion_artifact_gate_status")
-        != "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt_against_124gib_cap"
+        != "pending_mtp_mmproj_vocab_inventory_and_measured_peak_rss_gtt_against_124gib_cap"
         or memory_gate.get("rule") != "artifact_bytes + runtime_reserve_bytes <= device_budget_bytes"
         or memory_gate.get("yarn_1m_math_oracle_passed") is not True
         or memory_gate.get("yarn_1m_runtime_certified") is not False
@@ -2119,7 +2190,7 @@ def inspect_gguf(path: Path) -> dict[str, Any]:
             raise PipelineError(f"unsupported GGUF version {version}: {path}")
         tensor_count = read_u64(stream)
         metadata_count = read_u64(stream)
-        if tensor_count < 1 or tensor_count > 1_000_000 or metadata_count > 1_000_000:
+        if tensor_count > 1_000_000 or metadata_count > 1_000_000:
             raise PipelineError(f"GGUF header counts are outside audit bounds: {path}")
         metadata: dict[str, dict[str, Any]] = {}
         for _ in range(metadata_count):
@@ -2252,6 +2323,54 @@ def validate_bf16_qwen_mmproj_gguf(path: Path) -> dict[str, Any]:
         "tensor_types": sorted(tensor_types), "metadata": expected,
         "tensor_inventory_contract": inventory["contract_schema"],
         "tensor_inventory_sha256": inventory["tensor_inventory_sha256"],
+    }
+
+
+def validate_qwen_vocab_only_gguf(path: Path) -> dict[str, Any]:
+    """Verify the zero-tensor text-model view consumed by pinned llama.cpp mtmd.
+
+    ``llama_model_params.vocab_only`` still asks llama.cpp to parse every tensor
+    descriptor in the selected GGUF.  A quantized Ember model may contain
+    private type IDs unknown to the pinned public runtime, so the vision path
+    uses the converter's native ``--vocab-only`` output instead.  The exact
+    artifact hash binds all bytes; this bounded structural digest additionally
+    proves that it retained the Qwen vocabulary and 2560-wide model metadata
+    required by ``llama_model_n_embd_inp()`` without retaining any tensors.
+    """
+    inspected = inspect_gguf(path)
+    if inspected["tensors"]:
+        raise PipelineError("vision vocab companion must contain zero tensors")
+    metadata = inspected["metadata"]
+    if (metadata.get("general.architecture", {}).get("value") != "qwen4exp"
+            or metadata.get("qwen4exp.embedding_length", {}).get("value") != 2560):
+        raise PipelineError(
+            "vision vocab companion lacks the pinned Qwen architecture/embedding metadata")
+    tokenizer_model = metadata.get("tokenizer.ggml.model", {}).get("value")
+    tokens = metadata.get("tokenizer.ggml.tokens", {}).get("value")
+    if (not isinstance(tokenizer_model, str) or not tokenizer_model
+            or not isinstance(tokens, list) or not tokens
+            or any(not isinstance(token, str) for token in tokens)):
+        raise PipelineError("vision vocab companion lacks a complete tokenizer vocabulary")
+    token_types = metadata.get("tokenizer.ggml.token_type", {}).get("value")
+    if token_types is not None and (
+            not isinstance(token_types, list) or len(token_types) != len(tokens)
+            or any(not isinstance(value, int) or isinstance(value, bool)
+                   for value in token_types)):
+        raise PipelineError("vision vocab companion token types differ from its vocabulary")
+    tokenizer_metadata = {
+        key: row for key, row in sorted(metadata.items())
+        if key.startswith("tokenizer.")
+    }
+    metadata_sha256 = hashlib.sha256(json.dumps({
+        "general.architecture": metadata["general.architecture"],
+        "qwen4exp.embedding_length": metadata["qwen4exp.embedding_length"],
+        "tokenizer": tokenizer_metadata,
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+    return {
+        "version": inspected["version"], "tensor_count": 0,
+        "architecture": "qwen4exp", "embedding_length": 2560,
+        "tokenizer_model": tokenizer_model, "vocabulary_size": len(tokens),
+        "metadata_sha256": metadata_sha256,
     }
 
 

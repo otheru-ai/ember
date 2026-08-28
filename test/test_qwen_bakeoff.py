@@ -102,8 +102,10 @@ class BakeoffTest(unittest.TestCase):
             "evaluated_prefill_tokens": [2074, 2074, 2074],
             "completion_tokens": [256, 256, 256],
             "mtp_spec_ran": [True, True, True],
-            "companion_artifact_bytes": {"mtp": 2_000_000_000, "vision_mmproj": 901_943_132},
-            "enabled_companions": ["mtp", "vision_mmproj"],
+            "companion_artifact_bytes": {"mtp": 2_000_000_000,
+                                         "vision_mmproj": 901_943_132,
+                                         "vision_vocab": 12_000_000},
+            "enabled_companions": ["mtp", "vision_mmproj", "vision_vocab"],
             "runner_memtotal_bytes": 134_297_894_912,
             "runner_gtt_pages_limit": 32_505_856,
             "peak_memory_measurement_method": "runner_rss_gtt_sampler_v1",
@@ -967,9 +969,11 @@ class BakeoffTest(unittest.TestCase):
                 path.write_bytes(raw)
                 return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest()}
 
-            row["companion_artifact_bytes"] = {"mtp": 3, "vision_mmproj": 4}
+            row["companion_artifact_bytes"] = {
+                "mtp": 3, "vision_mmproj": 4, "vision_vocab": 5}
             mtp_path = root / "mtp.gguf"; mtp_path.write_bytes(b"mtp")
             mmproj_path = root / "mmproj.gguf"; mmproj_path.write_bytes(b"mmpr")
+            vocab_path = root / "vocab.gguf"; vocab_path.write_bytes(b"vocab")
             resources = {key: row[key] for key in (
                 "runner_memtotal_bytes", "runner_gtt_pages_limit",
                 "peak_memory_measurement_method", "measured_peak_rss_bytes",
@@ -1059,6 +1063,8 @@ class BakeoffTest(unittest.TestCase):
                             "bytes": row["companion_artifact_bytes"]["mtp"]},
                     "vision_mmproj": {"path": str(mmproj_path), "sha256": "8" * 64,
                                       "bytes": row["companion_artifact_bytes"]["vision_mmproj"]},
+                    "vision_vocab": {"path": str(vocab_path), "sha256": "9" * 64,
+                                     "bytes": row["companion_artifact_bytes"]["vision_vocab"]},
                     "combined_fits": True,
                 },
                 "measurement_contract": {

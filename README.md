@@ -221,13 +221,16 @@ EMBER_QWEN_SHA256SUMS_SHA256=<digest-from-the-certified-release-evidence>
 DFLASH_QWEN_MTP=/models/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf
 DFLASH_QWEN_MTP_DEPTH=<certified-1-through-4>
 DFLASH_QWEN_VISION_MMPROJ=/models/Qwen3.8-Flash-Next-BF16-mmproj.gguf
+DFLASH_QWEN_VISION_TEXT_MODEL=/models/Qwen3.8-Flash-Next-vocab-only.gguf
 ```
 
 Pass shard `00001`; the engine discovers every ordered sibling. Startup always
 verifies the checksum-list digest and every file named by that list, regardless
 of `EMBER_VERIFY_EXISTING_SHA256`, and requires the list to cover all main
-shards plus the selected MTP and BF16 mmproj. The release image supplies the
-pinned `DFLASH_QWEN_VISION_PROVIDER` shared object. Until a candidate has its
+shards plus the selected MTP, BF16 mmproj, and zero-tensor vocab-only vision
+text model. The release artifact manifest exposes those as three flattened
+companion records (`mtp`, `vision_mmproj`, and `vision_vocab`). The release
+image supplies the pinned `DFLASH_QWEN_VISION_PROVIDER` shared object. Until a candidate has its
 real-weight text/vision differential and gfx1151 release evidence, this mode is
 an engineering deployment boundary rather than a multimodal certification
 claim. See [.env.example](.env.example) for every container setting and

@@ -16,6 +16,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "test"))
 SCRIPT = ROOT / "scripts" / "qwen_release_package.py"
 PROFILE = ROOT / "share" / "release_profiles" / "qwen3.8-flash-next-rocmi4-strix-halo.json"
 SPEC = importlib.util.spec_from_file_location("qwen_release_package", SCRIPT)
@@ -73,6 +74,11 @@ def write_mmproj_fixture(path: Path, mutation: str | None = None) -> None:
     path.write_bytes(payload)
 
 
+def write_vocab_fixture(path: Path, *, with_tensor: bool = False) -> None:
+    from test_qwen_quantize import make_vision_vocab_companion
+    make_vision_vocab_companion(path, with_tensor=with_tensor)
+
+
 class QwenReleasePackageTests(unittest.TestCase):
     def run_script(self, *args: str) -> subprocess.CompletedProcess[str]:
         arguments = list(args)
@@ -101,6 +107,9 @@ class QwenReleasePackageTests(unittest.TestCase):
         profile_path.write_text(json.dumps(profile), encoding="utf-8")
         mmproj = directory / profile["artifact"]["required_companion_artifacts"][0]["filename"]
         write_mmproj_fixture(mmproj)
+        vocab = directory / profile["quantization"]["vision_artifact"][
+            "vocab_companion"]["filename"]
+        write_vocab_fixture(vocab)
         (directory / MTP_NAME).write_bytes(b"selected deterministic MTP fixture\n")
         target_names = ["blk.0.ssm_out.weight"]
         target_names_sha = hashlib.sha256("\n".join(target_names).encode()).hexdigest()
@@ -166,6 +175,24 @@ class QwenReleasePackageTests(unittest.TestCase):
             "schema_version": 1, "status": "complete", "mode": "execute",
             "publishes": False, "credentials_accessed": False,
             "compute_mode": "exact_dequant", "w4a4_enabled": False,
+            "companion_inventory": {
+                "status": "verified_exact",
+                "enabled_roles": ["mtp", "vision_mmproj"],
+                "roles": [
+                    {"role": "mtp", "size_bytes": (directory / MTP_NAME).stat().st_size,
+                     "sha256": hashlib.sha256((directory / MTP_NAME).read_bytes()).hexdigest()},
+                    {"role": "vision_mmproj", "size_bytes": mmproj.stat().st_size,
+                     "sha256": hashlib.sha256(mmproj.read_bytes()).hexdigest(),
+                     "format": "BF16", "text_model": {
+                         "size_bytes": vocab.stat().st_size,
+                         "sha256": hashlib.sha256(vocab.read_bytes()).hexdigest(),
+                         "format": "GGUF_VOCAB_ONLY",
+                         "gguf_contract": {
+                             "metadata_sha256":
+                                 qwen_release_package.quant.validate_qwen_vocab_only_gguf(
+                                     vocab)["metadata_sha256"]}}},
+                ],
+            },
             "intervention": {
                 "manifest_filename": profile["intervention"]["manifest_filename"],
                 "manifest_source_path": str(intervention_manifest),
@@ -223,6 +250,13 @@ class QwenReleasePackageTests(unittest.TestCase):
                 "total_bytes": artifact_size + reserve,
                 "headroom_bytes": budget - artifact_size - reserve,
                 "fits": True,
+                "enabled_companion_artifact_bytes": (
+                    (directory / MTP_NAME).stat().st_size + mmproj.stat().st_size
+                    + vocab.stat().st_size),
+                "combined_accounted_bytes": (
+                    artifact_size + reserve + (directory / MTP_NAME).stat().st_size
+                    + mmproj.stat().st_size + vocab.stat().st_size),
+                "combined_fits": True,
             },
             "output": {"shards": [{
                 "path": str(directory / profile["artifact"]["filename"]),
@@ -279,9 +313,27 @@ class QwenReleasePackageTests(unittest.TestCase):
         self.assertEqual(vision["layout"], "separate_mmproj_gguf")
         self.assertEqual(vision["storage_format"], "BF16")
         self.assertTrue(vision["runtime_provider"]["lazy_load"])
-        self.assertEqual(vision["runtime_provider"]["text_model_view"], "vocab_only")
+        self.assertEqual(vision["runtime_provider"]["text_model_view"],
+                         "separate_vocab_only_companion")
         self.assertFalse(vision["runtime_provider"]["duplicates_text_tensor_weights"])
         self.assertFalse(vision["runtime_provider"]["real_weight_differential_certified"])
+        self.assertEqual(
+            profile["artifact"]["required_companion_artifacts"],
+            [
+                {
+                    "role": "vision_mmproj",
+                    "filename": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+                    "format": "BF16",
+                    "required_for": "multimodal",
+                },
+                {
+                    "role": "vision_vocab",
+                    "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+                    "format": "GGUF_VOCAB_ONLY",
+                    "required_for": "multimodal",
+                },
+            ],
+        )
         baselines = {item["id"]: item for item in profile["external_comparison_baselines"]}
         official = baselines["official-qwen-serving-recipe"]
         self.assertEqual(official["settings"]["max_model_len"], 262144)
@@ -351,6 +403,23 @@ class QwenReleasePackageTests(unittest.TestCase):
             "a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08",
         )
 
+    def test_profile_rejects_hidden_or_reordered_vision_vocab_contract(self) -> None:
+        original = json.loads(PROFILE.read_text(encoding="utf-8"))
+        for mutation in ("missing", "reordered"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw_tmp:
+                profile = json.loads(json.dumps(original))
+                companions = profile["artifact"]["required_companion_artifacts"]
+                if mutation == "missing":
+                    companions.pop()
+                else:
+                    companions.reverse()
+                path = Path(raw_tmp) / "profile.json"
+                path.write_text(json.dumps(profile), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        qwen_release_package.PackageError,
+                        "exact ordered BF16 mmproj and vocab-only"):
+                    qwen_release_package.load_profile(path)
+
     def test_generates_metadata_checksums_and_nonpublishing_plan(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -369,7 +438,8 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             artifact_name = json.loads(profile.read_text())["artifact"]["filename"]
             mmproj_name = "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
-            for name in ("README.md", "LICENSE", "artifact-manifest.json", "SHA256SUMS", "upload-plan.json", "qwen-quant-build-record.json", "qwen-intervention-manifest.json", "release-profile.json", artifact_name, MTP_NAME, mmproj_name):
+            vocab_name = "Qwen3.8-Flash-Next-vocab-only.gguf"
+            for name in ("README.md", "LICENSE", "artifact-manifest.json", "SHA256SUMS", "upload-plan.json", "qwen-quant-build-record.json", "qwen-intervention-manifest.json", "release-profile.json", artifact_name, MTP_NAME, mmproj_name, vocab_name):
                 self.assertTrue((out / name).is_file(), name)
             manifest = json.loads((out / "artifact-manifest.json").read_text(encoding="utf-8"))
             plan = json.loads((out / "upload-plan.json").read_text(encoding="utf-8"))
@@ -387,12 +457,13 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertFalse(manifest["intervention"]["prompt_only"])
             self.assertTrue(manifest["intervention"]["quantizer_applied"])
             companions = {row["role"]: row for row in manifest["companion_artifacts"]}
-            self.assertEqual(set(companions), {"mtp", "vision_mmproj"})
+            self.assertEqual(set(companions), {"mtp", "vision_mmproj", "vision_vocab"})
             self.assertEqual(companions["mtp"]["filename"], MTP_NAME)
             self.assertEqual(
                 companions["vision_mmproj"]["inspection"]["metadata"]["general.file_type"],
                 32,
             )
+            self.assertEqual(companions["vision_vocab"]["inspection"]["tensor_count"], 0)
             self.assertEqual(
                 companions["vision_mmproj"]["inspection"][
                     "tensor_inventory_sha256"],
@@ -418,15 +489,17 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertIn("qwen-intervention-manifest.json", destinations)
             self.assertIn(MTP_NAME, destinations)
             self.assertIn(mmproj_name, destinations)
+            self.assertIn(vocab_name, destinations)
             self.assertNotIn("upload-plan.json", destinations)
             self.assertFalse(plan["authentication"]["token_embedded"])
             checksum_names = [line.split("  ", 1)[1] for line in
                               (out / "SHA256SUMS").read_text().splitlines()]
-            self.assertEqual(checksum_names, [artifact_name, MTP_NAME, mmproj_name])
+            self.assertEqual(checksum_names,
+                             [artifact_name, MTP_NAME, mmproj_name, vocab_name])
             self.assertTrue(all(Path(name).name == name for name in checksum_names))
             integrity = manifest["model_artifact_integrity"]
             self.assertEqual(integrity["ordered_filenames"], checksum_names)
-            self.assertEqual(integrity["entry_count"], 3)
+            self.assertEqual(integrity["entry_count"], 4)
             self.assertTrue(integrity["basenames_only"])
             self.assertEqual(integrity["sha256"], hashlib.sha256(
                 (out / "SHA256SUMS").read_bytes()).hexdigest())
@@ -670,6 +743,8 @@ class QwenReleasePackageTests(unittest.TestCase):
                 "shard_bytes": [first.stat().st_size, second.stat().st_size],
                 "total_bytes": artifact_size + reserve,
                 "headroom_bytes": budget - artifact_size - reserve,
+                "combined_accounted_bytes": artifact_size + reserve
+                    + record["memory_preflight"]["enabled_companion_artifact_bytes"],
             })
             record["output"] = {
                 "shards": [
@@ -706,6 +781,7 @@ class QwenReleasePackageTests(unittest.TestCase):
             self.assertEqual(checksum_names, [
                 first.name, second.name, MTP_NAME,
                 "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+                "Qwen3.8-Flash-Next-vocab-only.gguf",
             ])
             self.assertEqual(
                 manifest["model_artifact_integrity"]["ordered_filenames"],

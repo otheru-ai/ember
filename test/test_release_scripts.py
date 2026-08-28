@@ -46,6 +46,7 @@ class ReleaseScriptTests(unittest.TestCase):
             ),
             "mtp": "Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf",
             "mmproj": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+            "vision_vocab": "Qwen3.8-Flash-Next-vocab-only.gguf",
         }
         paths = {key: root / name for key, name in names.items()}
         for key, path in paths.items():
@@ -56,7 +57,7 @@ class ReleaseScriptTests(unittest.TestCase):
         checksums = root / "SHA256SUMS"
         checksums.write_text("".join(
             f"{hashlib.sha256(paths[key].read_bytes()).hexdigest()}  {names[key]}\n"
-            for key in ("model", "model_2", "mtp", "mmproj")
+            for key in ("model", "model_2", "mtp", "mmproj", "vision_vocab")
         ))
         paths["checksums"] = checksums
         env = {
@@ -71,6 +72,7 @@ class ReleaseScriptTests(unittest.TestCase):
             "DFLASH_QWEN_MTP": str(paths["mtp"]),
             "DFLASH_QWEN_MTP_DEPTH": "3",
             "DFLASH_QWEN_VISION_MMPROJ": str(paths["mmproj"]),
+            "DFLASH_QWEN_VISION_TEXT_MODEL": str(paths["vision_vocab"]),
             "DFLASH_QWEN_VISION_PROVIDER": str(provider),
             "EMBER_KV_CACHE_DIR": str(root),
             "EMBER_SEGVTRACE": "",
@@ -207,6 +209,7 @@ class ReleaseScriptTests(unittest.TestCase):
             "DFLASH_QWEN_MTP",
             "DFLASH_QWEN_MTP_DEPTH",
             "DFLASH_QWEN_VISION_MMPROJ",
+            "DFLASH_QWEN_VISION_TEXT_MODEL",
         ):
             self.assertIn(f"\n      - {name}\n", release_service)
 
@@ -531,6 +534,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 "printf 'mtp=%s\\n' \"$DFLASH_QWEN_MTP\"\n"
                 "printf 'depth=%s\\n' \"$DFLASH_QWEN_MTP_DEPTH\"\n"
                 "printf 'mmproj=%s\\n' \"$DFLASH_QWEN_VISION_MMPROJ\"\n"
+                "printf 'vision_vocab=%s\\n' \"$DFLASH_QWEN_VISION_TEXT_MODEL\"\n"
                 "printf 'provider=%s\\n' \"$DFLASH_QWEN_VISION_PROVIDER\"\n"
                 "printf 'argv='; printf ' <%s>' \"$@\"; printf '\\n'\n"
             )
@@ -547,6 +551,7 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn(f"mtp={paths['mtp']}", result.stdout)
             self.assertIn("depth=3", result.stdout)
             self.assertIn(f"mmproj={paths['mmproj']}", result.stdout)
+            self.assertIn(f"vision_vocab={paths['vision_vocab']}", result.stdout)
             self.assertIn(f"provider={paths['provider']}", result.stdout)
             self.assertIn(f" <-m> <{paths['model']}>", result.stdout)
             self.assertIn(" <--ctx> <262144>", result.stdout)

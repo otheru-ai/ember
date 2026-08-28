@@ -343,8 +343,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                   "qwen_dispatch_envelope_sha256"])
         self.assertLessEqual(len(inputs), 10)
         for path, expected_count in ((REQUEST_BRIDGE, 5), (WORKFLOW, 4),
-                                     (ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml", 10)):
-            called = re.search(r"workflow_call:\n    inputs:\n(.*?)\n  workflow_dispatch:",
+                                     (ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml", 10),
+                                     (ROOT / ".github/workflows/qwen-gfx1151-vision.yml", 15)):
+            called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:)",
                                path.read_text(encoding="utf-8"), re.S)
             self.assertIsNotNone(called)
             self.assertEqual(
@@ -358,10 +359,11 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-gfx1151-request-bridge.yml",
             "qwen-gfx1151-construct.yml",
             "qwen-gfx1151-retire-stock.yml",
+            "qwen-gfx1151-vision.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 3)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 4)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
@@ -416,6 +418,35 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             emitted = output.read_text(encoding="utf-8")
             self.assertIn("operation=request\n", emitted)
             self.assertIn("mode=prepare-cache\n", emitted)
+
+            output.unlink()
+            vision = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "vision",
+                "inputs": {
+                    "runtime_image": "ghcr.io/otheru-ai/ember@sha256:" + "2" * 64,
+                    "runtime_dev_image": "ghcr.io/otheru-ai/ember-dev@sha256:" + "3" * 64,
+                    "model": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/model.gguf",
+                    "model_sha256": "4" * 64,
+                    "model_build_record": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/build.json",
+                    "model_build_record_sha256": "5" * 64,
+                    "mtp": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/mtp.gguf",
+                    "mtp_sha256": "6" * 64, "mtp_depth": "2",
+                    "mmproj": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/mmproj.gguf",
+                    "mmproj_sha256": "7" * 64,
+                    "vision_vocab": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/vocab.gguf",
+                    "vision_vocab_sha256": "8" * 64,
+                    "output": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/vision-test",
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_vision = invoke(vision)
+            self.assertEqual(accepted_vision.returncode, 0, accepted_vision.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=vision\n", emitted)
+            self.assertIn("mtp_depth=2\n", emitted)
+            self.assertIn("vision_output=/var/tmp/ember-qwen3.8-flash-next/", emitted)
 
             output.unlink()
             invalid = dict(valid)

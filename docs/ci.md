@@ -33,6 +33,7 @@ The hosted workflows cannot execute these checks by themselves:
 |---|---|
 | End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights; `gfx1151-certify.yml` runs it on the dedicated Halo runner. |
 | Differential validator | Needs the GPU and the 85 GiB GGUF; `gfx1151-certify.yml` runs exact, batched, and optional DSpark validation. |
+| Qwen image-text differential | `qwen-gfx1151-vision.yml` compares cold and warm Ember embeddings against the exact pinned llama.cpp mtmd oracle, retains raw phase-separated RSS/HWM/GTT/UMA samples and captures, and restores production unconditionally. The residency profile is exact: MemTotal 134297894912 bytes, TTM `pages_limit` 32505856, and peak cap 133143986176 bytes. GitHub attests the exact evidence subject at the exact Ember source/signer commit; both its digest and verified Sigstore bundle are mandatory for the protected Hugging Face publication envelope. |
 
 Target-hardware certification starts automatically after the immutable
 candidate passes the hosted and container gates. The one ROCm failure mode

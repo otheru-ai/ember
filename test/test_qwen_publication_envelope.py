@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -30,7 +31,7 @@ def digest(path: Path) -> str:
 
 
 class QwenPublicationEnvelopeTests(unittest.TestCase):
-    def fixture(self, root: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
+    def fixture(self, root: Path) -> tuple[argparse.Namespace, dict, dict, dict, dict]:
         package = root / "package"
         package.mkdir()
         runtime_image = "ghcr.io/otheru-ai/ember@sha256:" + "2" * 64
@@ -41,6 +42,8 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
         mtp.write_bytes(b"mtp-bytes")
         mmproj = package / "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
         mmproj.write_bytes(b"vision-bytes")
+        vocab = package / "Qwen3.8-Flash-Next-vocab-only.gguf"
+        vocab.write_bytes(b"vocab-bytes")
         model_sha = digest(model)
         model_inventory = [{"index": 1, "sha256": model_sha,
                             "bytes": model.stat().st_size}]
@@ -90,12 +93,17 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
                 {"role": "vision_mmproj", "filename": mmproj.name, "format": "BF16",
                  "required_for": "multimodal", "size_bytes": mmproj.stat().st_size,
                  "sha256": digest(mmproj)},
+                {"role": "vision_vocab", "filename": vocab.name,
+                 "format": "GGUF_VOCAB_ONLY", "required_for": "multimodal",
+                 "size_bytes": vocab.stat().st_size, "sha256": digest(vocab),
+                 "inspection": {"metadata_sha256": "d" * 64}},
             ],
         }
         checksum_bytes = (
             f"{model_sha}  {model.name}\n"
             f"{digest(mtp)}  {mtp.name}\n"
             f"{digest(mmproj)}  {mmproj.name}\n"
+            f"{digest(vocab)}  {vocab.name}\n"
         ).encode()
         (package / "SHA256SUMS").write_bytes(checksum_bytes)
         artifact_manifest["model_artifact_integrity"] = {
@@ -103,8 +111,8 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
             "checksum_format": "gnu_sha256sum_text",
             "sha256": digest(package / "SHA256SUMS"),
             "basenames_only": True,
-            "ordered_filenames": [model.name, mtp.name, mmproj.name],
-            "entry_count": 3,
+            "ordered_filenames": [model.name, mtp.name, mmproj.name, vocab.name],
+            "entry_count": 4,
         }
         (package / "artifact-manifest.json").write_text(json.dumps(artifact_manifest))
         planned = []
@@ -126,7 +134,8 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
         plan_path = package / "upload-plan.json"
         plan_path.write_text(json.dumps(plan))
         evidence_paths = {}
-        for name in ("ledger", "attestation", "measurement", "quality", "hardware"):
+        for name in ("ledger", "attestation", "measurement", "quality", "hardware", "vision",
+                     "vision-attestation"):
             path = root / f"{name}.json"
             path.write_text("{}")
             evidence_paths[name] = path
@@ -145,24 +154,40 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
             quality_contract_sha256=digest(evidence_paths["quality"]),
             hardware_evidence=evidence_paths["hardware"],
             hardware_evidence_sha256=digest(evidence_paths["hardware"]),
+            vision_evidence=evidence_paths["vision"],
+            vision_evidence_sha256=digest(evidence_paths["vision"]),
+            vision_attestation=evidence_paths["vision-attestation"],
+            vision_attestation_sha256=digest(evidence_paths["vision-attestation"]),
             runtime_image=runtime_image)
         measurement = {"artifacts": {
             "mtp": {"sha256": digest(mtp), "bytes": mtp.stat().st_size},
             "vision_mmproj": {
                 "sha256": digest(mmproj), "bytes": mmproj.stat().st_size},
+            "vision_vocab": {
+                "sha256": digest(vocab), "bytes": vocab.stat().st_size},
         }}
-        return args, ledger, assessment, measurement
+        vision = {"identity": {
+            "model": {"first_shard_sha256": model_sha},
+            "vision_vocab": {"sha256": digest(vocab), "size_bytes": vocab.stat().st_size,
+                             "metadata_sha256": "d" * 64}}}
+        return args, ledger, assessment, measurement, vision
 
     def test_envelope_binds_package_runtime_and_forbids_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            args, ledger, assessment, measurement = self.fixture(Path(raw))
+            args, ledger, assessment, measurement, vision = self.fixture(Path(raw))
             with mock.patch.object(qpe, "validate_evidence",
-                                   return_value=(ledger, assessment, measurement, {})):
+                                   return_value=(ledger, assessment, measurement, {}, vision)):
                 value = qpe.assemble(args, "2026-08-27T12:00:00Z")
             self.assertEqual(value["schema"], qpe.SCHEMA)
             self.assertTrue(value["authorization"]["candidate_upload"])
             self.assertFalse(value["authorization"]["promotion"])
             self.assertFalse(value["publishes"])
+            self.assertEqual(value["evidence"]["vision"]["sha256"],
+                             args.vision_evidence_sha256)
+            self.assertEqual(value["attestation_policy"]["vision_subject_sha256"],
+                             args.vision_evidence_sha256)
+            self.assertEqual(value["attestation_policy"]["vision_source_digest"], "1" * 40)
+            self.assertEqual(value["attestation_policy"]["vision_signer_digest"], "1" * 40)
             self.assertEqual(value["runtime"]["ember_revision"], "1" * 40)
             self.assertEqual(value["candidate"]["revision"], "candidate/source-engine")
             self.assertEqual(
@@ -172,7 +197,7 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
     def test_plan_rejects_destination_escape_and_changed_bytes(self) -> None:
         for mutation, expected in (("escape", "malformed"), ("bytes", "SHA-256")):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
-                args, _, _, _ = self.fixture(Path(raw))
+                args, _, _, _, _ = self.fixture(Path(raw))
                 plan = json.loads(args.upload_plan.read_text())
                 if mutation == "escape":
                     plan["files"][0]["path_in_repo"] = "../outside"
@@ -186,9 +211,9 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
     def test_remote_verification_is_commit_and_hash_bound(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            args, ledger, assessment, measurement = self.fixture(root)
+            args, ledger, assessment, measurement, vision = self.fixture(root)
             with mock.patch.object(qpe, "validate_evidence",
-                                   return_value=(ledger, assessment, measurement, {})):
+                                   return_value=(ledger, assessment, measurement, {}, vision)):
                 value = qpe.assemble(args, "2026-08-27T12:00:00Z")
             remote = root / "remote"
             remote.mkdir()
@@ -201,6 +226,36 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
             with self.assertRaisesRegex(qpe.EnvelopeError, "SHA-256"):
                 qpe.verify_remote(value, remote, "9" * 40)
 
+    def test_vision_attestation_rejects_subject_substitution_without_mocking(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subject = root / "vision-certified.json"
+            subject.write_bytes(b"certified vision evidence")
+            subject_sha = digest(subject)
+
+            def write_bundle(path: Path, attested_sha: str) -> None:
+                statement = {"_type": "https://in-toto.io/Statement/v1",
+                             "subject": [{"name": subject.name,
+                                          "digest": {"sha256": attested_sha}}]}
+                path.write_text(json.dumps({
+                    "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+                    "verificationMaterial": {},
+                    "dsseEnvelope": {
+                        "payloadType": "application/vnd.in-toto+json",
+                        "payload": base64.b64encode(json.dumps(statement).encode()).decode(),
+                        "signatures": [{"sig": "fixture"}]}}))
+
+            valid = root / "valid.sigstore.json"
+            write_bundle(valid, subject_sha)
+            qpe.validate_attestation_subject(valid, digest(valid), subject_sha,
+                                             "vision evidence attestation")
+            substituted = root / "substituted.sigstore.json"
+            write_bundle(substituted, "f" * 64)
+            with self.assertRaisesRegex(qpe.EnvelopeError, "different subject"):
+                qpe.validate_attestation_subject(
+                    substituted, digest(substituted), subject_sha,
+                    "vision evidence attestation")
+
     def test_publisher_is_oidc_candidate_only_and_no_runtime_installer(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         for required in ("id-token: write", "environment: qwen-hf-candidate",
@@ -209,6 +264,10 @@ class QwenPublicationEnvelopeTests(unittest.TestCase):
                          "git merge-base --is-ancestor",
                          "Promotion was not requested or performed"):
             self.assertIn(required, body)
+        self.assertEqual(body.count("gh attestation verify"), 2)
+        self.assertIn("vision_attestation_workflow", body)
+        self.assertIn('--source-digest "$VISION_SOURCE_DIGEST"', body)
+        self.assertIn('--signer-digest "$VISION_SIGNER_DIGEST"', body)
         for forbidden in ("HF_TOKEN: ${{ secrets", "pip install", "curl -LsSf",
                           "hf repo branch delete", "--revision main --commit-message"):
             self.assertNotIn(forbidden, body)

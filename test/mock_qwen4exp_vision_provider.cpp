@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <thread>
 
 using namespace dflash::common;
@@ -12,9 +13,11 @@ namespace {
 std::atomic<int> g_create_calls{0};
 std::atomic<int> g_active_encodes{0};
 std::atomic<int> g_max_active_encodes{0};
+std::string g_text_model_path;
 
-void * create(const char *, const char *, int, char *, size_t) {
+void * create(const char *, const char * text_model_path, int, char *, size_t) {
     g_create_calls.fetch_add(1);
+    g_text_model_path = text_model_path ? text_model_path : "";
     if (std::getenv("EMBER_TEST_SLOW_VISION_PROVIDER"))
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     return reinterpret_cast<void *>(1);
@@ -59,6 +62,7 @@ extern "C" void ember_test_vision_provider_reset_stats() {
     g_create_calls.store(0);
     g_active_encodes.store(0);
     g_max_active_encodes.store(0);
+    g_text_model_path.clear();
 }
 
 extern "C" int ember_test_vision_provider_create_calls() {
@@ -67,4 +71,9 @@ extern "C" int ember_test_vision_provider_create_calls() {
 
 extern "C" int ember_test_vision_provider_max_active_encodes() {
     return g_max_active_encodes.load();
+}
+
+extern "C" bool ember_test_vision_provider_text_model_matches(
+        const char * expected) {
+    return expected && g_text_model_path == expected;
 }

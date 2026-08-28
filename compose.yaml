@@ -42,6 +42,7 @@ services:
       - DFLASH_QWEN_MTP
       - DFLASH_QWEN_MTP_DEPTH
       - DFLASH_QWEN_VISION_MMPROJ
+      - DFLASH_QWEN_VISION_TEXT_MODEL
       # Speculative-decode tuning. Unset means "use the engine default"; an
       # empty value is NOT the same thing (SPEC_MAX_CTX would log an invalid
       # -value warning, and LUCE_MMVQ_MAX_NCOLS uses "unset" to mean "derive

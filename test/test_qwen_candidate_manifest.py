@@ -81,6 +81,9 @@ class Fixture:
         self.mtp = root / "companions" / "mtp.gguf"; self.mtp.parent.mkdir(parents=True)
         self.mtp.write_bytes(b"mtp")
         self.mmproj = root / "companions" / "mmproj.gguf"; self.mmproj.write_bytes(b"mmproj")
+        self.vision_vocab = root / "companions" / "vocab-only.gguf"
+        self.vision_vocab.write_bytes(b"vocab")
+        self.vision_vocab_metadata_sha = "a" * 64
         self.mmproj_inventory_sha = manifest.vision_inventory.load_contract()[
             "tensor_inventory_sha256"]
         self.export = write(root / "companions" / "export.json", {"status": "complete"})
@@ -100,7 +103,12 @@ class Fixture:
                 {"role": "vision_mmproj", "enabled": True, "path": str(self.mmproj),
                  "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
                  "format": "BF16",
-                 "tensor_inventory_sha256": self.mmproj_inventory_sha},
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha,
+                 "text_model": {"path": str(self.vision_vocab),
+                     "size_bytes": self.vision_vocab.stat().st_size,
+                     "sha256": digest(self.vision_vocab),
+                     "format": "GGUF_VOCAB_ONLY",
+                     "metadata_sha256": self.vision_vocab_metadata_sha}},
             ],
         })
         self.fast = write(root / "companions" / "fast.json", {
@@ -116,7 +124,12 @@ class Fixture:
                 {"role": "vision_mmproj", "enabled": True, "path": str(self.mmproj),
                  "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
                  "format": "BF16",
-                 "tensor_inventory_sha256": self.mmproj_inventory_sha},
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha,
+                 "text_model": {"path": str(self.vision_vocab),
+                     "size_bytes": self.vision_vocab.stat().st_size,
+                     "sha256": digest(self.vision_vocab),
+                     "format": "GGUF_VOCAB_ONLY",
+                     "metadata_sha256": self.vision_vocab_metadata_sha}},
             ],
         })
         self.quality = write(root / "quality.json", {"audited": True})
@@ -141,7 +154,13 @@ class Fixture:
             {"role": "vision_mmproj", "path": str(self.mmproj),
              "size_bytes": self.mmproj.stat().st_size, "sha256": digest(self.mmproj),
              "format": "BF16", "gguf_contract": {
-                 "tensor_inventory_sha256": self.mmproj_inventory_sha}},
+                 "tensor_inventory_sha256": self.mmproj_inventory_sha},
+             "text_model": {"path": str(self.vision_vocab),
+                 "size_bytes": self.vision_vocab.stat().st_size,
+                 "sha256": digest(self.vision_vocab),
+                 "format": "GGUF_VOCAB_ONLY",
+                 "metadata_sha256": self.vision_vocab_metadata_sha,
+                 "gguf_contract": {"metadata_sha256": self.vision_vocab_metadata_sha}}},
         ]
         record = write(candidate / "qwen-quant-build-record.json", {
             "status": "complete", "mode": "execute", "tools": {"ember_revision": self.hex40},
@@ -242,7 +261,8 @@ class Fixture:
             "mtp_matrix_quant_contract": "Q4_0_ROCMI4", "mtp_depth": depth,
             "artifact_bytes": shard["size_bytes"],
             "companion_artifact_bytes": {"mtp": self.mtp.stat().st_size,
-                                         "vision_mmproj": self.mmproj.stat().st_size},
+                                         "vision_mmproj": self.mmproj.stat().st_size,
+                                         "vision_vocab": self.vision_vocab.stat().st_size},
             "quantization_arm": "rocmi4-q6k-embedding-head",
             "intervention_configuration_id": "lambda-0.25-all-48",
             "builder_identity": attestation["builder_identity"],

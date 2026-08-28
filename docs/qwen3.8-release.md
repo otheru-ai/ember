@@ -322,13 +322,22 @@ scripts/build_qwen_vision_provider.sh \
   --backend hip
 ```
 
-Set `DFLASH_QWEN_VISION_MMPROJ` to the packaged mmproj path for image requests.
+Set `DFLASH_QWEN_VISION_MMPROJ` and `DFLASH_QWEN_VISION_TEXT_MODEL` to the
+packaged BF16 projector and matching vocab-only GGUF paths for image requests.
 The image supplies `DFLASH_QWEN_VISION_PROVIDER`. Both the shared libraries and
 the vocab-only text-model view are opened lazily on the first image encode, so
 text-only generation has no provider residency or dispatch cost and never
-loads duplicate text tensors. HTTP image URLs and video remain unsupported and
-fail closed. The provider build has only GPU-free ABI/dependency coverage so
-far; do not treat it as real-weight image-text or gfx1151 certification.
+loads duplicate text tensors. Data-URL PNG/JPEG/WebP/GIF still images are
+accepted; remote HTTP image URLs and video remain unsupported and fail closed.
+GPU-free ABI/dependency coverage alone is not certification. Run the protected
+`qwen-gfx1151-vision.yml` workflow against the exact selected model, MTP, BF16
+mmproj, vocab-only GGUF, release image, and matching dev image. It compares Ember's cold and
+warm embedding rows for the pinned two-image corpus with a standalone oracle
+built directly against llama.cpp
+`abdc7a0bf815d3b83e26dd523c6960e4dd597e82` (float32 `atol=1e-5`,
+`rtol=1e-5`), while separately sampling RSS, GTT, and total UMA. The gate owns
+the GPU exclusively and restores production before emitting
+`vision-certified.json`.
 
 Run the generator only after producing the GGUF in a pinned build container and
 copying `LICENSE` from the pinned source snapshot. Include the completed build
@@ -342,6 +351,7 @@ python3 scripts/qwen_release_package.py \
   --mtp /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf \
   --mtp-sha256 <digest-from-the-sealed-final-bakeoff-evidence> \
   --mmproj /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-BF16-mmproj.gguf \
+  --vision-vocab /scratch/qwen3.8-rocmi4/Qwen3.8-Flash-Next-vocab-only.gguf \
   --license /models/Qwen3.8-Flash-Next-source/LICENSE \
   --build-record /scratch/qwen3.8-rocmi4/qwen-quant-build-record.json \
   --engine-revision "$(git rev-parse HEAD)" \
@@ -356,7 +366,8 @@ input whose inode, size, mtime, or ctime changes during the copy, and validates
 only those stable copies. It writes the GGUF shards, selected MTP, `README.md`, `LICENSE`,
 `artifact-manifest.json`, `SHA256SUMS`, `qwen-quant-build-record.json`,
 the byte-exact applied `qwen-intervention-manifest.json`,
-the separate BF16 mmproj, `release-profile.json`, and `upload-plan.json`, syncs them, then publishes the
+the separate BF16 mmproj, the matching zero-tensor vocab-only GGUF,
+`release-profile.json`, and `upload-plan.json`, syncs them, then publishes the
 entire previously absent output directory with
 `renameat2(RENAME_NOREPLACE)`. Existing directories, files, and dangling
 symlinks are never replaced. The package generator revalidates the preflight's exact
@@ -372,6 +383,9 @@ must identify a `clip` Qwen3-VL merger with file type `MOSTLY_BF16`, projection
 width 2560, spatial merge 2, and an unquantized BF16/F32 tensor inventory. Its
 exact size, digest, metadata evidence, and pending real-weight certification
 are recorded separately from the quantized text shard budget.
+The vocab-only GGUF must contain zero tensors and the pinned Qwen architecture,
+tokenizer, and 2560-wide embedding metadata required by the vision provider.
+Its exact size, digest, and GGUF metadata digest are recorded independently.
 It also requires the record's atomic-directory transaction evidence, tensor
 inventory digest, and ROCmI4 type histogram, and binds the completed record to
 the selected profile SHA-256, snapshot
@@ -383,11 +397,13 @@ summary (`sha256: null`); authoritative per-file hashes remain in `artifacts`.
 `SHA256SUMS` is the deployable runtime bundle boundary, not a recursive hash
 of mutable release metadata. It is GNU `sha256sum` text with safe basenames
 only, ordered as every selected main shard, the exact bakeoff-selected MTP,
-then the exact BF16 mmproj. Missing, reordered, duplicated, path-bearing, or
-otherwise unsafe names fail packaging. `artifact-manifest.json` records the
+then the exact BF16 mmproj, and finally the exact vocab-only GGUF. Missing,
+reordered, duplicated, path-bearing, or otherwise unsafe names fail packaging.
+`artifact-manifest.json` records the
 checksum file's own SHA-256, exact ordered filenames, and entry count; the
-publication envelope reproduces this list and binds both companions to the
-final measured hardware evidence. The upload plan separately hashes every
+publication envelope reproduces this list and binds all three flattened
+companion artifacts (`mtp`, `vision_mmproj`, and `vision_vocab`) to the final
+measured hardware evidence. The upload plan separately hashes every
 release-evidence file, avoiding a checksum cycle through the manifest.
 The generated model card states that this is an actual weight intervention and
 lists both pinned intervention tools; it does not infer “Heretic” from a name.
@@ -508,14 +524,21 @@ held-out confirmation, create a separate fail-closed handoff with
 SHA-256 values for `upload-plan.json`, the final ledger and its GitHub artifact
 attestation bundle, the complete measurement manifest, the audited quality
 contract, the matching-MTP real-weight hardware record, and the immutable
-runtime image. The tool replays the final 2,074-token prefill and 256-token
+runtime image. It also requires the exact `vision-certified.json` path,
+SHA-256, and retained GitHub attestation bundle path/SHA-256 from the protected
+gfx1151 vision workflow. The offline tool binds the bundle's one in-toto
+subject digest to that evidence; the workflow verifies its Sigstore identity
+against `OtherU-AI/ember/.github/workflows/qwen-gfx1151-vision.yml` immediately
+after capture and again before publication OIDC, with both `source-digest` and
+`signer-digest` fixed to the certified Ember revision. The tool replays the final 2,074-token prefill and 256-token
 decode decision from the pinned evidence, checks the exact three-sample
 performance/memory gates, binds the selected model inventory to every planned
 package byte, and records the runtime image, Ember revision, engine-binary
-digest, and tensor-format contract. It uses only the Python standard library,
+digest, tensor-format contract, ordered model inventory, selected MTP, BF16
+mmproj, provider/reference revision, and cold/warm residency record. It uses only the Python standard library,
 does not read credentials, and does not contact the Hub.
 
-The resulting `ember.qwen3.8.hf-publication-envelope.v1` authorizes only its
+The resulting `ember.qwen3.8.hf-publication-envelope.v3` authorizes only its
 generated `candidate/...` revision. It explicitly denies promotion. Verify it
 again immediately before publication:
 

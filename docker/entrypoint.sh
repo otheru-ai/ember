@@ -83,6 +83,7 @@ prepare_qwen() {
   local mtp="${DFLASH_QWEN_MTP:-}"
   local mtp_depth="${DFLASH_QWEN_MTP_DEPTH:-}"
   local mmproj="${DFLASH_QWEN_VISION_MMPROJ:-}"
+  local vision_text_model="${DFLASH_QWEN_VISION_TEXT_MODEL:-}"
   local provider="${DFLASH_QWEN_VISION_PROVIDER:-}"
 
   model="${EMBER_QWEN_MODEL:-}"
@@ -92,6 +93,8 @@ prepare_qwen() {
     die "DFLASH_QWEN_MTP_DEPTH must be an integer from 1 to 4 in qwen3.8-flash-next mode"
   [[ -n "$mmproj" ]] ||
     die "DFLASH_QWEN_VISION_MMPROJ is required in qwen3.8-flash-next mode"
+  [[ -n "$vision_text_model" ]] ||
+    die "DFLASH_QWEN_VISION_TEXT_MODEL is required in qwen3.8-flash-next mode"
   [[ -n "$provider" ]] ||
     die "DFLASH_QWEN_VISION_PROVIDER is required in qwen3.8-flash-next mode"
   [[ -f "$provider" && -r "$provider" && ! -L "$provider" ]] ||
@@ -104,12 +107,14 @@ prepare_qwen() {
   require_direct_model_artifact "$model" "Qwen main shard 1"
   require_direct_model_artifact "$mtp" "Qwen MTP companion"
   require_direct_model_artifact "$mmproj" "Qwen BF16 mmproj"
+  require_direct_model_artifact "$vision_text_model" "Qwen vision vocab companion"
   require_direct_model_artifact "$checksum_path" "Qwen SHA256SUMS"
 
-  local model_name mtp_name mmproj_name checksum_name shard_prefix shard_count_text
+  local model_name mtp_name mmproj_name vision_text_model_name checksum_name shard_prefix shard_count_text
   model_name="$(basename "$model")"
   mtp_name="$(basename "$mtp")"
   mmproj_name="$(basename "$mmproj")"
+  vision_text_model_name="$(basename "$vision_text_model")"
   checksum_name="$(basename "$checksum_path")"
   if [[ "$model_name" =~ ^(Qwen3\.8-Flash-Next-.+)-00001-of-([0-9]{5})\.gguf$ ]]; then
     shard_prefix="${BASH_REMATCH[1]}"
@@ -121,6 +126,8 @@ prepare_qwen() {
     die "DFLASH_QWEN_MTP must use the Qwen3.8-Flash-Next MTP artifact naming contract"
   [[ "$mmproj_name" == "Qwen3.8-Flash-Next-BF16-mmproj.gguf" ]] ||
     die "DFLASH_QWEN_VISION_MMPROJ must be Qwen3.8-Flash-Next-BF16-mmproj.gguf"
+  [[ "$vision_text_model_name" == "Qwen3.8-Flash-Next-vocab-only.gguf" ]] ||
+    die "DFLASH_QWEN_VISION_TEXT_MODEL must be Qwen3.8-Flash-Next-vocab-only.gguf"
 
   verify_sha256 "$checksum_path" "$checksum_sha256" "Qwen checksum manifest"
 
@@ -159,10 +166,13 @@ prepare_qwen() {
     die "Qwen SHA256SUMS omits the selected MTP companion $mtp_name"
   [[ -n "${sealed_names[$mmproj_name]+x}" ]] ||
     die "Qwen SHA256SUMS omits the selected BF16 mmproj $mmproj_name"
+  [[ -n "${sealed_names[$vision_text_model_name]+x}" ]] ||
+    die "Qwen SHA256SUMS omits the selected vision vocab companion $vision_text_model_name"
 
   export DFLASH_QWEN_MTP="$mtp"
   export DFLASH_QWEN_MTP_DEPTH="$mtp_depth"
   export DFLASH_QWEN_VISION_MMPROJ="$mmproj"
+  export DFLASH_QWEN_VISION_TEXT_MODEL="$vision_text_model"
   export DFLASH_QWEN_VISION_PROVIDER="$provider"
   echo "ember: sealed Qwen3.8-Flash-Next artifact set verified ($shard_count main shards, MTP depth $mtp_depth)"
 }

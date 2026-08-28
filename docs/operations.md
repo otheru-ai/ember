@@ -82,7 +82,8 @@ unpublished candidate. Obtain one certified candidate bundle containing:
 
 - the complete ordered main GGUF shard set;
 - its matching quantized MTP GGUF and selected depth from the bakeoff record;
-- `Qwen3.8-Flash-Next-BF16-mmproj.gguf`; and
+- `Qwen3.8-Flash-Next-BF16-mmproj.gguf`;
+- `Qwen3.8-Flash-Next-vocab-only.gguf`; and
 - a basename-only `SHA256SUMS` whose release evidence also gives the checksum
   file's own SHA-256.
 
@@ -90,8 +91,10 @@ All of those model artifacts and `SHA256SUMS` must be regular, non-symlink
 files directly beneath the directory mounted at `/models`. The selected main
 path must be shard `00001`; Ember validates that the checksum set contains
 every sibling through the declared `of-000NN` count. The set must also contain
-the exact selected MTP and mmproj names. Startup validates the checksum-list
-digest and then all listed files even when
+the exact selected MTP, mmproj, and vocab-only text-model names. The artifact
+manifest flattens these into the `mtp`, `vision_mmproj`, and `vision_vocab`
+companion records. Startup validates the checksum-list digest and then all
+listed files even when
 `EMBER_VERIFY_EXISTING_SHA256=0`; that DeepSeek optimization never weakens the
 Qwen boundary.
 
@@ -106,6 +109,7 @@ EMBER_QWEN_SHA256SUMS_SHA256=<64-lowercase-hex-from-release-evidence>
 DFLASH_QWEN_MTP=/models/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf
 DFLASH_QWEN_MTP_DEPTH=<certified-1-through-4>
 DFLASH_QWEN_VISION_MMPROJ=/models/Qwen3.8-Flash-Next-BF16-mmproj.gguf
+DFLASH_QWEN_VISION_TEXT_MODEL=/models/Qwen3.8-Flash-Next-vocab-only.gguf
 ```
 
 ```bash
@@ -115,9 +119,14 @@ docker compose logs -f ember
 
 The release image fixes `DFLASH_QWEN_VISION_PROVIDER` to its packaged dynamic
 provider. The entrypoint also requires that shared object to be a readable
-regular file before launching the server. This wires the runtime boundary; it
-does not turn GPU-free provider tests into a real-weight multimodal claim.
-Require the candidate's image-text differential, gfx1151 runtime record, and
+regular file before launching the server. This wires the runtime boundary.
+Certification comes only from the exact `vision-certified.json` produced by
+`qwen-gfx1151-vision.yml`; it covers a pinned image-text corpus twice (cold and
+warm), a direct pinned-llama.cpp embedding differential with explicit float32
+tolerances, and raw phase-separated RSS/HWM/GTT/UMA residency. Its GitHub
+attestation is verified immediately and again at the publication boundary.
+Require that evidence,
+the ordinary gfx1151 runtime record, and
 ordinary text/MTP certification before describing the deployment as a
 certified multimodal release.
 

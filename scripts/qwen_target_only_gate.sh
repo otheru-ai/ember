@@ -193,6 +193,8 @@ required = {
     "mtp", "mtp_bytes", "mtp_sha256", "mtp_export_manifest",
     "mtp_export_manifest_sha256", "mtp_matrix_quant_contract", "vision_mmproj",
     "vision_mmproj_bytes", "vision_mmproj_sha256", "vision_mmproj_format",
+    "vision_vocab", "vision_vocab_bytes", "vision_vocab_sha256",
+    "vision_vocab_format", "vision_vocab_metadata_sha256",
     "quality_contract", "quality_contract_sha256", "mtp_depth",
     "runtime_mode", "image", "image_digest", "profile_image",
     "profile_image_digest", "final_release_eligible", "model_inventory_sha256",
@@ -235,6 +237,7 @@ if (row["image"] != image or row["image_digest"] != image_digest
 for field in ("corpus_sha256", "profile_sha256", "override_sha256",
               "companion_inventory_sha256",
               "mtp_sha256", "mtp_export_manifest_sha256", "vision_mmproj_sha256",
+              "vision_vocab_sha256", "vision_vocab_metadata_sha256",
               "quality_contract_sha256", "model_inventory_sha256",
               "tensor_format_compatibility_sha256"):
     if is_stock and field == "quality_contract_sha256":
@@ -317,6 +320,7 @@ mmproj = role_map["vision_mmproj"]
 mtp_file = exact_file(row["mtp"], row["mtp_sha256"], row["mtp_bytes"], "MTP companion")
 mtp_manifest_file = exact_file(row["mtp_export_manifest"], row["mtp_export_manifest_sha256"], label="MTP export manifest")
 mmproj_file = exact_file(row["vision_mmproj"], row["vision_mmproj_sha256"], row["vision_mmproj_bytes"], "vision mmproj")
+vocab_file = exact_file(row["vision_vocab"], row["vision_vocab_sha256"], row["vision_vocab_bytes"], "vision vocab")
 if (mtp.get("path") != row["mtp"] or mtp.get("sha256") != row["mtp_sha256"] or
         mtp.get("size_bytes") != row["mtp_bytes"] or
         mtp.get("matrix_quant_contract") != row["mtp_matrix_quant_contract"] or
@@ -329,10 +333,16 @@ if (mmproj.get("path") != row["vision_mmproj"] or mmproj.get("sha256") != row["v
         mmproj.get("size_bytes") != row["vision_mmproj_bytes"] or mmproj.get("format") != row["vision_mmproj_format"] or
         row["vision_mmproj_format"] != "BF16"):
     fail("build-record vision mmproj contract differs from candidate")
+vocab = mmproj.get("text_model") or {}
+if (vocab.get("path") != row["vision_vocab"] or vocab.get("sha256") != row["vision_vocab_sha256"] or
+        vocab.get("size_bytes") != row["vision_vocab_bytes"] or vocab.get("format") != row["vision_vocab_format"] or
+        row["vision_vocab_format"] != "GGUF_VOCAB_ONLY" or
+        (vocab.get("gguf_contract") or {}).get("metadata_sha256") != row["vision_vocab_metadata_sha256"]):
+    fail("build-record vision vocab contract differs from candidate")
 memory = build.get("memory_preflight") or {}
 if (memory.get("combined_fits") is not True or memory.get("companion_artifact_fit_status") != "verified_exact_fit" or
-        memory.get("enabled_companion_artifact_bytes") != row["mtp_bytes"] + row["vision_mmproj_bytes"]):
-    fail("combined main+MTP+mmproj memory preflight is absent or inconsistent")
+        memory.get("enabled_companion_artifact_bytes") != row["mtp_bytes"] + row["vision_mmproj_bytes"] + row["vision_vocab_bytes"]):
+    fail("combined main+MTP+mmproj+vision-vocab memory preflight is absent or inconsistent")
 
 quality_file = None
 if not is_stock:
@@ -344,6 +354,7 @@ binding = {
     "quant_build_record": build_file, "intervention_manifest": intervention_file,
     "companion_inventory": inventory_file, "mtp": mtp_file,
     "mtp_export_manifest": mtp_manifest_file, "vision_mmproj": mmproj_file,
+    "vision_vocab": vocab_file,
     "quality_contract": quality_file,
     "performance_scope": "text_only_pending_vision_differential",
 }

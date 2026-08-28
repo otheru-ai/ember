@@ -16,10 +16,16 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <limits>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using dflash::common::kQwen4ExpVisionProviderAbi;
 using dflash::common::kQwen4ExpVisionEmbeddingWidth;
@@ -32,10 +38,74 @@ struct Context {
     llama_model * vocab_model = nullptr;
     mtmd_context * mtmd = nullptr;
     uint32_t embedding_width = 0;
+    uint64_t capture_index = 0;
 };
 
 void set_error(char * out, size_t cap, const char * message) {
     if (out && cap) std::snprintf(out, cap, "%s", message);
+}
+
+bool write_all(int fd, const void * data, size_t size) {
+    const auto * cursor = static_cast<const uint8_t *>(data);
+    while (size != 0) {
+        const ssize_t written = ::write(fd, cursor, size);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return false;
+        cursor += static_cast<size_t>(written);
+        size -= static_cast<size_t>(written);
+    }
+    return true;
+}
+
+void little_u64(uint64_t value, std::array<uint8_t, 8> & out) {
+    for (unsigned i = 0; i < 8; ++i)
+        out[i] = static_cast<uint8_t>(value >> (i * 8));
+}
+
+// Hardware certification sets this prefix inside a new, private evidence
+// directory. When enabled, capture failure is a request failure: silently
+// accepting a vision result without the bytes compared to the pinned mtmd
+// reference would turn a missing differential into release evidence.
+bool capture_output(Context * ctx,
+                    const qwen4exp_vision_provider_output_v1 & out,
+                    char * error, size_t error_cap) {
+    const char * prefix = std::getenv("DFLASH_QWEN_VISION_CAPTURE_PREFIX");
+    if (!prefix || !prefix[0]) return true;
+    if (prefix[0] != '/' || std::strchr(prefix, '\n') ||
+        std::strchr(prefix, '\r')) {
+        set_error(error, error_cap, "vision capture prefix must be an absolute safe path");
+        return false;
+    }
+    char suffix[48]{};
+    std::snprintf(suffix, sizeof(suffix), ".%06llu.f32",
+                  static_cast<unsigned long long>(ctx->capture_index));
+    const std::string path = std::string(prefix) + suffix;
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                          O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        set_error(error, error_cap, "cannot create exclusive vision capture");
+        return false;
+    }
+    const std::array<uint8_t, 8> magic{{'E','V','I','S','F','3','2','\0'}};
+    const uint64_t fields[] = {1, out.grid_t, out.grid_h, out.grid_w,
+                               out.embedding_width, out.row_count};
+    bool ok = write_all(fd, magic.data(), magic.size());
+    std::array<uint8_t, 8> encoded{};
+    for (uint64_t field : fields) {
+        little_u64(field, encoded);
+        ok = ok && write_all(fd, encoded.data(), encoded.size());
+    }
+    const size_t values = out.row_count * out.embedding_width;
+    ok = ok && write_all(fd, out.rows, values * sizeof(float));
+    ok = ok && ::fsync(fd) == 0;
+    const int close_result = ::close(fd);
+    if (!ok || close_result != 0) {
+        ::unlink(path.c_str());
+        set_error(error, error_cap, "could not durably write vision capture");
+        return false;
+    }
+    ++ctx->capture_index;
+    return true;
 }
 
 void * create(const char * mmproj_path, const char * text_model_path, int gpu,
@@ -194,6 +264,11 @@ bool encode(void * opaque, const uint8_t * encoded, size_t encoded_size,
     out->row_count = rows;
     out->rows = result;
     mtmd_input_chunks_free(chunks);
+    if (!capture_output(ctx, *out, error, error_cap)) {
+        std::free(out->rows);
+        *out = {};
+        return false;
+    }
     return true;
 }
 

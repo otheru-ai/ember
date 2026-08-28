@@ -391,6 +391,14 @@ jobs:
                   or mmproj.get("format") != c.get("vision_mmproj_format")
                   or c.get("vision_mmproj_format") != "BF16"):
               raise SystemExit("shared BF16 mmproj inventory differs")
+          vocab=mmproj.get("text_model") or {}
+          if (vocab.get("path") != c.get("vision_vocab")
+                  or vocab.get("size_bytes") != c.get("vision_vocab_bytes")
+                  or vocab.get("sha256") != c.get("vision_vocab_sha256")
+                  or vocab.get("format") != c.get("vision_vocab_format")
+                  or c.get("vision_vocab_format") != "GGUF_VOCAB_ONLY"
+                  or vocab.get("metadata_sha256") != c.get("vision_vocab_metadata_sha256")):
+              raise SystemExit("shared vision vocab inventory differs")
           if corpus_sha != c.get("corpus_sha256") and phase != "final":
               raise SystemExit("stock/sweep candidate uses the wrong selection-only corpus")
           if phase == "final":
@@ -409,7 +417,8 @@ jobs:
                   "mtp_depth": c.get("mtp_depth"),
                   "artifact_bytes": c.get("artifact_bytes"),
                   "companion_artifact_bytes": {"mtp": c.get("mtp_bytes"),
-                                                   "vision_mmproj": c.get("vision_mmproj_bytes")},
+                                                   "vision_mmproj": c.get("vision_mmproj_bytes"),
+                                                   "vision_vocab": c.get("vision_vocab_bytes")},
                   "quantization_arm": c.get("quantization_arm"),
                   "intervention_configuration_id": c.get("intervention_configuration_id"),
                   "builder_identity": builder,
@@ -512,6 +521,8 @@ jobs:
             "mtp", "mtp_bytes", "mtp_sha256", "mtp_export_manifest",
             "mtp_export_manifest_sha256", "mtp_matrix_quant_contract", "vision_mmproj",
             "vision_mmproj_bytes", "vision_mmproj_sha256", "vision_mmproj_format",
+            "vision_vocab", "vision_vocab_bytes", "vision_vocab_sha256",
+            "vision_vocab_format", "vision_vocab_metadata_sha256",
             "quality_contract", "quality_contract_sha256", "mtp_depth", "runtime_mode",
             "final_release_eligible", "model_inventory_sha256",
             "tensor_format_compatibility_sha256", "artifact_bytes",
@@ -583,7 +594,8 @@ jobs:
           identities=[{"index":i,"sha256":row["sha256"],"bytes":row["size_bytes"]}
                       for i,row in enumerate(inventory["shards"],1)]
           inventory_sha=qb.canonical_sha256(identities); artifact_bytes=sum(x["bytes"] for x in identities)
-          companions={"mtp":c["mtp_bytes"],"vision_mmproj":c["vision_mmproj_bytes"]}
+          companions={"mtp":c["mtp_bytes"],"vision_mmproj":c["vision_mmproj_bytes"],
+                      "vision_vocab":c["vision_vocab_bytes"]}
           runtime={"ember_revision":runtime_sha,"engine_binary_sha256":engine_sha,
                    "container_digest":runtime_image_sha,"tensor_format_contract_sha256":format_sha}
           quality=None if c["stage"]=="stock" else {"path":c["quality_contract"],"sha256":c["quality_contract_sha256"]}
@@ -603,7 +615,9 @@ jobs:
              "artifacts":{"combined_fits":True,"model_artifact_bytes":artifact_bytes,
                           "mtp":{"path":c["mtp"],"bytes":c["mtp_bytes"],"sha256":c["mtp_sha256"]},
                           "vision_mmproj":{"path":c["vision_mmproj"],"bytes":c["vision_mmproj_bytes"],
-                                           "sha256":c["vision_mmproj_sha256"]}},
+                                           "sha256":c["vision_mmproj_sha256"]},
+                          "vision_vocab":{"path":c["vision_vocab"],"bytes":c["vision_vocab_bytes"],
+                                          "sha256":c["vision_vocab_sha256"]}},
              "evidence":{"target_complete":desc(target_path),
                          "matching_mtp_hardware_measurement":desc(hardware_path),
                          "matching_mtp_timing":desc(timing),"quality_contract":quality},
@@ -625,7 +639,7 @@ jobs:
              "companion_inventory_sha256":c["companion_inventory_sha256"],"quality_contract":quality,
              "builder_identity":builder,"runtime_identity":runtime,
              "tensor_format_compatibility_sha256":format_sha,"model_inventory_sha256":inventory_sha,
-             "enabled_companions":["mtp","vision_mmproj"],"artifact_bytes":artifact_bytes,
+             "enabled_companions":["mtp","vision_mmproj","vision_vocab"],"artifact_bytes":artifact_bytes,
              "companion_artifact_bytes":companions,"prefill_tps_samples":facts["prefill_tps_samples"],
              "decode_tps_samples":facts["decode_tps_samples"],
              "evaluated_prefill_tokens":facts["evaluated_prefill_tokens"],

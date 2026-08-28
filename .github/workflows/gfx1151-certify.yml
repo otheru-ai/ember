@@ -80,6 +80,20 @@ jobs:
       capture_manifest_sha256: ${{ steps.envelope.outputs.capture_manifest_sha256 }}
       authorization_output: ${{ steps.envelope.outputs.authorization_output }}
       authorize: ${{ steps.envelope.outputs.authorize }}
+      runtime_image: ${{ steps.envelope.outputs.runtime_image }}
+      runtime_dev_image: ${{ steps.envelope.outputs.runtime_dev_image }}
+      model: ${{ steps.envelope.outputs.model }}
+      model_sha256: ${{ steps.envelope.outputs.model_sha256 }}
+      model_build_record: ${{ steps.envelope.outputs.model_build_record }}
+      model_build_record_sha256: ${{ steps.envelope.outputs.model_build_record_sha256 }}
+      mtp: ${{ steps.envelope.outputs.mtp }}
+      mtp_sha256: ${{ steps.envelope.outputs.mtp_sha256 }}
+      mtp_depth: ${{ steps.envelope.outputs.mtp_depth }}
+      mmproj: ${{ steps.envelope.outputs.mmproj }}
+      mmproj_sha256: ${{ steps.envelope.outputs.mmproj_sha256 }}
+      vision_vocab: ${{ steps.envelope.outputs.vision_vocab }}
+      vision_vocab_sha256: ${{ steps.envelope.outputs.vision_vocab_sha256 }}
+      vision_output: ${{ steps.envelope.outputs.vision_output }}
     steps:
       - name: Decode and validate exact branch-workflow dispatch envelope
         id: envelope
@@ -133,6 +147,10 @@ jobs:
                          "stock_artifact_revision", "stock_build_record_sha256",
                          "capture_manifest", "capture_manifest_sha256",
                          "authorization_output", "authorize"},
+              "vision": {"runtime_image", "runtime_dev_image", "model", "model_sha256",
+                         "model_build_record", "model_build_record_sha256", "mtp",
+                         "mtp_sha256", "mtp_depth", "mmproj", "mmproj_sha256",
+                         "vision_vocab", "vision_vocab_sha256", "output"},
           }
           if operation not in expected or set(inputs) != expected[operation]:
               fail("dispatch operation or input keys differ")
@@ -183,7 +201,7 @@ jobs:
                   fail("construction mode differs")
               result.update({"mode": mode, "operation_request": absolute("operation_request"),
                              "operation_request_sha256": digest("operation_request_sha256")})
-          else:
+          elif operation == "retire":
               image = scalar("builder_image")
               if re.fullmatch(r"ghcr\.io/[a-z0-9._/-]+:[A-Za-z0-9._-]+", image) is None:
                   fail("builder image reference is malformed")
@@ -202,6 +220,27 @@ jobs:
                   "capture_manifest_sha256": digest("capture_manifest_sha256"),
                   "authorization_output": absolute("authorization_output"),
                   "authorize": authorize})
+          else:
+              runtime_image = scalar("runtime_image")
+              runtime_dev_image = scalar("runtime_dev_image")
+              image_pattern = r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}"
+              if (re.fullmatch(image_pattern, runtime_image) is None
+                      or re.fullmatch(image_pattern, runtime_dev_image) is None):
+                  fail("vision runtime image identity is malformed")
+              depth = scalar("mtp_depth")
+              if depth not in ("1", "2", "3", "4"):
+                  fail("vision MTP depth differs")
+              result.update({"runtime_image": runtime_image,
+                  "runtime_dev_image": runtime_dev_image,
+                  "model": absolute("model"), "model_sha256": digest("model_sha256"),
+                  "model_build_record": absolute("model_build_record"),
+                  "model_build_record_sha256": digest("model_build_record_sha256"),
+                  "mtp": absolute("mtp"), "mtp_sha256": digest("mtp_sha256"),
+                  "mtp_depth": depth, "mmproj": absolute("mmproj"),
+                  "mmproj_sha256": digest("mmproj_sha256"),
+                  "vision_vocab": absolute("vision_vocab"),
+                  "vision_vocab_sha256": digest("vision_vocab_sha256"),
+                  "vision_output": absolute("output")})
           result["operation"] = operation
           with open(output_path, "a", encoding="utf-8") as stream:
               for name, item in sorted(result.items()):
@@ -250,6 +289,34 @@ jobs:
       capture_manifest_sha256: ${{ needs.qwen-dispatch-envelope.outputs.capture_manifest_sha256 }}
       authorization_output: ${{ needs.qwen-dispatch-envelope.outputs.authorization_output }}
       authorize: ${{ needs.qwen-dispatch-envelope.outputs.authorize }}
+    secrets: inherit
+
+  qwen-call-vision:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'vision'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/qwen-gfx1151-vision.yml
+    with:
+      ember_revision: ${{ inputs.commit_sha }}
+      runtime_image: ${{ needs.qwen-dispatch-envelope.outputs.runtime_image }}
+      runtime_dev_image: ${{ needs.qwen-dispatch-envelope.outputs.runtime_dev_image }}
+      model: ${{ needs.qwen-dispatch-envelope.outputs.model }}
+      model_sha256: ${{ needs.qwen-dispatch-envelope.outputs.model_sha256 }}
+      model_build_record: ${{ needs.qwen-dispatch-envelope.outputs.model_build_record }}
+      model_build_record_sha256: ${{ needs.qwen-dispatch-envelope.outputs.model_build_record_sha256 }}
+      mtp: ${{ needs.qwen-dispatch-envelope.outputs.mtp }}
+      mtp_sha256: ${{ needs.qwen-dispatch-envelope.outputs.mtp_sha256 }}
+      mtp_depth: ${{ needs.qwen-dispatch-envelope.outputs.mtp_depth }}
+      mmproj: ${{ needs.qwen-dispatch-envelope.outputs.mmproj }}
+      mmproj_sha256: ${{ needs.qwen-dispatch-envelope.outputs.mmproj_sha256 }}
+      vision_vocab: ${{ needs.qwen-dispatch-envelope.outputs.vision_vocab }}
+      vision_vocab_sha256: ${{ needs.qwen-dispatch-envelope.outputs.vision_vocab_sha256 }}
+      output: ${{ needs.qwen-dispatch-envelope.outputs.vision_output }}
     secrets: inherit
 
   qwen-inspect-control-residue:
@@ -1312,7 +1379,7 @@ jobs:
       CORPUS_CONTRACT_SHA256: 19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d
       GOOD_CORPUS_SHA256: a41997529ad28af7234e036f05bd9bca39c504f8ec118568b73699e9b314d140
       BAD_CORPUS_SHA256: a3bededd14b030fdf06562f6739f879838902f6f4691817573a98bbe9ac6cf7c
-      CAPTURE_RECIPE_SHA256: 4f9ec83bdd22bf0213179c657b3408edbcf9075958d4e9037ac5c0b6f0f5c634
+      CAPTURE_RECIPE_SHA256: 908907bf9c223784b1f1cf191f413a7f461f703c2b4e8cdadc28446312d2fb32
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

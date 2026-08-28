@@ -15,6 +15,7 @@ namespace {
 
 constexpr const char * kProviderEnv = "DFLASH_QWEN_VISION_PROVIDER";
 constexpr const char * kMmprojEnv = "DFLASH_QWEN_VISION_MMPROJ";
+constexpr const char * kTextModelEnv = "DFLASH_QWEN_VISION_TEXT_MODEL";
 constexpr const char * kEntry = "qwen4exp_vision_provider_get_v1";
 
 bool checked_mul(size_t a, size_t b, size_t & out) {
@@ -26,9 +27,7 @@ bool checked_mul(size_t a, size_t b, size_t & out) {
 } // namespace
 
 struct Qwen4ExpLazyVisionProvider::Impl {
-    Impl(std::string model_path, int gpu_index)
-        : text_model_path(std::move(model_path)), gpu(gpu_index) {}
-    std::string text_model_path;
+    explicit Impl(int gpu_index) : gpu(gpu_index) {}
     int gpu = 0;
     void * library = nullptr;
     const qwen4exp_vision_provider_v1 * api = nullptr;
@@ -53,10 +52,12 @@ struct Qwen4ExpLazyVisionProvider::Impl {
         attempted = true;
         const char * provider_path = std::getenv(kProviderEnv);
         const char * mmproj_path = std::getenv(kMmprojEnv);
-        if (!provider_path || !provider_path[0] || !mmproj_path || !mmproj_path[0]) {
+        const char * text_model_path = std::getenv(kTextModelEnv);
+        if (!provider_path || !provider_path[0] || !mmproj_path || !mmproj_path[0]
+                || !text_model_path || !text_model_path[0]) {
             error = std::string("Qwen4Exp vision requires both ") + kProviderEnv +
-                    " and " + kMmprojEnv +
-                    " (a separate BF16 --mmproj artifact)";
+                    ", " + kMmprojEnv + " and " + kTextModelEnv +
+                    " (separate BF16 --mmproj and zero-tensor vocab artifacts)";
             return false;
         }
         library = dlopen(provider_path, RTLD_NOW | RTLD_LOCAL);
@@ -83,7 +84,7 @@ struct Qwen4ExpLazyVisionProvider::Impl {
             return false;
         }
         char detail[512]{};
-        context = api->create(mmproj_path, text_model_path.c_str(), gpu,
+        context = api->create(mmproj_path, text_model_path, gpu,
                               detail, sizeof(detail));
         if (!context) {
             error = detail[0] ? detail : "Qwen4Exp vision provider could not load mmproj";
@@ -93,9 +94,8 @@ struct Qwen4ExpLazyVisionProvider::Impl {
     }
 };
 
-Qwen4ExpLazyVisionProvider::Qwen4ExpLazyVisionProvider(
-        std::string text_model_path, int gpu)
-    : impl_(std::make_unique<Impl>(std::move(text_model_path), gpu)) {}
+Qwen4ExpLazyVisionProvider::Qwen4ExpLazyVisionProvider(int gpu)
+    : impl_(std::make_unique<Impl>(gpu)) {}
 
 Qwen4ExpLazyVisionProvider::~Qwen4ExpLazyVisionProvider() = default;
 

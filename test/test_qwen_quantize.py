@@ -151,6 +151,36 @@ def make_mmproj_companion(path: Path, mutation: str | None = None) -> None:
     path.write_bytes(output)
 
 
+def make_vision_vocab_companion(path: Path, *, with_tensor: bool = False) -> None:
+    def string(value: str) -> bytes:
+        encoded = value.encode("utf-8")
+        return struct.pack("<Q", len(encoded)) + encoded
+
+    metadata = (
+        ("general.architecture", 8, "qwen4exp", None),
+        ("qwen4exp.embedding_length", 4, 2560, None),
+        ("tokenizer.ggml.model", 8, "gpt2", None),
+        ("tokenizer.ggml.tokens", 9, ["a", "b", "<vision>"], 8),
+        ("tokenizer.ggml.token_type", 9, [1, 1, 3], 4),
+    )
+    tensor_count = 1 if with_tensor else 0
+    output = bytearray(b"GGUF" + struct.pack("<IQQ", 3, tensor_count, len(metadata)))
+    for key, kind, value, subtype in metadata:
+        output += string(key) + struct.pack("<I", kind)
+        if kind == 8:
+            output += string(value)
+        elif kind == 4:
+            output += struct.pack("<I", value)
+        else:
+            output += struct.pack("<IQ", subtype, len(value))
+            for item in value:
+                output += string(item) if subtype == 8 else struct.pack("<I", item)
+    if with_tensor:
+        output += string("token_embd.weight") + struct.pack("<IQIQ", 1, 32, 30, 0)
+        output += b"\0" * ((-len(output)) % 32) + b"\0" * 64
+    path.write_bytes(output)
+
+
 def pack_string(value: str) -> bytes:
     encoded = value.encode()
     return struct.pack("<Q", len(encoded)) + encoded
@@ -623,6 +653,8 @@ class Fixture:
         if enable_mmproj:
             mmproj = self.root / "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
             make_mmproj_companion(mmproj)
+            vocab = self.root / "Qwen3.8-Flash-Next-vocab-only.gguf"
+            make_vision_vocab_companion(vocab)
             rows.append({
                 "role": "vision_mmproj", "enabled": True, "path": str(mmproj),
                 "size_bytes": mmproj.stat().st_size, "sha256": sha256(mmproj),
@@ -630,6 +662,13 @@ class Fixture:
                 "tensor_inventory_sha256":
                     qwen_quantize.vision_inventory.load_contract()[
                         "tensor_inventory_sha256"],
+                "text_model": {
+                    "path": str(vocab), "size_bytes": vocab.stat().st_size,
+                    "sha256": sha256(vocab), "format": "GGUF_VOCAB_ONLY",
+                    "metadata_sha256":
+                        qwen_quantize.validate_qwen_vocab_only_gguf(vocab)[
+                            "metadata_sha256"],
+                },
             })
         else:
             rows.append({"role": "vision_mmproj", "enabled": False})
@@ -652,6 +691,31 @@ class Fixture:
 
 
 class QwenQuantizeTests(unittest.TestCase):
+    def test_profile_requires_ordered_mmproj_and_vocab_artifact_contracts(self) -> None:
+        profile_path = (
+            ROOT / "share" / "release_profiles" /
+            "qwen3.8-flash-next-rocmi4-strix-halo.json"
+        )
+        original = json.loads(profile_path.read_text(encoding="utf-8"))
+        inventory_name = original["source"]["snapshot_inventory"]
+        inventory_source = profile_path.parent / inventory_name
+        for mutation in ("missing", "reordered"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw_tmp:
+                directory = Path(raw_tmp)
+                profile = json.loads(json.dumps(original))
+                companions = profile["artifact"]["required_companion_artifacts"]
+                if mutation == "missing":
+                    companions.pop()
+                else:
+                    companions.reverse()
+                candidate = directory / profile_path.name
+                candidate.write_text(json.dumps(profile), encoding="utf-8")
+                (directory / inventory_name).write_bytes(inventory_source.read_bytes())
+                with self.assertRaisesRegex(
+                        qwen_quantize.PipelineError,
+                        "exact ordered BF16 mmproj and vocab-only"):
+                    qwen_quantize.validate_profile(candidate)
+
     def test_profile_winner_order_is_pinned_performance_first(self) -> None:
         profile = json.loads((
             ROOT / "share" / "release_profiles" /

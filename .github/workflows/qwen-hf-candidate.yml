@@ -70,14 +70,22 @@ jobs:
               "revision": value["candidate"]["revision"],
               "ledger_path": value["evidence"]["final_ledger"]["path"],
               "ledger_attestation": value["evidence"]["final_ledger_attestation"]["path"],
+              "vision_path": value["evidence"]["vision"]["path"],
+              "vision_attestation": value["evidence"]["vision_attestation"]["path"],
               "attestation_repo": value["attestation_policy"]["repository"],
               "attestation_workflow": value["attestation_policy"]["signer_workflow"],
+              "vision_attestation_workflow": value["attestation_policy"]["vision_signer_workflow"],
+              "vision_source_digest": value["attestation_policy"]["vision_source_digest"],
+              "vision_signer_digest": value["attestation_policy"]["vision_signer_digest"],
               "engine_revision": value["runtime"]["ember_revision"],
           }
           if fields["repo_id"] != "otheru/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-GGUF":
               raise SystemExit("unexpected Hugging Face repository")
           if re.fullmatch(r"candidate/[A-Za-z0-9._-]+", fields["revision"]) is None:
               raise SystemExit("unsafe candidate revision")
+          if (fields["vision_source_digest"] != fields["engine_revision"]
+                  or fields["vision_signer_digest"] != fields["engine_revision"]):
+              raise SystemExit("vision attestation commit binding differs from engine revision")
           if any("\n" in item or "\0" in item for item in fields.values()):
               raise SystemExit("unsafe workflow field")
           with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as stream:
@@ -93,17 +101,26 @@ jobs:
           git cat-file -e "$engine_revision^{commit}"
           git merge-base --is-ancestor "$engine_revision" "$GITHUB_SHA"
 
-      - name: Verify the externally authenticated final ledger
+      - name: Verify both externally authenticated release subjects
         env:
+          GH_TOKEN: ${{ github.token }}
           LEDGER_PATH: ${{ steps.envelope.outputs.ledger_path }}
           LEDGER_ATTESTATION: ${{ steps.envelope.outputs.ledger_attestation }}
+          VISION_PATH: ${{ steps.envelope.outputs.vision_path }}
+          VISION_ATTESTATION: ${{ steps.envelope.outputs.vision_attestation }}
           ATTESTATION_REPO: ${{ steps.envelope.outputs.attestation_repo }}
           ATTESTATION_WORKFLOW: ${{ steps.envelope.outputs.attestation_workflow }}
+          VISION_ATTESTATION_WORKFLOW: ${{ steps.envelope.outputs.vision_attestation_workflow }}
+          VISION_SOURCE_DIGEST: ${{ steps.envelope.outputs.vision_source_digest }}
+          VISION_SIGNER_DIGEST: ${{ steps.envelope.outputs.vision_signer_digest }}
         run: |
           set -euo pipefail
           set +x
           gh attestation verify "$LEDGER_PATH" --bundle "$LEDGER_ATTESTATION" \
             --repo "$ATTESTATION_REPO" --signer-workflow "$ATTESTATION_WORKFLOW"
+          gh attestation verify "$VISION_PATH" --bundle "$VISION_ATTESTATION" \
+            --repo "$ATTESTATION_REPO" --signer-workflow "$VISION_ATTESTATION_WORKFLOW" \
+            --source-digest "$VISION_SOURCE_DIGEST" --signer-digest "$VISION_SIGNER_DIGEST"
 
       - name: Require the pinned OIDC-capable Hugging Face client
         run: |

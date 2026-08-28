@@ -137,7 +137,7 @@
       "certification_host_gtt_pages_limit": 32505856,
       "certification_host_gtt_cap_bytes": 133143986176,
       "certification_host_rule": "artifact_bytes + runtime_reserve_bytes + enabled_companion_artifact_bytes <= certification_host_memtotal_bytes",
-      "companion_artifact_gate_status": "pending_mtp_mmproj_inventory_and_measured_peak_rss_gtt_against_124gib_cap",
+      "companion_artifact_gate_status": "pending_mtp_mmproj_vocab_inventory_and_measured_peak_rss_gtt_against_124gib_cap",
       "reserve_status": "provisional_until_measured_peak_rss_and_gtt",
       "yarn_1m_math_oracle_passed": true,
       "yarn_1m_runtime_certified": false,
@@ -151,6 +151,14 @@
       "estimated_bytes": 901943132,
       "estimated_gib": 0.84,
       "converter_option": "--mmproj",
+      "vocab_companion": {
+        "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+        "format": "GGUF_VOCAB_ONLY",
+        "converter_option": "--vocab-only",
+        "tensor_count": 0,
+        "embedding_length": 2560,
+        "required_for": "multimodal"
+      },
       "included_in_text_shard_budget": false,
       "runtime_implementation_status": "provider_built_gpu_free_abi_smoke_only",
       "runtime_provider": {
@@ -159,7 +167,7 @@
         "shared_object": "libember_qwen4exp_vision_provider.so",
         "build_script": "scripts/build_qwen_vision_provider.sh",
         "lazy_load": true,
-        "text_model_view": "vocab_only",
+        "text_model_view": "separate_vocab_only_companion",
         "duplicates_text_tensor_weights": false,
         "real_weight_differential_certified": false,
         "gfx1151_runtime_certified": false
@@ -265,6 +273,12 @@
         "filename": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
         "format": "BF16",
         "required_for": "multimodal"
+      },
+      {
+        "role": "vision_vocab",
+        "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+        "format": "GGUF_VOCAB_ONLY",
+        "required_for": "multimodal"
       }
     ]
   },
@@ -291,7 +305,8 @@
       "qwen-quant-build-record.json",
       "qwen-intervention-manifest.json",
       "release-profile.json",
-      "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
+      "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+      "Qwen3.8-Flash-Next-vocab-only.gguf"
     ],
     "quality_modes": [
       "exact_dequant",

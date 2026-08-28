@@ -30,6 +30,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import qwen_vision_inventory as vision_inventory
+import qwen_quantize as quant
 
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -91,7 +92,7 @@ def render_selected_sha256sums(
         raise PackageError("SHA256SUMS selected artifact names must be unique")
     if names != expected:
         raise PackageError(
-            "SHA256SUMS must contain every selected main shard, then MTP, then mmproj"
+            "SHA256SUMS must contain every selected main shard, then MTP, mmproj, and vision vocab"
         )
     return "".join(f"{digest}  {name}\n" for digest, name in entries)
 
@@ -333,14 +334,35 @@ def load_profile(path: Path) -> dict[str, Any]:
     vision = require_mapping(
         quantization.get("vision_artifact"), "quantization.vision_artifact"
     )
+    vocab_companion = require_mapping(
+        vision.get("vocab_companion"),
+        "quantization.vision_artifact.vocab_companion",
+    )
     provider = require_mapping(
         vision.get("runtime_provider"),
         "quantization.vision_artifact.runtime_provider",
     )
     companions = artifact.get("required_companion_artifacts")
-    if not isinstance(companions, list) or len(companions) != 1:
-        raise PackageError("artifact must declare exactly one required vision companion")
-    companion = require_mapping(companions[0], "artifact.required_companion_artifacts[0]")
+    expected_companions = [
+        {
+            "role": "vision_mmproj",
+            "filename": "Qwen3.8-Flash-Next-BF16-mmproj.gguf",
+            "format": "BF16",
+            "required_for": "multimodal",
+        },
+        {
+            "role": "vision_vocab",
+            "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+            "format": "GGUF_VOCAB_ONLY",
+            "required_for": "multimodal",
+        },
+    ]
+    if companions != expected_companions:
+        raise PackageError(
+            "artifact must declare the exact ordered BF16 mmproj and vocab-only "
+            "vision companion contracts")
+    companion = companions[0]
+    vocab_artifact_companion = companions[1]
     if (
         vision.get("layout") != "separate_mmproj_gguf"
         or vision.get("required_for_multimodal_runtime") is not True
@@ -354,22 +376,34 @@ def load_profile(path: Path) -> dict[str, Any]:
         or provider.get("shared_object") != "libember_qwen4exp_vision_provider.so"
         or provider.get("build_script") != "scripts/build_qwen_vision_provider.sh"
         or provider.get("lazy_load") is not True
-        or provider.get("text_model_view") != "vocab_only"
+        or provider.get("text_model_view") != "separate_vocab_only_companion"
         or provider.get("duplicates_text_tensor_weights") is not False
         or provider.get("real_weight_differential_certified") is not False
         or provider.get("gfx1151_runtime_certified") is not False
-        or companion.get("role") != "vision_mmproj"
-        or companion.get("filename") != "Qwen3.8-Flash-Next-BF16-mmproj.gguf"
-        or companion.get("format") != "BF16"
-        or companion.get("required_for") != "multimodal"
+        or vocab_companion != {
+            "filename": "Qwen3.8-Flash-Next-vocab-only.gguf",
+            "format": "GGUF_VOCAB_ONLY",
+            "converter_option": "--vocab-only",
+            "tensor_count": 0,
+            "embedding_length": 2560,
+            "required_for": "multimodal",
+        }
+        or vocab_artifact_companion["filename"] != vocab_companion["filename"]
+        or vocab_artifact_companion["format"] != vocab_companion["format"]
+        or vocab_artifact_companion["required_for"] != vocab_companion["required_for"]
     ):
-        raise PackageError("profile does not carry the audited separate BF16 vision contract")
+        raise PackageError(
+            "profile does not carry the audited BF16 mmproj and vocab-only "
+            "vision contract")
     required_artifacts = release.get("required_artifacts")
     if (
         not isinstance(required_artifacts, list)
         or companion["filename"] not in required_artifacts
+        or vocab_artifact_companion["filename"] not in required_artifacts
     ):
-        raise PackageError("release.required_artifacts must include the BF16 mmproj")
+        raise PackageError(
+            "release.required_artifacts must include the BF16 mmproj and "
+            "vocab-only vision text model")
     q1_memory = require_mapping(release.get("q1_correctness_memory"), "release.q1_correctness_memory")
     if (
         q1_memory.get("classification") != "correctness_first_no_performance_claim"
@@ -661,9 +695,10 @@ evidence is embedded in every GGUF shard and retained in the build record.
 {artifact_rows}
 
 The BF16 `vision_mmproj` is a separate llama.cpp `--mmproj` artifact. Ember
-loads its dynamic mtmd provider only on the first image request and opens the
-text GGUF as a vocab-only view, so it does not duplicate the quantized text
-tensor weights. The provider has passed GPU-free ABI and dependency checks;
+loads its dynamic mtmd provider only on the first image request with the
+separate zero-tensor `--vocab-only` GGUF. This avoids both duplicate text
+weights and parsing Ember-private tensor types in public llama.cpp. The
+provider has passed GPU-free ABI and dependency checks;
 real-weight image-text differential correctness and gfx1151 runtime behavior
 remain uncertified.
 
@@ -730,7 +765,8 @@ def build_package_in_stage(
     profile_snapshot = out_dir / "release-profile.json"
     copy_stable_file(profile_path, profile_snapshot)
     profile = load_profile(profile_snapshot)
-    companion_contract = profile["artifact"]["required_companion_artifacts"][0]
+    required_companions = profile["artifact"]["required_companion_artifacts"]
+    companion_contract = required_companions[0]
     mmproj_name = require_safe_release_basename(
         companion_contract.get("filename"), "vision mmproj filename"
     )
@@ -738,6 +774,14 @@ def build_package_in_stage(
         args.mmproj.absolute()
         if args.mmproj is not None
         else source_build_record_path.parent / mmproj_name
+    )
+    vocab_contract = required_companions[1]
+    vocab_name = require_safe_release_basename(
+        vocab_contract.get("filename"), "vision vocab filename")
+    source_vocab_path = (
+        args.vision_vocab.absolute()
+        if args.vision_vocab is not None
+        else source_build_record_path.parent / vocab_name
     )
     if not HEX40.fullmatch(args.engine_revision):
         raise PackageError("--engine-revision must be a lowercase 40-character commit")
@@ -784,9 +828,10 @@ def build_package_in_stage(
         raise PackageError(
             "selected MTP filename must match the Qwen3.8-Flash-Next deployment contract"
         )
-    selected_names = [*destination_names, mtp_name, mmproj_name]
+    selected_names = [*destination_names, mtp_name, mmproj_name, vocab_name]
     if len(selected_names) != len(set(selected_names)):
-        raise PackageError("selected main, MTP, and mmproj artifact names must be unique")
+        raise PackageError(
+            "selected main, MTP, mmproj, and vision vocab artifact names must be unique")
     artifact_paths = [out_dir / destination for destination in destination_names]
     artifact_hashes = [
         copy_stable_file(source, destination)
@@ -829,7 +874,20 @@ def build_package_in_stage(
         "sha256": mmproj_hash,
         "inspection": mmproj_inspection,
     }
-    companion_records = [mtp_record, vision_record]
+    vocab_path = out_dir / vocab_name
+    vocab_hash = copy_stable_file(source_vocab_path, vocab_path)
+    try:
+        vocab_inspection = quant.validate_qwen_vocab_only_gguf(vocab_path)
+    except quant.PipelineError as exc:
+        raise PackageError(str(exc)) from exc
+    vocab_record = {
+        "role": "vision_vocab", "filename": vocab_name,
+        "format": vocab_contract["format"],
+        "required_for": vocab_contract["required_for"],
+        "size_bytes": vocab_path.stat().st_size, "sha256": vocab_hash,
+        "inspection": vocab_inspection,
+    }
+    companion_records = [mtp_record, vision_record, vocab_record]
     build_record_path = out_dir / "qwen-quant-build-record.json"
     copy_stable_file(source_build_record_path, build_record_path)
     try:
@@ -838,6 +896,29 @@ def build_package_in_stage(
         raise PackageError(f"cannot read quantization build record: {exc}") from exc
     if not isinstance(build_record, dict) or build_record.get("status") != "complete":
         raise PackageError("quantization build record must have status complete")
+    bound_companions = require_mapping(
+        build_record.get("companion_inventory"),
+        "build_record.companion_inventory")
+    bound_roles = {
+        row.get("role"): row for row in bound_companions.get("roles", [])
+        if isinstance(row, dict)
+    }
+    bound_mtp = bound_roles.get("mtp") or {}
+    bound_mmproj = bound_roles.get("vision_mmproj") or {}
+    bound_vocab = bound_mmproj.get("text_model") or {}
+    if (bound_companions.get("status") != "verified_exact"
+            or bound_companions.get("enabled_roles") != ["mtp", "vision_mmproj"]
+            or set(bound_roles) != {"mtp", "vision_mmproj"}
+            or any(bound_mtp.get(key) != mtp_record.get(key)
+                   for key in ("size_bytes", "sha256"))
+            or any(bound_mmproj.get(key) != vision_record.get(key)
+                   for key in ("size_bytes", "sha256", "format"))
+            or any(bound_vocab.get(key) != vocab_record.get(key)
+                   for key in ("size_bytes", "sha256", "format"))
+            or ((bound_vocab.get("gguf_contract") or {}).get("metadata_sha256") !=
+                vocab_record["inspection"]["metadata_sha256"])):
+        raise PackageError(
+            "quantization build record does not bind the selected MTP/mmproj/vocab companions")
     if (
         build_record.get("schema_version") != 1
         or build_record.get("mode") != "execute"
@@ -965,6 +1046,13 @@ def build_package_in_stage(
         or artifact_bytes + reserve_bytes > budget_bytes
     ):
         raise PackageError("quantization build record does not satisfy the exact native-262K memory gate")
+    companion_bytes = sum(row["size_bytes"] for row in companion_records)
+    if (memory_preflight.get("enabled_companion_artifact_bytes") != companion_bytes
+            or memory_preflight.get("combined_accounted_bytes") !=
+                artifact_bytes + reserve_bytes + companion_bytes
+            or memory_preflight.get("combined_fits") is not True):
+        raise PackageError(
+            "quantization build record combined memory gate omits packaged companions")
     if len(artifact_records) == 1:
         artifact_summary = {"kind": "single_file", **artifact_records[0]}
     else:
@@ -1037,6 +1125,7 @@ def build_package_in_stage(
         *((item["sha256"], item["filename"]) for item in artifact_records),
         (mtp_record["sha256"], mtp_record["filename"]),
         (vision_record["sha256"], vision_record["filename"]),
+        (vocab_record["sha256"], vocab_record["filename"]),
     ]
     checksum_text = render_selected_sha256sums(selected_checksums, selected_names)
     write_text(checksums_path, checksum_text)
@@ -1055,6 +1144,7 @@ def build_package_in_stage(
         *((path, destination) for path, destination in zip(artifact_paths, destination_names)),
         (mtp_path, mtp_name),
         (mmproj_path, mmproj_name),
+        (vocab_path, vocab_name),
         (readme_path, "README.md"),
         (license_out, "LICENSE"),
         (manifest_path, "artifact-manifest.json"),
@@ -1130,6 +1220,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--mmproj", type=Path,
         help=("separate BF16 vision GGUF; defaults to the required companion "
+              "filename beside --build-record"),
+    )
+    parser.add_argument(
+        "--vision-vocab", type=Path,
+        help=("zero-tensor Qwen vocab GGUF; defaults to the required companion "
               "filename beside --build-record"),
     )
     parser.add_argument("--mtp", type=Path, required=True,

@@ -187,6 +187,15 @@ def validate_companion_inventory(
         fail("vision companion must be enabled BF16")
     exact_file(mmproj.get("path"), mmproj.get("sha256"), "vision mmproj",
                mmproj.get("size_bytes"))
+    text_model = mmproj.get("text_model")
+    if (not isinstance(text_model, dict)
+            or set(text_model) != {"path", "size_bytes", "sha256", "format",
+                                  "metadata_sha256"}
+            or text_model.get("format") != "GGUF_VOCAB_ONLY"
+            or HEX64.fullmatch(str(text_model.get("metadata_sha256", ""))) is None):
+        fail("vision companion lacks its exact vocab-only text model")
+    exact_file(text_model.get("path"), text_model.get("sha256"),
+               "vision vocab companion", text_model.get("size_bytes"))
     return ({"path": str(inventory_path), "sha256": raw["sha256"]},
             mtp, mmproj, export)
 
@@ -219,7 +228,12 @@ def validate_build_companion(
     if (any(expected_mmproj.get(key) != mmproj.get(key)
             for key in ("path", "sha256", "size_bytes", "format"))
             or (expected_mmproj.get("gguf_contract") or {}).get(
-                "tensor_inventory_sha256") != mmproj.get("tensor_inventory_sha256")):
+                "tensor_inventory_sha256") != mmproj.get("tensor_inventory_sha256")
+            or any((expected_mmproj.get("text_model") or {}).get(key) !=
+                   mmproj["text_model"].get(key)
+                   for key in ("path", "size_bytes", "sha256", "format"))
+            or ((expected_mmproj.get("text_model") or {}).get("gguf_contract") or {}).get(
+                "metadata_sha256") != mmproj["text_model"].get("metadata_sha256")):
         fail("build-record mmproj provenance differs from canonical inventory")
 
 
@@ -477,7 +491,7 @@ def normalize(args: argparse.Namespace) -> dict[str, Any]:
         for contract in sorted(MTP_CONTRACTS)
     }
     mmproj_identities = [{key: row[2].get(key) for key in (
-        "path", "sha256", "size_bytes", "format", "enabled")}
+        "path", "sha256", "size_bytes", "format", "enabled", "text_model")}
         for row in companion_rows.values()]
     if any(identity != mmproj_identities[0] for identity in mmproj_identities[1:]):
         fail("companion inventories do not bind one shared BF16 vision mmproj")
@@ -599,6 +613,11 @@ def normalize(args: argparse.Namespace) -> dict[str, Any]:
         "vision_mmproj": mmproj["path"], "vision_mmproj_bytes": mmproj["size_bytes"],
         "vision_mmproj_sha256": mmproj["sha256"],
         "vision_mmproj_format": mmproj["format"],
+        "vision_vocab": mmproj["text_model"]["path"],
+        "vision_vocab_bytes": mmproj["text_model"]["size_bytes"],
+        "vision_vocab_sha256": mmproj["text_model"]["sha256"],
+        "vision_vocab_format": mmproj["text_model"]["format"],
+        "vision_vocab_metadata_sha256": mmproj["text_model"]["metadata_sha256"],
         "quality_contract": None, "quality_contract_sha256": None,
         "mtp_depth": args.mtp_depth, "runtime_mode": args.runtime_mode,
         "final_release_eligible": semantics["final_release_eligible"],
@@ -643,7 +662,8 @@ def normalize(args: argparse.Namespace) -> dict[str, Any]:
         "mtp_matrix_quant_contract": args.mtp_matrix_quant_contract,
         "mtp_depth": args.mtp_depth, "artifact_bytes": artifact_bytes,
         "companion_artifact_bytes": {"mtp": mtp["size_bytes"],
-                                     "vision_mmproj": mmproj["size_bytes"]},
+                                     "vision_mmproj": mmproj["size_bytes"],
+                                     "vision_vocab": mmproj["text_model"]["size_bytes"]},
         "quantization_arm": quantization_arm,
         "intervention_configuration_id": semantics["configuration_id"],
         "builder_identity": builder_identity,

@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "test"))
 import qwen_candidate_builder as builder  # noqa: E402
 import qwen_quantize as quant  # noqa: E402
-from test_qwen_quantize import Fixture, make_gguf, make_mmproj_companion  # noqa: E402
+from test_qwen_quantize import (Fixture, make_gguf, make_mmproj_companion,
+                                make_vision_vocab_companion)  # noqa: E402
 
 
 def digest(path: Path) -> str:
@@ -115,15 +116,19 @@ class CandidateBuilderTests(unittest.TestCase):
             self.assertTrue(authorization.exists())
             self.assertTrue(Path(result["completion"]).exists())
 
-    def test_cache_address_binds_main_and_mmproj(self) -> None:
+    def test_cache_address_binds_main_mmproj_and_vision_vocab(self) -> None:
         main = [{"name": "m-00001-of-00002.gguf", "size_bytes": 11,
                  "sha256": "1" * 64}]
         mmproj = {"name": builder.MMPROJ_BASENAME, "size_bytes": 7,
                   "sha256": "2" * 64}
-        main_sha, cache_id = builder.cache_content_address(main, mmproj)
+        vocab = {"name": builder.VISION_VOCAB_BASENAME, "size_bytes": 5,
+                 "sha256": "4" * 64}
+        main_sha, cache_id = builder.cache_content_address(main, mmproj, vocab)
         self.assertEqual(main_sha, builder.canonical_sha256(main))
         changed = dict(mmproj, sha256="3" * 64)
-        self.assertNotEqual(cache_id, builder.cache_content_address(main, changed)[1])
+        self.assertNotEqual(cache_id, builder.cache_content_address(main, changed, vocab)[1])
+        self.assertNotEqual(cache_id, builder.cache_content_address(
+            main, mmproj, dict(vocab, sha256="5" * 64))[1])
 
     def test_format_compatibility_excludes_builder_binary_and_arm_default(self) -> None:
         base = {"tool": "ember-gguf-quantize", "format": "Q4_0_ROCMI4",
@@ -167,12 +172,19 @@ class CandidateBuilderTests(unittest.TestCase):
             fixture = Fixture(fixture_root)
             fixture.companion_args(enable_mmproj=True)
             mmproj = fixture_root / builder.MMPROJ_BASENAME
+            vocab = fixture_root / builder.VISION_VOCAB_BASENAME
+            make_vision_vocab_companion(vocab)
+            vocab_gguf = quant.validate_qwen_vocab_only_gguf(vocab)
             cache_manifest = fixture_root / "bf16-cache-manifest.json"
             write_json(cache_manifest, {
                 "schema": quant.BF16_CACHE_SCHEMA,
                 "vision_mmproj": {"name": mmproj.name,
                                   "size_bytes": mmproj.stat().st_size,
                                   "sha256": digest(mmproj)},
+                "vision_vocab": {"name": vocab.name,
+                                  "size_bytes": vocab.stat().st_size,
+                                  "sha256": digest(vocab),
+                                  "gguf": vocab_gguf},
             })
             mtp = fixture_root / "Qwen3.8-Flash-Next-MTP.gguf"
             mtp_export = fixture_root / "Qwen3.8-Flash-Next-MTP.export.json"
@@ -192,6 +204,7 @@ class CandidateBuilderTests(unittest.TestCase):
             self.assertEqual([row["role"] for row in roles], ["mtp", "vision_mmproj"])
             self.assertEqual(roles[0]["matrix_quant_contract"], "Q4_0_ROCMI4")
             self.assertEqual(roles[1]["sha256"], digest(mmproj))
+            self.assertEqual(roles[1]["text_model"]["sha256"], digest(vocab))
             self.assertEqual(
                 roles[1]["tensor_inventory_sha256"],
                 quant.vision_inventory.load_contract()["tensor_inventory_sha256"],
@@ -207,12 +220,17 @@ class CandidateBuilderTests(unittest.TestCase):
                 fixture.companion_args(enable_mmproj=True)
                 mmproj = root / builder.MMPROJ_BASENAME
                 make_mmproj_companion(mmproj, mutation)
+                vocab = root / builder.VISION_VOCAB_BASENAME
+                make_vision_vocab_companion(vocab)
                 cache_manifest = root / "bf16-cache-manifest.json"
                 write_json(cache_manifest, {
                     "schema": quant.BF16_CACHE_SCHEMA,
                     "vision_mmproj": {"name": mmproj.name,
                                       "size_bytes": mmproj.stat().st_size,
                                       "sha256": digest(mmproj)},
+                    "vision_vocab": {"name": vocab.name,
+                                      "size_bytes": vocab.stat().st_size,
+                                      "sha256": digest(vocab)},
                 })
                 mtp = root / "Qwen3.8-Flash-Next-MTP.gguf"
                 mtp_export = root / "Qwen3.8-Flash-Next-MTP.export.json"
@@ -244,6 +262,8 @@ class CandidateBuilderTests(unittest.TestCase):
                       tensor_name="per_layer_token_embd.weight", tensor_type=0)
             mmproj = staging / builder.MMPROJ_BASENAME
             make_mmproj_companion(mmproj)
+            vocab = staging / builder.VISION_VOCAB_BASENAME
+            make_vision_vocab_companion(vocab)
             ple = quant.safetensor_ple_constants(fixture.snapshot)
             main_gguf = quant.verify_gguf_set(
                 [main], ple, quantized=False, profile=profile)
@@ -252,7 +272,11 @@ class CandidateBuilderTests(unittest.TestCase):
             mmproj_row = {"name": mmproj.name, "size_bytes": mmproj.stat().st_size,
                           "sha256": digest(mmproj), "format": "BF16",
                           "gguf": quant.validate_bf16_qwen_mmproj_gguf(mmproj)}
-            main_sha, cache_id = builder.cache_content_address(main_rows, mmproj_row)
+            vocab_row = {"name": vocab.name, "size_bytes": vocab.stat().st_size,
+                         "sha256": digest(vocab), "format": "GGUF_VOCAB_ONLY",
+                         "gguf": quant.validate_qwen_vocab_only_gguf(vocab)}
+            main_sha, cache_id = builder.cache_content_address(
+                main_rows, mmproj_row, vocab_row)
             tools = {
                 "llama_cpp_revision": fixture.llama_head,
                 "llama_cpp_base_revision": fixture.llama_base,
@@ -285,6 +309,8 @@ class CandidateBuilderTests(unittest.TestCase):
                                "ple_ggml_tensor_type": 0,
                                "mmproj": {"outtype": "bf16",
                                           "converter_option": "--mmproj"},
+                               "vision_vocab": {"converter_option": "--vocab-only",
+                                                "tensor_count": 0},
                                "gguf_writer_temp_cleanup": {
                                    "policy": "exact_converter_private_tmp_residue_v3",
                                    "main_removed": [], "mmproj_removed": []}},
@@ -298,6 +324,7 @@ class CandidateBuilderTests(unittest.TestCase):
                          "gguf": {key: main_gguf[key] for key in (
                              "tensor_count", "tensor_names_sha256", "tensor_type_counts")}},
                 "vision_mmproj": mmproj_row,
+                "vision_vocab": vocab_row,
             }
             manifest_path = staging / "bf16-cache-manifest.json"
             write_json(manifest_path, manifest)

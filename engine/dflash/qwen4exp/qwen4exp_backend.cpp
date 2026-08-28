@@ -225,7 +225,7 @@ bool Qwen4ExpBackend::encode_vision_image(
     std::lock_guard<std::mutex> lock(vision_provider_mu_);
     if (!vision_provider_)
         vision_provider_ = std::make_unique<Qwen4ExpLazyVisionProvider>(
-            config_.model_path, config_.device.gpu);
+            config_.device.gpu);
     return vision_provider_->encode(encoded, encoded_size, out, error);
 }
 

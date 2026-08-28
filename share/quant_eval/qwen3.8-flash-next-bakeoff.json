@@ -137,7 +137,7 @@
     "certification_host_memtotal_bytes": 134297894912,
     "certification_host_gtt_pages_limit": 32505856,
     "certification_host_gtt_cap_bytes": 133143986176,
-    "required_companion_inventory_keys": ["mtp", "vision_mmproj"],
+    "required_companion_inventory_keys": ["mtp", "vision_mmproj", "vision_vocab"],
     "peak_memory_measurement_method": "runner_rss_gtt_sampler_v1"
   },
   "measurement_policy": {

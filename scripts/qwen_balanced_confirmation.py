@@ -128,7 +128,8 @@ def _binding_from_assessment(row: dict[str, Any], evidence_root: Path) -> dict[s
         "artifact_bytes": "artifact_bytes",
     }
     companion_bytes = {"mtp": candidate.get("mtp_bytes"),
-                       "vision_mmproj": candidate.get("vision_mmproj_bytes")}
+                       "vision_mmproj": candidate.get("vision_mmproj_bytes"),
+                       "vision_vocab": candidate.get("vision_vocab_bytes")}
     if (candidate.get("stage") != "format"
             or candidate.get("final_release_eligible") is not True
             or candidate.get("arm_id") != row.get("arm_id")
@@ -140,6 +141,9 @@ def _binding_from_assessment(row: dict[str, Any], evidence_root: Path) -> dict[s
                                   "format finalist first shard")
     mtp = declared_regular_file(candidate.get("mtp"), candidate.get("mtp_sha256"),
                                 "format finalist MTP companion")
+    declared_regular_file(candidate.get("vision_vocab"),
+                          candidate.get("vision_vocab_sha256"),
+                          "format finalist vision vocab companion")
     build = exact_file(candidate.get("build_record"), candidate.get("build_record_sha256"),
                        "format finalist build record")
     return {

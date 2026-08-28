@@ -28,10 +28,11 @@ int main(int argc, char ** argv) {
     if (argc != 2) return 1;
     unsetenv("DFLASH_QWEN_VISION_PROVIDER");
     unsetenv("DFLASH_QWEN_VISION_MMPROJ");
+    unsetenv("DFLASH_QWEN_VISION_TEXT_MODEL");
     const uint8_t bytes[] = {7, 8, 9};
     EncodedVisionImage out;
     std::string error;
-    Qwen4ExpLazyVisionProvider absent("/unused/text.gguf", 0);
+    Qwen4ExpLazyVisionProvider absent(0);
     CHECK(!absent.encode(bytes, sizeof(bytes), out, error) &&
           error.find("DFLASH_QWEN_VISION_PROVIDER") != std::string::npos,
           "provider is lazy and absent configuration fails descriptively");
@@ -40,6 +41,7 @@ int main(int argc, char ** argv) {
     CHECK(mock_library != nullptr, "mock provider opens for test instrumentation");
     using reset_stats_fn = void (*)();
     using read_stat_fn = int (*)();
+    using path_matches_fn = bool (*)(const char *);
     reset_stats_fn reset_stats = mock_library
         ? load_symbol<reset_stats_fn>(mock_library,
               "ember_test_vision_provider_reset_stats") : nullptr;
@@ -49,12 +51,16 @@ int main(int argc, char ** argv) {
     read_stat_fn max_active = mock_library
         ? load_symbol<read_stat_fn>(mock_library,
               "ember_test_vision_provider_max_active_encodes") : nullptr;
-    CHECK(reset_stats && create_calls && max_active,
+    path_matches_fn text_model_matches = mock_library
+        ? load_symbol<path_matches_fn>(mock_library,
+              "ember_test_vision_provider_text_model_matches") : nullptr;
+    CHECK(reset_stats && create_calls && max_active && text_model_matches,
           "mock provider exposes concurrency instrumentation");
 
     setenv("DFLASH_QWEN_VISION_PROVIDER", argv[1], 1);
     setenv("DFLASH_QWEN_VISION_MMPROJ", "/unused/mock-mmproj.gguf", 1);
-    Qwen4ExpLazyVisionProvider provider("/unused/text.gguf", 0);
+    setenv("DFLASH_QWEN_VISION_TEXT_MODEL", "/unused/vocab-only.gguf", 1);
+    Qwen4ExpLazyVisionProvider provider(0);
     if (reset_stats) reset_stats();
     setenv("EMBER_TEST_SLOW_VISION_PROVIDER", "1", 1);
     constexpr int n_threads = 8;
@@ -86,6 +92,8 @@ int main(int argc, char ** argv) {
     CHECK(all_encoded, "concurrent provider calls all encode exactly");
     CHECK(create_calls && create_calls() == 1,
           "concurrent first use creates one provider context");
+    CHECK(text_model_matches && text_model_matches("/unused/vocab-only.gguf"),
+          "provider receives only the explicit vocab companion path");
     CHECK(max_active && max_active() == 1,
           "provider serializes encode access to its mtmd context");
 

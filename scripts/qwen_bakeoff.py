@@ -727,7 +727,7 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
     if artifact_bytes != artifacts.get("model_artifact_bytes"):
         raise BakeoffError("main artifact bytes do not equal the ordered hardware shard sum")
     companion_bytes: dict[str, int] = {}
-    for role in ("mtp", "vision_mmproj"):
+    for role in ("mtp", "vision_mmproj", "vision_vocab"):
         item = artifacts.get(role) or {}
         size = item.get("bytes")
         path_value = item.get("path")
@@ -960,10 +960,12 @@ def assess(row: dict[str, Any], gates: dict[str, Any], corpus_sha: str) -> dict[
     companion = derived.get("companion_artifact_bytes")
     required_companions = gates["required_companion_inventory_keys"]
     if not isinstance(companion, dict) or set(companion) != set(required_companions):
-        raise BakeoffError("measurement must inventory MTP and vision-mmproj companion bytes")
+        raise BakeoffError(
+            "measurement must inventory MTP, vision-mmproj, and vision-vocab companion bytes")
     enabled = row.get("enabled_companions")
     if enabled != required_companions:
-        raise BakeoffError("every exact MTP/mmproj companion must be enabled and accounted")
+        raise BakeoffError(
+            "every exact MTP/mmproj/vocab companion must be enabled and accounted")
     for name in required_companions:
         value = companion[name]
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
