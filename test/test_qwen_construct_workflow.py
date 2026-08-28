@@ -23,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-gfx1151-construct.yml"
 REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
 DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
+Q3_FIRST_TOKEN_PLAN = ROOT / ".github/workflows/qwen-q3-first-token-plan.yml"
+Q3_FIRST_TOKEN = ROOT / ".github/workflows/qwen-q3-first-token.yml"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 import qwen_selection_corpus_stage as selection_stage  # noqa: E402
@@ -661,8 +663,9 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                      (ROOT / ".github/workflows/qwen-quality-capture.yml", 3),
                                      (ROOT / ".github/workflows/qwen-quality-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-candidate-plan.yml", 4),
-                                     (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6)):
-            called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:)",
+                                     (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6),
+                                     (Q3_FIRST_TOKEN_PLAN, 1), (Q3_FIRST_TOKEN, 4)):
+            called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:|\npermissions:)",
                                path.read_text(encoding="utf-8"), re.S)
             self.assertIsNotNone(called)
             self.assertEqual(
@@ -681,10 +684,12 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-quality-plan.yml",
             "qwen-candidate-plan.yml",
             "qwen-gfx1151-bakeoff.yml",
+            "qwen-q3-first-token-plan.yml",
+            "qwen-q3-first-token.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 6)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 7)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 2)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-plan.yml"), 1)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-candidate-plan.yml"), 1)
@@ -695,6 +700,11 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("qwen-call-planned-candidate:", body)
         self.assertIn("needs: [qwen-dispatch-envelope, qwen-call-candidate-plan]", body)
         self.assertIn("needs.qwen-call-candidate-plan.outputs.operation_request", body)
+        self.assertIn(
+            "inputs.release_version == 'qwen-q3-first-token-v1-20260828'", body)
+        self.assertIn("qwen-plan-q3-first-token:", body)
+        self.assertIn("qwen-build-q3-first-token:", body)
+        self.assertIn("qwen-prove-q3-first-token:", body)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
@@ -862,6 +872,55 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             rejected = invoke(invalid)
             self.assertNotEqual(rejected.returncode, 0)
             self.assertFalse(output.exists())
+
+    def test_q3_first_token_lane_is_create_only_exclusive_and_scope_bounded(self) -> None:
+        ruby = shutil.which("ruby")
+        for path in (Q3_FIRST_TOKEN_PLAN, Q3_FIRST_TOKEN):
+            workflow_body = path.read_text(encoding="utf-8")
+            if ruby:
+                subprocess.run(
+                    [ruby, "-e", "require 'yaml'; YAML.parse_file(ARGV[0])", str(path)],
+                    check=True,
+                )
+            for index, block in enumerate(workflow_run_blocks(workflow_body)):
+                neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+                shell = subprocess.run(
+                    ["bash", "-n"], input=neutral, text=True, capture_output=True,
+                )
+                self.assertEqual(shell.returncode, 0,
+                                 f"{path.name} run block {index}: {shell.stderr}")
+                for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                    compile(script, f"{path.name}-{index}-heredoc.py", "exec")
+
+        plan = Q3_FIRST_TOKEN_PLAN.read_text(encoding="utf-8")
+        self.assertIn("rocmfp4-fast-matrix-q3-ple-q6k-embedding-head", plan)
+        self.assertIn("lambda-0.25-band-10-42", plan)
+        self.assertIn("os.O_EXCL", plan)
+        self.assertIn('"publishes": False', plan)
+        self.assertIn('"deletes": False', plan)
+        self.assertIn("scripts/qwen_bakeoff.py --corpus-dir", plan)
+        self.assertNotIn("ember-gpu-lock acquire", plan)
+        self.assertNotIn("ember-cert-production stop", plan)
+
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        self.assertIn("iflag=direct", proof)
+        self.assertIn("EMBER_TRACE_TOKENS=1", proof)
+        self.assertIn("--validate-tokens 2", proof)
+        self.assertIn('required = {"baseline", "restored", "fresh", "disk"}', proof)
+        self.assertIn('"first_token_id": first', proof)
+        self.assertIn("ember-gpu-lock acquire", proof)
+        self.assertIn("ember-cert-production stop", proof)
+        self.assertIn("ember-cert-production mask", proof)
+        self.assertIn("if: ${{ always() && steps.safety.outputs.armed == 'yes' }}", proof)
+        self.assertIn("ember-cert-production unmask", proof)
+        self.assertIn("ember-gpu-lock release", proof)
+        self.assertIn("actions/attest@", proof)
+        self.assertIn("no quality or performance claim", proof)
+
+        construct = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("construction_descriptor:", construct)
+        self.assertIn("steps.construction_descriptor.outputs.path", construct)
+        self.assertIn("steps.construction_descriptor.outputs.sha256", construct)
 
     def test_embedded_operation_request_parser_accepts_only_exact_mode_shape(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

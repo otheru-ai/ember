@@ -470,6 +470,35 @@ jobs:
       operation_request_sha256: ${{ needs.qwen-call-candidate-plan.outputs.operation_request_sha256 }}
     secrets: inherit
 
+  qwen-plan-q3-first-token:
+    if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
+    uses: ./.github/workflows/qwen-q3-first-token-plan.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+    secrets: inherit
+
+  qwen-build-q3-first-token:
+    needs: qwen-plan-q3-first-token
+    if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
+    uses: ./.github/workflows/qwen-gfx1151-construct.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      mode: build-candidate
+      operation_request: ${{ needs.qwen-plan-q3-first-token.outputs.operation_request }}
+      operation_request_sha256: ${{ needs.qwen-plan-q3-first-token.outputs.operation_request_sha256 }}
+    secrets: inherit
+
+  qwen-prove-q3-first-token:
+    needs: [qwen-plan-q3-first-token, qwen-build-q3-first-token]
+    if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
+    uses: ./.github/workflows/qwen-q3-first-token.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      candidate_id: ${{ needs.qwen-plan-q3-first-token.outputs.candidate_id }}
+      construction_descriptor: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor }}
+      construction_descriptor_sha256: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor_sha256 }}
+    secrets: inherit
+
   qwen-inspect-control-residue:
     # Read-only forensic mode for a failed bounded conversion.  It reports
     # inode metadata and relative names only; it never opens, removes, or

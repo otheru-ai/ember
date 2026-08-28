@@ -15,6 +15,11 @@ on:
       operation_request_sha256:
         required: true
         type: string
+    outputs:
+      construction_descriptor:
+        value: ${{ jobs.construct.outputs.construction_descriptor }}
+      construction_descriptor_sha256:
+        value: ${{ jobs.construct.outputs.construction_descriptor_sha256 }}
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -50,6 +55,9 @@ jobs:
   construct:
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 1440
+    outputs:
+      construction_descriptor: ${{ steps.construction_descriptor.outputs.path }}
+      construction_descriptor_sha256: ${{ steps.construction_descriptor.outputs.sha256 }}
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
       CONSTRUCTION_MODE: ${{ inputs.mode }}
@@ -711,6 +719,7 @@ jobs:
           test -s "$output/qwen-candidate-workset-attestation.json"
 
       - name: Emit a durable non-publishing construction descriptor
+        id: construction_descriptor
         if: inputs.mode == 'build-candidate'
         run: |
           set -euo pipefail
@@ -770,6 +779,8 @@ jobs:
           PY
           printf 'QWEN_CONSTRUCTION_DESCRIPTOR=%s\nQWEN_CONSTRUCTION_DESCRIPTOR_SHA256=%s\n' \
             "$descriptor" "$(sha256sum "$descriptor" | awk '{print $1}')" >>"$GITHUB_ENV"
+          printf 'path=%s\nsha256=%s\n' "$descriptor" \
+            "$(sha256sum "$descriptor" | awk '{print $1}')" >>"$GITHUB_OUTPUT"
 
       - name: Normalize one audited construction receipt into bakeoff manifest v3
         if: inputs.mode == 'normalize-candidate'

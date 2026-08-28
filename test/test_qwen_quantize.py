@@ -761,6 +761,19 @@ class QwenQuantizeTests(unittest.TestCase):
                                     "pinned override contract"):
             qwen_quantize.validated_quantization_arms(profile)
 
+    def test_bf16_cache_predecessor_projection_is_bound_to_current_profile(self) -> None:
+        profile_path = (
+            ROOT / "share" / "release_profiles" /
+            "qwen3.8-flash-next-rocmi4-strix-halo.json"
+        )
+        current_sha256 = sha256(profile_path)
+        self.assertEqual(
+            qwen_quantize.BF16_CACHE_PROFILE_COMPATIBILITY[current_sha256],
+            frozenset({
+                "5429aeadc92c3e5b70feb4063ae560a682a8d4318c395a8c031362aee73cc506",
+            }),
+        )
+
     def test_git_revision_scopes_safe_directory_without_home(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             checkout = Path(raw) / "checkout"
@@ -1559,6 +1572,37 @@ class QwenQuantizeTests(unittest.TestCase):
             )
             self.assertEqual(record["companion_inventory"]["roles"][0][
                 "matrix_quant_contract"], "Q4_0_ROCMFP4_FAST")
+
+    def test_pre_q3_fast_mtp_capability_projection_remains_exactly_loadable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            args = fixture.companion_args(mtp_matrix="Q4_0_ROCMFP4_FAST")
+            inventory_path = Path(args[args.index("--companion-inventory") + 1])
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            mtp_row = inventory["companions"][0]
+            export_path = Path(mtp_row["export_manifest_path"])
+            export = json.loads(export_path.read_text(encoding="utf-8"))
+            export["quantizer_build_info"]["per_tensor_formats"] = [
+                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+            ]
+            export_path.write_text(json.dumps(export), encoding="utf-8")
+            mtp_row["export_manifest_sha256"] = sha256(export_path)
+            inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+            args[args.index("--companion-inventory-sha256") + 1] = sha256(
+                inventory_path)
+
+            result = subprocess.run(
+                [*fixture.command(), *args,
+                 "--mtp-matrix-quant-contract", "Q4_0_ROCMFP4_FAST"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((fixture.root / "work.plan.json").read_text())
+            projection = record["companion_inventory"]["roles"][0][
+                "export_manifest"]["format_capability_projection"]
+            self.assertEqual(projection["status"], "pinned_pre_q3_mtp_export")
+            self.assertEqual(projection["required_matrix_format"],
+                             "Q4_0_ROCMFP4_FAST")
 
     def test_exact_inventory_explicitly_disables_absent_mmproj(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -93,6 +93,24 @@ SUPPORTED_TENSOR_FORMATS = {
     "Q4_0_ROCMFP4_FAST": 101,
     "Q3_0_ROCMFPX": 104,
 }
+# The Q3 recipe commit changed only release selection policy and the quantizer's
+# advertised format capability.  The pinned BF16 cache contains no quantized
+# weights, so its immediately preceding profile remains reusable for this exact
+# current profile pair.  Pin both sides: a later profile edit must be reviewed
+# instead of inheriting compatibility accidentally.
+BF16_CACHE_PROFILE_COMPATIBILITY = {
+    "70e58548facf0250514ad9f2685637c366cf0753a96139c9295bf96c465feca2":
+        frozenset({
+            "5429aeadc92c3e5b70feb4063ae560a682a8d4318c395a8c031362aee73cc506",
+        }),
+}
+# Existing ROCMI4/FAST MTP companions were exported before Q3 PLE support was
+# added.  Their matrices cannot use Q3, and their exact selected matrix format,
+# binary provenance, bytes, metadata, and tensor inventory are validated below.
+MTP_COMPATIBLE_QUANTIZER_FORMAT_SETS = frozenset({
+    tuple(SUPPORTED_TENSOR_FORMATS),
+    ("Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST"),
+})
 MTP_QUANTIZED_MATRIX_NAMES = frozenset({
     "mtp_hc_down.weight", "mtp_hc_up.weight",
     "mtp.hc_attn_inject.weight", "mtp.hc_attn_down.weight", "mtp.hc_attn_up.weight",
@@ -480,9 +498,25 @@ def validate_bf16_cache_manifest(
     }:
         raise PipelineError("BF16 cache source differs from the pinned release profile")
     profile_row = require_mapping(manifest.get("profile"), "BF16 cache profile")
-    if profile_row != {"profile_id": profile.get("profile_id"),
-                       "sha256": profile_sha256}:
+    expected_profile_row = {"profile_id": profile.get("profile_id"),
+                            "sha256": profile_sha256}
+    cache_profile_sha256 = profile_row.get("sha256")
+    compatible_predecessors = BF16_CACHE_PROFILE_COMPATIBILITY.get(
+        profile_sha256, frozenset())
+    profile_is_exact = profile_row == expected_profile_row
+    profile_is_compatible = (
+        profile_row.get("profile_id") == profile.get("profile_id")
+        and cache_profile_sha256 in compatible_predecessors
+        and set(profile_row) == {"profile_id", "sha256"}
+    )
+    if not profile_is_exact and not profile_is_compatible:
         raise PipelineError("BF16 cache profile differs from the current release profile")
+    profile_compatibility = {
+        "status": "exact" if profile_is_exact else "pinned_predecessor_projection",
+        "cache_profile_sha256": cache_profile_sha256,
+        "current_profile_sha256": profile_sha256,
+        "projection": "bf16_source_conversion_and_artifact_contract_v1",
+    }
     toolchain = require_mapping(manifest.get("toolchain"), "BF16 cache toolchain")
     require_exact_keys(toolchain, {
         "llama_cpp_revision", "llama_cpp_base_revision", "converter_sha256",
@@ -682,6 +716,7 @@ def validate_bf16_cache_manifest(
     return {
         "schema": BF16_CACHE_SCHEMA, "cache_id": cache_id,
         "manifest": manifest_file, "source": source, "profile": profile_row,
+        "profile_compatibility": profile_compatibility,
         "toolchain": toolchain, "conversion": conversion,
         "resources": resources, "measurement": measurement,
         "main": {**main, "shards": normalized_shards, "gguf": gguf},
@@ -2353,13 +2388,20 @@ def validate_mtp_export_manifest(
             or set(matrix_names) != MTP_QUANTIZED_MATRIX_NAMES):
         raise PipelineError("MTP export manifest matrix tensor inventory is not exact")
     quantizer = profile["quantizer"]
+    advertised_formats = build_info.get("per_tensor_formats") if isinstance(
+        build_info, dict) else None
+    formats_are_compatible = (
+        isinstance(advertised_formats, list)
+        and tuple(advertised_formats) in MTP_COMPATIBLE_QUANTIZER_FORMAT_SETS
+        and matrix_contract in advertised_formats
+    )
     if (not isinstance(build_info, dict)
             or build_info.get("tool") != profile["quantization"]["tool"]
             or build_info.get("rocmfpx_revision") != quantizer["revision"]
             or HEX40.fullmatch(str(build_info.get("ember_revision", ""))) is None
             or build_info.get("format") != profile["quantization"]["format"]
             or build_info.get("ggml_tensor_type") != profile["quantization"]["ggml_tensor_type"]
-            or build_info.get("per_tensor_formats") != list(SUPPORTED_TENSOR_FORMATS)):
+            or not formats_are_compatible):
         raise PipelineError("MTP export manifest quantizer build provenance is invalid")
     quantizer_sha = manifest.get("quantizer_sha256")
     if not isinstance(quantizer_sha, str) or SHA256_RE.fullmatch(quantizer_sha) is None:
@@ -2369,6 +2411,12 @@ def validate_mtp_export_manifest(
         "schema": required["schema"],
         "quantizer_sha256": quantizer_sha,
         "quantizer_build_info": build_info,
+        "format_capability_projection": {
+            "status": ("current" if advertised_formats == list(SUPPORTED_TENSOR_FORMATS)
+                       else "pinned_pre_q3_mtp_export"),
+            "advertised_formats": advertised_formats,
+            "required_matrix_format": matrix_contract,
+        },
         "matrix_tensor_count": len(matrix_names),
     }
 
