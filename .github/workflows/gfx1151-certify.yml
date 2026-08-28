@@ -101,6 +101,9 @@ jobs:
       phase: ${{ steps.envelope.outputs.phase }}
       phase_request: ${{ steps.envelope.outputs.phase_request }}
       phase_request_sha256: ${{ steps.envelope.outputs.phase_request_sha256 }}
+      quality_request_payload_base64: ${{ steps.envelope.outputs.quality_request_payload_base64 }}
+      quality_request_payload_sha256: ${{ steps.envelope.outputs.quality_request_payload_sha256 }}
+      quality_request_output: ${{ steps.envelope.outputs.quality_request_output }}
     steps:
       - name: Decode and validate exact branch-workflow dispatch envelope
         id: envelope
@@ -159,6 +162,8 @@ jobs:
                          "mtp_sha256", "mtp_depth", "mmproj", "mmproj_sha256",
                          "vision_vocab", "vision_vocab_sha256", "output"},
               "quality": {"phase_descriptor", "phase_descriptor_sha256"},
+              "quality-plan": {"request_payload_base64", "request_payload_sha256",
+                               "request_output"},
               "bakeoff": {"candidate_manifest", "candidate_manifest_sha256", "phase",
                            "phase_request", "phase_request_sha256"},
           }
@@ -256,6 +261,21 @@ jobs:
               result.update({
                   "phase_descriptor": absolute("phase_descriptor"),
                   "phase_descriptor_sha256": digest("phase_descriptor_sha256"),
+              })
+          elif operation == "quality-plan":
+              nested = scalar("request_payload_base64")
+              nested_sha = digest("request_payload_sha256")
+              try:
+                  nested_payload = base64.b64decode(nested, validate=True)
+              except (binascii.Error, ValueError) as exc:
+                  fail(f"quality descriptor request is not strict base64: {exc}")
+              if (not nested_payload or len(nested_payload) > 32768
+                      or hashlib.sha256(nested_payload).hexdigest() != nested_sha):
+                  fail("quality descriptor request payload/digest differs")
+              result.update({
+                  "quality_request_payload_base64": nested,
+                  "quality_request_payload_sha256": nested_sha,
+                  "quality_request_output": absolute("request_output"),
               })
           else:
               phase = scalar("phase")
@@ -360,6 +380,33 @@ jobs:
       commit_sha: ${{ inputs.commit_sha }}
       phase_descriptor: ${{ needs.qwen-dispatch-envelope.outputs.phase_descriptor }}
       phase_descriptor_sha256: ${{ needs.qwen-dispatch-envelope.outputs.phase_descriptor_sha256 }}
+    secrets: inherit
+
+  qwen-call-quality-plan:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'quality-plan'
+    uses: ./.github/workflows/qwen-quality-plan.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      request_payload_base64: ${{ needs.qwen-dispatch-envelope.outputs.quality_request_payload_base64 }}
+      request_payload_sha256: ${{ needs.qwen-dispatch-envelope.outputs.quality_request_payload_sha256 }}
+      request_output: ${{ needs.qwen-dispatch-envelope.outputs.quality_request_output }}
+    secrets: inherit
+
+  qwen-call-planned-quality:
+    needs: [qwen-dispatch-envelope, qwen-call-quality-plan]
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'quality-plan'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/qwen-quality-capture.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      phase_descriptor: ${{ needs.qwen-call-quality-plan.outputs.phase_descriptor }}
+      phase_descriptor_sha256: ${{ needs.qwen-call-quality-plan.outputs.phase_descriptor_sha256 }}
     secrets: inherit
 
   qwen-call-bakeoff:

@@ -505,6 +505,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                      (ROOT / ".github/workflows/qwen-gfx1151-retire-stock.yml", 10),
                                      (ROOT / ".github/workflows/qwen-gfx1151-vision.yml", 15),
                                      (ROOT / ".github/workflows/qwen-quality-capture.yml", 3),
+                                     (ROOT / ".github/workflows/qwen-quality-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6)):
             called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:)",
                                path.read_text(encoding="utf-8"), re.S)
@@ -522,12 +523,18 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-gfx1151-retire-stock.yml",
             "qwen-gfx1151-vision.yml",
             "qwen-quality-capture.yml",
+            "qwen-quality-plan.yml",
             "qwen-gfx1151-bakeoff.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 5)
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 1)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 2)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-plan.yml"), 1)
+        self.assertIn("qwen-call-planned-quality:", body)
+        self.assertIn("needs: [qwen-dispatch-envelope, qwen-call-quality-plan]", body)
+        self.assertIn("needs.qwen-call-quality-plan.outputs.phase_descriptor", body)
+        self.assertIn("needs.qwen-call-quality-plan.outputs.phase_descriptor_sha256", body)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
@@ -648,6 +655,26 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             emitted = output.read_text(encoding="utf-8")
             self.assertIn("operation=bakeoff\n", emitted)
             self.assertIn("phase=sweep\n", emitted)
+
+            output.unlink()
+            quality_request = b'{"schema":"fixture"}\n'
+            quality_plan = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "quality-plan",
+                "inputs": {
+                    "request_payload_base64": base64.b64encode(quality_request).decode(),
+                    "request_payload_sha256": hashlib.sha256(quality_request).hexdigest(),
+                    "request_output": "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/operation-requests/quality.json",
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_quality_plan = invoke(quality_plan)
+            self.assertEqual(accepted_quality_plan.returncode, 0,
+                             accepted_quality_plan.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=quality-plan\n", emitted)
+            self.assertIn("quality_request_output=/var/tmp/ember-", emitted)
 
             output.unlink()
             invalid = dict(valid)

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_quality_descriptor as quality  # noqa: E402
+import qwen_quality_request as request  # noqa: E402
 
 
 def digest(path: Path) -> str:
@@ -118,6 +121,77 @@ class Fixture:
 
 
 class QualityDescriptorTests(unittest.TestCase):
+    def test_request_adapter_executes_exact_create_only_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = Fixture(Path(raw))
+            args = fixture.args()
+            request_path = write(Path(raw) / "request.json", {
+                "schema": request.REQUEST_SCHEMA,
+                "ember_revision": fixture.revision,
+                "phase": args.phase,
+                "phase_plan": {"path": str(args.phase_plan),
+                               "sha256": args.phase_plan_sha256},
+                "stock_build_record": {"path": str(args.stock_build_record),
+                                       "sha256": args.stock_build_record_sha256},
+                "candidate_build_record": {"path": str(args.candidate_build_record),
+                                           "sha256": args.candidate_build_record_sha256},
+                "candidate_id": args.candidate_id,
+                "judge_inventory": {"path": str(args.judge_inventory),
+                                    "sha256": args.judge_inventory_sha256},
+                "model_runtime_image": args.model_runtime_image,
+                "judge_runtime_image": args.judge_runtime_image,
+                "quality_output_root": str(args.quality_output_root),
+                "capture_plan_output": str(args.capture_plan_output),
+                "phase_descriptor_output": str(args.output),
+                "publishes": False,
+                "deletes": False,
+            })
+            with (mock.patch.object(quality.bakeoff, "verify_plan",
+                                   return_value=fixture.selection),
+                  mock.patch.object(quality, "SWEEP_SHA256", digest(fixture.corpus))):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = request.main([
+                        "--request", str(request_path),
+                        "--request-sha256", digest(request_path),
+                        "--ember-revision", fixture.revision,
+                    ])
+            self.assertEqual(result, 0)
+            self.assertTrue(args.capture_plan_output.is_file())
+            self.assertTrue(args.output.is_file())
+
+    def test_request_adapter_rejects_lifecycle_revision_and_extra_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fixture = Fixture(root)
+            args = fixture.args()
+            base = {
+                "schema": request.REQUEST_SCHEMA,
+                "ember_revision": fixture.revision,
+                "phase": "sweep",
+                "phase_plan": {"path": str(args.phase_plan), "sha256": digest(args.phase_plan)},
+                "stock_build_record": {"path": str(args.stock_build_record),
+                                       "sha256": digest(args.stock_build_record)},
+                "candidate_build_record": {"path": str(args.candidate_build_record),
+                                           "sha256": digest(args.candidate_build_record)},
+                "candidate_id": args.candidate_id,
+                "judge_inventory": {"path": str(args.judge_inventory),
+                                    "sha256": digest(args.judge_inventory)},
+                "model_runtime_image": args.model_runtime_image,
+                "judge_runtime_image": args.judge_runtime_image,
+                "quality_output_root": str(args.quality_output_root),
+                "capture_plan_output": str(args.capture_plan_output),
+                "phase_descriptor_output": str(args.output),
+                "publishes": False, "deletes": False,
+            }
+            for name, changes, revision in (
+                ("delete", {"deletes": True}, fixture.revision),
+                ("extra", {"unexpected": None}, fixture.revision),
+                ("revision", {}, "2" * 40),
+            ):
+                path = write(root / f"request-{name}.json", base | changes)
+                with self.assertRaises(request.RequestError):
+                    request.request_args(path, digest(path), revision)
+
     def generate(self, fixture: Fixture, **changes: object) -> tuple[dict, dict]:
         with (mock.patch.object(quality.bakeoff, "verify_plan",
                                return_value=fixture.selection),

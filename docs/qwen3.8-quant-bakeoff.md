@@ -245,6 +245,24 @@ are create-only. Dispatch the workflow with the printed phase-descriptor path
 and SHA-256; the workflow independently repeats every binding before taking the
 GPU lock.
 
+Feature revisions do not require an operator shell on the runner. The stable
+default-branch `gfx1151-certify.yml` dispatcher accepts a `quality-plan`
+branch-dispatch envelope. Its nested request payload has schema
+`ember.qwen3.8.quality-descriptor-request.v1` and contains the same generator
+arguments as named fields: pinned `{path,sha256}` descriptors for the phase
+plan, stock build record, candidate build record, and judge inventory; the
+candidate id; both immutable runtime images; and the three new output paths.
+It also binds the exact Ember revision and requires `publishes=false` and
+`deletes=false`. The dispatcher persists those exact bytes create-only beneath
+`qwen-workset/evidence/operation-requests`, runs
+`scripts/qwen_quality_request.py` on the gfx1151 host, and passes the resulting
+descriptor path and digest directly into the reusable quality-capture workflow.
+The planning job does not acquire the GPU. An already-created descriptor can
+instead be supplied through the dispatcher's `quality` operation. Subsequent
+serial measurement uses the same dispatcher with its destructive-capability
+declared `bakeoff` operation; the bakeoff itself still permits deletion only
+through the externally attested reconstructable-retention authority.
+
 After the digest-matched stock ROCMI4 control and MTP companion exist, capture
 directions with `scripts/qwen_capture_control.py`. The operator supplies every
 image, build-record, shard, MTP, recipe, contract, and extraction-corpus digest

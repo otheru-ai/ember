@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-quality-capture.yml"
+PLAN_WORKFLOW = ROOT / ".github/workflows/qwen-quality-plan.yml"
 
 
 def shell_blocks(text: str) -> list[str]:
@@ -195,6 +196,26 @@ class QwenQualityWorkflowTest(unittest.TestCase):
         self.assertIn('"publication_allowed": False', body)
         for forbidden in ("docker push", "huggingface-cli", "hf upload", "gh release"):
             self.assertNotIn(forbidden, body)
+
+    def test_runner_local_planner_is_create_only_and_chains_exact_outputs(self) -> None:
+        body = PLAN_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", body)
+        self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", body)
+        self.assertIn("qwen-quality-plan-${{ github.run_id }}", body)
+        self.assertIn("O_EXCL", body)
+        self.assertIn("decoded quality request must contain 1..32768 bytes", body)
+        self.assertIn("scripts/qwen_quality_request.py", body)
+        self.assertIn("phase_descriptor_sha256", body)
+        self.assertNotIn("ember-gpu-lock acquire", body)
+        for forbidden in ("docker push", "huggingface-cli", "hf upload", "gh release"):
+            self.assertNotIn(forbidden, body)
+        for block in shell_blocks(body):
+            parsed = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            result = subprocess.run(["bash", "-n"], input=parsed, text=True,
+                                    capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for program in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", parsed, re.S):
+                compile(program, "quality-plan-heredoc.py", "exec")
 
 
 if __name__ == "__main__":
