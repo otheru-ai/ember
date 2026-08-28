@@ -1,4 +1,5 @@
-// GPU-free format contract for ROCmFPX Q4_0_ROCMI4 (upstream 16d05b8).
+// GPU-free format contracts for ROCmFPX Q4_0_ROCMI4 (upstream 16d05b8) and
+// the Q3_0_ROCMFPX PLE recipe reviewed at ciru-ai/ROCmFPX 112629f1.
 #include "rocmfpx.h"
 
 #include <math.h>
@@ -62,6 +63,30 @@ int main(void) {
           "importance-weighted quantizer reports exact byte count");
     CHECK(rocmfpx_validate_row_data_i4(&weighted, sizeof weighted),
           "importance-weighted quantizer emits a valid block");
+
+    CHECK(GGML_TYPE_Q3_0_ROCMFPX == 104,
+          "ROCmFPX FP3 keeps the interoperable GGUF tensor type 104");
+    CHECK(sizeof(block_rocmfp3) == 14 && rocmfpx_row_size_fp3(32) == 14,
+          "ROCmFPX FP3 stores 32 weights in one 3.5-bpw block");
+    block_rocmfp3 q3 = {
+        .qs = {
+            0x88, 0xc6, 0xfa, 0x88, 0xc6, 0xfa,
+            0x88, 0xc6, 0xfa, 0x88, 0xc6, 0xfa,
+        },
+        .e = {0x40, 0x40},
+    };
+    float fp3[32];
+    rocmfpx_dequantize_row_fp3(&q3, fp3, 32);
+    const float fp3_codes[8] = {0.0f, 1.0f, 2.0f, 4.0f,
+                                0.0f, -1.0f, -2.0f, -4.0f};
+    bool fp3_layout = true;
+    for (int i = 0; i < 32; ++i) {
+        fp3_layout = fp3_layout && fp3[i] == fp3_codes[i % 8];
+    }
+    CHECK(fp3_layout,
+          "ROCmFPX FP3 LSB-first packed codes and UE4M3 scales decode exactly");
+    CHECK(rocmfpx_validate_row_data_fp3(&q3, sizeof q3),
+          "external-recipe FP3 block validates through Ember's reference path");
 
     printf("%s: %d passed, %d failed\n", g_fail ? "FAIL" : "PASS", g_pass, g_fail);
     return g_fail != 0;

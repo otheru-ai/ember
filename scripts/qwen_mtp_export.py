@@ -501,7 +501,7 @@ def _quantizer_build_evidence(quantizer: Path) -> dict:
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         raise ExportError(f"cannot verify companion quantizer build: {exc}") from exc
     expected_formats = [
-        "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+        "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST", "Q3_0_ROCMFPX",
     ]
     revision = re.compile(r"[0-9a-f]{40}")
     ember_revision = build_info.get("ember_revision") if isinstance(

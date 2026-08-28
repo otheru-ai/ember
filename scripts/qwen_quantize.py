@@ -91,6 +91,7 @@ SUPPORTED_TENSOR_FORMATS = {
     "Q4_0_ROCMI4": 108,
     "Q6_K": 14,
     "Q4_0_ROCMFP4_FAST": 101,
+    "Q3_0_ROCMFPX": 104,
 }
 MTP_QUANTIZED_MATRIX_NAMES = frozenset({
     "mtp_hc_down.weight", "mtp_hc_up.weight",
@@ -990,6 +991,13 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
             r"^token_embd\.weight$=Q6_K",
             r"^output\.weight$=Q6_K",
         ],
+        "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head": [
+            r"^per_layer_token_embd\.weight$=Q3_0_ROCMFPX",
+            *[pattern + "=Q4_0_ROCMFP4_FAST"
+              for pattern in ROCMFP4_FAST_MATRIX_PATTERNS],
+            r"^token_embd\.weight$=Q6_K",
+            r"^output\.weight$=Q6_K",
+        ],
     }
     expected_mtp_contracts = {
         "rocmi4-control": "Q4_0_ROCMI4",
@@ -997,11 +1005,11 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
         "rocmfp4-fast-routed-experts-q6k-embedding-head": "Q4_0_ROCMFP4_FAST",
         "rocmfp4-fast-matrix": "Q4_0_ROCMFP4_FAST",
         "rocmfp4-fast-matrix-q6k-embedding-head": "Q4_0_ROCMFP4_FAST",
+        "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head": "Q4_0_ROCMFP4_FAST",
     }
     if [row.get("id") for row in rows if isinstance(row, dict)] != list(expected_overrides):
         raise PipelineError("performance bakeoff arms are missing, duplicated, or reordered")
     result: dict[str, dict[str, Any]] = {}
-    ple_override = quantization.get("ple_tensor_override")
     for index, row_value in enumerate(rows):
         arm = require_mapping(row_value, f"performance_bakeoff.arms[{index}]")
         arm_id = arm.get("id")
@@ -1022,10 +1030,12 @@ def validated_quantization_arms(profile: dict[str, Any]) -> dict[str, dict[str, 
             raise PipelineError(f"quantization arm {arm_id} repeats a tensor regex")
         ple_matches = [item for item in parsed
                        if item["compiled"].search("per_layer_token_embd.weight")]
-        if (len(ple_matches) != 1 or ple_matches[0]["value"] != ple_override or
-                parsed[0]["value"] != ple_override):
+        expected_ple_override = expected_overrides[arm_id][0]
+        if (len(ple_matches) != 1 or
+                ple_matches[0]["value"] != expected_ple_override or
+                parsed[0]["value"] != expected_ple_override):
             raise PipelineError(
-                f"quantization arm {arm_id} does not preserve the pinned PLE override")
+                f"quantization arm {arm_id} does not preserve its pinned PLE override")
         serialized = json.dumps(overrides, separators=(",", ":"), ensure_ascii=True)
         result[arm_id] = {
             "id": arm_id,
@@ -2118,8 +2128,11 @@ def validate_tools(
     if "Qwen4ExpForConditionalGeneration" not in qwen_text or "_read_hash_constants" not in qwen_text:
         raise PipelineError("pinned converter lacks Qwen4Exp exact PLE metadata handling")
     quant_text = quantizer_source.read_text(encoding="utf-8")
-    if "Q4_0_ROCMI4" not in quant_text or "arg_idx < argc && strncmp" not in quant_text:
-        raise PipelineError("pinned ROCmFPX source lacks ROCMI4 or the audited option parser")
+    if ("Q4_0_ROCMI4" not in quant_text or
+            "Q3_0_ROCMFPX" not in quant_text or
+            "arg_idx < argc && strncmp" not in quant_text):
+        raise PipelineError(
+            "pinned ROCmFPX source lacks ROCMI4/FP3 or the audited option parser")
     quantizer_binary = quantizer_binary.resolve()
     if not quantizer_binary.is_file() or not os.access(quantizer_binary, os.X_OK):
         raise PipelineError(f"quantizer is not an executable file: {quantizer_binary}")

@@ -47,6 +47,7 @@ int main() {
     CHECK(!qwen4exp_weight_type_supported(GGML_TYPE_Q8_0, true) &&
               qwen4exp_weight_type_supported(GGML_TYPE_Q8_0, false) &&
               qwen4exp_weight_type_supported(GGML_TYPE_Q6_K, false) &&
+              qwen4exp_weight_type_supported(GGML_TYPE_Q3_0_ROCMFPX, false) &&
               qwen4exp_weight_type_supported(GGML_TYPE_Q4_0_ROCMI4, false) &&
               qwen4exp_weight_type_supported(GGML_TYPE_Q4_0_ROCMFP4_FAST, false) &&
               !qwen4exp_weight_type_supported(GGML_TYPE_Q5_0, false),

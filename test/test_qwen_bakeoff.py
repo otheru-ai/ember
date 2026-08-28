@@ -432,6 +432,8 @@ class BakeoffTest(unittest.TestCase):
                 "rocmfp4-fast-routed-main-rocmfp4-fast-mtp-d3",
                 "rocmfp4-fast-matrix-main-rocmi4-mtp-d3",
                 "rocmfp4-fast-matrix-main-rocmfp4-fast-mtp-d3",
+                "rocmfp4-fast-matrix-q3-ple-main-rocmi4-mtp-d3",
+                "rocmfp4-fast-matrix-q3-ple-main-rocmfp4-fast-mtp-d3",
             })
             self.assertEqual(
                 {arm["quantization_arm"] for arm in plan["format_arms"]},
@@ -439,6 +441,7 @@ class BakeoffTest(unittest.TestCase):
                     "rocmi4-q6k-embedding-head",
                     "rocmfp4-fast-routed-experts-q6k-embedding-head",
                     "rocmfp4-fast-matrix-q6k-embedding-head",
+                    "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
                 },
             )
             self.assertTrue(all(
@@ -452,6 +455,7 @@ class BakeoffTest(unittest.TestCase):
                     "rocmi4-q6k-embedding-head",
                     "rocmfp4-fast-routed-experts-q6k-embedding-head",
                     "rocmfp4-fast-matrix-q6k-embedding-head",
+                    "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
                 } for mtp in qb.SUPPORTED_MTP_MATRIX_CONTRACTS},
             )
             self.assertEqual(

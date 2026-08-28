@@ -383,7 +383,8 @@ class Fixture:
         init_repo(self.rocmfpx)
         (self.rocmfpx / "tools" / "quantize").mkdir(parents=True)
         (self.rocmfpx / "tools" / "quantize" / "quantize.cpp").write_text(
-            "Q4_0_ROCMI4 arg_idx < argc && strncmp\n", encoding="utf-8",
+            "Q4_0_ROCMI4 Q3_0_ROCMFPX arg_idx < argc && strncmp\n",
+            encoding="utf-8",
         )
         self.rocm_revision = commit_all(self.rocmfpx, "rocmi4")
 
@@ -406,7 +407,7 @@ class Fixture:
             "if sys.argv[1:] == ['--build-info-json']:\n"
             f" print(json.dumps({{'tool':'ember-gguf-quantize','ember_revision':subprocess.check_output(['git','rev-parse','HEAD'],cwd=pathlib.Path(__file__).parent,text=True).strip(),"
             f"'rocmfpx_revision':'{self.rocm_revision}','format':'Q4_0_ROCMI4','ggml_tensor_type':108,"
-            "'per_tensor_formats':['Q4_0_ROCMI4','Q6_K','Q4_0_ROCMFP4_FAST'],"
+            "'per_tensor_formats':['Q4_0_ROCMI4','Q6_K','Q4_0_ROCMFP4_FAST','Q3_0_ROCMFPX'],"
             "'intervention_manifest_schema':1}))\n"
             "elif '--dry-size-json' in sys.argv:\n"
             " intervention={}\n"
@@ -962,6 +963,13 @@ class QwenQuantizeTests(unittest.TestCase):
                 *[pattern + "=Q4_0_ROCMFP4_FAST"
                   for pattern in qwen_quantize.ROCMFP4_FAST_MATRIX_PATTERNS],
             ],
+            "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head": [
+                "^per_layer_token_embd\\.weight$=Q3_0_ROCMFPX",
+                *[pattern + "=Q4_0_ROCMFP4_FAST"
+                  for pattern in qwen_quantize.ROCMFP4_FAST_MATRIX_PATTERNS],
+                "^token_embd\\.weight$=Q6_K",
+                "^output\\.weight$=Q6_K",
+            ],
         }
         for arm_id, overrides in expected.items():
             with self.subTest(arm=arm_id), tempfile.TemporaryDirectory() as raw:
@@ -990,6 +998,9 @@ class QwenQuantizeTests(unittest.TestCase):
              "malformed or unaudited"),
             ("rocmfp4-fast-matrix", 0,
              "^per_layer_token_embd\\.weight$=Q4_0_ROCMFP4_FAST",
+             "malformed or unaudited"),
+            ("rocmfp4-fast-matrix-q3-ple-q6k-embedding-head", 0,
+             "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
              "malformed or unaudited"),
         ]
         for arm_id, index, replacement, message in mutations:

@@ -26,6 +26,7 @@ bool qwen4exp_weight_type_supported(ggml_type type, bool vector_or_norm) {
         type == GGML_TYPE_BF16) return true;
     if (vector_or_norm) return false;
     return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q6_K ||
+           type == GGML_TYPE_Q3_0_ROCMFPX ||
            type == GGML_TYPE_Q4_0_ROCMI4 ||
            type == GGML_TYPE_Q4_0_ROCMFP4_FAST;
 }

@@ -4,7 +4,8 @@
 // tensor inventory and shapes, while a conservative name/rank policy chooses
 // ordinary weights. Explicit, non-overlapping --tensor-type regexes are
 // evaluated first; the released control forces the PLE table through type 108,
-// while bakeoff artifacts may select Q6_K or ROCmFP4 FAST per tensor.
+// while bakeoff artifacts may select Q6_K, ROCmFP4 FAST, or the compatible
+// ROCmFPX FP3 row-gather encoding per tensor.
 
 #include "gguf_quantize_common.h"
 
@@ -613,7 +614,7 @@ InterventionPlan load_intervention_manifest(const std::filesystem::path & path) 
 void usage(const char * executable) {
     std::fprintf(stderr,
                  "usage: %s --build-info-json\n"
-                 "       %s --tensor-type REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST} "
+                 "       %s --tensor-type REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST,Q3_0_ROCMFPX} "
                  "[--intervention-manifest JSON] "
                  "[--keep-split] [--dry-size-json] "
                  "[--device-budget-bytes N --runtime-reserve-bytes N] "
@@ -781,6 +782,8 @@ enum ggml_type ggml_type_for_format(quant::TensorFormat format) {
         case quant::TensorFormat::q6_k: return GGML_TYPE_Q6_K;
         case quant::TensorFormat::rocmfp4_fast:
             return GGML_TYPE_Q4_0_ROCMFP4_FAST;
+        case quant::TensorFormat::rocmfpx_fp3:
+            return GGML_TYPE_Q3_0_ROCMFPX;
     }
     throw std::runtime_error("unsupported tensor format");
 }

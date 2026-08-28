@@ -125,6 +125,33 @@
       "qwen4exp": "abdc7a0bf815d3b83e26dd523c6960e4dd597e82",
       "rocmi4": "c49ebdbd5c9f01ec242369f9e7f7967855f80cba"
     },
+    "external_recipe_references": [
+      {
+        "kind": "tensor_format_policy_only",
+        "repo_id": "agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF",
+        "revision": "9089b24dbed6e087a705201ba59a104575bda0b9",
+        "url": "https://huggingface.co/agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF/tree/9089b24dbed6e087a705201ba59a104575bda0b9",
+        "published_main_artifact_bytes": 89817848800,
+        "published_main_shard_count": 5,
+        "recipe": {
+          "ordinary_matrices": "Q4_0_ROCMFP4_FAST",
+          "per_layer_token_embd.weight": "Q3_0_ROCMFPX",
+          "token_embd.weight": "Q6_K",
+          "output.weight": "Q6_K",
+          "pure_quantization": true
+        },
+        "format_lineage": {
+          "repository": "https://github.com/ciru-ai/ROCmFPX",
+          "reviewed_revision": "112629f1ed1acc2e8071693fce83cc7f5070693a",
+          "q3_ggml_tensor_type": 104,
+          "q3_block_weights": 32,
+          "q3_block_bytes": 14,
+          "q3_bits_per_weight": 3.5
+        },
+        "adaptation": "apply only the tensor-format mix to Ember's pinned BF16/intervention pipeline; do not import the artifact, converter, benchmark, or quality claims",
+        "selection_status": "experimental_unpromoted_requires_ember_quality_memory_and_gfx1151_gates"
+      }
+    ],
     "ple_tensor_name": "per_layer_token_embd.weight",
     "ple_tensor_override": "^per_layer_token_embd\\.weight$=Q4_0_ROCMI4",
     "options_before_positionals": true,
@@ -254,12 +281,29 @@
             "^output\\.weight$=Q6_K"
           ],
           "promotion_requires": "quality, native-262k-memory, prefill, and decode gates"
+        },
+        {
+          "id": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
+          "default_matrix_format": "Q4_0_ROCMI4",
+          "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+          "tensor_class_format": "Q4_0_ROCMFP4_FAST",
+          "selection": "external-recipe format mix: explicit non-overlapping FAST matrix regexes, Q3 ROCmFPX mapped PLE row table, and Q6_K embedding/output",
+          "recipe_reference_revision": "9089b24dbed6e087a705201ba59a104575bda0b9",
+          "per_tensor_overrides": [
+            "^per_layer_token_embd\\.weight$=Q3_0_ROCMFPX",
+            "^blk\\.[0-9]+\\.(hc_(attn|ffn)_(down|up|inject)|ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|attn_(q|k|v|output|qkv|gate)|indexer\\.(q_proj|k_proj)|ssm_(alpha|beta|out)|ple_(key|value))\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^output_hc_(down|up)\\.weight$=Q4_0_ROCMFP4_FAST",
+            "^token_embd\\.weight$=Q6_K",
+            "^output\\.weight$=Q6_K"
+          ],
+          "promotion_requires": "Ember-owned quant audit, quality, native-262k-memory, PLE row-latency, prefill, and decode gates"
         }
       ],
       "runtime_support": {
         "Q4_0_ROCMI4": "released",
         "Q6_K": "loader_and_ggml_kernel_backed_bakeoff",
-        "Q4_0_ROCMFP4_FAST": "loader_and_ggml_kernel_backed_bakeoff"
+        "Q4_0_ROCMFP4_FAST": "loader_and_ggml_kernel_backed_bakeoff",
+        "Q3_0_ROCMFPX": "mapped_row_dequant_and_ggml_kernel_backed_bakeoff"
       }
     }
   },

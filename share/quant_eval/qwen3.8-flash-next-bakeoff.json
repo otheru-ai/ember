@@ -95,6 +95,28 @@
       "runtime_mode": "exact_dequant",
       "final_release_eligible": true,
       "intervention_audit_status": "passed_cross_decoder_gpu_free_regression; pending_real_weight_gfx1151_bakeoff"
+    },
+    {
+      "id": "rocmfp4-fast-matrix-q3-ple-main-rocmi4-mtp-d3",
+      "quantization_arm": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMI4",
+      "mtp_depth": 3,
+      "artifact_format": "Q3_0_ROCMFPX+Q4_0_ROCMFP4_FAST+Q6_K",
+      "runtime_mode": "exact_dequant",
+      "final_release_eligible": true,
+      "recipe_provenance": "agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF@9089b24dbed6e087a705201ba59a104575bda0b9",
+      "intervention_audit_status": "pending_ember_quant_audit_quality_memory_ple_latency_and_real_weight_gfx1151_bakeoff"
+    },
+    {
+      "id": "rocmfp4-fast-matrix-q3-ple-main-rocmfp4-fast-mtp-d3",
+      "quantization_arm": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
+      "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+      "mtp_depth": 3,
+      "artifact_format": "Q3_0_ROCMFPX+Q4_0_ROCMFP4_FAST+Q6_K",
+      "runtime_mode": "exact_dequant",
+      "final_release_eligible": true,
+      "recipe_provenance": "agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF@9089b24dbed6e087a705201ba59a104575bda0b9",
+      "intervention_audit_status": "pending_ember_quant_audit_quality_memory_ple_latency_and_real_weight_gfx1151_bakeoff"
     }
   ],
   "mtp_depth_sweep": {

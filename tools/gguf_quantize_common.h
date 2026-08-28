@@ -15,6 +15,7 @@ enum class TensorFormat {
     rocmi4,
     q6_k,
     rocmfp4_fast,
+    rocmfpx_fp3,
 };
 
 struct TensorTypeOverride {

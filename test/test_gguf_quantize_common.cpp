@@ -53,11 +53,13 @@ static void test_cli() {
               error.find("precede") != std::string::npos,
           "options after positionals are rejected rather than ignored");
     CHECK(parse({"tool", "--tensor-type", "head=Q6_K", "--tensor-type",
-                 "matrix=Q4_0_ROCMFP4_FAST", "in.gguf", "out.gguf",
+                 "matrix=Q4_0_ROCMFP4_FAST", "--tensor-type",
+                 "ple=Q3_0_ROCMFPX", "in.gguf", "out.gguf",
                  "Q4_0_ROCMI4", "4"}, options, error) &&
-              options.tensor_type_overrides.size() == 2 &&
+              options.tensor_type_overrides.size() == 3 &&
               options.tensor_type_overrides[0].format == quant::TensorFormat::q6_k &&
-              options.tensor_type_overrides[1].format == quant::TensorFormat::rocmfp4_fast,
+              options.tensor_type_overrides[1].format == quant::TensorFormat::rocmfp4_fast &&
+              options.tensor_type_overrides[2].format == quant::TensorFormat::rocmfpx_fp3,
           "safe mixed-quant per-tensor formats parse explicitly");
     CHECK(!parse({"tool", "--tensor-type", "x=Q5_K", "in.gguf", "out.gguf",
                   "Q4_0_ROCMI4", "4"}, options, error),
@@ -99,7 +101,7 @@ static void test_build_info() {
               "\"ember_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
               "\"rocmfpx_revision\":\"c49ebdbd5c9f01ec242369f9e7f7967855f80cba\","
               "\"format\":\"Q4_0_ROCMI4\",\"ggml_tensor_type\":108,"
-              "\"per_tensor_formats\":[\"Q4_0_ROCMI4\",\"Q6_K\",\"Q4_0_ROCMFP4_FAST\"],"
+              "\"per_tensor_formats\":[\"Q4_0_ROCMI4\",\"Q6_K\",\"Q4_0_ROCMFP4_FAST\",\"Q3_0_ROCMFPX\"],"
               "\"intervention_manifest_schema\":1}",
           "build-info JSON is one exact provenance object");
     quant::SizeReport fits;

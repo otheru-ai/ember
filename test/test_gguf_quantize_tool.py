@@ -28,6 +28,7 @@ TYPE_F16 = 1
 TYPE_BF16 = 30
 TYPE_Q6_K = 14
 TYPE_ROCMFP4_FAST = 101
+TYPE_ROCMFPX_FP3 = 104
 TYPE_ROCMI4 = 108
 
 if len(sys.argv) != 2:
@@ -254,7 +255,8 @@ class QuantizerToolTests(unittest.TestCase):
         self.assertEqual(info["format"], "Q4_0_ROCMI4")
         self.assertEqual(info["ggml_tensor_type"], 108)
         self.assertEqual(info["per_tensor_formats"],
-                         ["Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST"])
+                         ["Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+                          "Q3_0_ROCMFPX"])
         self.assertEqual(info["intervention_manifest_schema"], 1)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -337,6 +339,23 @@ class QuantizerToolTests(unittest.TestCase):
                 "blk.0.ffn_down_exps.weight": TYPE_ROCMFP4_FAST,
                 "blk.0.ffn_down_shexp.weight": TYPE_ROCMFP4_FAST,
             })
+
+            fp3_output = root / "fp3-ple.gguf"
+            fp3_result = subprocess.run(
+                [
+                    str(self.tool),
+                    "--tensor-type",
+                    r"^per_layer_token_embd\.weight$=Q3_0_ROCMFPX",
+                    str(source), str(fp3_output), "Q4_0_ROCMI4", "3",
+                ],
+                check=False, text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(fp3_result.returncode, 0, fp3_result.stderr)
+            self.assertEqual(
+                inspect(fp3_output)["tensors"]["per_layer_token_embd.weight"],
+                TYPE_ROCMFPX_FP3,
+            )
 
             expert_arm = next(
                 arm for arm in profile["quantization"]["performance_bakeoff"]["arms"]

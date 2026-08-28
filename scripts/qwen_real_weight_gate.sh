@@ -304,6 +304,7 @@ mapping={
  "rocmi4-q6k-embedding-head":"rocmi4_dense_and_routed",
  "rocmfp4-fast-routed-experts-q6k-embedding-head":"rocmi4_dense_only",
  "rocmfp4-fast-matrix-q6k-embedding-head":"no_eligible_rocmi4_mmq",
+ "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head":"no_eligible_rocmi4_mmq",
 }
 if arm not in mapping: raise SystemExit(f"unknown candidate kernel capability: {arm!r}")
 print(mapping[arm])

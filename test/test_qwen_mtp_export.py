@@ -185,7 +185,7 @@ class MtpExportTests(unittest.TestCase):
             "format": "Q4_0_ROCMI4",
             "ggml_tensor_type": 108,
             "per_tensor_formats": [
-                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST", "Q3_0_ROCMFPX",
             ],
             "intervention_manifest_schema": 1,
         }
@@ -216,7 +216,7 @@ class MtpExportTests(unittest.TestCase):
             "format": "Q4_0_ROCMI4",
             "ggml_tensor_type": 108,
             "per_tensor_formats": [
-                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST",
+                "Q4_0_ROCMI4", "Q6_K", "Q4_0_ROCMFP4_FAST", "Q3_0_ROCMFPX",
             ],
         }
         completed = mock.Mock(

@@ -49,6 +49,17 @@ int8 MMQ as the default. Canonical ROCMI4 owns GGUF file type 118. Ember's older
 Q2 recipe metadata moved to 119/120 while its on-disk tensor type 107 remains
 unchanged, preserving tensor-dispatched loading of already-published files.
 
+The Qwen3.8-Flash-Next format bakeoff also admits the existing
+`Q3_0_ROCMFPX` type (GGML tensor type 104) for the mapped
+`per_layer_token_embd.weight` row table. Its 32-weight/14-byte layout was
+re-audited against `ciru-ai/ROCmFPX` revision
+`112629f1ed1acc2e8071693fce83cc7f5070693a`; no broad vendor refresh was
+performed. The tensor mix is provenance-pinned to
+`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF` revision
+`9089b24dbed6e087a705201ba59a104575bda0b9`, but only as an experimental
+recipe input. Ember's own intervention, quantization audit, quality, memory,
+PLE-latency, and gfx1151 gates remain authoritative.
+
 ## Pruned deployment scope
 
 Ember preserves the upstream provenance above, but intentionally does not carry

@@ -31,7 +31,7 @@ bool parse_tensor_override(const std::string & argument,
                            std::string & error) {
     const std::size_t separator = argument.rfind('=');
     if (separator == std::string::npos || separator == 0) {
-        error = "--tensor-type requires REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST}";
+        error = "--tensor-type requires REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST,Q3_0_ROCMFPX}";
         return false;
     }
     const std::string format = argument.substr(separator + 1);
@@ -41,8 +41,10 @@ bool parse_tensor_override(const std::string & argument,
         override.format = TensorFormat::q6_k;
     } else if (format == "Q4_0_ROCMFP4_FAST") {
         override.format = TensorFormat::rocmfp4_fast;
+    } else if (format == "Q3_0_ROCMFPX") {
+        override.format = TensorFormat::rocmfpx_fp3;
     } else {
-        error = "--tensor-type requires REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST}";
+        error = "--tensor-type requires REGEX={Q4_0_ROCMI4,Q6_K,Q4_0_ROCMFP4_FAST,Q3_0_ROCMFPX}";
         return false;
     }
     override.pattern = argument.substr(0, separator);
@@ -196,6 +198,7 @@ const char * tensor_format_name(TensorFormat format) {
         case TensorFormat::rocmi4: return "Q4_0_ROCMI4";
         case TensorFormat::q6_k: return "Q6_K";
         case TensorFormat::rocmfp4_fast: return "Q4_0_ROCMFP4_FAST";
+        case TensorFormat::rocmfpx_fp3: return "Q3_0_ROCMFPX";
     }
     return "unknown";
 }
@@ -219,7 +222,7 @@ std::string build_info_json(const std::string & ember_revision) {
            "\"ember_revision\":\"" + ember_revision + "\","
            "\"rocmfpx_revision\":\"c49ebdbd5c9f01ec242369f9e7f7967855f80cba\","
            "\"format\":\"Q4_0_ROCMI4\",\"ggml_tensor_type\":108,"
-           "\"per_tensor_formats\":[\"Q4_0_ROCMI4\",\"Q6_K\",\"Q4_0_ROCMFP4_FAST\"],"
+           "\"per_tensor_formats\":[\"Q4_0_ROCMI4\",\"Q6_K\",\"Q4_0_ROCMFP4_FAST\",\"Q3_0_ROCMFPX\"],"
            "\"intervention_manifest_schema\":1}";
 }
 
