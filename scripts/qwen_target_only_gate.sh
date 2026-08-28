@@ -185,7 +185,7 @@ rows = [row for row in manifest["candidates"] if isinstance(row, dict) and row.g
 if len(rows) != 1: fail("candidate id must occur exactly once")
 row = rows[0]
 required = {
-    "id", "stage", "configuration_id", "arm_id", "corpus_sha256",
+    "id", "candidate_id", "stage", "configuration_id", "arm_id", "corpus_sha256",
     "quantization_arm", "model", "model_sha256", "build_record",
     "build_record_sha256", "intervention_configuration_id",
     "intervention_manifest", "intervention_manifest_sha256", "profile_sha256",
@@ -195,7 +195,8 @@ required = {
     "vision_mmproj_bytes", "vision_mmproj_sha256", "vision_mmproj_format",
     "quality_contract", "quality_contract_sha256", "mtp_depth",
     "runtime_mode", "image", "image_digest", "profile_image",
-    "profile_image_digest", "final_release_eligible",
+    "profile_image_digest", "final_release_eligible", "model_inventory_sha256",
+    "tensor_format_compatibility_sha256", "artifact_bytes",
 }
 if set(row) != required: fail("candidate keys differ from the v2 contract")
 plan_desc = manifest["bakeoff_plan"]
@@ -234,11 +235,16 @@ if (row["image"] != image or row["image_digest"] != image_digest
 for field in ("corpus_sha256", "profile_sha256", "override_sha256",
               "companion_inventory_sha256",
               "mtp_sha256", "mtp_export_manifest_sha256", "vision_mmproj_sha256",
-              "quality_contract_sha256"):
+              "quality_contract_sha256", "model_inventory_sha256",
+              "tensor_format_compatibility_sha256"):
     if is_stock and field == "quality_contract_sha256":
         continue
     if not isinstance(row[field], str) or HEX.fullmatch(row[field]) is None:
         fail(f"candidate {field} is malformed")
+if (not isinstance(row["candidate_id"], str) or not row["candidate_id"]
+        or isinstance(row["artifact_bytes"], bool)
+        or not isinstance(row["artifact_bytes"], int) or row["artifact_bytes"] < 1):
+    fail("candidate artifact identity is malformed")
 if not isinstance(row["mtp_depth"], int) or isinstance(row["mtp_depth"], bool) or not 1 <= row["mtp_depth"] <= 4:
     fail("candidate mtp_depth must be 1..4")
 

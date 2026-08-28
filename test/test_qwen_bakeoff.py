@@ -240,6 +240,85 @@ class BakeoffTest(unittest.TestCase):
                 qb.ASSESSMENT_SCHEMA))
         return {"assessments": descriptors}
 
+    def with_balanced_confirmation(self, plan: dict, results: dict) -> dict:
+        assessments = [json.loads(Path(item["subject"]["path"]).read_text(
+            encoding="utf-8")) for item in results["assessments"]]
+        confirmation_plan = qb.balanced_confirmation_plan(plan, assessments)
+        first, second = [item["arm_id"] for item in confirmation_plan["finalists"]]
+        samples = {
+            first: {"prefill": [413.0, 414.0, 415.0],
+                    "decode": [40.9, 41.0, 41.1]},
+            second: {"prefill": [412.0, 413.0, 414.0],
+                     "decode": [39.8, 39.9, 40.0]},
+        }
+        counts = {first: 0, second: 0}
+        by_arm = {row["arm_id"]: row for row in assessments}
+        workloads = {item["workload_id"]: item
+                     for item in confirmation_plan["workloads"]}
+        runs = []
+        for index, arm_id in enumerate(confirmation_plan["run_order"]):
+            sample = counts[arm_id]
+            counts[arm_id] += 1
+            assessment = by_arm[arm_id]
+            artifact = assessment["artifact_identity"]
+            runtime = assessment["runtime_identity"]
+            capability = qb.candidate_kernel_capability(
+                artifact["quantization_arm"])
+            w4a8_required = capability != "no_eligible_rocmi4_mmq"
+            workload_id = confirmation_plan["workload_order"][index]
+            workload = workloads[workload_id]
+            process = {
+                "schema": qb.BALANCED_PROCESS_SCHEMA,
+                "run_index": index, "arm_id": arm_id,
+                "candidate_id": artifact["candidate_id"],
+                "container_id": hashlib.sha256(
+                    f"container:{index}".encode()).hexdigest(),
+                "host_pid": 1000 + index, "proc_start_ticks": 5000 + index,
+                "ember_revision": runtime["ember_revision"],
+                "container_digest": runtime["container_digest"],
+                "engine_binary_sha256": runtime["engine_binary_sha256"],
+                "tensor_format_contract_sha256": runtime[
+                    "tensor_format_contract_sha256"],
+                "candidate_kernel_capability": capability,
+                "rocmi4_w4a8_iu4_requested": w4a8_required,
+                "candidate_binding_sha256": hashlib.sha256(
+                    f"binding:{arm_id}".encode()).hexdigest(),
+                "model_first_shard_sha256": hashlib.sha256(
+                    f"model:{arm_id}".encode()).hexdigest(),
+                "model_inventory_sha256": artifact["model_inventory_sha256"],
+                "companion_inventory_sha256": artifact[
+                    "companion_inventory_sha256"],
+                "mtp_sha256": hashlib.sha256(f"mtp:{arm_id}".encode()).hexdigest(),
+                "mtp_depth": artifact["mtp_depth"],
+            }
+            runs.append({
+                "run_index": index, "arm_id": arm_id,
+                "process_instance": process,
+                "process_instance_sha256": qb.canonical_sha256(process),
+                "workload_id": workload_id,
+                "workload_recipe_sha256": workload["recipe_sha256"],
+                "prefill_prompt_sha256": hashlib.sha256(
+                    f"prefill:{workload_id}".encode()).hexdigest(),
+                "decode_prompt_sha256": hashlib.sha256(
+                    f"decode:{workload_id}".encode()).hexdigest(),
+                "calibrated_prefill_words": 2040 + index // 2,
+                "evaluated_prefill_tokens": 2074, "completion_tokens": 256,
+                "prefill_tps": samples[arm_id]["prefill"][sample],
+                "decode_tps": samples[arm_id]["decode"][sample],
+                "spec_ran": True, "accept_rate": 0.981,
+                "startup_kernel_mode": (
+                    "w4a8_iu4_register_pack" if w4a8_required else
+                    "not_applicable_no_eligible_rocmi4_mmq"),
+                "startup_log_sha256": hashlib.sha256(
+                    f"startup:{index}".encode()).hexdigest(),
+            })
+        results["balanced_confirmation"] = {
+            "schema": qb.BALANCED_CONFIRMATION_SCHEMA,
+            "confirmation_plan": confirmation_plan,
+            "runs": runs,
+        }
+        return results
+
     def staged_selection(self, root: Path, plan: dict, corpora: Path,
                          tamper_final_build: bool = False,
                          tamper_final_depth: bool = False) -> tuple[dict, dict, dict, dict]:
@@ -249,8 +328,9 @@ class BakeoffTest(unittest.TestCase):
         sweep = qb.select_sweep(plan, self.assessment_input(root, plan, sweep_rows, "sweep"))
         sweep_desc = self.persist_attested(
             root, "sweep-ledger", sweep, qb.LEDGER_SCHEMA)
-        selected_format = qb.select_format(
-            plan, self.assessment_input(root, plan, format_rows, "format"), sweep_desc)
+        format_input = self.with_balanced_confirmation(
+            plan, self.assessment_input(root, plan, format_rows, "format"))
+        selected_format = qb.select_format(plan, format_input, sweep_desc)
         format_desc = self.persist_attested(
             root, "format-ledger", selected_format, qb.LEDGER_SCHEMA)
         winner_raw = next(row for row in format_rows
@@ -494,9 +574,9 @@ class BakeoffTest(unittest.TestCase):
             sweep_results = self.assessment_input(
                 root, plan, [row for row in complete if row["stage"] in {"stock", "sweep"}],
                 "staged-sweep")
-            format_results = self.assessment_input(
+            format_results = self.with_balanced_confirmation(plan, self.assessment_input(
                 root, plan, [row for row in complete if row["stage"] == "format"],
-                "staged-format")
+                "staged-format"))
             sweep = qb.select_sweep(plan, sweep_results)
             self.assertEqual(sweep["phase"], "sweep")
             sweep_descriptor = self.persist_attested(
@@ -523,6 +603,144 @@ class BakeoffTest(unittest.TestCase):
             tampered["sweep_configurations"][0]["scale"] = 9.0
             with self.assertRaisesRegex(qb.BakeoffError, "semantics differ"):
                 qb.verify_plan(tampered)
+
+    def test_balanced_confirmation_is_counterbalanced_fresh_and_noise_aware(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = qb.make_plan(qb.DEFAULT_RECIPE, self.make_corpora(root))
+            raw = self.complete_results(plan)["results"]
+            sweep_rows = [row for row in raw if row["stage"] in {"stock", "sweep"}]
+            format_rows = [row for row in raw if row["stage"] == "format"]
+            sweep = qb.select_sweep(
+                plan, self.assessment_input(root, plan, sweep_rows, "balanced-sweep"))
+            sweep_descriptor = self.persist_attested(
+                root, "balanced-sweep-ledger", sweep, qb.LEDGER_SCHEMA)
+            base = self.assessment_input(root, plan, format_rows, "balanced-format")
+
+            with self.assertRaisesRegex(qb.BakeoffError, "requires balanced finalist"):
+                qb.select_format(plan, base, sweep_descriptor)
+
+            confirmed = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            selected = qb.select_format(plan, confirmed, sweep_descriptor)
+            evidence = selected["balanced_confirmation"]
+            arms = [item["arm_id"] for item in
+                    evidence["confirmation_plan"]["finalists"]]
+            self.assertEqual(evidence["confirmation_plan"]["run_order"],
+                             [arms[0], arms[1], arms[1], arms[0], arms[0], arms[1]])
+            self.assertEqual(evidence["confirmation_plan"]["workload_order"],
+                             ["counterbalanced-pair-0"] * 2 +
+                             ["counterbalanced-pair-1"] * 2 +
+                             ["counterbalanced-pair-2"] * 2)
+            self.assertEqual(len({row["process_instance_sha256"]
+                                  for row in evidence["runs"]}), 6)
+            self.assertTrue(evidence["sequence_consistency_pass"])
+            self.assertEqual(selected["selected_metrics"]["decode_median_tps"], 41.0)
+            self.assertGreater(evidence["decode_median_difference_tps"],
+                               evidence["observed_run_noise_tps"])
+            self.assertEqual(
+                evidence["predeclared_practical_effect_floor_tps"], 1.0)
+            self.assertGreater(evidence["decode_median_difference_tps"],
+                               evidence["required_decode_separation_tps"])
+
+            wrong_order = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            wrong_order["balanced_confirmation"]["runs"][0]["arm_id"] = (
+                wrong_order["balanced_confirmation"]["runs"][1]["arm_id"])
+            with self.assertRaisesRegex(qb.BakeoffError, "persisted counterbalanced order"):
+                qb.select_format(plan, wrong_order, sweep_descriptor)
+
+            reused = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            reused_process = reused["balanced_confirmation"]["runs"][1]["process_instance"]
+            reused_process["container_id"] = reused["balanced_confirmation"]["runs"][0][
+                "process_instance"]["container_id"]
+            reused["balanced_confirmation"]["runs"][1]["process_instance_sha256"] = (
+                qb.canonical_sha256(reused_process))
+            with self.assertRaisesRegex(qb.BakeoffError, "unique fresh process"):
+                qb.select_format(plan, reused, sweep_descriptor)
+
+            wrong_mtp = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            wrong_mtp["balanced_confirmation"]["runs"][0]["spec_ran"] = False
+            with self.assertRaisesRegex(qb.BakeoffError, "run native MTP"):
+                qb.select_format(plan, wrong_mtp, sweep_descriptor)
+
+            full_accept = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            full_accept["balanced_confirmation"]["runs"][0]["accept_rate"] = 1.0
+            with self.assertRaisesRegex(qb.BakeoffError, "0 < accept_rate < 1"):
+                qb.select_format(plan, full_accept, sweep_descriptor)
+
+            wrong_binary = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            process = wrong_binary["balanced_confirmation"]["runs"][0][
+                "process_instance"]
+            process["engine_binary_sha256"] = "f" * 64
+            wrong_binary["balanced_confirmation"]["runs"][0][
+                "process_instance_sha256"] = qb.canonical_sha256(process)
+            with self.assertRaisesRegex(qb.BakeoffError, "candidate/image/binary/MTP"):
+                qb.select_format(plan, wrong_binary, sweep_descriptor)
+
+            wrong_prompt = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            wrong_prompt["balanced_confirmation"]["runs"][1][
+                "prefill_prompt_sha256"] = "f" * 64
+            with self.assertRaisesRegex(qb.BakeoffError, "identical prompts once per arm"):
+                qb.select_format(plan, wrong_prompt, sweep_descriptor)
+
+            wrong_shape = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            wrong_shape["balanced_confirmation"]["runs"][0][
+                "evaluated_prefill_tokens"] = 2073
+            with self.assertRaisesRegex(qb.BakeoffError, "exactly 2074 prefill"):
+                qb.select_format(plan, wrong_shape, sweep_descriptor)
+
+            below_gate = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            loser = below_gate["balanced_confirmation"]["confirmation_plan"][
+                "run_order"][1]
+            for run in below_gate["balanced_confirmation"]["runs"]:
+                if run["arm_id"] == loser:
+                    run["prefill_tps"] = 411.99
+            with self.assertRaisesRegex(qb.BakeoffError, "unchanged hard gates"):
+                qb.select_format(plan, below_gate, sweep_descriptor)
+
+            noisy = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            arms = noisy["balanced_confirmation"]["confirmation_plan"]["run_order"][:2]
+            noisy_values = {arms[0]: [39.8, 40.0, 40.2],
+                            arms[1]: [39.7, 39.9, 40.1]}
+            counts = {arms[0]: 0, arms[1]: 0}
+            for run in noisy["balanced_confirmation"]["runs"]:
+                arm_id = run["arm_id"]
+                run["decode_tps"] = noisy_values[arm_id][counts[arm_id]]
+                counts[arm_id] += 1
+            with self.assertRaisesRegex(qb.BakeoffError, "within observed run noise"):
+                qb.select_format(plan, noisy, sweep_descriptor)
+
+            immaterial = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            arms = immaterial["balanced_confirmation"]["confirmation_plan"][
+                "run_order"][:2]
+            for run in immaterial["balanced_confirmation"]["runs"]:
+                run["decode_tps"] = 40.5 if run["arm_id"] == arms[0] else 40.0
+            with self.assertRaisesRegex(qb.BakeoffError, "practical-effect floor"):
+                qb.select_format(plan, immaterial, sweep_descriptor)
+
+            sequence = self.with_balanced_confirmation(
+                plan, json.loads(json.dumps(base)))
+            arms = [item["arm_id"] for item in sequence["balanced_confirmation"][
+                "confirmation_plan"]["finalists"]]
+            sequence_values = {arms[0]: [42.0, 40.5, 42.0],
+                               arms[1]: [40.0, 41.2, 40.0]}
+            counts = {arms[0]: 0, arms[1]: 0}
+            for run in sequence["balanced_confirmation"]["runs"]:
+                arm_id = run["arm_id"]
+                run["decode_tps"] = sequence_values[arm_id][counts[arm_id]]
+                counts[arm_id] += 1
+            with self.assertRaisesRegex(qb.BakeoffError, "sequence/order inconsistent"):
+                qb.select_format(plan, sequence, sweep_descriptor)
 
     def test_intervention_layer_scales_and_accept_rate_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

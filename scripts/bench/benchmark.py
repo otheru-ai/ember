@@ -584,7 +584,8 @@ def wait_for_health(endpoint: str, timeout: float, status_path: Path) -> bool:
 
 
 def calibrate_prefill_words(suite: Suite, target_tokens: int,
-                            max_attempts: int = 8) -> tuple[int, list[dict]]:
+                            max_attempts: int = 8, *,
+                            marker: str = "0") -> tuple[int, list[dict]]:
     """Find the alpha-word count that this server tokenizes to target_tokens.
 
     The published 2K shape happened to be 2,074 tokens with the DeepSeek
@@ -604,7 +605,7 @@ def calibrate_prefill_words(suite: Suite, target_tokens: int,
         seen.add(words)
         record = suite.request(
             f"prefill-calibration-r{attempt}",
-            make_prefill_prompt("0", words), 1,
+            make_prefill_prompt(marker, words), 1,
             group="calibration", repeat=attempt)
         observed = record.get("prompt_tokens") if record.get("ok") else None
         attempts.append({

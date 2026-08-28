@@ -17,6 +17,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml"
 TARGET_GATE = ROOT / "scripts/qwen_target_only_gate.sh"
+BALANCED_RUNNER = ROOT / "scripts/qwen_balanced_confirmation.sh"
+BALANCED_HELPER = ROOT / "scripts/qwen_balanced_confirmation.py"
+BALANCED_SLOT = ROOT / "scripts/qwen_balanced_slot.py"
 HEX = "1" * 64
 ATTEST_SHA = "1e69f48acb82d1966a394da916b4c1698aa569d6"
 
@@ -43,6 +46,152 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenBakeoffWorkflowTest(unittest.TestCase):
+    def test_balanced_runner_dry_run_and_syntax_are_side_effect_free(self) -> None:
+        subprocess.run(["bash", "-n", str(BALANCED_RUNNER)], check=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            for tool in ("docker", "curl", "sudo", "dd", "python3", "stat"):
+                path = Path(temporary) / tool
+                path.write_text(f"#!/bin/sh\necho FORBIDDEN:{tool} >&2\nexit 97\n")
+                path.chmod(0o755)
+            env = os.environ | {"PATH": temporary + os.pathsep + os.environ["PATH"]}
+            result = subprocess.run([
+                "bash", str(BALANCED_RUNNER), "--dry-run",
+                "--plan", "/evidence/plan.json", "--plan-sha256", HEX,
+                "--accumulator", "/evidence/format.json",
+                "--accumulator-sha256", HEX,
+                "--evidence-root", "/evidence", "--image", "candidate:exact",
+                "--image-digest", f"sha256:{HEX}",
+                "--runtime-revision", "1" * 40,
+                "--engine-binary-sha256", HEX,
+                "--tensor-format-contract-sha256", HEX,
+                "--out-dir", "/tmp/qwen-balanced-never-created",
+            ], cwd=ROOT, env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("FORBIDDEN", result.stderr)
+        self.assertIn("ABBAAB", result.stdout)
+        self.assertIn("one exact 2074-token prefill + one 256-token decode", result.stdout)
+        self.assertIn("clean; profiling/counters forbidden", result.stdout)
+
+    def test_balanced_slot_and_assembler_emit_the_selector_schema(self) -> None:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import qwen_balanced_slot as slot
+        import qwen_bakeoff as qb
+        prefill = {"ok": True, "group": "prefill-2048",
+                   "evaluated_prefill_tokens": 2074,
+                   "restored_prefix": 0,
+                   "prefill_tps_rounding_consistent": True,
+                   "prefill_tokens_per_second": 413.25}
+        decode = {"ok": True, "group": "decode-256", "completion_tokens": 256,
+                  "decode_tps_rounding_consistent": True,
+                  "decode_tokens_per_second": 40.25, "spec_ran": True,
+                  "accept_rate": 0.981}
+        process = {"schema": qb.BALANCED_PROCESS_SCHEMA, "run_index": 0,
+                   "arm_id": "arm-a"}
+        recipe = {"workload_id": "pair-0", "marker": "QBC0",
+                  "prefill_generator": "benchmark.make_prefill_prompt.v1",
+                  "decode_generator": "benchmark.make_decode_prompt.v1",
+                  "evaluated_prefill_tokens": 2074, "completion_tokens": 256}
+        workload = {**recipe, "recipe_sha256": qb.canonical_sha256(recipe)}
+        row = slot.make_run(0, "arm-a", process, workload, 2040,
+                            "paired prefill", "paired decode", prefill, decode)
+        self.assertEqual(row["evaluated_prefill_tokens"], 2074)
+        self.assertEqual(row["completion_tokens"], 256)
+        with self.assertRaisesRegex(ValueError, "exactly 256"):
+            slot.make_run(0, "arm-a", process, workload, 2040,
+                          "paired prefill", "paired decode", prefill,
+                          decode | {"completion_tokens": 255})
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            runner = root / "runner.json"
+            order = ["arm-a", "arm-b", "arm-b", "arm-a", "arm-a", "arm-b"]
+            workload_order = ["pair-0", "pair-0", "pair-1", "pair-1",
+                              "pair-2", "pair-2"]
+            workloads = []
+            for index in range(3):
+                value = {"workload_id": f"pair-{index}", "marker": f"QBC{index}",
+                         "prefill_generator": "benchmark.make_prefill_prompt.v1",
+                         "decode_generator": "benchmark.make_decode_prompt.v1",
+                         "evaluated_prefill_tokens": 2074, "completion_tokens": 256}
+                workloads.append({**value, "recipe_sha256": qb.canonical_sha256(value)})
+            runtime = {"ember_revision": "1" * 40, "container_digest": f"sha256:{HEX}",
+                       "engine_binary_sha256": "2" * 64,
+                       "tensor_format_contract_sha256": "3" * 64}
+            bindings = []
+            for arm, digit in (("arm-a", "a"), ("arm-b", "b")):
+                capability = ("rocmi4_dense_and_routed" if arm == "arm-a" else
+                              "no_eligible_rocmi4_mmq")
+                bindings.append({"arm_id": arm, "candidate_id": f"candidate-{arm}",
+                                 "candidate_kernel_capability": capability,
+                                 "model_sha256": digit * 64,
+                                 "model_inventory_sha256": "4" * 64,
+                                 "companion_inventory_sha256": "5" * 64,
+                                 "mtp_sha256": "6" * 64, "mtp_depth": 3,
+                                 "candidate_binding": {"sha256": digit * 64}})
+            runner.write_text(json.dumps({
+                "schema": "ember.qwen3.8.balanced-confirmation-runner-plan.v1",
+                "confirmation_plan": {"run_order": order,
+                                      "workload_order": workload_order,
+                                      "workloads": workloads,
+                                      "finalists": [{
+                                          "arm_id": row["arm_id"],
+                                          "candidate_kernel_capability": row[
+                                              "candidate_kernel_capability"],
+                                      } for row in bindings]},
+                "runtime_identity": runtime, "bindings": bindings,
+            }), encoding="utf-8")
+            slots = []
+            for index, arm in enumerate(order):
+                path = root / f"slot-{index}.json"
+                binding = next(item for item in bindings if item["arm_id"] == arm)
+                w4a8 = (binding["candidate_kernel_capability"] !=
+                        "no_eligible_rocmi4_mmq")
+                process = {"schema": qb.BALANCED_PROCESS_SCHEMA, "run_index": index,
+                           "arm_id": arm, "candidate_id": binding["candidate_id"],
+                           "container_id": f"{index + 10:064x}", "host_pid": 100 + index,
+                           "proc_start_ticks": 1000 + index,
+                           **runtime,
+                           "candidate_kernel_capability": binding[
+                               "candidate_kernel_capability"],
+                           "rocmi4_w4a8_iu4_requested": w4a8,
+                           "candidate_binding_sha256": binding[
+                               "candidate_binding"]["sha256"],
+                           "model_first_shard_sha256": binding["model_sha256"],
+                           "model_inventory_sha256": binding["model_inventory_sha256"],
+                           "companion_inventory_sha256": binding[
+                               "companion_inventory_sha256"],
+                           "mtp_sha256": binding["mtp_sha256"], "mtp_depth": 3}
+                workload = next(item for item in workloads
+                                if item["workload_id"] == workload_order[index])
+                pair = index // 2
+                path.write_text(json.dumps({
+                    "run_index": index, "arm_id": arm,
+                    "process_instance": process,
+                    "process_instance_sha256": qb.canonical_sha256(process),
+                    "workload_id": workload["workload_id"],
+                    "workload_recipe_sha256": workload["recipe_sha256"],
+                    "prefill_prompt_sha256": f"{pair + 20:064x}",
+                    "decode_prompt_sha256": f"{pair + 30:064x}",
+                    "calibrated_prefill_words": 2040 + pair,
+                    "evaluated_prefill_tokens": 2074, "completion_tokens": 256,
+                    "prefill_tps": 413.0 + index, "decode_tps": 40.0 + index,
+                    "spec_ran": True, "accept_rate": 0.981,
+                    "startup_kernel_mode": (
+                        "w4a8_iu4_register_pack" if w4a8 else
+                        "not_applicable_no_eligible_rocmi4_mmq"),
+                    "startup_log_sha256": f"{index + 40:064x}",
+                }), encoding="utf-8")
+                slots.extend(["--slot", str(path)])
+            output = root / "confirmation.json"
+            result = subprocess.run([
+                sys.executable, str(BALANCED_HELPER), "assemble",
+                "--runner-plan", str(runner), *slots, "--output", str(output),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(value["schema"], "ember.qwen3.8.balanced-confirmation.v2")
+            self.assertEqual([item["arm_id"] for item in value["runs"]], order)
+
     def test_target_gate_syntax_and_side_effect_free_dry_run(self) -> None:
         subprocess.run(["bash", "-n", str(TARGET_GATE)], check=True)
         with tempfile.TemporaryDirectory() as temporary:
@@ -121,6 +270,9 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn('c.get("intervention_manifest_sha256") != "0"*64', body)
         self.assertIn('declared_capture = c.get("stock_capture")', body)
         self.assertIn('row["intervention_manifest_sha256"] = "0" * 64', body)
+        for field in ("candidate_id", "model_inventory_sha256",
+                      "tensor_format_compatibility_sha256", "artifact_bytes"):
+            self.assertIn(f'"{field}"', body)
 
     def test_embedded_phase_request_parser_is_exact_and_phase_scoped(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
@@ -209,6 +361,35 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn("provisional-retain", body)
         self.assertIn("it is not a loser until the phase ledger exists", body)
         self.assertIn("--measurement-only", body)
+
+    def test_format_boundary_runs_balanced_confirmation_before_selection(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        runner = body.index("scripts/qwen_balanced_confirmation.sh")
+        merge = body.index('value["balanced_confirmation"]')
+        select = body.index('args=(--plan "$EFFECTIVE_PLAN" --results "$selection_results"')
+        self.assertLess(runner, merge)
+        self.assertLess(merge, select)
+        self.assertIn('if [[ "$QWEN_BAKEOFF_PHASE" = format ]]', body)
+        self.assertIn('--accumulator-sha256 "$(sha256sum', body)
+        self.assertIn('--engine-binary-sha256 "$RUNTIME_ENGINE_SHA256"', body)
+        runner_body = BALANCED_RUNNER.read_text(encoding="utf-8")
+        self.assertIn("for index in $(seq 0 5)", runner_body)
+        self.assertIn('remove_container', runner_body)
+        self.assertIn('"ember.qwen3.8.fresh-server-process.v2"', runner_body)
+        self.assertIn('-e DFLASH_QWEN_MTP=/gate/mtp.gguf', runner_body)
+        self.assertIn('DFLASH_QWEN_MTP_DEPTH=$mtp_depth', runner_body)
+        self.assertIn('O_DIRECT finalist MTP integrity failed', runner_body)
+        self.assertIn('--prefix-cache-slots 1', runner_body)
+        self.assertIn('process_instance_sha256', BALANCED_SLOT.read_text(encoding="utf-8"))
+        slot_body = BALANCED_SLOT.read_text(encoding="utf-8")
+        self.assertIn('marker=args.workload_marker', slot_body)
+        self.assertIn('prefix-cache isolation request failed', slot_body)
+        self.assertIn('0 < accept_rate < 1', slot_body)
+        self.assertNotIn("profile_gpu.sh", runner_body)
+        self.assertNotIn("rocprof", runner_body)
+        self.assertLess(runner_body.index('sudo -n "$GPU_LOCK" acquire'),
+                        runner_body.index("for index in $(seq 0 5)"))
+        self.assertIn('restore_exclusive || die', runner_body)
 
     def test_nested_gates_exclusively_own_gpu_and_production_lifecycle(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

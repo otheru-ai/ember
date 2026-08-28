@@ -32,6 +32,21 @@ PLAN_SCHEMA_VERSION = 2
 RESULT_SCHEMA = "ember.qwen3.8.sequential-bakeoff-result.v4"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment.v2"
 LEDGER_SCHEMA = "ember.qwen3.8.sequential-bakeoff-ledger.v3"
+BALANCED_CONFIRMATION_SCHEMA = "ember.qwen3.8.balanced-confirmation.v2"
+BALANCED_PROCESS_SCHEMA = "ember.qwen3.8.fresh-server-process.v2"
+BALANCED_CONFIRMATION_SAMPLES = 3
+# A sub-1 tok/s decode lead is under 2.6% at the 39.49 tok/s release target and
+# does not justify selecting a different 128 GiB quant artifact. Persist this
+# practical-effect threshold in the pre-measurement plan rather than deriving
+# it from the six observed samples.
+BALANCED_MIN_DECODE_EFFECT_TPS = 1.0
+KERNEL_CAPABILITY_BY_QUANTIZATION_ARM = {
+    "profile-default-rocmi4": "rocmi4_dense_and_routed",
+    "rocmi4-control": "rocmi4_dense_and_routed",
+    "rocmi4-q6k-embedding-head": "rocmi4_dense_and_routed",
+    "rocmfp4-fast-routed-experts-q6k-embedding-head": "rocmi4_dense_only",
+    "rocmfp4-fast-matrix-q6k-embedding-head": "no_eligible_rocmi4_mmq",
+}
 SUPPORTED_MTP_MATRIX_CONTRACTS = {
     "Q4_0_ROCMI4", "Q4_0_ROCMFP4_FAST",
 }
@@ -58,6 +73,15 @@ BENCHMARK_SPEC.loader.exec_module(BENCHMARK_MODULE)
 
 class BakeoffError(ValueError):
     pass
+
+
+def candidate_kernel_capability(quantization_arm: Any) -> str:
+    capability = KERNEL_CAPABILITY_BY_QUANTIZATION_ARM.get(quantization_arm)
+    if capability is None:
+        raise BakeoffError(
+            "quantization arm has no declared timing-kernel capability: "
+            f"{quantization_arm!r}")
+    return capability
 
 
 def sha256(path: Path) -> str:
@@ -1343,6 +1367,315 @@ def _winner_key(metrics: dict[str, Any], identifier: str) -> tuple[float, float,
     )
 
 
+def balanced_confirmation_plan(
+    plan: dict[str, Any], rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Freeze the top-two format order before balanced measurements begin.
+
+    The format-arm sweep remains the screening stage. Only its top two
+    gate-passing arms enter confirmation. The counterbalanced A/B, B/A, A/B
+    pair order and three sealed workload recipes are persisted before any
+    confirmation result exists.
+    """
+    assessed = [(row, _metrics(row, plan)) for row in rows]
+    passing = [(row, metrics) for row, metrics in assessed if metrics["passes"]]
+    if len(passing) < 2:
+        raise BakeoffError("balanced confirmation requires two gate-passing format finalists")
+    finalists = sorted(
+        passing, key=lambda pair: _winner_key(pair[1], pair[0].get("arm_id"))
+    )[:2]
+    identities = []
+    for row, metrics in finalists:
+        arm_id = row.get("arm_id")
+        artifact = row.get("artifact_identity")
+        if not isinstance(arm_id, str) or not isinstance(artifact, dict):
+            raise BakeoffError("format finalist lacks its stable arm/artifact identity")
+        identities.append({
+            "arm_id": arm_id,
+            "candidate_id": artifact.get("candidate_id"),
+            "candidate_kernel_capability": candidate_kernel_capability(
+                artifact.get("quantization_arm")),
+            "artifact_identity": artifact,
+            "first_stage_metrics": metrics,
+        })
+    arm_a, arm_b = (item["arm_id"] for item in identities)
+    order = [arm_a, arm_b, arm_b, arm_a, arm_a, arm_b]
+    workloads = []
+    for index in range(BALANCED_CONFIRMATION_SAMPLES):
+        workload_id = f"counterbalanced-pair-{index}"
+        marker = f"QBC{index}"
+        recipe = {
+            "workload_id": workload_id,
+            "marker": marker,
+            "prefill_generator": "benchmark.make_prefill_prompt.v1",
+            "decode_generator": "benchmark.make_decode_prompt.v1",
+            "evaluated_prefill_tokens": 2074,
+            "completion_tokens": 256,
+        }
+        workloads.append({**recipe, "recipe_sha256": canonical_sha256(recipe)})
+    workload_order = [workloads[index // 2]["workload_id"] for index in range(6)]
+    value = {
+        "schema": BALANCED_CONFIRMATION_SCHEMA,
+        "selection_plan_sha256": canonical_sha256(plan),
+        "first_stage": "complete_format_arm_sweep",
+        "finalists": identities,
+        "run_order": order,
+        "workload_order": workload_order,
+        "counterbalance_design": {
+            "sequence": "ABBAAB",
+            "adjacent_pair_orientations": ["A_then_B", "B_then_A", "A_then_B"],
+            "signed_pair_metric": "decode_tps_A_minus_B",
+            "required_consistency": "all_three_signed_pair_differences_have_same_nonzero_sign",
+        },
+        "workloads": workloads,
+        "fresh_process_per_run": True,
+        "native_mtp_required_per_decode": True,
+        "workload": {
+            "evaluated_prefill_tokens": 2074,
+            "completion_tokens": 256,
+            "samples_per_arm": BALANCED_CONFIRMATION_SAMPLES,
+        },
+        "noise_rule": {
+            "metric": "decode_median_tps",
+            "observed_noise": "max_within_arm_decode_range_tps",
+            "predeclared_practical_effect_floor_tps": BALANCED_MIN_DECODE_EFFECT_TPS,
+            "required_separation": "absolute_median_difference_strictly_greater_than_max_observed_noise_and_practical_floor",
+            "sequence_consistency": "same_nonzero_A_minus_B_sign_in_all_adjacent_pairs",
+            "indistinguishable_action": "reject_selection",
+        },
+    }
+    value["ordering_sha256"] = canonical_sha256({
+        "finalists": [item["arm_id"] for item in identities],
+        "run_order": order,
+        "workload_order": workload_order,
+        "counterbalance_design": value["counterbalance_design"],
+        "workloads": workloads,
+        "workload": value["workload"],
+    })
+    return value
+
+
+def adjudicate_balanced_confirmation(
+    plan: dict[str, Any], rows: list[dict[str, Any]], evidence: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate fresh-process finalist evidence and return winner + metrics."""
+    expected = balanced_confirmation_plan(plan, rows)
+    if not isinstance(evidence, dict):
+        raise BakeoffError("format selection requires balanced finalist confirmation")
+    if set(evidence) != {"schema", "confirmation_plan", "runs"}:
+        raise BakeoffError("balanced confirmation evidence keys differ from the contract")
+    if evidence.get("schema") != BALANCED_CONFIRMATION_SCHEMA:
+        raise BakeoffError("balanced confirmation evidence schema differs")
+    if evidence.get("confirmation_plan") != expected:
+        raise BakeoffError("balanced confirmation used a different finalist order or workload")
+    runs = evidence.get("runs")
+    if not isinstance(runs, list) or len(runs) != BALANCED_CONFIRMATION_SAMPLES * 2:
+        raise BakeoffError("balanced confirmation requires exactly six counterbalanced runs")
+    process_ids: set[str] = set()
+    container_ids: set[str] = set()
+    host_process_ids: set[tuple[int, int]] = set()
+    process_by_arm: dict[str, dict[str, Any]] = {}
+    workload_runs: dict[str, list[dict[str, Any]]] = {
+        item["workload_id"]: [] for item in expected["workloads"]
+    }
+    eligible_kernel_modes: set[str] = set()
+    samples: dict[str, dict[str, list[float]]] = {
+        item["arm_id"]: {"prefill": [], "decode": []}
+        for item in expected["finalists"]
+    }
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict) or set(run) != {
+            "run_index", "arm_id", "process_instance", "process_instance_sha256",
+            "workload_id", "workload_recipe_sha256", "prefill_prompt_sha256",
+            "decode_prompt_sha256", "calibrated_prefill_words",
+            "evaluated_prefill_tokens", "completion_tokens",
+            "prefill_tps", "decode_tps", "spec_ran", "accept_rate",
+            "startup_kernel_mode", "startup_log_sha256",
+        }:
+            raise BakeoffError("balanced confirmation run keys differ from the contract")
+        arm_id = run.get("arm_id")
+        process_id = run.get("process_instance_sha256")
+        if (run.get("run_index") != index
+                or arm_id != expected["run_order"][index]):
+            raise BakeoffError("balanced confirmation did not follow its persisted counterbalanced order")
+        if arm_id not in samples:
+            raise BakeoffError("balanced confirmation contains an unknown finalist")
+        process = run.get("process_instance")
+        finalist = next(item for item in expected["finalists"] if item["arm_id"] == arm_id)
+        artifact = finalist["artifact_identity"]
+        capability = finalist["candidate_kernel_capability"]
+        w4a8_required = capability != "no_eligible_rocmi4_mmq"
+        row = next(item for item in rows if item.get("arm_id") == arm_id)
+        runtime = row.get("runtime_identity") or {}
+        if (not isinstance(process, dict) or set(process) != {
+                "schema", "run_index", "arm_id", "candidate_id", "container_id",
+                "host_pid", "proc_start_ticks", "ember_revision", "container_digest",
+                "engine_binary_sha256", "tensor_format_contract_sha256",
+                "candidate_kernel_capability", "rocmi4_w4a8_iu4_requested",
+                "candidate_binding_sha256", "model_first_shard_sha256",
+                "model_inventory_sha256", "companion_inventory_sha256",
+                "mtp_sha256", "mtp_depth"}):
+            raise BakeoffError("fresh process identity descriptor keys differ")
+        stable = {key: process.get(key) for key in (
+            "candidate_id", "container_digest", "engine_binary_sha256",
+            "tensor_format_contract_sha256", "candidate_binding_sha256",
+            "model_first_shard_sha256", "model_inventory_sha256",
+            "companion_inventory_sha256", "mtp_sha256", "mtp_depth")}
+        prior_stable = process_by_arm.setdefault(arm_id, stable)
+        if prior_stable != stable:
+            raise BakeoffError("one finalist changed its model/MTP/runtime binding between slots")
+        if (process.get("schema") != BALANCED_PROCESS_SCHEMA
+                or process.get("run_index") != index or process.get("arm_id") != arm_id
+                or process.get("candidate_id") != finalist["candidate_id"]
+                or not isinstance(process.get("container_id"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", process["container_id"]) is None
+                or isinstance(process.get("host_pid"), bool)
+                or not isinstance(process.get("host_pid"), int) or process["host_pid"] <= 1
+                or isinstance(process.get("proc_start_ticks"), bool)
+                or not isinstance(process.get("proc_start_ticks"), int)
+                or process["proc_start_ticks"] <= 0
+                or process.get("ember_revision") != runtime.get("ember_revision")
+                or process.get("container_digest") != runtime.get("container_digest")
+                or process.get("engine_binary_sha256") != runtime.get("engine_binary_sha256")
+                or process.get("tensor_format_contract_sha256") !=
+                   runtime.get("tensor_format_contract_sha256")
+                or process.get("candidate_kernel_capability") != capability
+                or process.get("rocmi4_w4a8_iu4_requested") is not w4a8_required
+                or process.get("model_inventory_sha256") != artifact.get("model_inventory_sha256")
+                or process.get("companion_inventory_sha256") !=
+                   artifact.get("companion_inventory_sha256")
+                or process.get("mtp_depth") != artifact.get("mtp_depth")
+                or any(re.fullmatch(r"[0-9a-f]{64}", str(process.get(key, ""))) is None
+                       for key in ("candidate_binding_sha256", "model_first_shard_sha256",
+                                   "mtp_sha256"))):
+            raise BakeoffError("fresh process identity is not bound to its candidate/image/binary/MTP")
+        if (not isinstance(process_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", process_id) is None
+                or process_id != canonical_sha256(process)
+                or process_id in process_ids):
+            raise BakeoffError("every confirmation sample must use one unique fresh process")
+        host_process_id = (process["host_pid"], process["proc_start_ticks"])
+        if (process["container_id"] in container_ids or host_process_id in host_process_ids):
+            raise BakeoffError("every confirmation sample must use one unique fresh process")
+        process_ids.add(process_id)
+        container_ids.add(process["container_id"])
+        host_process_ids.add(host_process_id)
+        if (run.get("evaluated_prefill_tokens") != 2074
+                or run.get("completion_tokens") != 256):
+            raise BakeoffError("confirmation workload must be exactly 2074 prefill and 256 decode tokens")
+        accept_rate = finite_number(run.get("accept_rate"), "confirmation MTP accept rate")
+        if run.get("spec_ran") is not True or not 0.0 < accept_rate < 1.0:
+            raise BakeoffError("every confirmation decode must run native MTP with 0 < accept_rate < 1")
+        workload_id = run.get("workload_id")
+        workload = next((item for item in expected["workloads"]
+                         if item["workload_id"] == workload_id), None)
+        if (workload is None or workload_id != expected["workload_order"][index]
+                or run.get("workload_recipe_sha256") != workload["recipe_sha256"]
+                or re.fullmatch(r"[0-9a-f]{64}", str(run.get("prefill_prompt_sha256", ""))) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(run.get("decode_prompt_sha256", ""))) is None
+                or isinstance(run.get("calibrated_prefill_words"), bool)
+                or not isinstance(run.get("calibrated_prefill_words"), int)
+                or run["calibrated_prefill_words"] < 1):
+            raise BakeoffError("confirmation run is not bound to its sealed paired workload")
+        workload_runs[workload_id].append(run)
+        kernel_mode = run.get("startup_kernel_mode")
+        eligible_modes = {"w4a8_iu4_register_pack", "w4a8_iu4_prepack"}
+        if ((w4a8_required and kernel_mode not in eligible_modes)
+                or (not w4a8_required and kernel_mode !=
+                    "not_applicable_no_eligible_rocmi4_mmq")
+                or re.fullmatch(r"[0-9a-f]{64}", str(run.get("startup_log_sha256", "")))
+                   is None):
+            raise BakeoffError(
+                "confirmation timing kernel mode differs from candidate capability")
+        if w4a8_required:
+            eligible_kernel_modes.add(kernel_mode)
+        samples[arm_id]["prefill"].append(
+            finite_number(run.get("prefill_tps"), "confirmation prefill sample"))
+        samples[arm_id]["decode"].append(
+            finite_number(run.get("decode_tps"), "confirmation decode sample"))
+    for workload_id, paired in workload_runs.items():
+        if (len(paired) != 2 or {item["arm_id"] for item in paired} != set(samples)
+                or paired[0]["prefill_prompt_sha256"] != paired[1]["prefill_prompt_sha256"]
+                or paired[0]["decode_prompt_sha256"] != paired[1]["decode_prompt_sha256"]
+                or paired[0]["calibrated_prefill_words"] !=
+                   paired[1]["calibrated_prefill_words"]):
+            raise BakeoffError(
+                f"paired workload {workload_id} did not use identical prompts once per arm")
+    if len(eligible_kernel_modes) > 1:
+        raise BakeoffError("confirmation slots changed W4A8 startup kernel mode")
+    gates = plan["recipe"]["value"]["hard_gates"]
+    metrics: dict[str, dict[str, Any]] = {}
+    for arm_id, values in samples.items():
+        if (len(values["prefill"]) != BALANCED_CONFIRMATION_SAMPLES
+                or len(values["decode"]) != BALANCED_CONFIRMATION_SAMPLES):
+            raise BakeoffError("confirmation must contain exactly three samples per arm")
+        prefill_peak = max(values["prefill"])
+        decode_median = statistics.median(values["decode"])
+        metrics[arm_id] = {
+            "prefill_tps_samples": values["prefill"],
+            "decode_tps_samples": values["decode"],
+            "prefill_peak_tps": prefill_peak,
+            "decode_median_tps": decode_median,
+            "decode_observed_range_tps": max(values["decode"]) - min(values["decode"]),
+            "hard_gate_passes": (
+                prefill_peak >= gates["minimum_prefill_peak_tps"]
+                and decode_median >= gates["minimum_decode_median_tps"]
+            ),
+        }
+    if not all(item["hard_gate_passes"] for item in metrics.values()):
+        raise BakeoffError("a balanced-confirmation finalist failed the unchanged hard gates")
+    arm_a, arm_b = [item["arm_id"] for item in expected["finalists"]]
+    median_delta = abs(
+        metrics[arm_a]["decode_median_tps"] - metrics[arm_b]["decode_median_tps"])
+    observed_noise = max(
+        metrics[arm_a]["decode_observed_range_tps"],
+        metrics[arm_b]["decode_observed_range_tps"],
+    )
+    required_separation = max(observed_noise, BALANCED_MIN_DECODE_EFFECT_TPS)
+    if median_delta <= required_separation:
+        raise BakeoffError(
+            "balanced finalist decode difference is within observed run noise or the "
+            "predeclared practical-effect floor; refusing selection")
+    pair_deltas = []
+    pair_details = []
+    for pair_index in range(BALANCED_CONFIRMATION_SAMPLES):
+        pair = runs[pair_index * 2:pair_index * 2 + 2]
+        values = {item["arm_id"]: finite_number(
+            item["decode_tps"], "paired confirmation decode sample") for item in pair}
+        delta = values[arm_a] - values[arm_b]
+        pair_deltas.append(delta)
+        pair_details.append({
+            "workload_id": pair[0]["workload_id"],
+            "run_indices": [item["run_index"] for item in pair],
+            "run_order": [item["arm_id"] for item in pair],
+            "decode_tps_A_minus_B": delta,
+        })
+    signs = {1 if value > 0 else -1 if value < 0 else 0 for value in pair_deltas}
+    median_sign = (1 if metrics[arm_a]["decode_median_tps"] >
+                   metrics[arm_b]["decode_median_tps"] else -1)
+    if signs != {median_sign}:
+        raise BakeoffError(
+            "counterbalanced adjacent-pair results are sequence/order inconsistent")
+    winner_id = max(
+        (arm_a, arm_b), key=lambda arm_id: metrics[arm_id]["decode_median_tps"])
+    winner = next(row for row in rows if row.get("arm_id") == winner_id)
+    confirmation = {
+        "schema": BALANCED_CONFIRMATION_SCHEMA,
+        "confirmation_plan": expected,
+        "runs": runs,
+        "metrics_by_arm": metrics,
+        "decode_median_difference_tps": median_delta,
+        "observed_run_noise_tps": observed_noise,
+        "predeclared_practical_effect_floor_tps": BALANCED_MIN_DECODE_EFFECT_TPS,
+        "required_decode_separation_tps": required_separation,
+        "counterbalanced_pair_results": pair_details,
+        "signed_pair_decode_differences_A_minus_B": pair_deltas,
+        "sequence_consistency_pass": True,
+        "selected_arm_id": winner_id,
+    }
+    return winner, confirmation
+
+
 def verify_ledger_semantics(plan: dict[str, Any], ledger: dict[str, Any]) -> None:
     phase = ledger.get("phase")
     rows = ledger.get("assessments")
@@ -1357,7 +1690,12 @@ def verify_ledger_semantics(plan: dict[str, Any], ledger: dict[str, Any]) -> Non
         if not isinstance(prior, dict):
             raise BakeoffError("format ledger does not embed its compact sweep ledger")
         verify_ledger_semantics(plan, prior)
-        expected = select_format_from_assessments(plan, rows, digests, prior)
+        retained = ledger.get("balanced_confirmation")
+        confirmation = ({key: retained.get(key) for key in (
+            "schema", "confirmation_plan", "runs")}
+            if isinstance(retained, dict) else retained)
+        expected = select_format_from_assessments(
+            plan, rows, digests, prior, confirmation)
     elif phase == "mtp-depth":
         prior = ledger.get("prior_format_ledger")
         if not isinstance(prior, dict):
@@ -1431,7 +1769,8 @@ def select_sweep(plan: dict[str, Any], results: dict[str, Any]) -> dict[str, Any
 
 
 def select_format_from_assessments(plan: dict[str, Any], rows: list[dict[str, Any]],
-                                   digests: list[str], prior: dict[str, Any]) -> dict[str, Any]:
+                                   digests: list[str], prior: dict[str, Any],
+                                   confirmation: Any) -> dict[str, Any]:
     arms = {item["id"]: item for item in plan["format_arms"]}
     if ({row.get("arm_id") for row in rows} != set(arms) or len(rows) != len(arms)):
         raise BakeoffError("format requires every planned arm exactly once")
@@ -1461,8 +1800,21 @@ def select_format_from_assessments(plan: dict[str, Any], rows: list[dict[str, An
                 if arm["final_release_eligible"] and metrics["passes"]]
     if not eligible:
         raise BakeoffError("no final-eligible format passed all measured gates")
-    winner, metrics = sorted(
-        eligible, key=lambda pair: _winner_key(pair[1], pair[0]["arm_id"]))[0]
+    eligible_rows = [row for row, _metrics_value in eligible]
+    winner, balanced = adjudicate_balanced_confirmation(
+        plan, eligible_rows, confirmation)
+    first_stage_metrics = next(
+        metrics for row, metrics in eligible if row is winner)
+    metrics = {
+        **first_stage_metrics,
+        "prefill_peak_tps": balanced["metrics_by_arm"][winner["arm_id"]][
+            "prefill_peak_tps"],
+        "prefill_median_tps": statistics.median(
+            balanced["metrics_by_arm"][winner["arm_id"]]["prefill_tps_samples"]),
+        "decode_median_tps": balanced["metrics_by_arm"][winner["arm_id"]][
+            "decode_median_tps"],
+        "balanced_confirmation_pass": True,
+    }
     return {**ledger_base("format", plan, rows, digests),
             "prior_sweep_ledger": prior,
             "prior_sweep_ledger_sha256": canonical_sha256(prior),
@@ -1471,6 +1823,7 @@ def select_format_from_assessments(plan: dict[str, Any], rows: list[dict[str, An
             "runtime_identity": prior["runtime_identity"],
             "selected_configuration_id": selected_id,
             "selected_configuration": configurations[selected_id],
+            "balanced_confirmation": balanced,
             "selected_arm_id": winner["arm_id"],
             "selected_arm": arms[winner["arm_id"]],
             "selected_artifact_identity": winner["artifact_identity"],
@@ -1482,7 +1835,8 @@ def select_format(plan: dict[str, Any], results: dict[str, Any],
     plan = verify_plan(plan)
     prior, _ = read_prior_ledger(sweep_descriptor, "sweep", plan)
     rows, digests = assessment_rows(results, {"format"}, plan)
-    return select_format_from_assessments(plan, rows, digests, prior)
+    return select_format_from_assessments(
+        plan, rows, digests, prior, results.get("balanced_confirmation"))
 
 
 def _artifact_without_depth(identity: dict[str, Any]) -> dict[str, Any]:

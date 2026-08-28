@@ -504,7 +504,7 @@ jobs:
           source, output, plan, plan_sha, image, image_sha, dev, dev_sha = sys.argv[1:]
           m=json.loads(pathlib.Path(source).read_text()); c=m["candidate"]
           keys={
-            "id", "stage", "configuration_id", "arm_id", "corpus_sha256",
+            "id", "candidate_id", "stage", "configuration_id", "arm_id", "corpus_sha256",
             "quantization_arm", "model", "model_sha256", "build_record",
             "build_record_sha256", "intervention_configuration_id",
             "intervention_manifest", "intervention_manifest_sha256", "profile_sha256",
@@ -513,7 +513,8 @@ jobs:
             "mtp_export_manifest_sha256", "mtp_matrix_quant_contract", "vision_mmproj",
             "vision_mmproj_bytes", "vision_mmproj_sha256", "vision_mmproj_format",
             "quality_contract", "quality_contract_sha256", "mtp_depth", "runtime_mode",
-            "final_release_eligible",
+            "final_release_eligible", "model_inventory_sha256",
+            "tensor_format_compatibility_sha256", "artifact_bytes",
           }
           if not keys.issubset(c): raise SystemExit(f"candidate lacks legacy gate fields: {sorted(keys-set(c))}")
           row={key:c[key] for key in keys}
@@ -723,7 +724,32 @@ jobs:
           printf 'QWEN_EXPECTED_COUNT=%s\n' "$expected" >>"$GITHUB_ENV"
           if (( current == expected )); then
             ledger="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-ledger.json"
-            args=(--plan "$EFFECTIVE_PLAN" --results "$QWEN_CURRENT_ACCUMULATOR"
+            selection_results="$QWEN_CURRENT_ACCUMULATOR"
+            if [[ "$QWEN_BAKEOFF_PHASE" = format ]]; then
+              confirmation_dir="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-balanced-confirmation"
+              scripts/qwen_balanced_confirmation.sh \
+                --plan "$EFFECTIVE_PLAN" --plan-sha256 "$EFFECTIVE_PLAN_SHA256" \
+                --accumulator "$QWEN_CURRENT_ACCUMULATOR" \
+                --accumulator-sha256 "$(sha256sum "$QWEN_CURRENT_ACCUMULATOR" | awk '{print $1}')" \
+                --evidence-root "$QWEN_BAKEOFF_EVIDENCE_ROOT" \
+                --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
+                --runtime-revision "$TARGET_SHA" \
+                --engine-binary-sha256 "$RUNTIME_ENGINE_SHA256" \
+                --tensor-format-contract-sha256 "$RUNTIME_FORMAT_SHA256" \
+                --out-dir "$confirmation_dir"
+              selection_results="$QWEN_BAKEOFF_EVIDENCE_ROOT/format-selection-input.json"
+              python3 - "$QWEN_CURRENT_ACCUMULATOR" \
+                "$confirmation_dir/balanced-confirmation.json" "$selection_results" <<'PY'
+          import json,pathlib,sys
+          accumulator,confirmation,output=map(pathlib.Path,sys.argv[1:])
+          value=json.loads(accumulator.read_text())
+          if "balanced_confirmation" in value:
+              raise SystemExit("format accumulator unexpectedly contains confirmation evidence")
+          value["balanced_confirmation"]=json.loads(confirmation.read_text())
+          output.write_text(json.dumps(value,indent=2,sort_keys=True)+"\n")
+          PY
+            fi
+            args=(--plan "$EFFECTIVE_PLAN" --results "$selection_results"
                   --stage "$QWEN_BAKEOFF_PHASE" --output "$ledger")
             if [[ "$QWEN_BAKEOFF_PHASE" != sweep ]]; then
               args+=(--prior-ledger "$QWEN_PRIOR_LEDGER" --prior-ledger-sha256 "$QWEN_PRIOR_LEDGER_SHA256"

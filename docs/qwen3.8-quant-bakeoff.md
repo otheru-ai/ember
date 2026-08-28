@@ -175,6 +175,16 @@ destination type and its cross-decoder GPU-free regression passes. The arm is
 still unpromoted until its exact intervened artifact passes the real-weight
 gfx1151 differential, quality, memory, and performance gates below.
 
+ROCMI4 W4A8 runtime evidence is control-correlated, not globally aggregated.
+Each real-weight scope binds its exact target tensor at begin/end and requires
+the ordered target route, IU4 launch (or MMVQ negative), and post-compute
+completion. Other shared/dense/routed events from the real MoE graph may occur
+inside that scope but cannot satisfy the target subsequence. Homogeneous ROCMI4
+arms prove dense and routed controls, routed-FAST arms prove dense controls,
+and broad FAST-matrix arms retain an explicit no-eligible-ROCMI4 not-applicable
+mode. Clean finalist timing requests W4A8 only for a candidate with eligible
+ROCMI4 MMQ weights and never enables dispatch telemetry or profiler counters.
+
 Quality evidence is accepted only with the v2 offline judge contract and its
 digest-pinned runtime-capture attestation. That attestation binds the stock,
 candidate, judge, and agentic request/response indexes to the exact OCI image
@@ -248,10 +258,45 @@ corpus directory is `/srv/ember/qwen3.8-otheru-corpus-a3c6a728`.
 
 Each measured candidate is reduced to a digest-bound assessment, and the
 externally attested ledgers are selected serially as `sweep`, `format`, then
-`mtp-depth`. `unlock-final` accepts only the sealed MTP-depth ledger; it does
-not accept the intermediate format ledger. The checked recipe uses schema v3,
-result evidence v4, candidate assessments v2, and ledgers v3 so earlier records
-cannot be mistaken for depth-bound evidence.
+`mtp-depth`. The complete format-arm sweep is only the screening measurement.
+Before the format ledger can name a winner, its two highest-ranked gate-passing
+arms require balanced confirmation in the plan-persisted counterbalanced order
+A/B, B/A, A/B (`ABBAAB`). Three sealed workload recipes each run once per arm
+as an adjacent pair. Both members calibrate the identical prompt construction,
+then evict that calibration snapshot from the one-slot prefix cache before
+timing; the retained full-prompt digests and calibrated word count must match
+within each pair. Every slot starts a fresh server process and records one exact
+2074-token prefill plus one 256-token decode, yielding exactly three samples per
+arm. Selection requires the absolute decode-median lead to be strictly greater
+than both the larger within-arm decode range and a predeclared 1.0 tok/s
+practical-effect floor. One tok/s is about 2.5% at the 39.49 tok/s release
+target; a smaller lead does not justify committing a different 128 GiB quant
+artifact even when this six-run sample happens to have less observed spread.
+At the format phase boundary the workflow invokes
+`scripts/qwen_balanced_confirmation.sh`. The runner recovers each finalist only
+through the externally attested assessment -> measured-result -> target
+completion -> candidate-binding digest chain, then persists the top-two order
+before acquiring the GPU. It holds the fixed GPU lock while production is
+stopped and masked, starts and removes one server container for every slot, and
+restores production on every exit path. It hashes the container ID, host PID,
+process start tick, candidate/model/MTP identities, arm, and slot into the
+unique process-instance identity. The full descriptor is retained alongside
+its canonical SHA-256 and is checked against the runtime image and engine
+binary. Each slot mounts and O_DIRECT-verifies the finalist's bound MTP,
+enables its exact depth, and requires native speculation with
+`0 < accept_rate < 1`. The timing container explicitly requests the compiled
+IU4 path with `DFLASH_ROCMI4_W4A8_IU4=1`; each retained server log must contain
+one recognized `w4a8_iu4_register_pack` or `w4a8_iu4_prepack` startup mode, and
+all six slots must agree. Dispatch-evidence environment decisions are cached
+once at process startup so disabled telemetry does not add per-dispatch
+`getenv` overhead to clean timing.
+The six confirmation slots are clean timing only; the screening gate's separate
+profile/counter evidence is retained, and no profiler runs concurrently with
+confirmation timing.
+`unlock-final` accepts only the sealed MTP-depth ledger; it does not accept the
+intermediate format ledger. The checked recipe uses schema v3, result evidence
+v4, candidate assessments v2, and ledgers v3 so earlier records cannot be
+mistaken for depth-bound evidence.
 
 The stage commands follow this shape (each later command also supplies the
 exact prior-ledger and attestation-bundle paths and SHA-256 values):
@@ -281,6 +326,20 @@ Among only those passing candidates, each selection phase ranks decode median
 descending, then prefill median descending, then audited quality score
 descending, then stable candidate id ascending. The prefill peak remains a
 hard threshold; it is not the prefill performance tie-break statistic.
+For the final format choice, the first-stage order determines only the two
+finalists. Both finalists must independently clear the unchanged 412.0 tok/s
+prefill-peak and 39.49 tok/s decode-median gates during balanced confirmation.
+The selector defines observed run noise conservatively as the larger of the
+two within-arm decode ranges. The confirmation decode medians must differ by
+strictly more than that value; equality or a smaller difference is
+indistinguishable and rejects the selection instead of breaking the tie with
+quality or identifier. It also computes the signed A-minus-B decode difference
+for each adjacent pair, including the reversed middle pair; all three must have
+the same nonzero sign as the overall median advantage. This rejects a winner
+that changes with pair order, workload, or thermal sequence. The confirmation
+object retains the premeasurement ordering/workload commitment, all six full
+process descriptors and digests, raw samples, paired prompt hashes, derived
+per-arm metrics, signed pair differences, separation, and observed-noise value.
 Both the static artifact-plus-reserve-plus-companion sum and measured UMA peak
 must fit real host MemTotal, which is stricter than the nominal 128 GiB
 architectural budget. The decision remains non-publishing; release packaging
