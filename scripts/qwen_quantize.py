@@ -1664,6 +1664,12 @@ def credential_free_env() -> dict[str, str]:
         "PATH": os.defpath,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        # The gfx1151 runner UID is deliberately not present in the builder
+        # image's passwd database. torch._dynamo calls getpass.getuser() while
+        # importing, so name the isolated process without inheriting any host
+        # account identity or broadening the credential-free environment.
+        "USER": "ember-qwen",
+        "LOGNAME": "ember-qwen",
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "HF_DATASETS_OFFLINE": "1",

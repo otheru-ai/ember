@@ -691,6 +691,16 @@ class Fixture:
 
 
 class QwenQuantizeTests(unittest.TestCase):
+    def test_credential_free_environment_has_deterministic_non_host_identity(self) -> None:
+        with mock.patch.dict(
+                os.environ, {"USER": "host-user", "LOGNAME": "host-login",
+                             "HOME": "/host/home", "AWS_SECRET_ACCESS_KEY": "secret"}):
+            environment = qwen_quantize.credential_free_env()
+        self.assertEqual(environment["USER"], "ember-qwen")
+        self.assertEqual(environment["LOGNAME"], "ember-qwen")
+        self.assertNotIn("HOME", environment)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", environment)
+
     def test_profile_requires_ordered_mmproj_and_vocab_artifact_contracts(self) -> None:
         profile_path = (
             ROOT / "share" / "release_profiles" /

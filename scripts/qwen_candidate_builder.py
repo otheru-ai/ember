@@ -169,6 +169,14 @@ def tensor_format_contract_sha256(
     })
 
 
+def converter_temp_env(temp_dir: Path) -> dict[str, str]:
+    """Keep converter and torch compiler scratch inside its private transaction."""
+    return {
+        "TMPDIR": str(temp_dir),
+        "TORCHINDUCTOR_CACHE_DIR": str(temp_dir / "torchinductor_root"),
+    }
+
+
 def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
     root = args.cache_root.absolute()
     if CONTAINER_DIGEST_RE.fullmatch(args.builder_container_digest) is None:
@@ -215,7 +223,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                 quant.run_checked([
                     sys.executable, str(converter), str(args.snapshot_dir.resolve()),
                     "--outfile", str(unsplit), "--outtype", "bf16", "--use-temp-file",
-                ], env_overrides={"TMPDIR": str(temp_dir)})
+                ], env_overrides=converter_temp_env(temp_dir))
                 quant.run_checked([
                     str(args.gguf_splitter.resolve()), "--split-max-size", "48G",
                     str(unsplit), str(main),
@@ -241,7 +249,7 @@ def prepare_cache(args: argparse.Namespace) -> dict[str, Any]:
                     sys.executable, str(converter), str(args.snapshot_dir.resolve()),
                     "--outfile", str(mmproj), "--outtype", "bf16", "--mmproj",
                     "--use-temp-file",
-                ], env_overrides={"TMPDIR": str(mmproj_temp_dir)})
+                ], env_overrides=converter_temp_env(mmproj_temp_dir))
                 mmproj_temp_cleanup = quant.cleanup_gguf_writer_temp(mmproj_temp_dir)
                 if not mmproj.is_file():
                     raise BuilderError("pinned converter did not produce the named BF16 mmproj")

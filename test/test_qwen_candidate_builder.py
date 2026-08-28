@@ -33,6 +33,13 @@ def write_json(path: Path, value: dict) -> None:
 
 
 class CandidateBuilderTests(unittest.TestCase):
+    def test_converter_temp_environment_is_private_and_cleanup_compatible(self) -> None:
+        temp_dir = Path("/work/.converter-tmp")
+        self.assertEqual(builder.converter_temp_env(temp_dir), {
+            "TMPDIR": str(temp_dir),
+            "TORCHINDUCTOR_CACHE_DIR": str(temp_dir / "torchinductor_root"),
+        })
+
     def test_cpp_inventory_include_is_generated_from_shared_descriptor(self) -> None:
         contract = quant.vision_inventory.load_contract()
         self.assertEqual(contract["tensor_count"], 334)
