@@ -849,6 +849,223 @@ jobs:
           (( healthy == 1 )) || cleanup_failed=1
           exit "$cleanup_failed"
 
+  qwen-resume-q3-timing:
+    # Re-run only corrected clean timing after exact differential, memory, and
+    # profiler evidence have been retained. Script-only benchmark fixes bind to
+    # the old proof through the byte-identical ember-dflash digest. No model
+    # integrity hash or quant construction is repeated.
+    if: startsWith(inputs.release_version, 'qwen-resume-q3-timing-')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 90
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      SOURCE_SPEC: ${{ inputs.release_version }}
+      TIMING_PORT: '18087'
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Bind retained Q3 correctness and profiler evidence
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "${{ github.sha }}"
+          pattern='^qwen-resume-q3-timing-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)$'
+          if [[ "$SOURCE_SPEC" =~ $pattern ]]; then
+            source_sha="${BASH_REMATCH[1]}"
+            source_run_id="${BASH_REMATCH[2]}"
+            source_run_attempt="${BASH_REMATCH[3]}"
+            profile_sha="${BASH_REMATCH[4]}"
+            profile_run_id="${BASH_REMATCH[5]}"
+            profile_run_attempt="${BASH_REMATCH[6]}"
+          else
+            echo 'invalid retained Q3 timing-resume source specification' >&2
+            exit 2
+          fi
+          root=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/first-token
+          source_output="$root/q3-ple-${source_sha:0:12}-$source_run_id-$source_run_attempt"
+          profile_output="$source_output/profile-resume-${profile_sha:0:12}-${profile_run_id}-${profile_run_attempt}"
+          evidence="$source_output/first-token-evidence.json"
+          differential="$source_output/full-benchmark/differential.json"
+          old_timing="$source_output/full-benchmark/timing.jsonl"
+          profile_report="$profile_output/report.json"
+          profile_manifest="$profile_output/manifest.json"
+          [[ -d "$source_output" && ! -L "$source_output" ]]
+          [[ -d "$profile_output" && ! -L "$profile_output" ]]
+          for path in "$evidence" "$differential" "$old_timing" \
+              "$profile_report" "$profile_manifest"; do
+            [[ -f "$path" && ! -L "$path" ]]
+          done
+          mapfile -t retained < <(python3 - "$evidence" "$differential" \
+              "$old_timing" "$profile_report" "$source_sha" "$source_output" <<'PY'
+          import json, pathlib, re, sys
+          evidence_path, differential_path, timing_path, profile_path, source_sha, source_output = sys.argv[1:]
+          evidence = json.load(open(evidence_path, encoding="utf-8"))
+          differential = json.load(open(differential_path, encoding="utf-8"))
+          rows = [json.loads(line) for line in open(timing_path, encoding="utf-8")]
+          profile = json.load(open(profile_path, encoding="utf-8"))
+          if evidence.get("ember_revision") != source_sha:
+              raise SystemExit("retained evidence revision differs from source spec")
+          spec = differential.get("spec") or {}
+          if not (differential.get("ok") and differential.get("snapshot_ok")
+                  and spec.get("checked") and spec.get("exact")):
+              raise SystemExit("retained 64-token differential is not exact")
+          summaries = [row for row in rows if row.get("kind") == "summary"]
+          if (len(summaries) != 1
+                  or (summaries[0].get("memory_gate") or {}).get("passed") is not True):
+              raise SystemExit("retained model-load memory evidence is incomplete")
+          phases = profile.get("phases") or {}
+          for phase in ("prefill", "decode"):
+              row = phases.get(phase) or {}
+              if "error" in row or len(row.get("counter_files") or []) != 2:
+                  raise SystemExit(f"retained {phase} profiler evidence is incomplete")
+              if not {"FETCH_SIZE", "WRITE_SIZE"}.issubset(row.get("counters_raw") or {}):
+                  raise SystemExit(f"retained {phase} counters are incomplete")
+          model = str((evidence.get("model") or {}).get("first_shard", ""))
+          mtp = str((evidence.get("mtp") or {}).get("path", ""))
+          engine_sha = str((evidence.get("runtime") or {}).get("engine_sha256", ""))
+          safe_path = re.compile(r"^/[A-Za-z0-9._/-]+$")
+          for label, raw in (("model", model), ("MTP", mtp)):
+              path = pathlib.Path(raw)
+              if (safe_path.fullmatch(raw) is None or not path.is_file() or path.is_symlink()):
+                  raise SystemExit(f"retained {label} path is absent or unsafe")
+          if re.fullmatch(r"[0-9a-f]{64}", engine_sha) is None:
+              raise SystemExit("retained engine digest is malformed")
+          print(model); print(mtp); print(engine_sha); print(source_output)
+          PY
+          )
+          ((${#retained[@]} == 4))
+          timing_tag="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${TARGET_SHA:0:12}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" \
+            --password-stdin >/dev/null
+          docker pull "$timing_tag"
+          timing_image="$(docker image inspect --format \
+            '{{range .RepoDigests}}{{println .}}{{end}}' "$timing_tag" | head -n 1)"
+          [[ "$timing_image" =~ ^ghcr\.io/otheru-ai/ember@sha256:[0-9a-f]{64}$ ]]
+          test "$(docker image inspect --format \
+            '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+            "$timing_image")" = "$TARGET_SHA"
+          current_engine_sha="$(docker run --rm --entrypoint sha256sum \
+            "$timing_image" /usr/local/bin/ember-dflash | awk '{print $1}')"
+          test "$current_engine_sha" = "${retained[2]}"
+          script_root="$RUNNER_TEMP/qwen-timing-resume-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          install -d -m 700 "$script_root/scripts/bench"
+          extract_container="$(docker create "$timing_image")"
+          cleanup_extract() { docker rm -f "$extract_container" >/dev/null 2>&1 || true; }
+          trap cleanup_extract EXIT
+          docker cp "$extract_container:/ember/scripts/bench/benchmark.py" \
+            "$script_root/scripts/bench/"
+          cleanup_extract
+          trap - EXIT
+          test -s "$script_root/scripts/bench/benchmark.py"
+          timing_output="${retained[3]}/timing-resume-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "$timing_output" && ! -L "$timing_output" ]]
+          printf 'TIMING_MODEL=%s\nTIMING_MTP=%s\nTIMING_IMAGE=%s\nTIMING_OUTPUT=%s\nTIMING_SCRIPT_ROOT=%s\n' \
+            "${retained[0]}" "${retained[1]}" "$timing_image" "$timing_output" \
+            "$script_root" >>"$GITHUB_ENV"
+          echo 'retained correctness/profile bound to byte-identical timing engine; model bytes were not hashed'
+
+      - name: Acquire exclusive GPU access and stop production
+        id: timing_safety
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          echo 'lock=yes' >>"$GITHUB_OUTPUT"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null; then
+            echo 'restore=yes' >>"$GITHUB_OUTPUT"
+            sudo -n /usr/local/sbin/ember-cert-production stop
+          else
+            echo 'restore=no' >>"$GITHUB_OUTPUT"
+          fi
+          sudo -n /usr/local/sbin/ember-cert-production mask
+          echo 'masked=yes' >>"$GITHUB_OUTPUT"
+
+      - name: Run only corrected exact-shape Q3 timing
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$TIMING_OUTPUT"
+          timing_container="qwen-timing-resume-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gpu_args=(--device /dev/kfd --device /dev/dri)
+          declare -A seen_gids=()
+          for node in /dev/kfd /dev/dri/*; do
+            [[ -e "$node" ]] || continue
+            gid="$(stat -c %g -- "$node")"
+            if [[ -z "${seen_gids[$gid]+x}" ]]; then
+              gpu_args+=(--group-add "$gid")
+              seen_gids[$gid]=1
+            fi
+          done
+          docker run -d --name "$timing_container" --network host "${gpu_args[@]}" \
+            -v "$(dirname "$TIMING_MODEL"):/gate/model:ro" \
+            -v "$TIMING_MTP:/gate/mtp.gguf:ro" \
+            -e DFLASH_QWEN_MTP=/gate/mtp.gguf -e DFLASH_QWEN_MTP_DEPTH=3 \
+            -e EMBER_IDLE_RECLAIM_SECS=0 \
+            --entrypoint /usr/local/bin/ember-dflash "$TIMING_IMAGE" \
+            -m "/gate/model/$(basename "$TIMING_MODEL")" --host 127.0.0.1 \
+            --port "$TIMING_PORT" --max-ctx 8192 >/dev/null
+          timing_host_pid="$(docker inspect --format '{{.State.Pid}}' "$timing_container")"
+          [[ "$timing_host_pid" =~ ^[0-9]+$ && "$timing_host_pid" -gt 1 ]]
+          if ! python3 "$TIMING_SCRIPT_ROOT/scripts/bench/benchmark.py" \
+            --endpoint "http://127.0.0.1:$TIMING_PORT/v1/chat/completions" \
+            --health-endpoint "http://127.0.0.1:$TIMING_PORT/health" \
+            --health-timeout 1800 --timeout 900 --model qwen3.8-flash-next \
+            --output "$TIMING_OUTPUT/timing.jsonl" --protocol hard-gate \
+            --prefill-target 412.0 --decode-target 39.49 --calibrate-qwen-shapes \
+            --server-pid "$timing_host_pid" --gtt-cap-bytes 133143986176 \
+            --require-memory-gate; then
+            docker logs "$timing_container" \
+              >"$TIMING_OUTPUT/timing-server-failure.log" 2>&1 || true
+            exit 1
+          fi
+          docker logs "$timing_container" >"$TIMING_OUTPUT/timing-server.log" 2>&1
+          python3 - "$TIMING_OUTPUT/timing.jsonl" <<'PY'
+          import json, sys
+          rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+          summaries = [row for row in rows if row.get("kind") == "summary"]
+          if len(summaries) != 1:
+              raise SystemExit("corrected timing summary is missing")
+          summary = summaries[0]
+          gate = summary.get("hard_gate") or {}
+          if gate.get("protocol") != "ember-2026.8.29-qwen-prefill2074-decode256-v1":
+              raise SystemExit("corrected timing protocol mismatch")
+          if not (gate.get("prefill_2048") or {}).get("shape_match"):
+              raise SystemExit("corrected prefill samples are not exact 2,074-token shapes")
+          if not (gate.get("decode_256_counting") or {}).get("shape_match"):
+              raise SystemExit("corrected decode samples are not exact 256-token shapes")
+          if (summary.get("memory_gate") or {}).get("passed") is not True:
+              raise SystemExit("corrected timing memory gate failed")
+          decode = [row for row in rows if row.get("kind") == "request"
+                    and row.get("group") == "decode-256" and row.get("ok")]
+          if len(decode) != 3 or not all(row.get("spec_ran") is True for row in decode):
+              raise SystemExit("corrected decode did not run native MTP three times")
+          print(json.dumps({"hard_gate": gate, "memory_gate": summary["memory_gate"],
+                            "decode_calibration": summary.get("decode_calibration")},
+                           sort_keys=True))
+          PY
+
+      - name: Restore production and release the GPU lock
+        if: always() && steps.timing_safety.outputs.lock == 'yes'
+        run: |
+          set +e
+          cleanup_failed=0
+          docker rm -f "qwen-timing-resume-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            >/dev/null 2>&1 || true
+          if [[ "${{ steps.timing_safety.outputs.masked }}" = yes ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
+          fi
+          if [[ "${{ steps.timing_safety.outputs.restore }}" = yes ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
+          fi
+          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null || cleanup_failed=1
+          healthy=0
+          for _ in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
+              healthy=1; break
+            fi
+            sleep 2
+          done
+          (( healthy == 1 )) || cleanup_failed=1
+          exit "$cleanup_failed"
+
   qwen-inspect-control-residue:
     # Read-only forensic mode for a failed bounded conversion.  It reports
     # inode metadata and relative names only; it never opens, removes, or
