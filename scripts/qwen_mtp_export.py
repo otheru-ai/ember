@@ -129,7 +129,10 @@ MTP_GGUF_TENSORS = (
     _gguf("mtp.ffn_gate_up_exps.weight", (2560, 1280, 512), "mtp.layers.0.mlp.experts.gate_up_proj"),
     _gguf("mtp.ffn_down_exps.weight", (640, 2560, 512), "mtp.layers.0.mlp.experts.down_proj"),
     _gguf("mtp.ffn_gate_inp.weight", (2560, 512), "mtp.layers.0.mlp.gate.weight"),
-    _gguf("mtp.ffn_gate_inp_shexp.weight", (2560, 1), "mtp.layers.0.mlp.shared_expert_gate.weight"),
+    # GGML canonicalizes trailing singleton dimensions away. The PyTorch
+    # [1, 2560] router is therefore a 2560-value GGUF vector, matching the
+    # target-model loader and avoiding a rank contract no ggml tensor can keep.
+    _gguf("mtp.ffn_gate_inp_shexp.weight", (2560,), "mtp.layers.0.mlp.shared_expert_gate.weight"),
     _gguf("mtp.ffn_gate_shexp.weight", (2560, 640), "mtp.layers.0.mlp.shared_expert.gate_proj.weight"),
     _gguf("mtp.ffn_up_shexp.weight", (2560, 640), "mtp.layers.0.mlp.shared_expert.up_proj.weight"),
     _gguf("mtp.ffn_down_shexp.weight", (640, 2560), "mtp.layers.0.mlp.shared_expert.down_proj.weight"),

@@ -134,6 +134,11 @@ class MtpExportTests(unittest.TestCase):
         self.assertEqual(len({tensor.name for tensor in mtp.MTP_GGUF_TENSORS}), 32)
         self.assertTrue(all(len(tensor.name.encode()) < 64
                             for tensor in mtp.MTP_GGUF_TENSORS))
+        shared_router = next(
+            tensor for tensor in mtp.MTP_GGUF_TENSORS
+            if tensor.name == "mtp.ffn_gate_inp_shexp.weight"
+        )
+        self.assertEqual(shared_router.shape, (2560,))
         self.assertTrue(all(begin % 32 == 0 for begin, _ in extents))
         self.assertEqual(extents[18][1], extents[19][0])
         self.assertEqual(

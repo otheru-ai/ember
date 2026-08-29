@@ -34,7 +34,10 @@ const RequiredTensor kRequired[] = {
     {"mtp.ffn_gate_up_exps.weight", {2560, 1280, 512}},
     {"mtp.ffn_down_exps.weight", {640, 2560, 512}},
     {"mtp.ffn_gate_inp.weight", {2560, 512}},
-    {"mtp.ffn_gate_inp_shexp.weight", {2560, 1}},
+    // ggml_n_dims() removes the trailing singleton from PyTorch [1, 2560].
+    // Keep this shared-expert router canonical and consistent with the main
+    // Qwen4Exp loader's ffn_gate_inp_shexp contract.
+    {"mtp.ffn_gate_inp_shexp.weight", {2560}},
     {"mtp.ffn_gate_shexp.weight", {2560, 640}},
     {"mtp.ffn_up_shexp.weight", {2560, 640}},
     {"mtp.ffn_down_shexp.weight", {640, 2560}},
