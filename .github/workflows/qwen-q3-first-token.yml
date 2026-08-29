@@ -368,7 +368,10 @@ jobs:
           set -euo pipefail
           for name in validation.json engine.log \
                       full-benchmark/differential.json \
-                      full-benchmark/differential-dispatch-server.log; do
+                      full-benchmark/differential-dispatch-server.log \
+                      full-benchmark/timing.jsonl \
+                      full-benchmark/timing-server.log \
+                      full-benchmark/timing-server-failure.log; do
             path="$QWEN_FIRST_TOKEN_OUTPUT/$name"
             if [[ -f "$path" && ! -L "$path" ]]; then
               printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"

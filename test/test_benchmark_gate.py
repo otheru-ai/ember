@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 from pathlib import Path
 
 
@@ -150,6 +153,26 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(words, 2043)
         self.assertEqual(fake.words, [2048, 2043])
         self.assertEqual(attempts[-1]["prompt_tokens"], 2074)
+
+    def test_http_error_preserves_bounded_backend_response(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            suite = benchmark.Suite(
+                "http://127.0.0.1:1/v1/chat/completions",
+                Path(raw) / "timing.jsonl", 1.0, "test")
+            body = b'{"error":{"message":"backend failed"}}' + b"x" * 5000
+            error = urllib.error.HTTPError(
+                suite.endpoint, 500, "Internal Server Error", {}, io.BytesIO(body))
+            with mock.patch.object(benchmark.urllib.request, "urlopen",
+                                   side_effect=error), \
+                    mock.patch.object(suite, "emit"):
+                record = suite.request(
+                    "repro", "prompt", 1, group="diagnostic", repeat=1)
+            self.assertFalse(record["ok"])
+            self.assertEqual(record["http_status"], 500)
+            self.assertTrue(record["response_body"].startswith(
+                '{"error":{"message":"backend failed"}}'))
+            self.assertEqual(len(record["response_body"].encode()), 4096)
+            self.assertTrue(record["response_body_truncated"])
 
     def test_quant_build_record_binds_complete_ordered_shards(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

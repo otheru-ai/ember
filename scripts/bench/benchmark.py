@@ -423,6 +423,29 @@ class Suite:
                 "finish_reason": choice.get("finish_reason"),
                 "response_bytes": len(json.dumps(body)),
             }
+        except urllib.error.HTTPError as exc:
+            # The OpenAI-shaped error body carries the backend failure reason.
+            # Keep it bounded so a malformed peer cannot inflate a long-running
+            # benchmark record without limit.
+            wall = time.perf_counter() - started
+            response_body = exc.read(4097)
+            if len(response_body) > 4096:
+                response_body = response_body[:4096]
+                response_truncated = True
+            else:
+                response_truncated = False
+            record = {
+                "kind": "request",
+                "group": group,
+                "label": label,
+                "repeat": repeat,
+                "ok": False,
+                "wall_seconds": wall,
+                "error": f"{type(exc).__name__}: {exc}",
+                "http_status": exc.code,
+                "response_body": response_body.decode("utf-8", errors="replace"),
+                "response_body_truncated": response_truncated,
+            }
         except Exception as exc:  # preserve the rest of a long benchmark sweep
             wall = time.perf_counter() - started
             record = {
