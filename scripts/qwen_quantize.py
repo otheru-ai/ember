@@ -2698,13 +2698,6 @@ def verify_gguf_set(
     type_counts = Counter(tensor["type"] for tensor in all_tensors)
     override_evidence: list[dict[str, Any]] | None = None
     if quantized:
-        ple_name = profile["quantization"]["ple_tensor_name"]
-        ple = next((tensor for tensor in all_tensors if tensor["name"] == ple_name), None)
-        expected_type = profile["quantization"]["ggml_tensor_type"]
-        if ple is None or ple["type"] != expected_type:
-            raise PipelineError(f"{ple_name} must use GGML tensor type {expected_type}")
-        if type_counts[expected_type] == 0:
-            raise PipelineError(f"quantized GGUF contains no tensor type {expected_type}")
         selected_overrides = tensor_overrides or [
             profile["quantization"]["ple_tensor_override"]
         ]
@@ -2712,6 +2705,20 @@ def verify_gguf_set(
             parse_profile_tensor_override(value, f"output tensor override {index}")
             for index, value in enumerate(selected_overrides)
         ]
+        ple_name = profile["quantization"]["ple_tensor_name"]
+        ple = next((tensor for tensor in all_tensors if tensor["name"] == ple_name), None)
+        ple_overrides = [
+            override for override in parsed_overrides
+            if override["compiled"].search(ple_name)
+        ]
+        if len(ple_overrides) != 1:
+            raise PipelineError(
+                f"selected tensor overrides must match {ple_name} exactly once")
+        expected_type = ple_overrides[0]["ggml_tensor_type"]
+        if ple is None or ple["type"] != expected_type:
+            raise PipelineError(f"{ple_name} must use GGML tensor type {expected_type}")
+        if type_counts[expected_type] == 0:
+            raise PipelineError(f"quantized GGUF contains no tensor type {expected_type}")
         matched = [False] * len(parsed_overrides)
         matched_names: list[list[str]] = [[] for _ in parsed_overrides]
         for tensor in all_tensors:

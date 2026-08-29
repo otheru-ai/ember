@@ -1357,6 +1357,35 @@ class QwenQuantizeTests(unittest.TestCase):
                  for item in result["tensor_override_evidence"]],
                 [1, 1, 1],
             )
+
+            q3_overrides = qwen_quantize.validated_quantization_arms(profile)[
+                "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head"][
+                    "per_tensor_overrides"]
+            q3_tensors = [
+                ("per_layer_token_embd.weight", 104),
+                ("blk.0.attn_q.weight", 101),
+                ("output_hc_down.weight", 101),
+                ("token_embd.weight", 14),
+                ("output.weight", 14),
+            ]
+            q3_paths = []
+            for index, (name, tensor_type) in enumerate(q3_tensors):
+                path = root / f"q3-{index + 1:05d}-of-00005.gguf"
+                make_gguf(path, split_no=index, split_count=5,
+                          tensor_name=name, tensor_type=tensor_type,
+                          stock_control=True, quantized=True)
+                q3_paths.append(path)
+            result = qwen_quantize.verify_gguf_set(
+                q3_paths, expected_ple, quantized=True, profile=profile,
+                stock_control=True, tensor_overrides=q3_overrides)
+            self.assertEqual(result["tensor_type_counts"], {
+                "14": 2, "101": 2, "104": 1,
+            })
+            self.assertEqual(
+                [item["matched_tensor_count"]
+                 for item in result["tensor_override_evidence"]],
+                [1, 1, 1, 1, 1],
+            )
             make_gguf(q6_paths[-1], split_no=2, split_count=3,
                       tensor_name="output.weight", tensor_type=1,
                       stock_control=True, quantized=True)
