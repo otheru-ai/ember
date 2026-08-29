@@ -147,6 +147,13 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn('EMBER_PROFILE_IMAGE:-ember-rocm:10.0-dev', body)
         self.assertNotIn("ember-rocm:7.14-dev", body)
 
+    def test_qwen_profile_uses_bounded_exact_benchmark_shapes(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn('EMBER_PROFILE_PREFILL_WORDS:-2048', body)
+        self.assertIn('model == "qwen3.8-flash-next"', body)
+        self.assertIn('"Marker F. Write a very long comma-separated sequence', body)
+        self.assertIn('usage.get("completion_tokens") != expected_decode', body)
+
     def test_release_image_does_not_carry_the_profiler(self):
         # The release image is a stripped runtime closure; collect-runtime.sh
         # exists precisely to keep compilers and profilers out of it.
