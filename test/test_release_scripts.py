@@ -569,6 +569,15 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn(f" <-m> <{paths['model']}>", result.stdout)
             self.assertIn(" <--ctx> <262144>", result.stdout)
 
+            repeated = subprocess.run(
+                ["bash", str(ENTRYPOINT), "--ctx", "262144"],
+                env=os.environ | env,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(repeated.stdout.count("integrity cache hit"), 5)
+
     def test_qwen_mode_rejects_unsealed_or_incomplete_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -582,7 +591,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 78)
-            self.assertIn("artifact-set SHA-256 verification failed", result.stderr)
+            self.assertIn("Qwen checksummed artifact SHA-256 mismatch", result.stderr)
 
             env, paths = self.qwen_deployment_fixture(root)
             lines = paths["checksums"].read_text().splitlines(keepends=True)
@@ -673,6 +682,7 @@ class ReleaseScriptTests(unittest.TestCase):
                 "EMBER_SKIP_DEVICE_CHECK": "1",
                 "EMBER_MODEL_DIR": directory,
                 "EMBER_SERVER_BIN": "/bin/echo",
+                "EMBER_KV_CACHE_DIR": directory,
                 "EMBER_SEGVTRACE": "",
                 # This switch skips only pre-existing files. Both downloads
                 # must still cross the digest gate before atomic promotion.
@@ -694,6 +704,9 @@ class ReleaseScriptTests(unittest.TestCase):
             checks = sha256_log.read_text().splitlines()
             self.assertEqual(len(checks), 2)
             self.assertTrue(all(".part" in check for check in checks))
+            self.assertEqual(
+                len(list((root / "artifact-integrity-v1").glob("*.identity"))), 2
+            )
 
     def test_entrypoint_can_skip_preexisting_artifact_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -731,6 +744,56 @@ class ReleaseScriptTests(unittest.TestCase):
             )
             self.assertFalse(marker.exists())
             self.assertEqual(result.stderr.count("WARNING: skipping SHA-256"), 2)
+
+    def test_entrypoint_reuses_identity_bound_integrity_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            model = root / (
+                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+            )
+            draft = root / (
+                "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
+            )
+            model.write_bytes(b"pre-provisioned-model")
+            draft.write_bytes(b"pre-provisioned-draft")
+            sha256_log = root / "sha256.log"
+            fake_sha256sum = root / "sha256sum"
+            fake_sha256sum.write_text(
+                "#!/usr/bin/env bash\n"
+                f"cat >> {sha256_log}\n"
+                "exit 0\n"
+            )
+            fake_sha256sum.chmod(0o755)
+            env = os.environ | {
+                "EMBER_SKIP_DEVICE_CHECK": "1",
+                "EMBER_MODEL_DIR": directory,
+                "EMBER_SERVER_BIN": "/bin/true",
+                "EMBER_KV_CACHE_DIR": directory,
+                "PATH": directory + os.pathsep + os.environ["PATH"],
+            }
+
+            first = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            self.assertEqual(first.stdout.count("verifying SHA-256"), 2)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 2)
+
+            second = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            self.assertEqual(second.stdout.count("integrity cache hit"), 2)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 2)
+
+            draft.write_bytes(b"changed-draft-with-new-identity")
+            third = subprocess.run(
+                ["bash", str(ENTRYPOINT)], env=env, text=True,
+                capture_output=True, check=True,
+            )
+            self.assertEqual(third.stdout.count("integrity cache hit"), 1)
+            self.assertEqual(third.stdout.count("verifying SHA-256"), 1)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 3)
 
     def test_entrypoint_rejects_wrong_digest_even_with_ignored_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

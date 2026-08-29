@@ -203,9 +203,12 @@ EMBER_CACHE_DIR=./cache
 
 The default `deepseek-v4-flash` deployment uses only the pinned quant and
 drafter. They are not configurable, and Ember always verifies downloads before
-making them runnable. Existing DeepSeek artifacts are also re-hashed before
-every start by default; operators using a trusted, immutable model store may
-set `EMBER_VERIFY_EXISTING_SHA256=0` to skip that expensive startup scan.
+making them runnable. The first launch of an existing DeepSeek artifact hashes
+it and stores an identity-bound integrity record under the persistent cache
+mount. Later launches skip the content scan while device, inode, size, mtime,
+and ctime still match. A changed or replaced file is hashed again. Operators
+using a trusted, immutable model store may set `EMBER_VERIFY_EXISTING_SHA256=0`
+to skip even the first verification.
 
 An explicit, local-artifact-only Qwen deployment boundary is also available for
 a completed Qwen3.8-Flash-Next candidate. It does not silently reuse the
@@ -225,10 +228,12 @@ DFLASH_QWEN_VISION_TEXT_MODEL=/models/Qwen3.8-Flash-Next-vocab-only.gguf
 ```
 
 Pass shard `00001`; the engine discovers every ordered sibling. Startup always
-verifies the checksum-list digest and every file named by that list, regardless
-of `EMBER_VERIFY_EXISTING_SHA256`, and requires the list to cover all main
+verifies the small checksum-list digest and requires the list to cover all main
 shards plus the selected MTP, BF16 mmproj, and zero-tensor vocab-only vision
-text model. The release artifact manifest exposes those as three flattened
+text model. Files named by the sealed list use the same identity-bound cache,
+regardless of `EMBER_VERIFY_EXISTING_SHA256`: the first launch hashes them and
+later launches hash only files whose identity changed. The release artifact
+manifest exposes those as three flattened
 companion records (`mtp`, `vision_mmproj`, and `vision_vocab`). The release
 image supplies the pinned `DFLASH_QWEN_VISION_PROVIDER` shared object. Until a candidate has its
 real-weight text/vision differential and gfx1151 release evidence, this mode is

@@ -17,6 +17,9 @@ draft="$model_dir/$draft_file"
 model_verified=0
 draft_verified=0
 verify_existing_sha256="${EMBER_VERIFY_EXISTING_SHA256:-1}"
+integrity_cache_dir="${EMBER_INTEGRITY_CACHE_DIR:-\
+${EMBER_KV_CACHE_DIR:-/cache}/artifact-integrity-v1}"
+integrity_cache_state=0
 
 die() {
   echo "ember: $*" >&2
@@ -56,12 +59,86 @@ verify_sha256() {
     die "$label SHA-256 mismatch: $path (remove the file and download it again)"
 }
 
+prepare_integrity_cache() {
+  if [[ "$integrity_cache_state" == 1 ]]; then
+    return 0
+  fi
+  if [[ "$integrity_cache_state" == -1 ]]; then
+    return 1
+  fi
+  if [[ "$integrity_cache_dir" != /* || -L "$integrity_cache_dir" ]] ||
+      ! mkdir -p -- "$integrity_cache_dir" ||
+      [[ ! -d "$integrity_cache_dir" || ! -w "$integrity_cache_dir" ]]; then
+    echo "ember: WARNING: integrity cache is unavailable; artifacts will be hashed" >&2
+    integrity_cache_state=-1
+    return 1
+  fi
+  integrity_cache_state=1
+}
+
+artifact_identity() {
+  local path="$1"
+  # GNU stat's %y/%z include nanoseconds.  ctime makes an in-place rewrite
+  # invalidate the record even if an operator restores the size and mtime.
+  stat -L --printf '%d\n%i\n%s\n%y\n%z' -- "$path"
+}
+
+persist_integrity_record() {
+  local path="$1"
+  local digest="$2"
+  local identity="$3"
+  local record record_path temporary
+
+  if ! prepare_integrity_cache; then
+    return 0
+  fi
+  record=$'ember.artifact-integrity.v1\n'"$digest"$'\n'"$identity"
+  record_path="$integrity_cache_dir/$digest.identity"
+  temporary="$(mktemp "$integrity_cache_dir/.artifact-identity.XXXXXX")" || {
+    echo "ember: WARNING: cannot create integrity cache record for $path" >&2
+    return 0
+  }
+  if printf '%s\n' "$record" >"$temporary" && mv -f -- "$temporary" "$record_path"; then
+    :
+  else
+    rm -f -- "$temporary"
+    echo "ember: WARNING: cannot persist integrity cache record for $path" >&2
+  fi
+}
+
+verify_cached_sha256() {
+  local path="$1"
+  local digest="$2"
+  local label="$3"
+  local before after record record_path base
+
+  before="$(artifact_identity "$path")" || die "cannot stat $label: $path"
+  record=$'ember.artifact-integrity.v1\n'"$digest"$'\n'"$before"
+  base="$(basename "$path")"
+  if prepare_integrity_cache; then
+    record_path="$integrity_cache_dir/$digest.identity"
+    if [[ -f "$record_path" && ! -L "$record_path" ]] &&
+        [[ "$(<"$record_path")" == "$record" ]]; then
+      echo "ember: $base: OK (integrity cache hit)"
+      return 0
+    fi
+  else
+    record_path=
+  fi
+
+  verify_sha256 "$path" "$digest" "$label"
+  after="$(artifact_identity "$path")" || die "cannot re-stat $label: $path"
+  [[ "$after" == "$before" ]] || die "$label changed while it was hashed: $path"
+
+  persist_integrity_record "$path" "$digest" "$after"
+}
+
 verify_existing_artifact() {
   local path="$1"
   local digest="$2"
   local label="$3"
   if [[ "$verify_existing_sha256" == 1 ]]; then
-    verify_sha256 "$path" "$digest" "$label"
+    verify_cached_sha256 "$path" "$digest" "$label"
   else
     echo "ember: WARNING: skipping SHA-256 verification for pre-existing $label: $path" >&2
   fi
@@ -137,6 +214,7 @@ prepare_qwen() {
   # must not expand the set of files startup is allowed to inspect.
   local line digest artifact_name
   declare -A sealed_names=()
+  declare -a sealed_order=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" =~ ^([0-9a-f]{64})\ \ ([A-Za-z0-9][A-Za-z0-9._+-]*)$ ]]; then
       digest="${BASH_REMATCH[1]}"
@@ -147,11 +225,10 @@ prepare_qwen() {
     [[ -z "${sealed_names[$artifact_name]+x}" ]] ||
       die "Qwen SHA256SUMS repeats $artifact_name"
     sealed_names["$artifact_name"]="$digest"
+    sealed_order+=("$artifact_name")
     require_direct_model_artifact "$model_dir/$artifact_name" \
       "Qwen checksummed artifact"
   done < "$checksum_path"
-  (cd "$model_dir" && sha256sum --check --strict --status -- "$checksum_name") ||
-    die "Qwen artifact-set SHA-256 verification failed"
 
   local shard_count shard_number shard_name
   shard_count=$((10#$shard_count_text))
@@ -168,6 +245,11 @@ prepare_qwen() {
     die "Qwen SHA256SUMS omits the selected BF16 mmproj $mmproj_name"
   [[ -n "${sealed_names[$vision_text_model_name]+x}" ]] ||
     die "Qwen SHA256SUMS omits the selected vision vocab companion $vision_text_model_name"
+
+  for artifact_name in "${sealed_order[@]}"; do
+    verify_cached_sha256 "$model_dir/$artifact_name" \
+      "${sealed_names[$artifact_name]}" "Qwen checksummed artifact"
+  done
 
   export DFLASH_QWEN_MTP="$mtp"
   export DFLASH_QWEN_MTP_DEPTH="$mtp_depth"
@@ -210,6 +292,8 @@ download_artifact() {
   fi
   verify_sha256 "$partial" "$artifact_sha256" "$label"
   mv "$partial" "$destination"
+  persist_integrity_record "$destination" "$artifact_sha256" \
+    "$(artifact_identity "$destination")"
   downloaded_artifact="$destination"
 }
 
