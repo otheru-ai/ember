@@ -51,6 +51,7 @@ typedef struct {
     int32_t correction_low;
     int32_t correction_high;
     int32_t mrope_sections[3];
+    float inv_freq[EMBER_QWEN_ROPE_FREQ_COUNT];
 } ember_qwen_yarn_config;
 
 // Resolve the release policy.  Native mode accepts contexts through 262,144.

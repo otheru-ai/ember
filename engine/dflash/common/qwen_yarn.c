@@ -63,18 +63,12 @@ bool ember_qwen_yarn_configure(bool enable_yarn, int32_t max_context,
     config->mrope_sections[0] = 11;
     config->mrope_sections[1] = 11;
     config->mrope_sections[2] = 10;
-    return true;
-}
-
-void ember_qwen_yarn_inv_freq(const ember_qwen_yarn_config *config,
-                              float out[EMBER_QWEN_ROPE_FREQ_COUNT]) {
-    if (!config || !out) return;
     for (int32_t index = 0; index < EMBER_QWEN_ROPE_FREQ_COUNT; ++index) {
         const float exponent = (float)(2 * index) /
                                (float)EMBER_QWEN_ROPE_DIM;
         const float base_frequency = 1.0f / powf(config->theta, exponent);
         if (!config->enabled) {
-            out[index] = base_frequency;
+            config->inv_freq[index] = base_frequency;
             continue;
         }
         const float denominator =
@@ -86,9 +80,16 @@ void ember_qwen_yarn_inv_freq(const ember_qwen_yarn_config *config,
         if (ramp > 1.0f) ramp = 1.0f;
         const float extrapolation = 1.0f - ramp;
         const float interpolation_frequency = base_frequency / config->factor;
-        out[index] = interpolation_frequency * (1.0f - extrapolation) +
-                     base_frequency * extrapolation;
+        config->inv_freq[index] = interpolation_frequency * (1.0f - extrapolation) +
+                                  base_frequency * extrapolation;
     }
+    return true;
+}
+
+void ember_qwen_yarn_inv_freq(const ember_qwen_yarn_config *config,
+                              float out[EMBER_QWEN_ROPE_FREQ_COUNT]) {
+    if (!config || !out) return;
+    memcpy(out, config->inv_freq, sizeof(config->inv_freq));
 }
 
 static int32_t mrope_axis_for_frequency(
@@ -103,11 +104,9 @@ void ember_qwen_yarn_cos_sin(const ember_qwen_yarn_config *config,
                              float cos_out[EMBER_QWEN_ROPE_DIM],
                              float sin_out[EMBER_QWEN_ROPE_DIM]) {
     if (!config || !positions || !cos_out || !sin_out) return;
-    float inverse[EMBER_QWEN_ROPE_FREQ_COUNT];
-    ember_qwen_yarn_inv_freq(config, inverse);
     for (int32_t index = 0; index < EMBER_QWEN_ROPE_FREQ_COUNT; ++index) {
         const int32_t axis = mrope_axis_for_frequency(config, index);
-        const float angle = (float)positions[axis] * inverse[index];
+        const float angle = (float)positions[axis] * config->inv_freq[index];
         const float cosine = cosf(angle) * config->attention_factor;
         const float sine = sinf(angle) * config->attention_factor;
         cos_out[index] = cosine;
