@@ -532,7 +532,9 @@ jobs:
           root=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/first-token
           output="$root/q3-ple-${source_sha:0:12}-$source_run_id-$source_run_attempt"
           [[ -d "$root" && ! -L "$root" && -d "$output" && ! -L "$output" ]]
-          for name in validation.json engine.log; do
+          for name in validation.json engine.log \
+                      full-benchmark/differential.json \
+                      full-benchmark/differential-dispatch-server.log; do
             path="$output/$name"
             if [[ -f "$path" && ! -L "$path" ]]; then
               printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"

@@ -366,7 +366,9 @@ jobs:
         if: ${{ failure() && steps.safety.outputs.armed == 'yes' }}
         run: |
           set -euo pipefail
-          for name in validation.json engine.log; do
+          for name in validation.json engine.log \
+                      full-benchmark/differential.json \
+                      full-benchmark/differential-dispatch-server.log; do
             path="$QWEN_FIRST_TOKEN_OUTPUT/$name"
             if [[ -f "$path" && ! -L "$path" ]]; then
               printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
