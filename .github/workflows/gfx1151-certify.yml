@@ -732,9 +732,9 @@ jobs:
             [[ -f "$path" && ! -L "$path" ]]
           done
           mapfile -t retained < <(python3 - "$evidence" "$differential" "$timing" \
-              "$source_sha" <<'PY'
+              "$source_sha" "$source_output" <<'PY'
           import json, pathlib, re, sys
-          evidence_path, differential_path, timing_path, source_sha = sys.argv[1:]
+          evidence_path, differential_path, timing_path, source_sha, source_output = sys.argv[1:]
           evidence = json.load(open(evidence_path, encoding="utf-8"))
           differential = json.load(open(differential_path, encoding="utf-8"))
           rows = [json.loads(line) for line in open(timing_path, encoding="utf-8")]

@@ -285,6 +285,8 @@ class ReleaseScriptTests(unittest.TestCase):
         # where a checkout is fine and a failure cannot cost a release.
         certify_job = certify.split("\n  promote:", 1)[0]
         self.assertNotIn("actions/checkout", certify_job)
+        self.assertIn('"$source_sha" "$source_output" <<\'PY\'', certify_job)
+        self.assertIn("source_sha, source_output = sys.argv[1:]", certify_job)
         self.assertNotIn("benchmark_bundle.sh", certify_job)
         self.assertIn("  benchmark:", certify)
         self.assertIn("needs: [certify, promote]", certify)
