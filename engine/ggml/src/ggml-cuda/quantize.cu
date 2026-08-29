@@ -1,4 +1,5 @@
 #include "quantize.cuh"
+#include "../../rocmfpx/w4a4_grid.h"
 #include <cstdint>
 
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
@@ -244,14 +245,10 @@ static __global__ void quantize_mmq_q8_1(
 
     const float d_inv = i4_grid ? (amax > 0.0f ? 7.0f / amax : 0.0f) : 127.0f / amax;
     if constexpr (i4_grid) {
-        const int c0 = (int) fminf(fmaxf(roundf(xi.x*d_inv), -8.0f), 7.0f);
-        const int c1 = (int) fminf(fmaxf(roundf(xi.y*d_inv), -8.0f), 7.0f);
-        const int c2 = (int) fminf(fmaxf(roundf(xi.z*d_inv), -8.0f), 7.0f);
-        const int c3 = (int) fminf(fmaxf(roundf(xi.w*d_inv), -8.0f), 7.0f);
-        const int lo4 = (c0 & 15) | ((c1 & 15) << 8) | ((c2 & 15) << 16) | ((c3 & 15) << 24);
+        const uint32_t lo4 = rocmi4_w4a4_pack4(xi.x, xi.y, xi.z, xi.w, d_inv);
         const int hi4 = __shfl_xor_sync(0xffffffff, lo4, 1, WARP_SIZE);
         if (iqs % 8 == 0) {
-            ((int *) y[ib].qs)[iqs/8] = lo4 | (hi4 << 4);
+            ((int *) y[ib].qs)[iqs/8] = (int)rocmi4_w4a4_fold(lo4, (uint32_t)hi4);
         }
     } else {
     char4 q;
@@ -298,7 +295,7 @@ static __global__ void quantize_mmq_q8_1(
         return;
     }
 
-    const float d = i4_grid ? (amax > 0.0f ? amax/(7.0f*16.0f) : 0.0f) : 1.0f/d_inv;
+    const float d = i4_grid ? rocmi4_w4a4_scale(amax) : 1.0f/d_inv;
 
     if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
         y[ib].ds4[iqs/32] = make_half2(d, sum);

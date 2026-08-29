@@ -2,6 +2,7 @@
 // gfx1151 ROCMI4 kernels. This tests integer identity only; production dispatch
 // remains on the existing exact I8 path.
 #include "rocmi4_exact.h"
+#include "w4a4_grid.h"
 
 #include <array>
 #include <cstddef>
@@ -284,6 +285,44 @@ void check_runtime_opt_in() {
           "only the exact runtime value 1 requests the W4A8 IU4 experiment");
 }
 
+void check_w4a4_grid_arithmetic() {
+    CHECK(rocmi4_w4a4_scale(0.0f) == 0.0f &&
+              rocmi4_w4a4_pack4(0.0f, 0.0f, 0.0f, 0.0f, 0.0f) == 0u,
+          "W4A4 zero block keeps both scale and inverse scale at zero");
+
+    const float d_inv = 7.0f / 7.0f;
+    const std::uint32_t packed = rocmi4_w4a4_pack4(
+        -8.0f, 7.0f, -9.0f, 9.0f, d_inv);
+    CHECK((packed & 0x0fu) == 8u && ((packed >> 8) & 0x0fu) == 7u &&
+              ((packed >> 16) & 0x0fu) == 8u &&
+              ((packed >> 24) & 0x0fu) == 7u,
+          "W4A4 clamp admits signed -8/+7 and clamps both directions");
+    CHECK(rocmi4_w4a4_quantize_value(-7.0f, d_inv) == -7,
+          "W4A4 symmetric scale never emits -8 for -amax");
+    CHECK(rocmi4_w4a4_scale(7.0f) == 7.0f / (7.0f * 16.0f),
+          "W4A4 scale preserves the sixteen-fold denominator");
+
+    // quantize_mmq_q8_1 uses lane^1: each lane's four byte values occupy the
+    // low nibbles while its partner's values occupy the high nibbles. This is
+    // a stride-4-in-K pairing, distinct from the stride-16 ROCMI4 prepack.
+    const std::uint32_t lane0 = rocmi4_w4a4_pack4(0, 1, 2, 3, 1.0f);
+    const std::uint32_t lane1 = rocmi4_w4a4_pack4(4, 5, 6, 7, 1.0f);
+    const std::uint32_t folded0 = rocmi4_w4a4_fold(lane0, lane1);
+    const std::uint32_t lane2 = rocmi4_w4a4_pack4(-1, -2, -3, -4, 1.0f);
+    const std::uint32_t lane3 = rocmi4_w4a4_pack4(-5, -6, -7, -8, 1.0f);
+    const std::uint32_t folded1 = rocmi4_w4a4_fold(lane2, lane3);
+    bool round_trip = true;
+    for (std::size_t i = 0; i < 4; ++i) {
+        round_trip = round_trip && ((folded0 >> (8 * i)) & 0x0fu) == i &&
+                     ((folded0 >> (8 * i + 4)) & 0x0fu) == i + 4;
+        const int low = static_cast<int>((folded1 >> (8 * i)) & 0x0fu);
+        const int high = static_cast<int>((folded1 >> (8 * i + 4)) & 0x0fu);
+        round_trip = round_trip && low == 15 - static_cast<int>(i) &&
+                     high == 11 - static_cast<int>(i);
+    }
+    CHECK(round_trip, "W4A4 fold round-trips both lanes across two groups");
+}
+
 void check_exhaustive_scalar_products() {
     bool ok = true;
     for (int weight = -8; weight <= 7; ++weight) {
@@ -364,6 +403,7 @@ int main() {
     check_activation_prepack_layout();
     check_split_half_weight_fragment_order();
     check_runtime_opt_in();
+    check_w4a4_grid_arithmetic();
     check_exhaustive_scalar_products();
     check_adversarial_tiles();
     check_random_tiles();
