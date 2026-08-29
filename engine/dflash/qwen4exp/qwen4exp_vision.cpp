@@ -28,7 +28,110 @@ bool append_position(std::array<std::vector<int32_t>, 3> & positions,
     return true;
 }
 
+bool checked_advance(int64_t current, int64_t amount, int64_t & next,
+                     std::string & error) {
+    if (amount < 0 || current > std::numeric_limits<int64_t>::max() - amount) {
+        error = "Qwen4Exp M-RoPE position exceeds int64 range";
+        return false;
+    }
+    next = current + amount;
+    return true;
+}
+
 } // namespace
+
+bool qwen4exp_assign_mrope_positions(
+    const std::vector<Qwen4ExpMropeRun> & runs, size_t token_count,
+    std::array<std::vector<int32_t>, 3> & positions, int64_t & rope_delta,
+    std::string & error) {
+    error.clear();
+    int64_t current = 0;
+    int64_t maximum = -1;
+    size_t counted = 0;
+    for (const Qwen4ExpMropeRun & run : runs) {
+        if (run.token_count > token_count - counted) {
+            error = "Qwen4Exp M-RoPE run count exceeds token count";
+            return false;
+        }
+        counted += run.token_count;
+        if (!run.image) {
+            if (run.token_count > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+                error = "Qwen4Exp M-RoPE text position exceeds int64 range";
+                return false;
+            }
+            if (run.token_count != 0) {
+                int64_t last = 0;
+                if (!checked_advance(current,
+                                     static_cast<int64_t>(run.token_count - 1),
+                                     last, error) ||
+                    last > std::numeric_limits<int32_t>::max()) {
+                    error = "Qwen4Exp M-RoPE position exceeds int32 range";
+                    return false;
+                }
+                maximum = std::max(maximum, last);
+            }
+            if (!checked_advance(current, static_cast<int64_t>(run.token_count),
+                                 current, error)) return false;
+            continue;
+        }
+        const Qwen4ExpVisionGrid & grid = run.grid;
+        const size_t merged = qwen4exp_vision_merged_tokens(grid);
+        if (grid.t != 1 || merged == 0 || merged != run.token_count) {
+            error = "invalid Qwen4Exp vision position run contract";
+            return false;
+        }
+        const int64_t max_axis = static_cast<int64_t>(
+            std::max(grid.h, grid.w) / Qwen4ExpVisionContract::spatial_merge_size);
+        const int64_t max_offset = static_cast<int64_t>(
+            std::max(grid.h, grid.w) / Qwen4ExpVisionContract::spatial_merge_size - 1);
+        int64_t last = 0;
+        if (!checked_advance(current, max_offset, last, error) ||
+            last > std::numeric_limits<int32_t>::max()) {
+            error = "Qwen4Exp M-RoPE position exceeds int32 range";
+            return false;
+        }
+        maximum = std::max(maximum, last);
+        if (!checked_advance(current, max_axis, current, error)) return false;
+    }
+    if (counted != token_count) {
+        error = "Qwen4Exp M-RoPE run count does not match token count";
+        return false;
+    }
+
+    for (auto & axis : positions) {
+        axis.clear();
+        axis.reserve(token_count);
+    }
+    current = 0;
+    for (const Qwen4ExpMropeRun & run : runs) {
+        if (!run.image) {
+            for (size_t i = 0; i < run.token_count; ++i) {
+                const int64_t p = current + static_cast<int64_t>(i);
+                if (!append_position(positions, p, p, p, error)) return false;
+            }
+            current += static_cast<int64_t>(run.token_count);
+            continue;
+        }
+        const uint32_t merged_h = run.grid.h /
+            Qwen4ExpVisionContract::spatial_merge_size;
+        const uint32_t merged_w = run.grid.w /
+            Qwen4ExpVisionContract::spatial_merge_size;
+        for (uint32_t h = 0; h < merged_h; ++h) {
+            for (uint32_t w = 0; w < merged_w; ++w) {
+                if (!append_position(positions, current,
+                                     current + static_cast<int64_t>(h),
+                                     current + static_cast<int64_t>(w), error)) {
+                    return false;
+                }
+            }
+        }
+        current += static_cast<int64_t>(std::max(run.grid.h, run.grid.w) /
+            Qwen4ExpVisionContract::spatial_merge_size);
+    }
+    rope_delta = token_count == 0 ? 0 : maximum + 1 -
+        static_cast<int64_t>(token_count);
+    return true;
+}
 
 bool qwen4exp_validate_vision_config(const Qwen4ExpVisionConfig & config,
                                      std::string & error) {
@@ -174,8 +277,7 @@ bool qwen4exp_prepare_vision_input(
 
     size_t image_index = 0;
     size_t cursor = 0;
-    int64_t current_position = 0;
-    int64_t maximum_position = -1;
+    std::vector<Qwen4ExpMropeRun> mrope_runs;
 
     while (cursor < tokens) {
         const Qwen4ExpModality modality = modalities[cursor];
@@ -184,15 +286,7 @@ bool qwen4exp_prepare_vision_input(
         const size_t run = end - cursor;
 
         if (modality == Qwen4ExpModality::TEXT) {
-            for (size_t i = 0; i < run; ++i) {
-                const int64_t p = current_position + static_cast<int64_t>(i);
-                if (!append_position(out.position_ids, p, p, p, error)) {
-                    out = {};
-                    return false;
-                }
-                maximum_position = std::max(maximum_position, p);
-            }
-            current_position += static_cast<int64_t>(run);
+            mrope_runs.push_back({run, false, {}});
         } else if (modality == Qwen4ExpModality::IMAGE) {
             if (image_index >= images.size()) {
                 error = "Qwen4Exp image modality run has no encoded image";
@@ -234,30 +328,7 @@ bool qwen4exp_prepare_vision_input(
                 std::memcpy(dst, src, kTextWidth * sizeof(float));
             }
 
-            const uint32_t merged_h =
-                image.grid.h / Qwen4ExpVisionContract::spatial_merge_size;
-            const uint32_t merged_w =
-                image.grid.w / Qwen4ExpVisionContract::spatial_merge_size;
-            for (uint32_t t = 0; t < image.grid.t; ++t) {
-                for (uint32_t h = 0; h < merged_h; ++h) {
-                    for (uint32_t w = 0; w < merged_w; ++w) {
-                        const int64_t tp = current_position + t;
-                        const int64_t hp = current_position + h;
-                        const int64_t wp = current_position + w;
-                        if (!append_position(out.position_ids, tp, hp, wp,
-                                             error)) {
-                            out = {};
-                            return false;
-                        }
-                        maximum_position = std::max(
-                            maximum_position, std::max(tp, std::max(hp, wp)));
-                    }
-                }
-            }
-            // This intentionally excludes T, matching get_rope_index.
-            current_position += static_cast<int64_t>(
-                std::max(image.grid.h, image.grid.w) /
-                Qwen4ExpVisionContract::spatial_merge_size);
+            mrope_runs.push_back({run, true, image.grid});
         } else {
             error = "Qwen4Exp video vision path is not implemented";
             out = {};
@@ -268,6 +339,12 @@ bool qwen4exp_prepare_vision_input(
 
     if (image_index != images.size()) {
         error = "Qwen4Exp encoded image has no matching placeholder run";
+        out = {};
+        return false;
+    }
+    if (!qwen4exp_assign_mrope_positions(mrope_runs, tokens,
+                                         out.position_ids, out.rope_delta,
+                                         error)) {
         out = {};
         return false;
     }
@@ -283,10 +360,6 @@ bool qwen4exp_prepare_vision_input(
         out = {};
         return false;
     }
-    // Empty prompts follow the mathematical max+1-length identity at zero.
-    out.rope_delta = tokens == 0
-        ? 0
-        : maximum_position + 1 - static_cast<int64_t>(tokens);
     return true;
 }
 

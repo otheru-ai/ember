@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -147,6 +148,20 @@ static void test_mrope_and_ordered_splice(void) {
           "incremental decode adds cached rope delta on every axis");
 }
 
+static void test_mrope_overflow_guard(void) {
+    std::array<std::vector<int32_t>, 3> positions;
+    int64_t rope_delta = 0;
+    std::string error;
+    const size_t max = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+    const std::vector<Qwen4ExpMropeRun> runs = {
+        {max + 1, false, {}}, {1, true, {1, 2, 2}},
+    };
+    CHECK(!qwen4exp_assign_mrope_positions(runs, max + 2, positions,
+                                           rope_delta, error) &&
+              error.find("int32") != std::string::npos,
+          "shared runtime M-RoPE walk rejects image-axis int32 overflow");
+}
+
 static void test_processor_shape_and_patch_layout(void) {
     Qwen4ExpImageSize resized;
     Qwen4ExpVisionGrid grid;
@@ -289,6 +304,7 @@ int main(void) {
     test_tensor_inventory();
     test_vit_patch_positions();
     test_mrope_and_ordered_splice();
+    test_mrope_overflow_guard();
     test_processor_shape_and_patch_layout();
     test_multiple_images_and_fail_closed();
     test_encoder_boundary();

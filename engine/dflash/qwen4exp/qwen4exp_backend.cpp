@@ -2,6 +2,7 @@
 
 #include "qwen4exp_activation_dump.h"
 #include "qwen4exp_frontier.h"
+#include "qwen4exp_vision.h"
 
 #include "common/errors.h"
 #include "common/sampler.h"
@@ -53,47 +54,41 @@ bool prepare_prompt_positions(
         const GenerateRequest & request,
         std::array<std::vector<int32_t>, 3> & positions,
         int64_t & rope_delta, std::string & error) {
-    for (auto & axis : positions) {
-        axis.clear();
-        axis.reserve(request.prompt.size());
-    }
     size_t run_index = 0;
     size_t cursor = 0;
-    int64_t current = 0;
-    int64_t maximum = -1;
+    std::vector<Qwen4ExpMropeRun> runs;
     while (cursor < request.prompt.size()) {
         if (run_index < request.vision.size() &&
             request.vision[run_index].prompt_offset == static_cast<int>(cursor)) {
             const VisionEmbeddingRun & run = request.vision[run_index++];
             if (run.grid_t != 1 || run.grid_h <= 0 || run.grid_w <= 0 ||
                 run.grid_h % 2 != 0 || run.grid_w % 2 != 0 ||
-                run.embeddings.size() % 2560 != 0) {
+                run.embeddings.size() % Qwen4ExpVisionContract::output_hidden_size != 0) {
                 error = "invalid Qwen4Exp vision run contract";
                 return false;
             }
-            const size_t rows = run.embeddings.size() / 2560;
-            const size_t expected = static_cast<size_t>(run.grid_h / 2) *
-                                    static_cast<size_t>(run.grid_w / 2);
+            const size_t rows = run.embeddings.size() /
+                Qwen4ExpVisionContract::output_hidden_size;
+            const size_t expected = static_cast<size_t>(run.grid_h /
+                Qwen4ExpVisionContract::spatial_merge_size) *
+                static_cast<size_t>(run.grid_w /
+                Qwen4ExpVisionContract::spatial_merge_size);
             if (rows != expected || rows > request.prompt.size() - cursor) {
                 error = "Qwen4Exp image rows do not match the merged grid";
                 return false;
             }
-            size_t row = 0;
-            for (int t = 0; t < run.grid_t; ++t)
-                for (int h = 0; h < run.grid_h / 2; ++h)
-                    for (int w = 0; w < run.grid_w / 2; ++w, ++row) {
-                        if (request.prompt[cursor + row] != 248056) {
-                            error = "Qwen4Exp vision run must cover image_pad tokens";
-                            return false;
-                        }
-                        positions[0].push_back(static_cast<int32_t>(current + t));
-                        positions[1].push_back(static_cast<int32_t>(current + h));
-                        positions[2].push_back(static_cast<int32_t>(current + w));
-                        maximum = std::max(maximum,
-                            current + std::max(t, std::max(h, w)));
-                    }
+            for (size_t row = 0; row < rows; ++row) {
+                if (request.prompt[cursor + row] !=
+                    static_cast<int32_t>(Qwen4ExpVisionContract::image_token_id)) {
+                    error = "Qwen4Exp vision run must cover image_pad tokens";
+                    return false;
+                }
+            }
+            runs.push_back({rows, true,
+                            {static_cast<uint32_t>(run.grid_t),
+                             static_cast<uint32_t>(run.grid_h),
+                             static_cast<uint32_t>(run.grid_w)}});
             cursor += rows;
-            current += std::max(run.grid_h, run.grid_w) / 2;
             continue;
         }
         if (run_index < request.vision.size() &&
@@ -101,21 +96,23 @@ bool prepare_prompt_positions(
             error = "Qwen4Exp vision runs overlap or are out of order";
             return false;
         }
-        if (current > std::numeric_limits<int32_t>::max()) {
-            error = "Qwen4Exp M-RoPE text position exceeds int32 range";
+        const size_t next = run_index < request.vision.size()
+            ? static_cast<size_t>(request.vision[run_index].prompt_offset)
+            : request.prompt.size();
+        if (next < cursor || next > request.prompt.size()) {
+            error = "Qwen4Exp vision run lies outside the prompt";
             return false;
         }
-        for (auto & axis : positions) axis.push_back(static_cast<int32_t>(current));
-        maximum = std::max(maximum, current);
-        ++current;
-        ++cursor;
+        runs.push_back({next - cursor, false, {}});
+        cursor = next;
+        continue;
     }
     if (run_index != request.vision.size()) {
         error = "Qwen4Exp vision run lies outside the prompt";
         return false;
     }
-    rope_delta = maximum + 1 - static_cast<int64_t>(request.prompt.size());
-    return true;
+    return qwen4exp_assign_mrope_positions(runs, request.prompt.size(),
+                                            positions, rope_delta, error);
 }
 } // namespace
 

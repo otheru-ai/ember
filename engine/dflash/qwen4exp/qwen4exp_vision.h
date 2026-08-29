@@ -77,6 +77,17 @@ struct Qwen4ExpVisionGrid {
     uint32_t w = 0;
 };
 
+struct Qwen4ExpMropeRun {
+    size_t token_count = 0;
+    bool image = false;
+    Qwen4ExpVisionGrid grid;
+};
+
+bool qwen4exp_assign_mrope_positions(
+    const std::vector<Qwen4ExpMropeRun> & runs, size_t token_count,
+    std::array<std::vector<int32_t>, 3> & positions, int64_t & rope_delta,
+    std::string & error);
+
 // Number of rows after the official spatial merger.  Zero means the grid is
 // malformed or its product overflows size_t.
 size_t qwen4exp_vision_merged_tokens(const Qwen4ExpVisionGrid & grid);
