@@ -538,7 +538,7 @@ jobs:
             path="$output/$name"
             if [[ -f "$path" && ! -L "$path" ]]; then
               printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
-              tail -n 240 -- "$path"
+              tail -n 1024 -- "$path"
             else
               printf '===== %s was not created =====\n' "$name"
             fi
