@@ -188,6 +188,17 @@ class HarnessContractTests(unittest.TestCase):
         # No stray second copy of the device flags to drift out of sync.
         self.assertEqual(body.count("--device /dev/kfd"), 1)
 
+    def test_gpu_groups_come_from_host_device_gids(self):
+        body = PROFILE_SH.read_text()
+        # Docker resolves named supplementary groups inside the image. The
+        # pinned ROCm 10 dev image has no `render` group, so bind the numeric
+        # owners of the host device nodes instead.
+        self.assertIn("bind_gpu_device_groups", body)
+        self.assertIn("stat -c %g", body)
+        self.assertIn('GPU_ARGS+=(--group-add "$gid")', body)
+        self.assertNotIn("--group-add video", body)
+        self.assertNotIn("--group-add render", body)
+
     def test_counter_pass_is_separate_from_timing_pass(self):
         # Durations under --pmc are serialized and must never be a bandwidth
         # denominator. The two passes existing separately is the whole guard.

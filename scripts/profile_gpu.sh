@@ -173,12 +173,32 @@ preflight_hard() {
 # Every container that must SEE the GPU needs these. rocprofv3 --list-avail
 # reports counters per agent, so without them it returns an empty list and the
 # harness concludes the counters do not exist. Defined once; used everywhere.
+#
+# Use the numeric owning groups of the actual host device nodes. Docker resolves
+# a named --group-add against the container's /etc/group, and AMD's full ROCm 10
+# dev image has no `render` entry even though the host device is render-owned.
+# The numeric GID is the permission boundary that matters and works regardless
+# of the image's group database.
 GPU_ARGS=(
   --device /dev/kfd --device /dev/dri
-  --group-add video --group-add render
   --ipc host --security-opt seccomp=unconfined
   --ulimit memlock=-1:-1
 )
+
+bind_gpu_device_groups() {
+  local node gid
+  declare -A gpu_gids=()
+  for node in /dev/kfd /dev/dri/*; do
+    [[ -c "$node" ]] || continue
+    gid="$(stat -c %g -- "$node")"
+    [[ "$gid" =~ ^[0-9]+$ ]] || die "device node has a nonnumeric GID: $node"
+    gpu_gids["$gid"]=1
+  done
+  (( ${#gpu_gids[@]} > 0 )) || die "no GPU device groups were discovered"
+  for gid in "${!gpu_gids[@]}"; do
+    GPU_ARGS+=(--group-add "$gid")
+  done
+}
 
 # ── production quiesce, with unconditional restore ───────────────────────
 RESTORE_MODE=none
@@ -426,6 +446,7 @@ main() {
   fi
 
   preflight_hard
+  bind_gpu_device_groups
   mkdir -p "$OUT_DIR"
   write_probes "$OUT_DIR"
   select_counters
