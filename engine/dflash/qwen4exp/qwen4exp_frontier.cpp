@@ -1447,8 +1447,18 @@ Qwen4ExpFrontierMoeGraph * qwen4exp_frontier_moe_create_batch(
     // Avoid the known M=1 batched GEMM failure mode: the scalar shared gate is
     // a broadcast multiply and row reduction, exactly as in the measured DS4
     // cached FFN graph.
+    // Qwen's canonical shared-expert gate is BF16.  HIP's broadcast binary
+    // kernel accepts an F32 activation only when the broadcast operand is F32
+    // or F16, so make the weight-side conversion explicit.  The tensor is one
+    // row (10 KiB in the production model), and keeping the multiply in F32
+    // also preserves the scalar gate accumulation used by the CPU reference.
+    ggml_tensor * shared_gate_input = weights.shared_gate_input;
+    if (shared_gate_input->type != GGML_TYPE_F32) {
+        shared_gate_input = ggml_cast(
+            ctx, shared_gate_input, GGML_TYPE_F32);
+    }
     ggml_tensor * shared_scale = ggml_sum_rows(
-        ctx, ggml_mul(ctx, result->input, weights.shared_gate_input));
+        ctx, ggml_mul(ctx, result->input, shared_gate_input));
     shared = ggml_mul(ctx, shared, ggml_sigmoid(ctx, shared_scale));
     set_layer_name(shared, layer, "shared");
 

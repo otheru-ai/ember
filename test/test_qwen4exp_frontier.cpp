@@ -1130,7 +1130,7 @@ int main() {
     weights.experts_down =
         ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 3, 4, 5);
     weights.shared_gate_input =
-        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 1);
+        ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, 4, 1);
     weights.shared_gate =
         ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 3);
     weights.shared_up =
@@ -1147,6 +1147,14 @@ int main() {
 
     std::vector<float> router(20), gate_up(120), gate(60), up(60), down(60);
     std::vector<float> shared_gate_input = {0.07f, -0.04f, 0.02f, 0.09f};
+    std::vector<ggml_bf16_t> shared_gate_input_bf16(
+        shared_gate_input.size());
+    for (size_t index = 0; index < shared_gate_input.size(); ++index) {
+        shared_gate_input_bf16[index] =
+            ggml_fp32_to_bf16(shared_gate_input[index]);
+        shared_gate_input[index] =
+            ggml_bf16_to_fp32(shared_gate_input_bf16[index]);
+    }
     std::vector<float> shared_gate(12), shared_up(12), shared_down(12);
     for (size_t index = 0; index < router.size(); ++index)
         router[index] = 0.013f * static_cast<float>(static_cast<int>(index % 9) - 4);
@@ -1184,8 +1192,9 @@ int main() {
     ggml_backend_tensor_set(weights.experts_down, down.data(), 0,
                             down.size() * sizeof(float));
     ggml_backend_tensor_set(weights.shared_gate_input,
-                            shared_gate_input.data(), 0,
-                            shared_gate_input.size() * sizeof(float));
+                            shared_gate_input_bf16.data(), 0,
+                            shared_gate_input_bf16.size() *
+                                sizeof(ggml_bf16_t));
     ggml_backend_tensor_set(weights.shared_gate, shared_gate.data(), 0,
                             shared_gate.size() * sizeof(float));
     ggml_backend_tensor_set(weights.shared_up, shared_up.data(), 0,
@@ -1299,7 +1308,8 @@ int main() {
         dflash::common::qwen4exp_frontier_moe_create(
             backend, spec, weights, 48, error);
     if (!graph) std::fprintf(stderr, "frontier build error: %s\n", error.c_str());
-    CHECK(graph != nullptr, "persistent frontier graph builds");
+    CHECK(graph != nullptr,
+          "persistent frontier graph builds with a BF16 shared gate");
     if (graph) {
         dflash::common::Qwen4ExpMtpWeights mtp;
         mtp.frontier_moe = graph;
