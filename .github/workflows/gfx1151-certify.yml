@@ -715,10 +715,14 @@ jobs:
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$TARGET_SHA" = "${{ github.sha }}"
-          if [[ "$SOURCE_SPEC" =~ ^qwen-resume-q3-profile-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+          pattern='^qwen-resume-q3-profile-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)(-from-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*))?$'
+          if [[ "$SOURCE_SPEC" =~ $pattern ]]; then
             source_sha="${BASH_REMATCH[1]}"
             source_run_id="${BASH_REMATCH[2]}"
             source_run_attempt="${BASH_REMATCH[3]}"
+            prior_profile_sha="${BASH_REMATCH[5]:-}"
+            prior_profile_run_id="${BASH_REMATCH[6]:-}"
+            prior_profile_run_attempt="${BASH_REMATCH[7]:-}"
           else
             echo 'invalid retained Q3 profile-resume source specification' >&2
             exit 2
@@ -790,11 +794,18 @@ jobs:
           trap - EXIT
           test -x "$script_root/scripts/profile_gpu.sh"
           test -s "$script_root/scripts/profile_report.py"
-          profile_output="${retained[3]}/profile-resume-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          [[ ! -e "$profile_output" && ! -L "$profile_output" ]]
-          printf 'PROFILE_MODEL=%s\nPROFILE_MTP=%s\nPROFILE_IMAGE=%s\nPROFILE_OUTPUT=%s\nPROFILE_SCRIPT_ROOT=%s\n' \
+          profile_resume_arg=
+          if [[ -n "$prior_profile_sha" ]]; then
+            profile_output="${retained[3]}/profile-resume-${prior_profile_sha:0:12}-${prior_profile_run_id}-${prior_profile_run_attempt}"
+            [[ -d "$profile_output" && ! -L "$profile_output" ]]
+            profile_resume_arg=--resume
+          else
+            profile_output="${retained[3]}/profile-resume-${TARGET_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            [[ ! -e "$profile_output" && ! -L "$profile_output" ]]
+          fi
+          printf 'PROFILE_MODEL=%s\nPROFILE_MTP=%s\nPROFILE_IMAGE=%s\nPROFILE_OUTPUT=%s\nPROFILE_SCRIPT_ROOT=%s\nPROFILE_RESUME_ARG=%s\n' \
             "${retained[0]}" "${retained[1]}" "$profile_image" "$profile_output" \
-            "$script_root" >>"$GITHUB_ENV"
+            "$script_root" "$profile_resume_arg" >>"$GITHUB_ENV"
           echo 'retained correctness/timing bound to byte-identical profiler; model bytes were not read or hashed'
 
       - name: Acquire exclusive GPU access and stop production
@@ -815,10 +826,12 @@ jobs:
       - name: Resume only the separate Q3 trace and counter passes
         run: |
           set -euo pipefail
+          resume_args=()
+          [[ -z "${PROFILE_RESUME_ARG:-}" ]] || resume_args+=("$PROFILE_RESUME_ARG")
           "$PROFILE_SCRIPT_ROOT/scripts/profile_gpu.sh" --no-quiesce \
             --image "$PROFILE_IMAGE" --binary /usr/local/bin/ember-dflash \
             --model "$PROFILE_MODEL" --mtp "$PROFILE_MTP" --mtp-depth 3 \
-            --port "$PROFILE_PORT" --out-dir "$PROFILE_OUTPUT"
+            --port "$PROFILE_PORT" --out-dir "$PROFILE_OUTPUT" "${resume_args[@]}"
           python3 "$PROFILE_SCRIPT_ROOT/scripts/profile_report.py" "$PROFILE_OUTPUT" --json \
             >"$PROFILE_OUTPUT/report.json"
           test -s "$PROFILE_OUTPUT/manifest.json"

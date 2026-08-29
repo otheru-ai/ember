@@ -151,8 +151,17 @@ class HarnessContractTests(unittest.TestCase):
         body = PROFILE_SH.read_text()
         self.assertIn('EMBER_PROFILE_PREFILL_WORDS:-2048', body)
         self.assertIn('model == "qwen3.8-flash-next"', body)
+        self.assertIn('value["reasoning_effort"] = "none"', body)
         self.assertIn('"Marker F. Write a very long comma-separated sequence', body)
         self.assertIn('usage.get("completion_tokens") != expected_decode', body)
+
+    def test_profile_can_reuse_only_shape_valid_complete_passes(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn("--resume", body)
+        self.assertIn("pass_is_complete", body)
+        self.assertIn('reusing completed response and profiler CSVs', body)
+        self.assertIn('name "*$tag*kernel_trace.csv"', body)
+        self.assertIn('name "*$tag*counter_collection.csv"', body)
 
     def test_release_image_does_not_carry_the_profiler(self):
         # The release image is a stripped runtime closure; collect-runtime.sh

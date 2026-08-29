@@ -289,6 +289,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("source_sha, source_output = sys.argv[1:]", certify_job)
         self.assertIn("GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}", certify_job)
         self.assertIn('echo "$GHCR_TOKEN" | docker login ghcr.io', certify_job)
+        self.assertIn("-from-([0-9a-f]{40})", certify_job)
+        self.assertIn("PROFILE_RESUME_ARG", certify_job)
         self.assertIn("  qwen-resume-q3-timing:", certify_job)
         self.assertIn("--calibrate-qwen-shapes", certify_job)
         self.assertIn("No model", certify_job)
