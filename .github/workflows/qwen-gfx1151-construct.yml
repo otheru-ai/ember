@@ -230,7 +230,7 @@ jobs:
                   raise SystemExit(f"{name} is malformed")
               return item
           capture=pair("capture_manifest")
-          cache=pair("cache_manifest",mode=="prepare-cache" or mode=="normalize-candidate")
+          cache=pair("cache_manifest",mode not in {"prepare-companions","build-candidate"})
           rocmi4=pair("companion_rocmi4")
           fast=pair("companion_fast")
           plan=pair("selection_plan")

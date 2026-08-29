@@ -56,6 +56,14 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def test_constructor_requires_cache_only_for_cache_consuming_modes(self) -> None:
+        body = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn(
+            'cache=pair("cache_manifest",mode not in '
+            '{"prepare-companions","build-candidate"})',
+            body,
+        )
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {
