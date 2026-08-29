@@ -64,6 +64,12 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             body,
         )
 
+    def test_q3_reuse_request_is_exactly_retry_idempotent(self) -> None:
+        body = Q3_FIRST_TOKEN_PLAN.read_text(encoding="utf-8")
+        self.assertIn('output.read_bytes()!=raw', body)
+        self.assertIn('raise SystemExit("existing reuse request differs")', body)
+        self.assertIn('os.O_CREAT|os.O_EXCL', body)
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {

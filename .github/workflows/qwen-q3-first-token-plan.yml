@@ -125,11 +125,16 @@ jobs:
                  "parameters":{"construction_descriptor":{
                      "path":str(pathlib.Path(construction).resolve()),"sha256":digest}},
                  "publishes":False,"deletes":False}
-          fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|
-                     getattr(os,"O_NOFOLLOW",0),0o600)
-          with os.fdopen(fd,"w",encoding="utf-8") as stream:
-              json.dump(value,stream,indent=2,sort_keys=True);stream.write("\n")
-              stream.flush();os.fsync(stream.fileno())
+          raw=(json.dumps(value,indent=2,sort_keys=True)+"\n").encode()
+          output=pathlib.Path(destination)
+          if output.exists() or output.is_symlink():
+              if output.is_symlink() or not output.is_file() or output.read_bytes()!=raw:
+                  raise SystemExit("existing reuse request differs")
+          else:
+              fd=os.open(destination,os.O_WRONLY|os.O_CREAT|os.O_EXCL|
+                         getattr(os,"O_NOFOLLOW",0),0o600)
+              with os.fdopen(fd,"wb") as stream:
+                  stream.write(raw);stream.flush();os.fsync(stream.fileno())
           PY
             request_sha="$(sha256sum "$request" | awk '{print $1}')"
             printf 'operation_request=%s\noperation_request_sha256=%s\ncandidate_id=%s\nconstruction_mode=reuse-candidate\n' \
