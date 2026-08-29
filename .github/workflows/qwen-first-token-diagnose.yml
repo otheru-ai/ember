@@ -1,0 +1,52 @@
+name: Qwen retained first-token diagnosis
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-hex candidate revision used by the failed proof
+        required: true
+        type: string
+      source_run_id:
+        description: GitHub run id that retained the diagnostic directory
+        required: true
+        type: string
+      source_run_attempt:
+        description: GitHub run attempt that retained the diagnostic directory
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-first-token-diagnose-${{ inputs.source_run_id }}-${{ inputs.source_run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 5
+    steps:
+      - name: Read the bounded retained Q3 proof output
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          root=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/first-token
+          output="$root/q3-ple-${COMMIT_SHA:0:12}-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
+          [[ -d "$root" && ! -L "$root" && -d "$output" && ! -L "$output" ]]
+          for name in validation.json engine.log; do
+            path="$output/$name"
+            if [[ -f "$path" && ! -L "$path" ]]; then
+              printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
+              tail -n 240 -- "$path"
+            else
+              printf '===== %s was not created =====\n' "$name"
+            fi
+          done

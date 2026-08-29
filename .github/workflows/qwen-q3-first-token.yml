@@ -336,6 +336,20 @@ jobs:
           (( healthy == 1 )) || cleanup_failed=1
           exit "$cleanup_failed"
 
+      - name: Surface retained first-token diagnostics
+        if: ${{ failure() && steps.safety.outputs.armed == 'yes' }}
+        run: |
+          set -euo pipefail
+          for name in validation.json engine.log; do
+            path="$QWEN_FIRST_TOKEN_OUTPUT/$name"
+            if [[ -f "$path" && ! -L "$path" ]]; then
+              printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
+              tail -n 240 -- "$path"
+            else
+              printf '===== %s was not created =====\n' "$name"
+            fi
+          done
+
       - name: Attest the first-token evidence
         if: success()
         id: attest
