@@ -547,6 +547,155 @@ jobs:
             fi
           done
 
+  qwen-repro-timing-http:
+    # Bounded one-request runtime repro for a retained Q3 proof. It deliberately
+    # skips quantization, integrity hashing, and the long differential/profile
+    # passes: the immutable source image and local artifact paths come from the
+    # already-verified first-token evidence.
+    if: startsWith(inputs.release_version, 'qwen-repro-timing-http-')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 10
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      SOURCE_SPEC: ${{ inputs.release_version }}
+      REPRO_PORT: '18087'
+      REPRO_CONTAINER: qwen-q3-http-repro-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Resolve the immutable retained runtime without hashing model data
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "${{ github.sha }}"
+          if [[ "$SOURCE_SPEC" =~ ^qwen-repro-timing-http-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+            source_sha="${BASH_REMATCH[1]}"
+            source_run_id="${BASH_REMATCH[2]}"
+            source_run_attempt="${BASH_REMATCH[3]}"
+          else
+            echo 'invalid retained Q3 HTTP-repro source specification' >&2
+            exit 2
+          fi
+          root=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/first-token
+          output="$root/q3-ple-${source_sha:0:12}-$source_run_id-$source_run_attempt"
+          evidence="$output/first-token-evidence.json"
+          [[ -d "$output" && ! -L "$output" && -f "$evidence" && ! -L "$evidence" ]]
+          mapfile -t resolved < <(python3 - "$evidence" "$source_sha" <<'PY'
+          import json, pathlib, re, sys
+          evidence_path, source_sha = sys.argv[1:]
+          value = json.load(open(evidence_path, encoding="utf-8"))
+          if value.get("ember_revision") != source_sha:
+              raise SystemExit("retained evidence revision differs from source spec")
+          model = str((value.get("model") or {}).get("first_shard", ""))
+          mtp = str((value.get("mtp") or {}).get("path", ""))
+          image = str((value.get("runtime") or {}).get("image", ""))
+          safe_path = re.compile(r"^/[A-Za-z0-9._/-]+$")
+          safe_image = re.compile(
+              r"^ghcr\.io/otheru-ai/ember@sha256:[0-9a-f]{64}$")
+          for label, raw in (("model", model), ("MTP", mtp)):
+              path = pathlib.Path(raw)
+              if (safe_path.fullmatch(raw) is None or not path.is_file()
+                      or path.is_symlink()):
+                  raise SystemExit(f"retained {label} path is absent or unsafe")
+          if safe_image.fullmatch(image) is None:
+              raise SystemExit("retained runtime image is not immutable or expected")
+          print(model); print(mtp); print(image)
+          PY
+          )
+          ((${#resolved[@]} == 3))
+          printf 'REPRO_MODEL=%s\nREPRO_MTP=%s\nREPRO_IMAGE=%s\n' \
+            "${resolved[0]}" "${resolved[1]}" "${resolved[2]}" >>"$GITHUB_ENV"
+          docker image inspect "${resolved[2]}" >/dev/null
+          echo 'retained runtime resolved; model and MTP content were not read or hashed'
+
+      - name: Acquire exclusive GPU access and stop production
+        id: safety
+        run: |
+          set -euo pipefail
+          sudo -n /usr/local/sbin/ember-gpu-lock acquire
+          echo 'lock=yes' >>"$GITHUB_OUTPUT"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null; then
+            echo 'restore=yes' >>"$GITHUB_OUTPUT"
+            sudo -n /usr/local/sbin/ember-cert-production stop
+          else
+            echo 'restore=no' >>"$GITHUB_OUTPUT"
+          fi
+          sudo -n /usr/local/sbin/ember-cert-production mask
+          echo 'masked=yes' >>"$GITHUB_OUTPUT"
+
+      - name: Load once and print one exact benchmark response
+        run: |
+          set -euo pipefail
+          gpu_args=(--device /dev/kfd --device /dev/dri --ipc host \
+                    --security-opt seccomp=unconfined --ulimit memlock=-1:-1)
+          declare -A gpu_gids=()
+          for node in /dev/kfd /dev/dri/*; do
+            [[ -c "$node" ]] || continue
+            gid="$(stat -c %g -- "$node")"
+            [[ "$gid" =~ ^[0-9]+$ ]]
+            gpu_gids["$gid"]=1
+          done
+          ((${#gpu_gids[@]} > 0))
+          for gid in "${!gpu_gids[@]}"; do gpu_args+=(--group-add "$gid"); done
+          docker run -d --name "$REPRO_CONTAINER" --network host "${gpu_args[@]}" \
+            -v "$(dirname "$REPRO_MODEL"):/repro/model:ro" \
+            -v "$REPRO_MTP:/repro/mtp.gguf:ro" \
+            -e DFLASH_QWEN_MTP=/repro/mtp.gguf -e DFLASH_QWEN_MTP_DEPTH=3 \
+            -e EMBER_IDLE_RECLAIM_SECS=0 \
+            --entrypoint /usr/local/bin/ember-dflash "$REPRO_IMAGE" \
+            -m "/repro/model/$(basename "$REPRO_MODEL")" \
+            --host 127.0.0.1 --port "$REPRO_PORT" --max-ctx 8192 >/dev/null
+          healthy=0
+          for _ in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 \
+                "http://127.0.0.1:$REPRO_PORT/health" >/dev/null; then
+              healthy=1; break
+            fi
+            sleep 1
+          done
+          (( healthy == 1 ))
+          request="$RUNNER_TEMP/qwen-q3-http-repro-$GITHUB_RUN_ID.json"
+          response="$RUNNER_TEMP/qwen-q3-http-response-$GITHUB_RUN_ID.json"
+          printf '%s\n' \
+            '{"model":"qwen3.8-flash-next","messages":[{"role":"user","content":"Marker W. Reply with exactly the word READY."}],"reasoning_effort":"none","temperature":0,"max_tokens":8,"stream":false}' \
+            >"$request"
+          status="$(curl --silent --show-error --max-time 900 \
+            --output "$response" --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' --data-binary "@$request" \
+            "http://127.0.0.1:$REPRO_PORT/v1/chat/completions")"
+          printf '===== HTTP status %s =====\n' "$status"
+          python3 - "$response" <<'PY'
+          import pathlib, sys
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          print(raw[:4096].decode("utf-8", errors="replace"))
+          if len(raw) > 4096:
+              print(f"[response truncated; total={len(raw)} bytes]")
+          PY
+          echo '===== timing server log ====='
+          docker logs "$REPRO_CONTAINER"
+
+      - name: Restore production and release the GPU lock
+        if: always() && steps.safety.outputs.lock == 'yes'
+        run: |
+          set +e
+          cleanup_failed=0
+          docker rm -f "$REPRO_CONTAINER" >/dev/null 2>&1 || true
+          if [[ "${{ steps.safety.outputs.masked }}" = yes ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
+          fi
+          if [[ "${{ steps.safety.outputs.restore }}" = yes ]]; then
+            sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
+          fi
+          sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
+          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null || cleanup_failed=1
+          healthy=0
+          for _ in $(seq 1 120); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
+              healthy=1; break
+            fi
+            sleep 2
+          done
+          (( healthy == 1 )) || cleanup_failed=1
+          exit "$cleanup_failed"
+
   qwen-inspect-control-residue:
     # Read-only forensic mode for a failed bounded conversion.  It reports
     # inode metadata and relative names only; it never opens, removes, or
