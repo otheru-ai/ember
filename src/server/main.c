@@ -811,6 +811,11 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
                                    const int32_t *prompt_ids, int n_prompt,
                                    gen_ctx *g) {
     if (!g->has_tools || !g->acc.ptr || g->n_gen_ids <= 0) return;
+    // Image regions are represented by repeated image_pad ids, so prompt ids
+    // do not distinguish two different images. Never publish a tool-turn KV
+    // snapshot (or its disk checkpoint) that a later text/vision request could
+    // mistake for the same prefix.
+    if (req && req->has_images) return;
     if (!generated_frontier_matches_text(be, g)) {
         fprintf(stderr,
                 "[ember] post-tool snapshot skipped: sampled token frontier "
