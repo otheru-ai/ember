@@ -199,21 +199,17 @@ jobs:
           sudo -n /usr/local/sbin/ember-cert-production stop
           sudo -n /usr/local/sbin/ember-cert-production mask
           touch "$QWEN_FIRST_TOKEN_OUTPUT/.production-masked"
-          python3 - "$BUILD_RECORD" <<'PY'
-          import hashlib, json, subprocess, sys
+          PYTHONPATH="$GITHUB_WORKSPACE/scripts" python3 - "$BUILD_RECORD" \
+              "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json" \
+              "$MTP" "$MTP_SHA256" <<'PY'
+          import json, pathlib, sys
+          from qwen_integrity_cache import IntegrityCache
           record = json.load(open(sys.argv[1], encoding="utf-8"))
-          for row in record["output"]["shards"]:
-              digest = hashlib.sha256()
-              process = subprocess.Popen(
-                  ["dd", f"if={row['path']}", "iflag=direct", "bs=8M", "status=none"],
-                  stdout=subprocess.PIPE)
-              assert process.stdout is not None
-              while chunk := process.stdout.read(8 * 1024 * 1024): digest.update(chunk)
-              if process.wait() != 0 or digest.hexdigest() != row["sha256"]:
-                  raise SystemExit(f"O_DIRECT target integrity failed: {row['path']}")
+          with IntegrityCache(pathlib.Path(sys.argv[2])) as cache:
+              for row in record["output"]["shards"]:
+                  cache.verify(pathlib.Path(row["path"]), row["sha256"])
+              cache.verify(pathlib.Path(sys.argv[3]), sys.argv[4])
           PY
-          mtp_actual="$(dd if="$MTP" iflag=direct bs=8M status=none | sha256sum | awk '{print $1}')"
-          test "$mtp_actual" = "$MTP_SHA256"
           available_kib=0
           for _ in $(seq 1 60); do
             available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
@@ -230,6 +226,8 @@ jobs:
           Path(sys.argv[1]).write_text(
               text + "\nState the invariant in one short sentence.\n", encoding="utf-8")
           PY
+          validation_cache="$QWEN_FIRST_TOKEN_OUTPUT/kv-validation-cache"
+          mkdir -m 700 "$validation_cache"
           gpu_args=(--device /dev/kfd --device /dev/dri --ipc host \
                     --security-opt seccomp=unconfined --ulimit memlock=-1:-1)
           declare -A gpu_gids=()
@@ -247,10 +245,12 @@ jobs:
             -v "$(dirname "$MODEL"):/first-token/model:ro" \
             -v "$MTP:/first-token/mtp.gguf:ro" \
             -v "$QWEN_FIRST_TOKEN_OUTPUT/prompt.txt:/first-token/prompt.txt:ro" \
+            -v "$validation_cache:/first-token/cache" \
             -e DFLASH_QWEN_MTP=/first-token/mtp.gguf \
             -e DFLASH_QWEN_MTP_DEPTH=3 -e EMBER_TRACE_TOKENS=1 \
             --entrypoint /usr/local/bin/ember-dflash "$RUNTIME_IMAGE" \
             -m "/first-token/model/$(basename "$MODEL")" --max-ctx 8192 \
+            --kv-cache-dir /first-token/cache \
             --validate-prompt /first-token/prompt.txt --validate-tokens 2 \
             >"$QWEN_FIRST_TOKEN_OUTPUT/validation.json" \
             2>"$QWEN_FIRST_TOKEN_OUTPUT/engine.log"
@@ -355,6 +355,7 @@ jobs:
             --model-build-record "$BUILD_RECORD" \
             --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
             --mtp "$MTP" --mtp-sha256 "$MTP_SHA256" --mtp-depth 3 \
+            --integrity-cache "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json" \
             --measurement-only --out-dir "$benchmark_output"
           evidence="$benchmark_output/hardware-measured.json"
           test -f "$evidence" && test ! -L "$evidence"

@@ -797,7 +797,6 @@ jobs:
         run: |
           set -euo pipefail
           output="$QWEN_EVIDENCE/reuse-$(basename "$QWEN_REUSE_CONSTRUCTION" .json)-${TARGET_SHA:0:12}.json"
-          test ! -e "$output" && test ! -L "$output"
           format_contract="$(python3 - "$QWEN_REUSE_CONSTRUCTION" <<'PY'
           import json, pathlib, sys
           value=json.loads(pathlib.Path(sys.argv[1]).read_text())
@@ -813,6 +812,7 @@ jobs:
             --runtime-dev-ref "$QWEN_BUILDER_IMAGE" \
             --runtime-dev-digest "$QWEN_BUILDER_IMAGE_DIGEST" \
             --tensor-format-contract-sha256 "$format_contract" \
+            --integrity-cache "$QWEN_EVIDENCE/.artifact-integrity-v1.json" \
             --output "$output")"
           mapfile -t rebound < <(python3 - "$result" <<'PY'
           import json, re, sys

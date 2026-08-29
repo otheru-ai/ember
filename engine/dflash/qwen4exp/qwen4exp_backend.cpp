@@ -125,6 +125,7 @@ Qwen4ExpBackend::Qwen4ExpBackend(const Qwen4ExpBackendConfig & config)
 Qwen4ExpBackend::~Qwen4ExpBackend() { shutdown(); }
 
 bool Qwen4ExpBackend::init() {
+    const auto init_begin = Clock::now();
     // Backend construction is retried in some embedding processes. Clear a
     // prior architecture's diagnostic so every false return below owns the
     // message observed by the factory and C ABI bridge.
@@ -148,6 +149,7 @@ bool Qwen4ExpBackend::init() {
         set_last_error("failed to initialize Qwen4Exp HIP backend");
         return false;
     }
+    const auto hip_end = Clock::now();
     const int max_ctx = config_.max_ctx > 0 ? config_.max_ctx : 8192;
     std::string error;
     if (!load_qwen4exp_gguf(config_.model_path, backend_, max_ctx,
@@ -158,6 +160,7 @@ bool Qwen4ExpBackend::init() {
                                       : error));
         return false;
     }
+    const auto target_end = Clock::now();
     state_budget_bytes_ = weights_.state_budget_bytes;
     const char * mtp_path = std::getenv("DFLASH_QWEN_MTP");
     const char * mtp_depth = std::getenv("DFLASH_QWEN_MTP_DEPTH");
@@ -197,6 +200,7 @@ bool Qwen4ExpBackend::init() {
             return false;
         }
     }
+    const auto mtp_end = Clock::now();
     const char * dispatch_evidence =
         std::getenv("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE");
     if (dispatch_evidence && std::strcmp(dispatch_evidence, "1") == 0 &&
@@ -213,6 +217,13 @@ bool Qwen4ExpBackend::init() {
                  max_ctx, weights_.yarn.enabled ? "factor-4" : "off",
                  mtp_depth_ ? "opt-in" : "off", mtp_depth_,
                  activation_dump_path_.empty() ? "off" : "on");
+    std::fprintf(stderr,
+                 "[qwen-load] component=backend hip_init_ms=%.3f "
+                 "target_init_ms=%.3f mtp_init_ms=%.3f total_ms=%.3f\n",
+                 std::chrono::duration<double, std::milli>(hip_end - init_begin).count(),
+                 std::chrono::duration<double, std::milli>(target_end - hip_end).count(),
+                 std::chrono::duration<double, std::milli>(mtp_end - target_end).count(),
+                 std::chrono::duration<double, std::milli>(mtp_end - init_begin).count());
     return true;
 }
 

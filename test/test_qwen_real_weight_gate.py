@@ -358,11 +358,15 @@ class QwenRealWeightGateTest(unittest.TestCase):
     def test_integrity_is_direct_and_profile_supports_qwen_mtp(self) -> None:
         gate = GATE.read_text(encoding="utf-8")
         profile = PROFILE.read_text(encoding="utf-8")
-        self.assertIn('"iflag=direct"', gate)
+        integrity = (ROOT / "scripts/qwen_integrity_cache.py").read_text(
+            encoding="utf-8")
+        self.assertIn('"iflag=direct"', integrity)
+        self.assertIn("IntegrityCache", gate)
         self.assertIn('inventory["shards"]', gate)
         self.assertIn("model-inventory.json", gate)
         self.assertIn("qwen-quant-build-record.json", gate)
         self.assertIn("DFLASH_QWEN_MTP=/gate/mtp.gguf", gate)
+        self.assertIn("--kv-cache-dir /gate/cache", gate)
         self.assertIn("--mtp PATH", profile)
         self.assertIn("DFLASH_QWEN_MTP=/pmtp/", profile)
         self.assertIn("--draft and --mtp are mutually exclusive", profile)

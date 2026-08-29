@@ -5,6 +5,8 @@
 #include "gguf.h"
 
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -16,6 +18,12 @@
 
 namespace dflash::common {
 namespace {
+
+using LoadClock = std::chrono::steady_clock;
+
+long long elapsed_ms(LoadClock::time_point begin, LoadClock::time_point end) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
+}
 
 size_t align_up(size_t value, size_t alignment) {
     if (alignment == 0 || value > SIZE_MAX - (alignment - 1)) return SIZE_MAX;
@@ -199,6 +207,12 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
                         int max_ctx, bool enable_yarn, Qwen4ExpWeights & out,
                         std::string & error) {
     error.clear();
+    const auto load_begin = LoadClock::now();
+    auto validation_end = load_begin;
+    auto metadata_end = load_begin;
+    auto allocation_end = load_begin;
+    auto upload_end = load_begin;
+    auto frontier_end = load_begin;
     if (!backend) {
         error = "invalid Qwen4Exp backend";
         return false;
@@ -212,6 +226,7 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
     std::vector<std::string> paths;
     if (!qwen4exp_discover_gguf_shards(path.c_str(), paths, error) ||
         !validate_qwen4exp_gguf(path.c_str(), error)) return false;
+    validation_end = LoadClock::now();
 
     struct Allocation {
         ggml_tensor * tensor;
@@ -313,6 +328,7 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
             total += allocated;
         }
     }
+    metadata_end = LoadClock::now();
 
     {
         const uint64_t dense_total = static_cast<uint64_t>(total);
@@ -343,6 +359,7 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
         goto fail;
     }
     ggml_backend_buffer_set_usage(out.buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    allocation_end = LoadClock::now();
     for (const Allocation & allocation : allocations) {
         Qwen4ExpWeightShard & shard = out.shards[allocation.shard];
         char * base = static_cast<char *>(ggml_backend_buffer_get_base(out.buf));
@@ -361,6 +378,7 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
                                       allocation.file_offset,
                                       allocation.bytes, error)) goto fail;
     }
+    upload_end = LoadClock::now();
 
     out.max_ctx = max_ctx;
     out.layers.resize(48);
@@ -432,6 +450,20 @@ bool load_qwen4exp_gguf(const std::string & path, ggml_backend_t backend,
         goto fail;
     }
     if (!qwen4exp_frontier_create(out, error)) goto fail;
+    frontier_end = LoadClock::now();
+    std::fprintf(stderr,
+                 "[qwen-load] component=target shards=%zu dense_tensors=%zu "
+                 "dense_bytes=%zu mapped_bytes=%llu validation_ms=%lld "
+                 "metadata_map_plan_ms=%lld allocation_ms=%lld upload_ms=%lld "
+                 "frontier_ms=%lld total_ms=%lld\n",
+                 paths.size(), allocations.size(), total,
+                 static_cast<unsigned long long>(mapped_total),
+                 elapsed_ms(load_begin, validation_end),
+                 elapsed_ms(validation_end, metadata_end),
+                 elapsed_ms(metadata_end, allocation_end),
+                 elapsed_ms(allocation_end, upload_end),
+                 elapsed_ms(upload_end, frontier_end),
+                 elapsed_ms(load_begin, frontier_end));
     for (gguf_context * context : contexts) gguf_free(context);
     return true;
 

@@ -13,6 +13,8 @@ import subprocess
 import sys
 from typing import Any
 
+from qwen_integrity_cache import IntegrityCache, IntegrityError
+
 
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -147,19 +149,26 @@ def rebind(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(recorded, list) or not recorded or artifacts != recorded:
         raise ReuseError("construction and build-record shard inventories differ")
     total = 0
-    for index, row in enumerate(recorded):
-        if (not isinstance(row, dict)
-                or set(row) != {"path", "size_bytes", "sha256"}
-                or not isinstance(row["size_bytes"], int)
-                or isinstance(row["size_bytes"], bool) or row["size_bytes"] < 1
-                or HEX64.fullmatch(str(row["sha256"])) is None):
-            raise ReuseError(f"candidate shard {index} metadata is malformed")
-        path = Path(str(row["path"]))
-        if (not path.is_absolute() or path.is_symlink() or not path.is_file()
-                or path.stat().st_size != row["size_bytes"]
-                or sha256_file(path) != row["sha256"]):
-            raise ReuseError(f"candidate shard {index} differs")
-        total += row["size_bytes"]
+    try:
+        with IntegrityCache(args.integrity_cache) as cache:
+            for index, row in enumerate(recorded):
+                if (not isinstance(row, dict)
+                        or set(row) != {"path", "size_bytes", "sha256"}
+                        or not isinstance(row["size_bytes"], int)
+                        or isinstance(row["size_bytes"], bool) or row["size_bytes"] < 1
+                        or HEX64.fullmatch(str(row["sha256"])) is None):
+                    raise ReuseError(f"candidate shard {index} metadata is malformed")
+                path = Path(str(row["path"]))
+                if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+                        or path.stat().st_size != row["size_bytes"]):
+                    raise ReuseError(f"candidate shard {index} differs")
+                try:
+                    cache.verify(path, row["sha256"])
+                except IntegrityError as exc:
+                    raise ReuseError(f"candidate shard {index} differs: {exc}") from exc
+                total += row["size_bytes"]
+    except IntegrityError as exc:
+        raise ReuseError(f"candidate integrity cache failed: {exc}") from exc
     if total != (construction.get("artifacts") or {}).get("total_bytes"):
         raise ReuseError("candidate shard byte total differs")
 
@@ -190,6 +199,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--runtime-dev-ref", required=True)
     parser.add_argument("--runtime-dev-digest", required=True)
     parser.add_argument("--tensor-format-contract-sha256", required=True)
+    parser.add_argument("--integrity-cache", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -198,14 +208,27 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     try:
         value = rebind(args)
-        if not args.output.is_absolute() or args.output.exists() or args.output.is_symlink():
-            raise ReuseError("output must be one new absolute path")
+        if not args.output.is_absolute():
+            raise ReuseError("output must be one absolute path")
         args.output.parent.mkdir(parents=True, exist_ok=True)
+        raw = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+        if args.output.exists() or args.output.is_symlink():
+            if (args.output.is_symlink() or not args.output.is_file()
+                    or args.output.read_bytes() != raw):
+                raise ReuseError("existing rebound descriptor differs")
+            print(json.dumps({"path": str(args.output),
+                              "sha256": sha256_file(args.output)}, sort_keys=True))
+            return 0
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(args.output, flags, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, indent=2, sort_keys=True)
-            stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        directory = os.open(args.output.parent,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         print(json.dumps({"path": str(args.output),
                           "sha256": sha256_file(args.output)}, sort_keys=True))
         return 0

@@ -18,6 +18,7 @@ DISPATCH_EVIDENCE="$REPO/scripts/qwen_w4a8_dispatch_evidence.py"
 IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
 MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
 MTP=""; MTP_SHA256=""; OUT_DIR=""
+INTEGRITY_CACHE=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json
 BINARY=/usr/local/bin/ember-dflash
 PORT=18086; MTP_DEPTH=4; DRY_RUN=0
 MEASUREMENT_ONLY=0
@@ -48,6 +49,7 @@ options:
   --binary PATH               ember-dflash path in image
   --port N                    temporary loopback port (default 18086)
   --mtp-depth N               proposal depth 1..4 (default 4)
+  --integrity-cache PATH      persistent identity-bound verification cache
   --measurement-only          retain complete measurements below hard thresholds
   --dry-run                   validate syntax and print plan; touch nothing
 EOF
@@ -65,6 +67,7 @@ while (( $# )); do
     --model-build-record-sha256) MODEL_BUILD_RECORD_SHA256="${2:?--model-build-record-sha256 needs a value}"; shift 2 ;;
     --mtp) MTP="${2:?--mtp needs a path}"; shift 2 ;;
     --mtp-sha256) MTP_SHA256="${2:?--mtp-sha256 needs a value}"; shift 2 ;;
+    --integrity-cache) INTEGRITY_CACHE="${2:?--integrity-cache needs a path}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a path}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --port) PORT="${2:?--port needs a value}"; shift 2 ;;
@@ -91,8 +94,9 @@ done
   die "--model-build-record-sha256 must be 64 lowercase hex characters"
 [[ "$MTP_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   die "--mtp-sha256 must be 64 lowercase hex characters"
-[[ "$MODEL" = /* && "$MODEL_BUILD_RECORD" = /* && "$MTP" = /* && "$OUT_DIR" = /* ]] ||
-  die "--model, --model-build-record, --mtp and --out-dir must be absolute paths"
+[[ "$MODEL" = /* && "$MODEL_BUILD_RECORD" = /* && "$MTP" = /* &&
+   "$OUT_DIR" = /* && "$INTEGRITY_CACHE" = /* ]] ||
+  die "--model, --model-build-record, --mtp, --out-dir and --integrity-cache must be absolute paths"
 [[ "$BINARY" = /* ]] || die "--binary must be an absolute in-image path"
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )) ||
   die "--port must be 1024..65535"
@@ -112,6 +116,7 @@ plan:
   build record sha    $MODEL_BUILD_RECORD_SHA256
   MTP companion       $MTP
   MTP sha256          $MTP_SHA256
+  integrity cache     $INTEGRITY_CACHE
   MTP depth           $MTP_DEPTH
   evidence            $OUT_DIR
   ownership           $GPU_LOCK acquire/release
@@ -412,39 +417,17 @@ PRODUCTION_STATE_CAPTURED=1
 sudo -n "$PRODUCTION" mask
 MASKED=1
 
-direct_sha256() {
-  python3 - "$1" <<'PY'
-import hashlib, subprocess, sys
-path = sys.argv[1]
-digest = hashlib.sha256()
-process = subprocess.Popen(
-    ["dd", f"if={path}", "iflag=direct", "bs=8M", "status=none"],
-    stdout=subprocess.PIPE)
-assert process.stdout is not None
-while chunk := process.stdout.read(8 * 1024 * 1024):
-    digest.update(chunk)
-if process.wait() != 0:
-    raise SystemExit(f"O_DIRECT integrity read failed: {path}")
-print(digest.hexdigest())
-PY
-}
-
-log "verifying every ordered target shard and MTP with O_DIRECT reads"
-python3 - "$OUT_DIR/model-inventory.json" <<'PY'
-import hashlib, json, subprocess, sys
+log "verifying every ordered target shard and MTP through the identity-bound cache"
+PYTHONPATH="$REPO/scripts" python3 - "$OUT_DIR/model-inventory.json" \
+    "$INTEGRITY_CACHE" "$MTP" "$MTP_SHA256" <<'PY'
+import json, pathlib, sys
+from qwen_integrity_cache import IntegrityCache
 inventory = json.load(open(sys.argv[1], encoding="utf-8"))
-for row in inventory["shards"]:
-    digest = hashlib.sha256()
-    process = subprocess.Popen(
-        ["dd", f"if={row['path']}", "iflag=direct", "bs=8M", "status=none"],
-        stdout=subprocess.PIPE)
-    assert process.stdout is not None
-    while chunk := process.stdout.read(8 * 1024 * 1024):
-        digest.update(chunk)
-    if process.wait() != 0 or digest.hexdigest() != row["sha256"]:
-        raise SystemExit(f"O_DIRECT shard integrity failed: {row['path']}")
+with IntegrityCache(pathlib.Path(sys.argv[2])) as cache:
+    for row in inventory["shards"]:
+        cache.verify(pathlib.Path(row["path"]), row["sha256"])
+    cache.verify(pathlib.Path(sys.argv[3]), sys.argv[4])
 PY
-[[ "$(direct_sha256 "$MTP")" == "$MTP_SHA256" ]] || die "MTP companion digest mismatch"
 
 for _ in $(seq 1 60); do
   available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
@@ -464,6 +447,7 @@ Path(sys.argv[1]).write_text(
     text + "\nExplain the invariant in numbered steps without skipping details.\n",
     encoding="utf-8")
 PY
+mkdir -m 700 "$OUT_DIR/validation-kv-cache"
 
 log "running q=1/native-batch snapshot differential"
 CONTAINER="qwen-real-gate-validate-$$"
@@ -472,10 +456,12 @@ docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
   -v "$(dirname "$MODEL"):/gate/model:ro" \
   -v "$MTP:/gate/mtp.gguf:ro" \
   -v "$OUT_DIR/validation-prompt.txt:/gate/prompt.txt:ro" \
+  -v "$OUT_DIR/validation-kv-cache:/gate/cache" \
   -e DFLASH_QWEN_MTP=/gate/mtp.gguf \
   -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH" \
   --entrypoint "$BINARY" "$IMAGE" \
   -m "/gate/model/$(basename "$MODEL")" --max-ctx 8192 \
+  --kv-cache-dir /gate/cache \
   --validate-prompt /gate/prompt.txt --validate-tokens 64 \
   >"$OUT_DIR/differential.json" \
   2>"$OUT_DIR/differential-dispatch-server.log"

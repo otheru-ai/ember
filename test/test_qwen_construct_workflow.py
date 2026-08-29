@@ -30,6 +30,7 @@ import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 import qwen_selection_corpus_stage as selection_stage  # noqa: E402
 import qwen_candidate_request as candidate_request  # noqa: E402
 import qwen_reuse_candidate as reuse_candidate  # noqa: E402
+import qwen_integrity_cache as integrity_cache  # noqa: E402
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -56,6 +57,25 @@ def workflow_run_blocks(text: str) -> list[str]:
 
 
 class QwenConstructWorkflowTest(unittest.TestCase):
+    def test_integrity_cache_rehashes_only_when_file_identity_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            artifact = root / "model.gguf"
+            artifact.write_bytes(b"first")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            cache_path = root / "integrity.json"
+            with integrity_cache.IntegrityCache(cache_path, now=100) as cache:
+                self.assertFalse(cache.verify(artifact.resolve(), digest))
+            with mock.patch.object(integrity_cache, "hash_file",
+                                   side_effect=AssertionError("unexpected rehash")):
+                with integrity_cache.IntegrityCache(cache_path, now=101) as cache:
+                    self.assertTrue(cache.verify(artifact.resolve(), digest))
+            artifact.write_bytes(b"other")
+            with integrity_cache.IntegrityCache(cache_path, now=102) as cache:
+                with self.assertRaisesRegex(integrity_cache.IntegrityError,
+                                            "artifact digest differs"):
+                    cache.verify(artifact.resolve(), digest)
+
     def test_constructor_requires_cache_only_for_cache_consuming_modes(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn(
@@ -69,6 +89,18 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn('output.read_bytes()!=raw', body)
         self.assertIn('raise SystemExit("existing reuse request differs")', body)
         self.assertIn('os.O_CREAT|os.O_EXCL', body)
+        reuse = (ROOT / "scripts/qwen_reuse_candidate.py").read_text(
+            encoding="utf-8")
+        self.assertIn('raise ReuseError("existing rebound descriptor differs")', reuse)
+
+    def test_q3_proof_and_benchmark_share_one_integrity_cache(self) -> None:
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        self.assertGreaterEqual(proof.count(".artifact-integrity-v1.json"), 2)
+        self.assertIn("from qwen_integrity_cache import IntegrityCache", proof)
+        gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("--integrity-cache", gate)
+        self.assertIn("from qwen_integrity_cache import IntegrityCache", gate)
 
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
@@ -923,9 +955,12 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertNotIn("ember-cert-production stop", plan)
 
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
-        self.assertIn("iflag=direct", proof)
+        self.assertIn("qwen_integrity_cache", proof)
+        self.assertIn("iflag=direct", (ROOT / "scripts/qwen_integrity_cache.py").read_text(
+            encoding="utf-8"))
         self.assertIn("EMBER_TRACE_TOKENS=1", proof)
         self.assertIn("--validate-tokens 2", proof)
+        self.assertIn("--kv-cache-dir /first-token/cache", proof)
         self.assertIn('required = {"baseline", "restored", "fresh", "disk"}', proof)
         self.assertIn('"first_token_id": first', proof)
         self.assertIn("ember-gpu-lock acquire", proof)
@@ -1048,6 +1083,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                 "--runtime-dev-ref", dev,
                 "--runtime-dev-digest", "sha256:" + "3" * 64,
                 "--tensor-format-contract-sha256", format_sha,
+                "--integrity-cache", str(root / "integrity-cache.json"),
                 "--output", str(root / "rebound.json"),
             ])
             rebound = reuse_candidate.rebind(args)
