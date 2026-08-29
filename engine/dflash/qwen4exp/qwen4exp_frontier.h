@@ -112,6 +112,15 @@ bool qwen4exp_frontier_dense_eval(
     Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
     ggml_tensor * weight, const float * input, int input_count, int n_tokens,
     std::vector<float> & output, std::string & error);
+
+// Evaluate an arbitrary positive number of independent rows through the
+// bounded q1/q5/q16 cache. Larger callers (notably four HC streams per MTP
+// synchronization row) are split transactionally instead of growing a new
+// persistent graph shape.
+bool qwen4exp_frontier_dense_eval_rows(
+    Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+    ggml_tensor * weight, const float * input, int input_count, int n_tokens,
+    std::vector<float> & output, std::string & error);
 bool qwen4exp_frontier_static_f32(
     Qwen4ExpFrontierDenseCache * cache, ggml_tensor * tensor,
     std::vector<float> & output, std::string & error);

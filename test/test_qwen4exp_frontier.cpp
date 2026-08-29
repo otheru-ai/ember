@@ -1286,6 +1286,29 @@ int main() {
                       dense_cache) == 4U,
               "unsupported dense width fails without growing the cache");
 
+        std::vector<float> q60_input;
+        std::vector<float> q60_expected;
+        for (int row = 0; row < 60; ++row) {
+            const std::vector<float> input_row{
+                0.01f * static_cast<float>(row + 1),
+                -0.02f * static_cast<float>(row + 2),
+                0.03f * static_cast<float>(row % 7),
+                0.04f * static_cast<float>(row % 11),
+            };
+            q60_input.insert(q60_input.end(), input_row.begin(), input_row.end());
+            const std::vector<float> expected_row =
+                matvec(router, 5, 4, input_row);
+            q60_expected.insert(q60_expected.end(), expected_row.begin(),
+                                expected_row.end());
+        }
+        dense_ok = dflash::common::qwen4exp_frontier_dense_eval_rows(
+            dense_cache, backend, weights.router, q60_input.data(), 4, 60,
+            actual, error);
+        CHECK(dense_ok && close_vectors(actual, q60_expected) &&
+                  dflash::common::qwen4exp_frontier_dense_graph_count(
+                      dense_cache) == 4U,
+              "q60 MTP HC rows chunk through bounded q16 graphs exactly");
+
         std::vector<float> first_static;
         bool static_ok = dflash::common::qwen4exp_frontier_static_f32(
             dense_cache, weights.router, first_static, error);

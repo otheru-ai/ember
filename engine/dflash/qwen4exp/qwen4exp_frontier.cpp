@@ -448,6 +448,35 @@ bool qwen4exp_frontier_dense_eval(
     return true;
 }
 
+bool qwen4exp_frontier_dense_eval_rows(
+        Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+        ggml_tensor * weight, const float * input, int input_count,
+        int n_tokens, std::vector<float> & output, std::string & error) {
+    if (!input || input_count <= 0 || n_tokens <= 0 ||
+        static_cast<size_t>(n_tokens) >
+            std::numeric_limits<size_t>::max() /
+                static_cast<size_t>(input_count)) {
+        error = "invalid Qwen4Exp persistent dense row evaluation";
+        return false;
+    }
+    std::vector<float> assembled;
+    for (int offset = 0; offset < n_tokens;
+         offset += kQwen4ExpFrontierMoeMaxBatch) {
+        const int rows = std::min(kQwen4ExpFrontierMoeMaxBatch,
+                                  n_tokens - offset);
+        std::vector<float> chunk;
+        const float * chunk_input =
+            input + static_cast<size_t>(offset) *
+                        static_cast<size_t>(input_count);
+        if (!qwen4exp_frontier_dense_eval(
+                cache, backend, weight, chunk_input, input_count, rows,
+                chunk, error)) return false;
+        assembled.insert(assembled.end(), chunk.begin(), chunk.end());
+    }
+    output = std::move(assembled);
+    return true;
+}
+
 bool qwen4exp_frontier_static_f32(
         Qwen4ExpFrontierDenseCache * cache, ggml_tensor * tensor,
         std::vector<float> & output, std::string & error) {

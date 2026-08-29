@@ -75,8 +75,8 @@ bool matmul_rows(Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
                  ggml_tensor * weight,
                  const float * input, int input_count, int rows,
                  std::vector<float> & output, std::string & error) {
-    return qwen4exp_frontier_dense_eval(cache, backend, weight, input,
-                                        input_count, rows, output, error);
+    return qwen4exp_frontier_dense_eval_rows(
+        cache, backend, weight, input, input_count, rows, output, error);
 }
 
 bool rotate_optional(Qwen4ExpFrontierDenseCache * cache,
