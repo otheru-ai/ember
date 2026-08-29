@@ -491,6 +491,12 @@ jobs:
   qwen-prove-q3-first-token:
     needs: [qwen-plan-q3-first-token, qwen-build-q3-first-token]
     if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     uses: ./.github/workflows/qwen-q3-first-token.yml
     with:
       commit_sha: ${{ inputs.commit_sha }}

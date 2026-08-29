@@ -705,6 +705,11 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("qwen-plan-q3-first-token:", body)
         self.assertIn("qwen-build-q3-first-token:", body)
         self.assertIn("qwen-prove-q3-first-token:", body)
+        q3_proof_job = body[body.index("  qwen-prove-q3-first-token:"):
+                            body.index("  qwen-inspect-control-residue:")]
+        for permission in ("contents: read", "packages: read", "id-token: write",
+                           "attestations: write", "artifact-metadata: write"):
+            self.assertIn(permission, q3_proof_job)
         self.assertIn("contains(github.workflow_ref, '/.github/workflows/gfx1151-certify.yml@')",
                       WORKFLOW.read_text(encoding="utf-8"))
         self.assertIn("ember.qwen3.8.branch-dispatch-envelope.v1", body)
