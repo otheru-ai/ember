@@ -258,8 +258,9 @@ struct Qwen4ExpMtpVerifyResult {
 
 // Runs one bounded target batch over [base, candidate_0, ...], compares each
 // row's next-token logits to the corresponding candidate, and reconciles the
-// complete target state. A rejected candidate may already have mutated every
-// target state family, so every non-full result goes through strict replay.
+// complete target state. Batched acceptance is tentative: q=1 replay confirms
+// every candidate before it can be committed, so reduction-order argmax drift
+// cannot change the generated token stream.
 bool qwen4exp_verify_bounded_batch(
     Qwen4ExpState & target_state,
     std::vector<float> & target_logits,

@@ -246,26 +246,56 @@ bool qwen4exp_verify_bounded_batch(
         return false;
     }
 
+    size_t batch_accepted = 0;
     for (size_t i = 0; i < candidates.size(); ++i) {
         if (argmax_row(output.row_logits[i]) != candidates[i]) break;
-        ++result.accepted_predictions;
+        ++batch_accepted;
         if (candidates[i] == eos_id || candidates[i] == eot_id) {
-            result.terminal_prediction = true;
             break;
         }
     }
-    // The base row is always authoritative. Every accepted non-terminal
-    // candidate is also an emitted input row; EOS/EOT is observed but is not
-    // consumed, matching ordinary q=1 generation semantics.
-    result.committed_input_rows = 1 + result.accepted_predictions;
-    if (result.terminal_prediction) --result.committed_input_rows;
-    target_logits = output.row_logits.back();
-    if (!qwen4exp_replay_accepted_prefix(
-            committed_state, committed_logits, target_state, target_logits,
-            input_rows, result.committed_input_rows, replay_step, opaque,
-            result.replay, error)) {
-        output = {};
-        return false;
+
+    // The layer-major verifier is a proposal accelerator, not an authority
+    // boundary. A different reduction order can move a near-tied argmax even
+    // when every tensor/state update is otherwise valid. The gfx1151 Q3
+    // differential caught exactly that after 29 emitted tokens: a batched
+    // false acceptance escaped because the old full-accept path retained its
+    // logits without q=1 confirmation. Replay the authoritative base row and
+    // every tentatively accepted candidate, stopping at the first q=1
+    // disagreement. No proposed token is committed from batched logits alone.
+    target_state = committed_state;
+    target_logits = committed_logits;
+    result.replay.disposition =
+        Qwen4ExpReplayDisposition::ReplayedAcceptedPrefix;
+    auto replay_row = [&](size_t row) {
+        if (!replay_step(opaque, target_state, input_rows[row], target_logits,
+                         error)) {
+            target_state = committed_state;
+            target_logits = committed_logits;
+            result = {};
+            output = {};
+            if (error.empty())
+                error = "Qwen4Exp MTP authoritative q=1 replay failed";
+            return false;
+        }
+        ++result.replay.rows_replayed;
+        output.row_hc[row] = target_state.hc;
+        return true;
+    };
+    if (!replay_row(0)) return false;
+    result.committed_input_rows = 1;
+    while (result.accepted_predictions < batch_accepted) {
+        const size_t candidate_index = result.accepted_predictions;
+        if (argmax_row(target_logits) != candidates[candidate_index]) break;
+        ++result.accepted_predictions;
+        const int32_t accepted = candidates[candidate_index];
+        if (accepted == eos_id || accepted == eot_id) {
+            result.terminal_prediction = true;
+            break;
+        }
+        const size_t input_row = candidate_index + 1;
+        if (!replay_row(input_row)) return false;
+        ++result.committed_input_rows;
     }
     return true;
 }

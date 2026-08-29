@@ -76,6 +76,8 @@ struct StepHarness {
 struct BatchHarness {
     StepHarness step;
     std::vector<int32_t> predictions;
+    std::vector<int32_t> replay_predictions;
+    size_t replay_calls = 0;
     bool fail = false;
 };
 
@@ -141,7 +143,13 @@ static bool fake_batch_replay(void * opaque, Qwen4ExpState & state,
                               std::vector<float> & logits,
                               std::string & error) {
     auto * batch = static_cast<BatchHarness *>(opaque);
-    return fake_q1_step(&batch->step, state, row, logits, error);
+    if (!fake_q1_step(&batch->step, state, row, logits, error)) return false;
+    const auto & predictions = batch->replay_predictions.empty()
+        ? batch->predictions : batch->replay_predictions;
+    if (batch->replay_calls >= predictions.size()) return false;
+    logits.assign(16, -1.0f);
+    logits[static_cast<size_t>(predictions[batch->replay_calls++])] = 1.0f;
+    return true;
 }
 
 static std::vector<Qwen4ExpReplayRow> rows() {
@@ -531,12 +539,23 @@ static void test_bounded_batch_full_and_partial_rejection() {
               fake_verify_batch, fake_batch_replay, &full_batch, output,
               result, error),
           "bounded target batch accepts a complete draft");
-    CHECK(result.accepted_predictions == 3 &&
+    Qwen4ExpState full_expected = committed;
+    std::vector<float> full_expected_logits = committed_logits;
+    BatchHarness full_expected_batch;
+    full_expected_batch.predictions = full_batch.predictions;
+    bool full_expected_ok = true;
+    for (const auto & row : input)
+        full_expected_ok = full_expected_ok && fake_batch_replay(
+            &full_expected_batch, full_expected, row, full_expected_logits,
+            error);
+    CHECK(full_expected_ok && result.accepted_predictions == 3 &&
               result.committed_input_rows == 4 &&
               result.replay.disposition ==
-                  Qwen4ExpReplayDisposition::FullAcceptance &&
-              result.replay.rows_replayed == 0,
-          "full bounded acceptance retains the batch state");
+                  Qwen4ExpReplayDisposition::ReplayedAcceptedPrefix &&
+              result.replay.rows_replayed == 4 &&
+              same_state(full, full_expected) &&
+              full_logits == full_expected_logits,
+          "full bounded acceptance is confirmed by authoritative q=1 replay");
     CHECK(output.row_logits.size() == 4 && output.row_hc.size() == 4 &&
               full.cur_pos == committed.cur_pos + 4,
           "bounded verifier exposes every target logit and HC row");
@@ -552,11 +571,12 @@ static void test_bounded_batch_full_and_partial_rejection() {
           "bounded target batch reconciles a partial rejection");
     Qwen4ExpState expected = committed;
     std::vector<float> expected_logits = committed_logits;
-    StepHarness expected_step;
-    CHECK(fake_q1_step(&expected_step, expected, input[0], expected_logits,
-                       error) &&
-              fake_q1_step(&expected_step, expected, input[1], expected_logits,
-                           error),
+    BatchHarness expected_step;
+    expected_step.predictions = partial_batch.predictions;
+    CHECK(fake_batch_replay(&expected_step, expected, input[0], expected_logits,
+                            error) &&
+              fake_batch_replay(&expected_step, expected, input[1],
+                                expected_logits, error),
           "partial bounded reference prefix builds");
     CHECK(result.accepted_predictions == 1 &&
               result.committed_input_rows == 2 && same_state(partial, expected) &&
@@ -576,6 +596,37 @@ static void test_bounded_batch_full_and_partial_rejection() {
     partial_logits = snapshot_logits;
     CHECK(same_state(partial, expected) && partial_logits == expected_logits,
           "post-rejection snapshot restores target state and seed logits");
+}
+
+static void test_bounded_batch_false_acceptance_is_rejected_by_q1() {
+    const std::vector<Qwen4ExpReplayRow> input = {
+        {210, {7, 7, 7}}, {211, {8, 8, 8}},
+        {212, {9, 9, 9}}, {213, {10, 10, 10}}};
+    const Qwen4ExpState committed = seed_state();
+    Qwen4ExpState state = committed;
+    std::vector<float> logits = {1.0f};
+    BatchHarness batch;
+    batch.predictions = {3, 4, 5, 6};
+    batch.replay_predictions = {8, 4, 5, 6};
+    Qwen4ExpMtpVerifyOutput output;
+    Qwen4ExpMtpVerifyResult result;
+    std::string error;
+    CHECK(qwen4exp_verify_bounded_batch(
+              state, logits, input, {3, 4, 5}, 14, 15,
+              fake_verify_batch, fake_batch_replay, &batch, output,
+              result, error),
+          "q=1 confirmation completes after a batched false acceptance");
+    Qwen4ExpState expected = committed;
+    std::vector<float> expected_logits = {1.0f};
+    BatchHarness expected_batch;
+    expected_batch.predictions = batch.replay_predictions;
+    CHECK(fake_batch_replay(&expected_batch, expected, input[0],
+                            expected_logits, error) &&
+              result.accepted_predictions == 0 &&
+              result.committed_input_rows == 1 &&
+              result.replay.rows_replayed == 1 &&
+              same_state(state, expected) && logits == expected_logits,
+          "batched-only argmax never escapes the authoritative base frontier");
 }
 
 static void test_bounded_batch_failure_is_transactional() {
@@ -618,11 +669,12 @@ static void test_bounded_terminal_is_observed_not_consumed() {
           "bounded target batch observes an accepted terminal prediction");
     Qwen4ExpState expected = committed;
     std::vector<float> expected_logits = {1.0f};
-    StepHarness expected_step;
-    CHECK(fake_q1_step(&expected_step, expected, input[0], expected_logits,
-                       error) &&
-              fake_q1_step(&expected_step, expected, input[1], expected_logits,
-                           error),
+    BatchHarness expected_step;
+    expected_step.predictions = batch.predictions;
+    CHECK(fake_batch_replay(&expected_step, expected, input[0], expected_logits,
+                            error) &&
+              fake_batch_replay(&expected_step, expected, input[1],
+                                expected_logits, error),
           "terminal reference frontier builds without consuming EOS");
     CHECK(result.accepted_predictions == 2 && result.terminal_prediction &&
               result.committed_input_rows == 2 && same_state(state, expected),
@@ -641,6 +693,7 @@ int main() {
     test_mtp_snapshot_frontier_invariant();
     test_layer_major_matches_token_major_causality();
     test_bounded_batch_full_and_partial_rejection();
+    test_bounded_batch_false_acceptance_is_rejected_by_q1();
     test_bounded_batch_failure_is_transactional();
     test_bounded_terminal_is_observed_not_consumed();
     std::printf("qwen4exp mtp replay: %d passed, %d failed\n", g_pass, g_fail);
