@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 import qwen_selection_corpus_stage as selection_stage  # noqa: E402
 import qwen_candidate_request as candidate_request  # noqa: E402
+import qwen_reuse_candidate as reuse_candidate  # noqa: E402
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -509,7 +510,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
     def test_modes_prepare_shared_inputs_and_build_one_candidate(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn(
-            "options: [prepare-cache, prepare-companions, build-candidate, normalize-candidate]",
+            "options: [prepare-cache, prepare-companions, build-candidate, reuse-candidate, normalize-candidate]",
             body,
         )
         dispatch = re.search(r"workflow_dispatch:\n    inputs:\n(.*?)\npermissions:", body, re.S)
@@ -928,10 +929,122 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("Attest the complete Q3 benchmark evidence", proof)
         self.assertIn("no quality or performance claim", proof)
 
+        self.assertIn("construction_mode:", plan)
+        self.assertIn("ARTIFACT_BUILDER_SHA:", plan)
+        self.assertIn("git diff --quiet", plan)
+        self.assertIn("construction_mode=reuse-candidate", plan)
+        self.assertIn("mode: ${{ needs.qwen-plan-q3-first-token.outputs.construction_mode }}",
+                      DISPATCHER.read_text(encoding="utf-8"))
+        construct_workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("scripts/qwen_reuse_candidate.py", construct_workflow)
+        self.assertIn("inputs.mode != 'reuse-candidate'", construct_workflow)
+
         construct = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("construction_descriptor:", construct)
         self.assertIn("steps.construction_descriptor.outputs.path", construct)
         self.assertIn("steps.construction_descriptor.outputs.sha256", construct)
+
+    def test_candidate_reuse_rebinds_runtime_without_changing_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def write(name: str, value: object) -> tuple[Path, str]:
+                path = root / name
+                path.write_text(json.dumps(value, sort_keys=True) + "\n",
+                                encoding="utf-8")
+                return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def desc(pair: tuple[Path, str]) -> dict[str, str]:
+                return {"path": str(pair[0].resolve()), "sha256": pair[1]}
+
+            capture = write("capture.json", {"capture": True})
+            cache = write("cache.json", {"cache": True})
+            selection = write("selection.json", {"selection": True})
+            intervention = write("intervention.json", {"intervention": True})
+            rocmi4 = write("rocmi4.json", {"format": "ROCMI4"})
+            fast = write("fast.json", {"format": "FAST"})
+            shard = root / "model.gguf"
+            shard.write_bytes(b"immutable-q3-artifact")
+            shard_sha = hashlib.sha256(shard.read_bytes()).hexdigest()
+            builder_revision = "b" * 40
+            candidate_id = "q3-stable-artifact"
+            format_sha = "f" * 64
+            rows = [{"path": str(shard.resolve()), "size_bytes": shard.stat().st_size,
+                     "sha256": shard_sha}]
+            build = write("build.json", {
+                "status": "complete", "mode": "execute",
+                "tools": {"ember_revision": builder_revision},
+                "quantization_recipe": {
+                    "id": "q3-recipe",
+                    "selected_mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+                    "ple_override_preserved": True,
+                },
+                "output": {"shards": rows},
+            })
+            attestation = write("attestation.json", {
+                "schema": "ember.qwen3.8.candidate-workset-attestation.v1",
+                "candidate_id": candidate_id,
+                "build_record_sha256": build[1],
+                "builder_identity": {
+                    "ember_revision": builder_revision,
+                    "tensor_format_contract_sha256": format_sha,
+                },
+                "tensor_format_compatibility_sha256": format_sha,
+            })
+            old_image = "ghcr.io/otheru-ai/ember@sha256:" + "1" * 64
+            construction = write("construction.json", {
+                "schema": "ember.qwen3.8.candidate-construction.v1",
+                "status": "complete", "publishes": False, "deletes": False,
+                "candidate_id": candidate_id, "kind": "intervention",
+                "intended_stage": "format", "row_id": "q3-row",
+                "intervention_configuration_id": "lambda",
+                "quantization_arm": "q3-recipe",
+                "mtp_matrix_quant_contract": "Q4_0_ROCMFP4_FAST",
+                "runtime_mode": "exact_dequant",
+                "builder_revision": builder_revision,
+                "runtime_revision": builder_revision,
+                "images": {
+                    "builder": {"ref": old_image, "digest": "sha256:" + "1" * 64},
+                    "runtime": {"release_ref": old_image,
+                                "release_digest": "sha256:" + "1" * 64,
+                                "dev_ref": old_image,
+                                "dev_digest": "sha256:" + "1" * 64,
+                                "tensor_format_contract_sha256": format_sha},
+                },
+                "capture": desc(capture), "stock_capture": None,
+                "bf16_cache": desc(cache),
+                "shared_companions": {"Q4_0_ROCMI4": desc(rocmi4),
+                                      "Q4_0_ROCMFP4_FAST": desc(fast)},
+                "selection_plan": desc(selection), "build_record": desc(build),
+                "builder_attestation": desc(attestation),
+                "intervention_manifest": desc(intervention),
+                "artifacts": {"shards": rows,
+                              "total_bytes": shard.stat().st_size},
+                "v3_candidate_manifest": {"ready": False, "blocked_on": []},
+            })
+            runtime_revision = "c" * 40
+            release = "ghcr.io/otheru-ai/ember@sha256:" + "2" * 64
+            dev = "ghcr.io/otheru-ai/ember@sha256:" + "3" * 64
+            args = reuse_candidate.parse_args([
+                "--construction", str(construction[0]),
+                "--construction-sha256", construction[1],
+                "--runtime-revision", runtime_revision,
+                "--runtime-release-ref", release,
+                "--runtime-release-digest", "sha256:" + "2" * 64,
+                "--runtime-dev-ref", dev,
+                "--runtime-dev-digest", "sha256:" + "3" * 64,
+                "--tensor-format-contract-sha256", format_sha,
+                "--output", str(root / "rebound.json"),
+            ])
+            rebound = reuse_candidate.rebind(args)
+            self.assertEqual(rebound["builder_revision"], builder_revision)
+            self.assertEqual(rebound["runtime_revision"], runtime_revision)
+            self.assertEqual(rebound["artifacts"]["shards"], rows)
+            self.assertEqual(rebound["images"]["runtime"]["release_ref"], release)
+            shard.write_bytes(b"mutated")
+            with self.assertRaisesRegex(reuse_candidate.ReuseError,
+                                        "candidate shard 0 differs"):
+                reuse_candidate.rebind(args)
 
     def test_embedded_operation_request_parser_accepts_only_exact_mode_shape(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
@@ -951,7 +1064,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                 text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(len(result.stdout.splitlines()), 21)
+            self.assertEqual(len(result.stdout.splitlines()), 23)
             value["parameters"]["unexpected"] = None
             request.write_text(json.dumps(value) + "\n", encoding="utf-8")
             malformed = subprocess.run(

@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$CANDIDATE_ID" = "q3-ple-first-token-${TARGET_SHA:0:12}" ]]
+          [[ "$CANDIDATE_ID" =~ ^q3-ple-first-token-[0-9a-f]{12}$ ]]
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
           git diff --quiet --exit-code
           [[ "$CONSTRUCTION_DESCRIPTOR" = /* && -f "$CONSTRUCTION_DESCRIPTOR" && ! -L "$CONSTRUCTION_DESCRIPTOR" ]]
@@ -71,7 +71,8 @@ jobs:
                   or descriptor.get("quantization_arm") != "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head"
                   or descriptor.get("mtp_matrix_quant_contract") != "Q4_0_ROCMFP4_FAST"
                   or descriptor.get("runtime_mode") != "exact_dequant"
-                  or descriptor.get("builder_revision") != revision
+                  or re.fullmatch(r"[0-9a-f]{40}",
+                                  str(descriptor.get("builder_revision", ""))) is None
                   or descriptor.get("runtime_revision") != revision):
               raise SystemExit("construction descriptor is not the exact nonpublishing Q3 smoke candidate")
           def exact(item, label):
