@@ -505,6 +505,43 @@ jobs:
       construction_descriptor_sha256: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor_sha256 }}
     secrets: inherit
 
+  qwen-diagnose-first-token:
+    # Read-only recovery for a failed proof whose bounded output remains on the
+    # pinned runner. The source revision/run/attempt are carried in the special
+    # release_version so the default-branch dispatcher needs no new inputs.
+    if: startsWith(inputs.release_version, 'qwen-diagnose-first-token-')
+    runs-on: [self-hosted, linux, x64, gfx1151]
+    timeout-minutes: 5
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      SOURCE_SPEC: ${{ inputs.release_version }}
+    steps:
+      - name: Read the bounded retained Q3 proof output
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$TARGET_SHA" = "${{ github.sha }}"
+          if [[ "$SOURCE_SPEC" =~ ^qwen-diagnose-first-token-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+            source_sha="${BASH_REMATCH[1]}"
+            source_run_id="${BASH_REMATCH[2]}"
+            source_run_attempt="${BASH_REMATCH[3]}"
+          else
+            echo 'invalid retained first-token source specification' >&2
+            exit 2
+          fi
+          root=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/first-token
+          output="$root/q3-ple-${source_sha:0:12}-$source_run_id-$source_run_attempt"
+          [[ -d "$root" && ! -L "$root" && -d "$output" && ! -L "$output" ]]
+          for name in validation.json engine.log; do
+            path="$output/$name"
+            if [[ -f "$path" && ! -L "$path" ]]; then
+              printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
+              tail -n 240 -- "$path"
+            else
+              printf '===== %s was not created =====\n' "$name"
+            fi
+          done
+
   qwen-inspect-control-residue:
     # Read-only forensic mode for a failed bounded conversion.  It reports
     # inode metadata and relative names only; it never opens, removes, or
