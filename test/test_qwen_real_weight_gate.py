@@ -331,6 +331,31 @@ class QwenRealWeightGateTest(unittest.TestCase):
             self.assertEqual(evidence["dispatch_confirmation"],
                              "not_applicable_w4a8_not_configured")
 
+    def test_no_eligible_recipe_binds_control_mode_without_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log_path = Path(temporary) / "control.log"
+            out_path = Path(temporary) / "control.json"
+            log_path.write_text("ordinary exact int8 startup\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(log_path),
+                 "--output", str(out_path), "--expected-capability",
+                 "no_eligible_rocmi4_mmq"], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(out_path.read_text(encoding="utf-8"))
+            self.assertEqual(evidence["candidate_kernel_capability"],
+                             "no_eligible_rocmi4_mmq")
+            self.assertEqual(evidence["candidate_timing_kernel_mode"],
+                             "not_applicable_no_eligible_rocmi4_mmq")
+            self.assertEqual(evidence["ordered_control_ids"], [])
+
+            rejected = subprocess.run(
+                [sys.executable, str(DISPATCH), "--log", str(log_path),
+                 "--output", str(Path(temporary) / "eligible.json"),
+                 "--expected-capability", "rocmi4_dense_only"],
+                text=True, capture_output=True)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("differs from expected", rejected.stderr)
+
     def test_compile_evidence_triggers_cover_all_production_tu_inputs(self) -> None:
         workflow = (ROOT / ".github/workflows/rocmi4-w4a8-compile-evidence.yml").read_text(
             encoding="utf-8")

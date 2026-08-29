@@ -482,7 +482,8 @@ if not isinstance(rate, (int, float)) or not 0.0 <= rate < 1.0:
 PY
 python3 "$DISPATCH_EVIDENCE" \
   --log "$OUT_DIR/differential-dispatch-server.log" \
-  --output "$OUT_DIR/kernel-runtime-evidence.json"
+  --output "$OUT_DIR/kernel-runtime-evidence.json" \
+  --expected-capability "$candidate_kernel_capability"
 python3 - "$OUT_DIR/w4a8-build-evidence.json" \
   "$OUT_DIR/kernel-runtime-evidence.json" <<'PY'
 import json, sys

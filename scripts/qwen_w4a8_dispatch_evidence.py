@@ -73,6 +73,34 @@ class EvidenceError(ValueError):
     pass
 
 
+def bind_expected_capability(evidence: dict[str, object],
+                             expected: str | None) -> dict[str, object]:
+    if expected is None:
+        return evidence
+    actual = evidence.get("candidate_kernel_capability")
+    if (actual is None and expected == "no_eligible_rocmi4_mmq" and
+            evidence.get("dispatch_confirmation") ==
+            "not_applicable_w4a8_not_configured"):
+        enriched = dict(evidence)
+        enriched.update({
+            "candidate_kernel_capability": expected,
+            "candidate_timing_kernel_mode":
+                "not_applicable_no_eligible_rocmi4_mmq",
+            "dispatch_confirmation":
+                "not_applicable_no_eligible_rocmi4_mmq",
+            "capability_confirmation":
+                "quant_recipe_declares_no_eligible_rocmi4_mmq",
+            "positive_controls": {}, "negative_controls": {},
+            "ordered_control_ids": [], "observed_kernel_dispatches": [],
+            "logical_dense_scopes": [],
+        })
+        return enriched
+    if actual != expected:
+        raise EvidenceError(
+            f"runtime capability {actual!r} differs from expected {expected!r}")
+    return evidence
+
+
 def parse_log(text: str) -> dict[str, object]:
     marker_lines = [line[line.index("ROCmI4"):].strip()
                     for line in text.splitlines() if "ROCmI4 W4A" in line]
@@ -320,9 +348,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--expected-capability",
+        choices=("rocmi4_dense_and_routed", "rocmi4_dense_only",
+                 "no_eligible_rocmi4_mmq"),
+        help="capability already bound to the candidate quant recipe")
     args = parser.parse_args()
     try:
         evidence = parse_log(args.log.read_text(encoding="utf-8", errors="replace"))
+        evidence = bind_expected_capability(evidence, args.expected_capability)
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(evidence, stream, indent=2, sort_keys=True)
             stream.write("\n")
