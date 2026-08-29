@@ -521,6 +521,7 @@ benchmark_args=(
   --health-endpoint "http://127.0.0.1:$PORT/health" --health-timeout 1800
   --model qwen3.8-flash-next --output "$OUT_DIR/timing.jsonl"
   --protocol hard-gate --prefill-target 412.0 --decode-target 39.49
+  --calibrate-qwen-shapes
   --server-pid "$TIMING_HOST_PID" --gtt-cap-bytes 133143986176
 )
 if (( ! MEASUREMENT_ONLY )); then

@@ -154,6 +154,34 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(fake.words, [2048, 2043])
         self.assertEqual(attempts[-1]["prompt_tokens"], 2074)
 
+    def test_qwen_decode_calibration_records_and_selects_exact_shape(self) -> None:
+        class FakeSuite:
+            def __init__(self) -> None:
+                self.markers: list[str] = []
+
+            def request(self, _label: str, prompt: str, _max_tokens: int,
+                        *, group: str, repeat: int) -> dict:
+                del group, repeat
+                marker = prompt.split("Marker ", 1)[1].split(".", 1)[0]
+                self.markers.append(marker)
+                lengths = {"D": 25, "E": 1, "F": 256}
+                length = lengths[marker]
+                return {"ok": True, "completion_tokens": length,
+                        "finish_reason": "length" if length == 256 else "stop"}
+
+        fake = FakeSuite()
+        marker, attempts = benchmark.calibrate_decode_marker(fake, 256)
+        self.assertEqual(marker, "F")
+        self.assertEqual(fake.markers, ["D", "E", "F"])
+        self.assertEqual([row["completion_tokens"] for row in attempts],
+                         [25, 1, 256])
+
+    def test_qwen_gate_protocol_is_bound_in_machine_evidence(self) -> None:
+        gate = benchmark.evaluate_hard_gate(
+            self.records(), prefill_target=412.0, decode_target=39.49,
+            protocol=benchmark.QWEN_HARD_GATE_PROTOCOL)
+        self.assertEqual(gate["protocol"], benchmark.QWEN_HARD_GATE_PROTOCOL)
+
     def test_http_error_preserves_bounded_backend_response(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             suite = benchmark.Suite(

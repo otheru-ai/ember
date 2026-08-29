@@ -302,6 +302,7 @@ def evaluate_memory_gate(resources: dict, *, gtt_cap_bytes: int) -> dict:
 
 
 HARD_GATE_PROTOCOL = "ember-2026.8.24-prefill2048-decode256-v1"
+QWEN_HARD_GATE_PROTOCOL = "ember-2026.8.29-qwen-prefill2074-decode256-v1"
 HARD_GATE_PREFILL_TPS = 412.0
 HARD_GATE_DECODE_TPS = 39.49
 HARD_GATE_PREFILL_TOKENS = 2074
@@ -491,7 +492,8 @@ class Suite:
 
 
 def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
-                       decode_target: float) -> dict:
+                       decode_target: float,
+                       protocol: str = HARD_GATE_PROTOCOL) -> dict:
     prefill_rows = [
         row for row in records
         if row.get("kind") == "request" and row.get("group") == "prefill-2048"
@@ -530,7 +532,7 @@ def evaluate_hard_gate(records: list[dict], *, prefill_target: float,
         decode_median is not None and decode_median >= decode_target
     )
     return {
-        "protocol": HARD_GATE_PROTOCOL,
+        "protocol": protocol,
         "passed": passed,
         "required_samples_per_group": HARD_GATE_SAMPLES,
         "prefill_2048": {
@@ -652,6 +654,38 @@ def calibrate_prefill_words(suite: Suite, target_tokens: int,
     return words, attempts
 
 
+def calibrate_decode_marker(suite: Suite, target_tokens: int,
+                            markers: str = "DEFGHJKLMNPQRSTUVWXYZ23456789",
+                            max_attempts: int = 8) -> tuple[str, list[dict]]:
+    """Select a recorded deterministic prompt that reaches the decode shape.
+
+    Qwen's greedy response length is unexpectedly sensitive to the otherwise
+    inert marker: retained Q3 evidence stopped at 25, 1, and 256 tokens for
+    markers D, E, and F.  Calibrate from a fixed public ordering, then repeat
+    that exact prompt for timing.  This does not use calibration throughput and
+    makes the workload selection auditable instead of silently discarding
+    short samples.
+    """
+    attempts: list[dict] = []
+    selected = markers[0]
+    for attempt, marker in enumerate(markers[:max_attempts], 1):
+        selected = marker
+        record = suite.request(
+            f"decode-calibration-r{attempt}", make_decode_prompt(marker),
+            target_tokens, group="decode-calibration", repeat=attempt)
+        observed = record.get("completion_tokens") if record.get("ok") else None
+        attempts.append({
+            "attempt": attempt,
+            "marker": marker,
+            "completion_tokens": observed,
+            "finish_reason": record.get("finish_reason"),
+            "ok": bool(record.get("ok")),
+        })
+        if observed == target_tokens:
+            break
+    return selected, attempts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", default="http://127.0.0.1:8000/v1/chat/completions")
@@ -666,6 +700,8 @@ def main() -> int:
                         default=HARD_GATE_DECODE_TPS)
     parser.add_argument("--require-gate", action="store_true",
                         help="exit nonzero unless the matched hard gate passes")
+    parser.add_argument("--calibrate-qwen-shapes", action="store_true",
+                        help="use recorded Qwen-specific exact-shape calibration")
     parser.add_argument("--server-pid", type=int,
                         help="explicit host PID of the timed server container")
     parser.add_argument("--proc-root", type=Path, default=Path("/proc"))
@@ -683,6 +719,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.require_gate and args.protocol != "hard-gate":
         parser.error("--require-gate requires --protocol hard-gate")
+    if args.calibrate_qwen_shapes and args.protocol != "hard-gate":
+        parser.error("--calibrate-qwen-shapes requires --protocol hard-gate")
     if args.prefill_target <= 0 or args.decode_target <= 0:
         parser.error("gate targets must be positive")
     if args.server_pid is not None and args.server_pid <= 1:
@@ -719,7 +757,8 @@ def main() -> int:
         "started_unix": time.time(),
         "endpoint": args.endpoint,
         "model": args.model,
-        "protocol": (HARD_GATE_PROTOCOL if args.protocol == "hard-gate"
+        "protocol": (QWEN_HARD_GATE_PROTOCOL if args.calibrate_qwen_shapes
+                     else HARD_GATE_PROTOCOL if args.protocol == "hard-gate"
                      else "full"),
         "container_pid": sampler.pid,
         "server_pid_source": "explicit" if args.server_pid is not None else "ember-server-fallback",
@@ -737,14 +776,22 @@ def main() -> int:
 
     markers = iter("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()")
     calibration: list[dict] = []
+    decode_calibration: list[dict] = []
     hard_gate_words = 2048
     if args.protocol == "hard-gate":
         hard_gate_words, calibration = calibrate_prefill_words(
-            suite, HARD_GATE_PREFILL_TOKENS)
+            suite, HARD_GATE_PREFILL_TOKENS,
+            marker="A" if args.calibrate_qwen_shapes else "0")
+    if args.calibrate_qwen_shapes:
+        markers = iter("BCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()")
     shapes = ((hard_gate_words, 3),) if args.protocol == "hard-gate" else (
         (128, 3), (512, 3), (2048, 3), (8192, 3), (16384, 2), (32768, 2))
     for words, repeats in shapes:
         for repeat in range(1, repeats + 1):
+            # Calibrate with single-token marker A, then time unique same-class
+            # markers B/C/D. This avoids both Qwen's digit-vs-letter token-count
+            # difference and an identical-prompt prefix-cache hit; the hard
+            # gate still verifies all three evaluated exactly 2,074 tokens.
             marker = next(markers)
             suite.request(
                 f"prefill-{words}-r{repeat}",
@@ -755,8 +802,12 @@ def main() -> int:
                 repeat=repeat,
             )
 
+    decode_marker = None
+    if args.calibrate_qwen_shapes:
+        decode_marker, decode_calibration = calibrate_decode_marker(
+            suite, 256)
     for repeat in range(1, 4):
-        marker = next(markers)
+        marker = decode_marker if decode_marker is not None else next(markers)
         suite.request(
             f"decode-256-r{repeat}",
             make_decode_prompt(marker),
@@ -775,7 +826,9 @@ def main() -> int:
     groups = suite.summarize()
     gate = evaluate_hard_gate(
         suite.records, prefill_target=args.prefill_target,
-        decode_target=args.decode_target) if args.protocol == "hard-gate" else None
+        decode_target=args.decode_target,
+        protocol=(QWEN_HARD_GATE_PROTOCOL if args.calibrate_qwen_shapes
+                  else HARD_GATE_PROTOCOL)) if args.protocol == "hard-gate" else None
     resources = sampler.summary()
     memory_gate = evaluate_memory_gate(
         resources, gtt_cap_bytes=args.gtt_cap_bytes)
@@ -789,6 +842,11 @@ def main() -> int:
             "selected_words": hard_gate_words,
             "attempts": calibration,
         } if args.protocol == "hard-gate" else None),
+        "decode_calibration": ({
+            "target_completion_tokens": 256,
+            "selected_marker": decode_marker,
+            "attempts": decode_calibration,
+        } if args.calibrate_qwen_shapes else None),
         "resources": resources,
         "memory_gate": memory_gate,
     })
