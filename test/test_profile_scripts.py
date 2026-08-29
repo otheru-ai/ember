@@ -26,6 +26,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROFILE_SH = ROOT / "scripts" / "profile_gpu.sh"
 PROFILE_PY = ROOT / "scripts" / "profile_report.py"
+CALIBRATE_SH = ROOT / "scripts" / "calibrate_counter_units.sh"
+CALIBRATE_PY = ROOT / "scripts" / "calibrate_counter_units.py"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import profile_report  # noqa: E402
@@ -60,6 +62,51 @@ def sabotaged_path(directory):
 class HarnessContractTests(unittest.TestCase):
     def test_script_is_syntactically_valid(self):
         subprocess.run(["bash", "-n", str(PROFILE_SH)], check=True, capture_output=True)
+        subprocess.run(["bash", "-n", str(CALIBRATE_SH)], check=True, capture_output=True)
+
+    def test_counter_calibration_dry_run_is_gpu_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = str(pathlib.Path(tmp) / "out")
+            result = subprocess.run(
+                ["bash", str(CALIBRATE_SH), "--dry-run", "--out-dir", out],
+                text=True, capture_output=True,
+                env=os.environ | {"PATH": tmp + os.pathsep + os.environ["PATH"]},
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("dry run: no GPU touched", result.stdout)
+
+    def test_counter_calibration_fit_accepts_known_kib_samples(self):
+        rows = []
+        for counter in ("FETCH_SIZE", "WRITE_SIZE"):
+            for value in (1_000_000, 2_000_000, 4_000_000):
+                rows.append({"counter": counter, "expected_bytes": value * 1024,
+                             "traffic": value + 17, "baseline": 17})
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = pathlib.Path(tmp) / "samples.jsonl"
+            samples.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            result = subprocess.run(
+                [sys.executable, str(CALIBRATE_PY), str(samples)],
+                text=True, capture_output=True, check=True,
+            )
+        report = json.loads(result.stdout)
+        self.assertEqual(report["FETCH_SIZE"]["candidate_unit"], "kb")
+        self.assertEqual(report["WRITE_SIZE"]["candidate_unit"], "kb")
+        self.assertTrue(report["FETCH_SIZE"]["certified"])
+        self.assertTrue(report["WRITE_SIZE"]["certified"])
+
+    def test_counter_calibration_requires_both_counters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = pathlib.Path(tmp) / "samples.jsonl"
+            samples.write_text("\n".join(json.dumps({
+                "counter": "FETCH_SIZE", "expected_bytes": value,
+                "traffic": value / 1024, "baseline": 0,
+            }) for value in (1024, 2048, 4096)) + "\n")
+            result = subprocess.run(
+                [sys.executable, str(CALIBRATE_PY), str(samples)],
+                text=True, capture_output=True,
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("WRITE_SIZE", result.stderr)
 
     def test_dry_run_touches_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:

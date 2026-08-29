@@ -38,6 +38,22 @@ known-traffic gfx1151 microbenchmark confirms the unit and the operator passes
 that calibrated value explicitly with `--counter-unit`. Preserve the raw
 `rocprofv3-counter-info.txt` in that calibration record.
 
+The reproducible calibration workload is `tools/bench_counter_traffic.hip`.
+Run its collector on the exclusively held target:
+
+```bash
+scripts/calibrate_counter_units.sh --image ember-rocm:10.0-dev \
+  --out-dir /var/tmp/ember-counter-calibration-<stamp>
+```
+
+The collector profiles `FETCH_SIZE` against read-only 64-byte cache-line
+streams and `WRITE_SIZE` against write-only streams, with a no-memory baseline,
+three buffer sizes larger than MALL, and one PMC pass per counter. It writes
+raw CSVs, `samples.jsonl`, and a regression result. A unit is accepted only if
+the inferred bytes-per-counter value is within 2% of bytes, KiB, or MiB and the
+fit residual is also below 2%. Do not infer the unit from the model's nominal
+weight size or from a PMC-pass duration; those are different quantities.
+
 ROCm Compute Profiler's roofline is a complementary machine-ceiling
 measurement:
 
