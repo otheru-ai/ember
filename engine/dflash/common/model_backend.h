@@ -456,6 +456,12 @@ struct ModelBackend {
     // Returns empty ref (ctx==nullptr) if slot is invalid or unused.
     virtual SnapshotRef snapshot_ref(int slot) const { (void)slot; return {}; }
 
+    // Release any transient representation produced by snapshot_ref(). Most
+    // backends expose their native snapshot tensors and need no cleanup.
+    // Vector-backed backends may materialize a temporary tensor view solely
+    // for DiskPrefixCache; the cache calls this after it finishes reading it.
+    virtual void snapshot_ref_release(int slot) const { (void)slot; }
+
     // Import a deserialized snapshot into the given slot. Backend takes
     // ownership of ctx and buf on success. On failure (returns false),
     // the caller is responsible for freeing ctx and buf.

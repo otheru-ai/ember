@@ -113,6 +113,7 @@ public:
     bool empty() const { return size_ == 0; }
     float at(size_t index) const;
     void append(const float * values, size_t count);
+    bool copy_to(float * values, size_t count) const;
     void clear();
     size_t shared_slab_count() const { return slabs_.size(); }
     uint64_t account_bytes(std::unordered_set<const void *> & seen) const;

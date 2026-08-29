@@ -103,6 +103,12 @@ int main() {
           snapshot.layers[3].value.size() == 2 &&
           snapshot.layers[3].index_key.size() == 2,
           "snapshot keeps QSA K/V and raw index-K atomically");
+    std::vector<float> exported_key(snapshot.layers[3].key.size());
+    CHECK(snapshot.layers[3].key.copy_to(exported_key.data(),
+                                         exported_key.size()) &&
+              exported_key == std::vector<float>({1.0f, 2.0f}) &&
+              !snapshot.layers[3].key.copy_to(exported_key.data(), 1),
+          "QSA snapshot exports an exact, size-checked disk representation");
     const float live_more[] = {7.0f};
     state.layers[3].key.append(live_more, 1);
     CHECK(snapshot.layers[3].key.size() == 2 &&

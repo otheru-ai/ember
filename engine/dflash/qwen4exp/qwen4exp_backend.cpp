@@ -149,6 +149,11 @@ bool Qwen4ExpBackend::init() {
         set_last_error("failed to initialize Qwen4Exp HIP backend");
         return false;
     }
+    snapshot_backend_ = ggml_backend_init_by_name("cpu", nullptr);
+    if (!snapshot_backend_) {
+        set_last_error("failed to initialize Qwen4Exp snapshot backend");
+        return false;
+    }
     const auto hip_end = Clock::now();
     const int max_ctx = config_.max_ctx > 0 ? config_.max_ctx : 8192;
     std::string error;
@@ -787,6 +792,7 @@ bool Qwen4ExpBackend::snapshot_save(int slot) {
                             mtp_depth_ ? &mtp_snapshot : nullptr) >
         state_budget_bytes_)
         return false;
+    snapshot_ref_release(slot);
     snapshots_[static_cast<size_t>(slot)] = std::move(snapshot);
     if (mtp_depth_)
         mtp_snapshots_[static_cast<size_t>(slot)] = std::move(mtp_snapshot);
@@ -795,6 +801,7 @@ bool Qwen4ExpBackend::snapshot_save(int slot) {
 
 void Qwen4ExpBackend::snapshot_free(int slot) {
     if (valid_slot(slot)) {
+        snapshot_ref_release(slot);
         snapshots_[static_cast<size_t>(slot)] = {};
         mtp_snapshots_[static_cast<size_t>(slot)] = {};
     }
@@ -809,16 +816,376 @@ int Qwen4ExpBackend::snapshot_cur_pos(int slot) const {
         ? snapshots_[static_cast<size_t>(slot)].state.cur_pos : 0;
 }
 
+ModelBackend::SnapshotRef Qwen4ExpBackend::snapshot_ref(int slot) const {
+    SnapshotRef ref;
+    if (!valid_slot(slot) || !snapshot_used(slot) || !snapshot_backend_)
+        return ref;
+
+    snapshot_ref_release(slot);
+    const Qwen4ExpSnapshot & snapshot = snapshots_[static_cast<size_t>(slot)];
+    const Qwen4ExpState & state = snapshot.state;
+    constexpr size_t kHcValues = 10240;
+    constexpr size_t kPleValues = 9 * 10240;
+    constexpr size_t kGdnConvValues = 3 * 10240;
+    constexpr size_t kGdnRecurrentValues = 48 * 128 * 128;
+    const size_t rows = static_cast<size_t>(state.cur_pos);
+    if (state.cur_pos <= 0 || state.cur_pos > weights_.max_ctx ||
+        state.hc.size() != kHcValues || state.ple_conv.size() != kPleValues ||
+        !weights_.output ||
+        snapshot.logits.size() != static_cast<size_t>(weights_.output->ne[1]))
+        return ref;
+    for (const auto & axis : state.mrope_positions)
+        if (axis.size() != rows) return ref;
+    for (size_t layer = 0; layer < state.layers.size(); ++layer) {
+        const Qwen4ExpLayerState & ls = state.layers[layer];
+        if ((layer + 1) % 4 == 0) {
+            if (ls.key.size() != rows * 512 ||
+                ls.value.size() != rows * 512 ||
+                ls.index_key.size() != rows * 128) return ref;
+        } else if (!ls.conv || !ls.recurrent ||
+                   ls.conv->size() != kGdnConvValues ||
+                   ls.recurrent->size() != kGdnRecurrentValues) {
+            return ref;
+        }
+    }
+    if (mtp_depth_) {
+        const MtpSnapshot & mtp = mtp_snapshots_[static_cast<size_t>(slot)];
+        std::string error;
+        if (!mtp.used || !qwen4exp_mtp_frontier_valid(
+                state, mtp.state, mtp.target_hc, error)) return ref;
+    }
+
+    ggml_init_params params{};
+    params.mem_size = ggml_tensor_overhead() * 128U + 4096U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) return ref;
+    auto add_1d = [&](ggml_type type, int64_t count, const char * name) {
+        ggml_tensor * tensor = ggml_new_tensor_1d(ctx, type, count);
+        if (tensor) ggml_set_name(tensor, name);
+        return tensor != nullptr;
+    };
+    auto add_rows = [&](ggml_type type, int64_t width, int64_t count,
+                        const char * name) {
+        ggml_tensor * tensor = ggml_new_tensor_2d(ctx, type, width, count);
+        if (tensor) ggml_set_name(tensor, name);
+        return tensor != nullptr;
+    };
+    bool ok = add_1d(GGML_TYPE_I32, 9, "qwen_snap_meta") &&
+              add_1d(GGML_TYPE_F32, static_cast<int64_t>(kHcValues),
+                     "qwen_snap_hc") &&
+              add_1d(GGML_TYPE_F32, static_cast<int64_t>(kPleValues),
+                     "qwen_snap_ple_conv") &&
+              add_1d(GGML_TYPE_F32,
+                     static_cast<int64_t>(snapshot.logits.size()),
+                     "qwen_snap_logits");
+    char name[64];
+    for (int axis = 0; ok && axis < 3; ++axis) {
+        std::snprintf(name, sizeof(name), "qwen_snap_mrope_%d", axis);
+        ok = add_rows(GGML_TYPE_I32, 1, state.cur_pos, name);
+    }
+    for (int layer = 0; ok && layer < 48; ++layer) {
+        if ((layer + 1) % 4 == 0) {
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_key_%d", layer);
+            ok = add_rows(GGML_TYPE_F32, 512, state.cur_pos, name);
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_value_%d", layer);
+            ok = ok && add_rows(GGML_TYPE_F32, 512, state.cur_pos, name);
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_index_%d", layer);
+            ok = ok && add_rows(GGML_TYPE_F32, 128, state.cur_pos, name);
+        } else {
+            std::snprintf(name, sizeof(name), "qwen_snap_gdn_conv_%d", layer);
+            ok = add_1d(GGML_TYPE_F32,
+                        static_cast<int64_t>(kGdnConvValues), name);
+            std::snprintf(name, sizeof(name),
+                          "qwen_snap_gdn_recurrent_%d", layer);
+            ok = ok && add_1d(GGML_TYPE_F32,
+                              static_cast<int64_t>(kGdnRecurrentValues), name);
+        }
+    }
+    if (ok && mtp_depth_) {
+        const Qwen4ExpMtpState & mtp =
+            mtp_snapshots_[static_cast<size_t>(slot)].state;
+        ok = add_rows(GGML_TYPE_F32, 512, mtp.cur_pos,
+                      "qwen_snap_mtp_qsa_key") &&
+             add_rows(GGML_TYPE_F32, 512, mtp.cur_pos,
+                      "qwen_snap_mtp_qsa_value") &&
+             add_rows(GGML_TYPE_F32, 128, mtp.cur_pos,
+                      "qwen_snap_mtp_qsa_index") &&
+             add_1d(GGML_TYPE_F32, static_cast<int64_t>(kHcValues),
+                    "qwen_snap_mtp_hc") &&
+             add_1d(GGML_TYPE_F32, static_cast<int64_t>(kHcValues),
+                    "qwen_snap_mtp_target_hc");
+        for (int axis = 0; ok && axis < 3; ++axis) {
+            std::snprintf(name, sizeof(name), "qwen_snap_mtp_mrope_%d", axis);
+            ok = add_rows(GGML_TYPE_I32, 1, mtp.cur_pos, name);
+        }
+    }
+    if (!ok) {
+        ggml_free(ctx);
+        return ref;
+    }
+
+    ggml_backend_buffer_t buf =
+        ggml_backend_alloc_ctx_tensors(ctx, snapshot_backend_);
+    if (!buf) {
+        ggml_free(ctx);
+        return ref;
+    }
+    auto set_bytes = [&](const char * tensor_name, const void * data,
+                         size_t bytes) {
+        ggml_tensor * tensor = ggml_get_tensor(ctx, tensor_name);
+        if (!tensor || ggml_nbytes(tensor) != bytes) return false;
+        ggml_backend_tensor_set(tensor, data, 0, bytes);
+        return true;
+    };
+    const int32_t meta[9] = {
+        1, state.cur_pos, state.last_token, mtp_depth_,
+        mtp_depth_ ? mtp_snapshots_[static_cast<size_t>(slot)].state.cur_pos : 0,
+        state.ple_tokens[0], state.ple_tokens[1],
+        mtp_depth_ && !mtp_snapshots_[static_cast<size_t>(slot)].state.hc.empty(),
+        weights_.max_ctx};
+    ok = set_bytes("qwen_snap_meta", meta, sizeof(meta)) &&
+         set_bytes("qwen_snap_hc", state.hc.data(),
+                   state.hc.size() * sizeof(float)) &&
+         set_bytes("qwen_snap_ple_conv", state.ple_conv.data(),
+                   state.ple_conv.size() * sizeof(float)) &&
+         set_bytes("qwen_snap_logits", snapshot.logits.data(),
+                   snapshot.logits.size() * sizeof(float));
+    for (int axis = 0; ok && axis < 3; ++axis) {
+        std::snprintf(name, sizeof(name), "qwen_snap_mrope_%d", axis);
+        const auto & positions = state.mrope_positions[static_cast<size_t>(axis)];
+        ok = set_bytes(name, positions.data(),
+                       positions.size() * sizeof(int32_t));
+    }
+    std::vector<float> flattened;
+    auto set_cow = [&](const char * tensor_name,
+                       const Qwen4ExpCowBuffer & cow) {
+        flattened.resize(cow.size());
+        return cow.copy_to(flattened.data(), flattened.size()) &&
+               set_bytes(tensor_name, flattened.data(),
+                         flattened.size() * sizeof(float));
+    };
+    for (int layer = 0; ok && layer < 48; ++layer) {
+        const Qwen4ExpLayerState & ls = state.layers[static_cast<size_t>(layer)];
+        if ((layer + 1) % 4 == 0) {
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_key_%d", layer);
+            ok = set_cow(name, ls.key);
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_value_%d", layer);
+            ok = ok && set_cow(name, ls.value);
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_index_%d", layer);
+            ok = ok && set_cow(name, ls.index_key);
+        } else {
+            std::snprintf(name, sizeof(name), "qwen_snap_gdn_conv_%d", layer);
+            ok = set_bytes(name, ls.conv->data(),
+                           ls.conv->size() * sizeof(float));
+            std::snprintf(name, sizeof(name),
+                          "qwen_snap_gdn_recurrent_%d", layer);
+            ok = ok && set_bytes(name, ls.recurrent->data(),
+                                 ls.recurrent->size() * sizeof(float));
+        }
+    }
+    if (ok && mtp_depth_) {
+        const MtpSnapshot & mtp = mtp_snapshots_[static_cast<size_t>(slot)];
+        ok = set_cow("qwen_snap_mtp_qsa_key", mtp.state.qsa.key) &&
+             set_cow("qwen_snap_mtp_qsa_value", mtp.state.qsa.value) &&
+             set_cow("qwen_snap_mtp_qsa_index", mtp.state.qsa.index_key);
+        std::vector<float> zero_hc;
+        const std::vector<float> * mtp_hc = &mtp.state.hc;
+        if (mtp_hc->empty()) {
+            zero_hc.assign(kHcValues, 0.0f);
+            mtp_hc = &zero_hc;
+        }
+        ok = ok && set_bytes("qwen_snap_mtp_hc", mtp_hc->data(),
+                             mtp_hc->size() * sizeof(float)) &&
+             set_bytes("qwen_snap_mtp_target_hc", mtp.target_hc.data(),
+                       mtp.target_hc.size() * sizeof(float));
+        for (int axis = 0; ok && axis < 3; ++axis) {
+            std::snprintf(name, sizeof(name), "qwen_snap_mtp_mrope_%d", axis);
+            const auto & positions =
+                mtp.state.mrope_positions[static_cast<size_t>(axis)];
+            ok = set_bytes(name, positions.data(),
+                           positions.size() * sizeof(int32_t));
+        }
+    }
+    if (!ok) {
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+        return ref;
+    }
+    SerializedSnapshot & serialized =
+        serialized_snapshots_[static_cast<size_t>(slot)];
+    serialized.ctx = ctx;
+    serialized.buf = buf;
+    ref.ctx = ctx;
+    ref.buf = buf;
+    ref.cur_pos = state.cur_pos;
+    ref.last_tok = state.last_token;
+    return ref;
+}
+
+void Qwen4ExpBackend::snapshot_ref_release(int slot) const {
+    if (!valid_slot(slot)) return;
+    SerializedSnapshot & serialized =
+        serialized_snapshots_[static_cast<size_t>(slot)];
+    if (serialized.buf) ggml_backend_buffer_free(serialized.buf);
+    if (serialized.ctx) ggml_free(serialized.ctx);
+    serialized = {};
+}
+
+bool Qwen4ExpBackend::snapshot_adopt(int slot, ggml_context * ctx,
+                                    ggml_backend_buffer_t buf, int cur_pos,
+                                    int32_t last_tok) {
+    if (!valid_slot(slot) || !ctx || !buf || cur_pos <= 0 ||
+        cur_pos > weights_.max_ctx) return false;
+    auto tensor = [&](const char * name, ggml_type type, int64_t width,
+                      int64_t rows) -> ggml_tensor * {
+        ggml_tensor * value = ggml_get_tensor(ctx, name);
+        if (!value || value->type != type || value->ne[0] != width ||
+            value->ne[1] != rows || value->ne[2] != 1 || value->ne[3] != 1)
+            return nullptr;
+        return value;
+    };
+    auto read_f32 = [&](const char * name, size_t count,
+                        std::vector<float> & out) {
+        ggml_tensor * value = tensor(name, GGML_TYPE_F32,
+                                    static_cast<int64_t>(count), 1);
+        if (!value) return false;
+        out.resize(count);
+        ggml_backend_tensor_get(value, out.data(), 0,
+                                count * sizeof(float));
+        return true;
+    };
+    ggml_tensor * meta_tensor = tensor("qwen_snap_meta", GGML_TYPE_I32, 9, 1);
+    if (!meta_tensor) return false;
+    int32_t meta[9]{};
+    ggml_backend_tensor_get(meta_tensor, meta, 0, sizeof(meta));
+    if (meta[0] != 1 || meta[1] != cur_pos || meta[2] != last_tok ||
+        meta[3] != mtp_depth_ || meta[8] != weights_.max_ctx ||
+        (meta[7] != 0 && meta[7] != 1)) return false;
+
+    Qwen4ExpSnapshot snapshot;
+    snapshot.used = true;
+    snapshot.state.cur_pos = cur_pos;
+    snapshot.state.last_token = last_tok;
+    snapshot.state.ple_tokens = {meta[5], meta[6]};
+    if (!read_f32("qwen_snap_hc", 10240, snapshot.state.hc) ||
+        !read_f32("qwen_snap_ple_conv", 9 * 10240,
+                  snapshot.state.ple_conv)) return false;
+    ggml_tensor * logits_tensor = ggml_get_tensor(ctx, "qwen_snap_logits");
+    if (!weights_.output || !logits_tensor ||
+        logits_tensor->type != GGML_TYPE_F32 ||
+        logits_tensor->ne[0] != weights_.output->ne[1] ||
+        logits_tensor->ne[1] != 1 ||
+        logits_tensor->ne[2] != 1 || logits_tensor->ne[3] != 1) return false;
+    snapshot.logits.resize(static_cast<size_t>(logits_tensor->ne[0]));
+    ggml_backend_tensor_get(logits_tensor, snapshot.logits.data(), 0,
+                            snapshot.logits.size() * sizeof(float));
+
+    const size_t state_rows = static_cast<size_t>(cur_pos);
+    char name[64];
+    for (int axis = 0; axis < 3; ++axis) {
+        std::snprintf(name, sizeof(name), "qwen_snap_mrope_%d", axis);
+        ggml_tensor * value = tensor(name, GGML_TYPE_I32, 1, cur_pos);
+        if (!value) return false;
+        auto & positions =
+            snapshot.state.mrope_positions[static_cast<size_t>(axis)];
+        positions.resize(state_rows);
+        ggml_backend_tensor_get(value, positions.data(), 0,
+                                positions.size() * sizeof(int32_t));
+    }
+    auto read_cow = [&](const char * tensor_name, int64_t width, int64_t rows,
+                        Qwen4ExpCowBuffer & out) {
+        ggml_tensor * value = tensor(tensor_name, GGML_TYPE_F32, width, rows);
+        if (!value) return false;
+        std::vector<float> values(static_cast<size_t>(width * rows));
+        ggml_backend_tensor_get(value, values.data(), 0,
+                                values.size() * sizeof(float));
+        out.append(values.data(), values.size());
+        return true;
+    };
+    for (int layer = 0; layer < 48; ++layer) {
+        Qwen4ExpLayerState & ls =
+            snapshot.state.layers[static_cast<size_t>(layer)];
+        if ((layer + 1) % 4 == 0) {
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_key_%d", layer);
+            if (!read_cow(name, 512, cur_pos, ls.key)) return false;
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_value_%d", layer);
+            if (!read_cow(name, 512, cur_pos, ls.value)) return false;
+            std::snprintf(name, sizeof(name), "qwen_snap_qsa_index_%d", layer);
+            if (!read_cow(name, 128, cur_pos, ls.index_key)) return false;
+        } else {
+            std::vector<float> values;
+            std::snprintf(name, sizeof(name), "qwen_snap_gdn_conv_%d", layer);
+            if (!read_f32(name, 3 * 10240, values)) return false;
+            ls.conv = std::make_shared<std::vector<float>>(std::move(values));
+            std::snprintf(name, sizeof(name),
+                          "qwen_snap_gdn_recurrent_%d", layer);
+            if (!read_f32(name, 48 * 128 * 128, values)) return false;
+            ls.recurrent =
+                std::make_shared<std::vector<float>>(std::move(values));
+        }
+    }
+
+    MtpSnapshot mtp_snapshot;
+    if (mtp_depth_) {
+        if (meta[4] != cur_pos - 1) return false;
+        mtp_snapshot.used = true;
+        mtp_snapshot.state.cur_pos = meta[4];
+        if (!read_cow("qwen_snap_mtp_qsa_key", 512, meta[4],
+                      mtp_snapshot.state.qsa.key) ||
+            !read_cow("qwen_snap_mtp_qsa_value", 512, meta[4],
+                      mtp_snapshot.state.qsa.value) ||
+            !read_cow("qwen_snap_mtp_qsa_index", 128, meta[4],
+                      mtp_snapshot.state.qsa.index_key)) return false;
+        std::vector<float> mtp_hc;
+        if (!read_f32("qwen_snap_mtp_hc", 10240, mtp_hc) ||
+            !read_f32("qwen_snap_mtp_target_hc", 10240,
+                      mtp_snapshot.target_hc)) return false;
+        if (meta[7]) mtp_snapshot.state.hc = std::move(mtp_hc);
+        const size_t mtp_rows = static_cast<size_t>(meta[4]);
+        for (int axis = 0; axis < 3; ++axis) {
+            std::snprintf(name, sizeof(name), "qwen_snap_mtp_mrope_%d", axis);
+            ggml_tensor * value = tensor(name, GGML_TYPE_I32, 1, meta[4]);
+            if (!value) return false;
+            auto & positions =
+                mtp_snapshot.state.mrope_positions[static_cast<size_t>(axis)];
+            positions.resize(mtp_rows);
+            ggml_backend_tensor_get(value, positions.data(), 0,
+                                    positions.size() * sizeof(int32_t));
+        }
+        std::string error;
+        if (!qwen4exp_mtp_frontier_valid(
+                snapshot.state, mtp_snapshot.state, mtp_snapshot.target_hc,
+                error)) return false;
+    }
+    if (state_storage_bytes(slot, &snapshot,
+                            mtp_depth_ ? &mtp_snapshot : nullptr) >
+        state_budget_bytes_) return false;
+
+    snapshot_free(slot);
+    snapshots_[static_cast<size_t>(slot)] = std::move(snapshot);
+    if (mtp_depth_)
+        mtp_snapshots_[static_cast<size_t>(slot)] = std::move(mtp_snapshot);
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    return true;
+}
+
 void Qwen4ExpBackend::shutdown() {
     {
         std::lock_guard<std::mutex> lock(vision_provider_mu_);
         vision_provider_.reset();
     }
+    for (int slot = 0; slot < kMaxSlots; ++slot) snapshot_ref_release(slot);
     for (Qwen4ExpSnapshot & snapshot : snapshots_) snapshot = {};
     for (MtpSnapshot & snapshot : mtp_snapshots_) snapshot = {};
     state_.clear(); logits_.clear(); mtp_state_.clear(); mtp_target_hc_.clear();
     free_qwen4exp_mtp_weights(mtp_weights_);
     free_qwen4exp_weights(weights_);
+    if (snapshot_backend_) {
+        ggml_backend_free(snapshot_backend_);
+        snapshot_backend_ = nullptr;
+    }
     if (backend_) { ggml_backend_free(backend_); backend_ = nullptr; }
 }
 

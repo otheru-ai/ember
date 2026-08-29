@@ -485,6 +485,7 @@ void DiskPrefixCache::learn_layout(int slot) {
     bool had_disk_layout = layout_from_disk_;
 
     compute_layout_id(ref.ctx);
+    backend_.snapshot_ref_release(slot);
 
     if (had_disk_layout && std::memcmp(prev_id.data(), layout_id_.data(), 16) != 0) {
         // Model layout differs from what was learned from disk files.
@@ -709,6 +710,7 @@ bool DiskPrefixCache::lookup(const std::vector<int32_t> & prompt_ids, int slot) 
             return false;
         }
         compute_layout_id(ref.ctx);
+        backend_.snapshot_ref_release(slot);
         if (std::memcmp(disk_id.data(), layout_id_.data(), 16) != 0) {
             std::fprintf(stderr,
                          "[disk-cache] adopted layout mismatch: disk=%s model=%s\n",
@@ -754,6 +756,11 @@ bool DiskPrefixCache::save(int slot, const std::vector<int32_t> & prompt_ids,
 
     auto ref = backend_.snapshot_ref(slot);
     if (!ref.ctx) return false;
+    struct SnapshotRefGuard {
+        ModelBackend & backend;
+        int slot;
+        ~SnapshotRefGuard() { backend.snapshot_ref_release(slot); }
+    } ref_guard{backend_, slot};
     if (ref.cur_pos < 0 ||
         (size_t)ref.cur_pos != prompt_ids.size()) {
         std::fprintf(
@@ -773,7 +780,14 @@ bool DiskPrefixCache::save(int slot, const std::vector<int32_t> & prompt_ids,
     // Choose the deepest stored token prefix as the delta parent.  The chain is
     // bounded so a hot restore never turns into an unbounded sequence of reads.
     const DiskEntry * parent = nullptr;
+    // Delta checkpoints currently depend on DeepSeek's per-layer compressor
+    // counters in ds4_snap_meta. Qwen exports complete vector-backed state and
+    // therefore writes independent base checkpoints until it has an equally
+    // explicit append-only counter contract.
+    const bool delta_capable =
+        ggml_get_tensor(ref.ctx, "ds4_snap_meta") != nullptr;
     for (const auto & candidate : entries_) {
+        if (!delta_capable) break;
         const int n = (int)candidate.token_count;
         if (candidate.version != DISK_CACHE_VERSION ||
             n <= 0 || n >= (int)prompt_ids.size() ||

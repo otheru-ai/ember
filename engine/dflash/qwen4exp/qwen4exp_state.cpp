@@ -57,6 +57,17 @@ void Qwen4ExpCowBuffer::append(const float * values, size_t count) {
     }
 }
 
+bool Qwen4ExpCowBuffer::copy_to(float * values, size_t count) const {
+    if ((!values && count != 0) || count != size_) return false;
+    size_t copied = 0;
+    for (const auto & slab : slabs_) {
+        if (!slab || slab->size() > count - copied) return false;
+        std::copy(slab->begin(), slab->end(), values + copied);
+        copied += slab->size();
+    }
+    return copied == count;
+}
+
 void Qwen4ExpCowBuffer::clear() {
     slabs_.clear();
     size_ = 0;

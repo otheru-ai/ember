@@ -43,6 +43,11 @@ public:
     void snapshot_free(int slot) override;
     bool snapshot_used(int slot) const override;
     int snapshot_cur_pos(int slot) const override;
+    SnapshotRef snapshot_ref(int slot) const override;
+    void snapshot_ref_release(int slot) const override;
+    bool snapshot_adopt(int slot, ggml_context * ctx,
+                        ggml_backend_buffer_t buf, int cur_pos,
+                        int32_t last_tok) override;
     void shutdown() override;
 
 private:
@@ -50,6 +55,11 @@ private:
         bool used = false;
         Qwen4ExpMtpState state;
         std::vector<float> target_hc;
+    };
+
+    struct SerializedSnapshot {
+        ggml_context * ctx = nullptr;
+        ggml_backend_buffer_t buf = nullptr;
     };
 
     GenerateResult run(const GenerateRequest & request, const DaemonIO & io,
@@ -63,6 +73,7 @@ private:
 
     Qwen4ExpBackendConfig config_;
     ggml_backend_t backend_ = nullptr;
+    ggml_backend_t snapshot_backend_ = nullptr;
     Qwen4ExpWeights weights_;
     Qwen4ExpState state_;
     std::vector<float> logits_;
@@ -71,6 +82,7 @@ private:
     Qwen4ExpMtpState mtp_state_;
     std::vector<float> mtp_target_hc_;
     std::array<MtpSnapshot, kMaxSlots> mtp_snapshots_;
+    mutable std::array<SerializedSnapshot, kMaxSlots> serialized_snapshots_;
     int mtp_depth_ = 0;
     uint64_t state_budget_bytes_ = 0;
     // Image preprocessing happens before requests enter the resident batch
