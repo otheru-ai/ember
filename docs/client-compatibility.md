@@ -203,8 +203,12 @@ Validate discovery with `omp models find ember`, then run
 
 Ember supports streaming text, reasoning, function tools, parallel tool calls,
 tool-result replay, stop sequences, and usage reporting across these adapters.
-It is text-only: image, audio, computer-use, and provider-hosted tools are not
-implemented. Client releases can change their wire behavior, so the
+Native Chat Completions also accepts `image_url` content parts and routes them
+through the opt-in Qwen vision seam. The Responses adapter rejects
+`input_image`, and the Anthropic Messages adapter currently accepts only
+`type: text` content blocks. Audio, computer-use, and provider-hosted tools are
+not implemented. Vision remains an opt-in deployment boundary, not a certified
+multimodal release; see `docs/operations.md`. Client releases can change their wire behavior, so the
 `client_compatibility_server` test keeps representative Anthropic Messages,
 Responses, and Chat Completions requests in the release test suite, including
 the native DeepSeek request shared by Reasonix and DeepSeek Harness.

@@ -135,6 +135,12 @@ extern "C" bool ember_backend_vision_encode(
         return false;
     }
     const size_t count = image.embeddings.size();
+    if (count % EMBER_QWEN_VISION_EMBEDDING_WIDTH != 0) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "vision embedding size is not a whole number of rows");
+        return false;
+    }
     if (count > SIZE_MAX / sizeof(float)) {
         if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding size overflow");
         return false;
@@ -148,7 +154,8 @@ extern "C" bool ember_backend_vision_encode(
     out->grid_t = image.grid_t;
     out->grid_h = image.grid_h;
     out->grid_w = image.grid_w;
-    out->n_tokens = static_cast<int>(count / 2560);
+    out->n_tokens = static_cast<int>(count /
+                                     EMBER_QWEN_VISION_EMBEDDING_WIDTH);
     out->embeddings = copy;
     return true;
 }
@@ -670,7 +677,8 @@ static void build_generate_request(const ember_gen_request *req,
             dst.grid_h = src.grid_h;
             dst.grid_w = src.grid_w;
             const size_t count = src.n_tokens > 0
-                ? static_cast<size_t>(src.n_tokens) * 2560 : 0;
+                ? static_cast<size_t>(src.n_tokens) *
+                  EMBER_QWEN_VISION_EMBEDDING_WIDTH : 0;
             if (src.embeddings && count)
                 dst.embeddings.assign(src.embeddings, src.embeddings + count);
             greq.vision.push_back(std::move(dst));

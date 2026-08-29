@@ -815,6 +815,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
     // do not distinguish two different images. Never publish a tool-turn KV
     // snapshot (or its disk checkpoint) that a later text/vision request could
     // mistake for the same prefix.
+    // The GPU-free stub rejects vision before this point, so the regression is
+    // intentionally uncovered by the host gauntlet; real-weight validation
+    // exercises this guard on the Qwen vision deployment path.
     if (req && req->has_images) return;
     if (!generated_frontier_matches_text(be, g)) {
         fprintf(stderr,

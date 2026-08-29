@@ -347,7 +347,8 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         }
         while (vision_index < request.vision.size() &&
                request.vision[vision_index].prompt_offset +
-                   static_cast<int>(request.vision[vision_index].embeddings.size() / 2560) <= i)
+                   static_cast<int>(request.vision[vision_index].embeddings.size() /
+                                    Qwen4ExpVisionContract::output_hidden_size) <= i)
             ++vision_index;
         const VisionEmbeddingRun * vision =
             vision_index < request.vision.size() &&
@@ -456,13 +457,15 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         const float * supplied_embedding = nullptr;
         if (vision) {
             const size_t row = static_cast<size_t>(i - vision->prompt_offset);
-            supplied_embedding = vision->embeddings.data() + row * 2560;
+            supplied_embedding = vision->embeddings.data() +
+                row * Qwen4ExpVisionContract::output_hidden_size;
         }
         if (mtp_depth_ && !mtp_target_hc_.empty()) {
             if (!qwen4exp_mtp_sync_cache_q1(
                     weights_, mtp_weights_, mtp_state_,
                     request.prompt[static_cast<size_t>(i)], supplied_embedding,
-                    supplied_embedding ? 2560U : 0U, mtp_target_hc_.data(),
+                    supplied_embedding ? Qwen4ExpVisionContract::output_hidden_size : 0U,
+                    mtp_target_hc_.data(),
                     mtp_target_hc_.size(), position, error)) {
                 result.fail(GenerateErrorCode::PrefillFailed,
                             "Qwen4Exp MTP prompt synchronization failed: " + error);
@@ -475,7 +478,9 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 i - vision->prompt_offset);
             stepped = qwen4exp_step_q1_embedding(
                 weights_, state_, request.prompt[static_cast<size_t>(i)],
-                vision->embeddings.data() + row * 2560, 2560,
+                vision->embeddings.data() + row *
+                    Qwen4ExpVisionContract::output_hidden_size,
+                Qwen4ExpVisionContract::output_hidden_size,
                 position, logits_, error);
         } else if (capture_row) {
             std::vector<float> capture;

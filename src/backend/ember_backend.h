@@ -21,6 +21,10 @@ extern "C" {
 
 typedef struct ember_backend ember_backend;
 
+// Qwen3.8-Flash-Next's projected vision rows are fixed at this width.  This
+// ABI constant mirrors the model contract without exposing engine headers.
+enum { EMBER_QWEN_VISION_EMBEDDING_WIDTH = 2560 };
+
 typedef enum {
     EMBER_DS4_PREFILL_SPARSE = 0,
     EMBER_DS4_PREFILL_EXACT  = 1,
@@ -59,7 +63,7 @@ typedef struct {
     int    grid_h;
     int    grid_w;
     int    n_tokens;
-    float *embeddings; // row-major [n_tokens,2560]
+    float *embeddings; // row-major [n_tokens,EMBER_QWEN_VISION_EMBEDDING_WIDTH]
 } ember_vision_image;
 
 bool ember_backend_vision_encode(ember_backend *b,
