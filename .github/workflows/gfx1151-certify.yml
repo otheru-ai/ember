@@ -708,6 +708,7 @@ jobs:
       TARGET_SHA: ${{ inputs.commit_sha }}
       SOURCE_SPEC: ${{ inputs.release_version }}
       PROFILE_PORT: '18086'
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Bind retained exact evidence to the byte-identical current profiler
         run: |
@@ -766,6 +767,8 @@ jobs:
           )
           ((${#retained[@]} == 4))
           profile_tag="ghcr.io/${GITHUB_REPOSITORY,,}:dev-sha-${TARGET_SHA:0:12}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" \
+            --password-stdin >/dev/null
           docker pull "$profile_tag"
           profile_image="$(docker image inspect --format \
             '{{range .RepoDigests}}{{println .}}{{end}}' "$profile_tag" | head -n 1)"

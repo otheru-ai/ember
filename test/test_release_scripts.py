@@ -287,6 +287,8 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertNotIn("actions/checkout", certify_job)
         self.assertIn('"$source_sha" "$source_output" <<\'PY\'', certify_job)
         self.assertIn("source_sha, source_output = sys.argv[1:]", certify_job)
+        self.assertIn("GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}", certify_job)
+        self.assertIn('echo "$GHCR_TOKEN" | docker login ghcr.io', certify_job)
         self.assertNotIn("benchmark_bundle.sh", certify_job)
         self.assertIn("  benchmark:", certify)
         self.assertIn("needs: [certify, promote]", certify)
