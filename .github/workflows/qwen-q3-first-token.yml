@@ -30,7 +30,7 @@ concurrency:
 jobs:
   first-token:
     runs-on: [self-hosted, linux, x64, gfx1151]
-    timeout-minutes: 180
+    timeout-minutes: 1440
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
       CANDIDATE_ID: ${{ inputs.candidate_id }}
@@ -135,13 +135,15 @@ jobs:
           print(record_path); print(hashlib.sha256(record_path.read_bytes()).hexdigest())
           print(attestation_path); print(hashlib.sha256(attestation_path.read_bytes()).hexdigest())
           print(mtp); print(mtp_rows[0]["sha256"])
-          print(image); print(digest); print(total)
+          print(image); print(digest)
+          print(runtime["dev_ref"]); print(runtime["dev_digest"])
+          print(total)
           PY
           )
-          (( ${#bound[@]} == 11 ))
+          (( ${#bound[@]} == 13 ))
           names=(MODEL MODEL_SHA256 BUILD_RECORD BUILD_RECORD_SHA256 BUILDER_ATTESTATION \
                  BUILDER_ATTESTATION_SHA256 MTP MTP_SHA256 RUNTIME_IMAGE RUNTIME_IMAGE_DIGEST \
-                 MODEL_TOTAL_BYTES)
+                 RUNTIME_DEV_IMAGE RUNTIME_DEV_IMAGE_DIGEST MODEL_TOTAL_BYTES)
           for index in "${!names[@]}"; do
             printf -v "${names[$index]}" '%s' "${bound[$index]}"
             export "${names[$index]}"
@@ -156,6 +158,10 @@ jobs:
           docker image inspect "$RUNTIME_IMAGE" | python3 -c \
             'import json,sys; e=sys.argv[1]; d=json.load(sys.stdin)[0].get("RepoDigests",[]); raise SystemExit(0 if any(x.endswith("@"+e) for x in d) else 1)' \
             "$RUNTIME_IMAGE_DIGEST"
+          docker pull "$RUNTIME_DEV_IMAGE"
+          docker image inspect "$RUNTIME_DEV_IMAGE" | python3 -c \
+            'import json,sys; e=sys.argv[1]; d=json.load(sys.stdin)[0].get("RepoDigests",[]); raise SystemExit(0 if any(x.endswith("@"+e) for x in d) else 1)' \
+            "$RUNTIME_DEV_IMAGE_DIGEST"
           test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RUNTIME_IMAGE")" = "$TARGET_SHA"
           engine_sha="$(docker run --rm --entrypoint sha256sum "$RUNTIME_IMAGE" \
             /usr/local/bin/ember-dflash | awk '{print $1}')"
@@ -336,6 +342,24 @@ jobs:
           (( healthy == 1 )) || cleanup_failed=1
           exit "$cleanup_failed"
 
+      - name: Run the complete Q3 real-weight benchmark
+        run: |
+          set -euo pipefail
+          benchmark_output="$QWEN_FIRST_TOKEN_OUTPUT/full-benchmark"
+          scripts/qwen_real_weight_gate.sh \
+            --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
+            --profile-image "$RUNTIME_DEV_IMAGE" \
+            --profile-image-digest "$RUNTIME_DEV_IMAGE_DIGEST" \
+            --model "$MODEL" --model-sha256 "$MODEL_SHA256" \
+            --model-build-record "$BUILD_RECORD" \
+            --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
+            --mtp "$MTP" --mtp-sha256 "$MTP_SHA256" --mtp-depth 3 \
+            --measurement-only --out-dir "$benchmark_output"
+          evidence="$benchmark_output/hardware-measured.json"
+          test -f "$evidence" && test ! -L "$evidence"
+          printf 'QWEN_Q3_BENCHMARK_EVIDENCE=%s\nQWEN_Q3_BENCHMARK_EVIDENCE_SHA256=%s\n' \
+            "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"
+
       - name: Surface retained first-token diagnostics
         if: ${{ failure() && steps.safety.outputs.armed == 'yes' }}
         run: |
@@ -372,6 +396,28 @@ jobs:
           printf 'QWEN_FIRST_TOKEN_BUNDLE=%s\nQWEN_FIRST_TOKEN_BUNDLE_SHA256=%s\n' \
             "$bundle" "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
 
+      - name: Attest the complete Q3 benchmark evidence
+        if: success()
+        id: attest_benchmark
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
+        with:
+          subject-path: ${{ env.QWEN_Q3_BENCHMARK_EVIDENCE }}
+
+      - name: Retain and verify the Q3 benchmark attestation
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION_BUNDLE: ${{ steps.attest_benchmark.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          bundle="$QWEN_FIRST_TOKEN_OUTPUT/full-benchmark/hardware-measured.sigstore.json"
+          install -m 0600 -- "$ACTION_BUNDLE" "$bundle"
+          gh attestation verify "$QWEN_Q3_BENCHMARK_EVIDENCE" --bundle "$bundle" \
+            --repo OtherU-AI/ember \
+            --signer-workflow .github/workflows/qwen-q3-first-token.yml >/dev/null
+          printf 'QWEN_Q3_BENCHMARK_BUNDLE=%s\nQWEN_Q3_BENCHMARK_BUNDLE_SHA256=%s\n' \
+            "$bundle" "$(sha256sum "$bundle" | awk '{print $1}')" >>"$GITHUB_ENV"
+
       - name: Remove temporary registry credentials
         if: always() && env.DOCKER_CONFIG != ''
         run: |
@@ -383,13 +429,34 @@ jobs:
         run: |
           first="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["generation"]["first_token_id"])' \
             "$QWEN_FIRST_TOKEN_EVIDENCE")"
+          mapfile -t metrics < <(python3 - "$QWEN_Q3_BENCHMARK_EVIDENCE" <<'PY'
+          import json, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          performance = value["hard_gates"]["performance"]
+          resources = value["resources"]
+          print(performance["prefill_2048"]["peak_tps"])
+          print(performance["prefill_2048"]["median_tps"])
+          print(performance["decode_256_counting"]["median_tps"])
+          print(resources["measured_peak_uma_bytes"])
+          print(str(value["passed"]).lower())
+          PY
+          )
+          (( ${#metrics[@]} == 5 ))
           {
-            echo '## Qwen Q3 PLE first-token proof passed'
+            echo '## Qwen Q3 PLE differential and full benchmark completed'
             echo
             echo "First sampled token ID: \`$first\`"
+            echo "Prefill peak/median: \`${metrics[0]} / ${metrics[1]} tok/s\`"
+            echo "Decode median: \`${metrics[2]} tok/s\`"
+            echo "Measured peak UMA: \`${metrics[3]} bytes\`"
+            echo "Existing release thresholds passed: \`${metrics[4]}\`"
             echo "Evidence: \`$QWEN_FIRST_TOKEN_EVIDENCE\`"
             echo "Evidence SHA-256: \`$QWEN_FIRST_TOKEN_EVIDENCE_SHA256\`"
             echo "Attestation: \`$QWEN_FIRST_TOKEN_BUNDLE\`"
             echo "Attestation SHA-256: \`$QWEN_FIRST_TOKEN_BUNDLE_SHA256\`"
-            echo 'Scope: first token and two-token exact differential only; no quality or performance claim.'
+            echo "Benchmark evidence: \`$QWEN_Q3_BENCHMARK_EVIDENCE\`"
+            echo "Benchmark evidence SHA-256: \`$QWEN_Q3_BENCHMARK_EVIDENCE_SHA256\`"
+            echo "Benchmark attestation: \`$QWEN_Q3_BENCHMARK_BUNDLE\`"
+            echo "Benchmark attestation SHA-256: \`$QWEN_Q3_BENCHMARK_BUNDLE_SHA256\`"
+            echo 'Scope: exact differential, unprofiled timing, peak runner memory, and separate trace/PMC passes; no publication.'
           } >>"$GITHUB_STEP_SUMMARY"

@@ -920,6 +920,12 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("ember-cert-production unmask", proof)
         self.assertIn("ember-gpu-lock release", proof)
         self.assertIn("actions/attest@", proof)
+        self.assertIn("scripts/qwen_real_weight_gate.sh", proof)
+        self.assertIn("--measurement-only --out-dir", proof)
+        self.assertIn("--mtp-depth 3", proof)
+        self.assertIn("hardware-measured.json", proof)
+        self.assertIn("Measured peak UMA", proof)
+        self.assertIn("Attest the complete Q3 benchmark evidence", proof)
         self.assertIn("no quality or performance claim", proof)
 
         construct = WORKFLOW.read_text(encoding="utf-8")
