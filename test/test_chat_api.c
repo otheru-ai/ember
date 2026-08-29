@@ -67,6 +67,55 @@ static void test_multimodal_content(void) {
     ember_json_free(v);
 }
 
+static void test_refusal_content_history(void) {
+    const char *body =
+        "{\"messages\":[{\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"prefix\"},"
+        "{\"type\":\"refusal\",\"refusal\":\"cannot help\"}]}]}";
+    ember_json *v = ember_json_parse(body);
+    ember_chat_request req;
+    CHECK(ember_chat_request_parse(v, &req), "assistant refusal content parses");
+    CHECK(strcmp(req.messages[0].content, "prefixcannot help") == 0,
+          "refusal text survives flattened assistant history");
+    CHECK(req.messages[0].n_parts == 2 &&
+              req.messages[0].parts[0].kind == EMBER_CONTENT_TEXT &&
+              req.messages[0].parts[1].kind == EMBER_CONTENT_TEXT &&
+              strcmp(req.messages[0].parts[1].text, "cannot help") == 0,
+          "refusal content is preserved in order as text");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    const char *top =
+        "{\"messages\":[{\"role\":\"assistant\",\"content\":null,"
+        "\"refusal\":\"top-level refusal\"}]}";
+    v = ember_json_parse(top);
+    CHECK(ember_chat_request_parse(v, &req) &&
+              strcmp(req.messages[0].content, "top-level refusal") == 0,
+          "top-level assistant refusal survives history replay");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    const char *bad_user =
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"refusal\",\"refusal\":\"nope\"}]}]}";
+    v = ember_json_parse(bad_user);
+    CHECK(!ember_chat_request_parse(v, &req),
+          "user refusal content remains rejected");
+    ember_json_free(v);
+
+    const char *bad_parts =
+        "{\"messages\":[{\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"input_audio\",\"audio\":{}}]}]}";
+    v = ember_json_parse(bad_parts);
+    CHECK(!ember_chat_request_parse(v, &req), "input_audio remains rejected");
+    ember_json_free(v);
+    v = ember_json_parse(
+        "{\"messages\":[{\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"invented\",\"text\":\"x\"}]}]}");
+    CHECK(!ember_chat_request_parse(v, &req), "invented content remains rejected");
+    ember_json_free(v);
+}
+
 static void test_historical_tool_result_does_not_poison_decode(void) {
     const char *body =
         "{\"messages\":["
@@ -724,6 +773,7 @@ int main(void) {
     printf("ember chat_api tests\n");
     test_full_request();
     test_multimodal_content();
+    test_refusal_content_history();
     test_historical_tool_result_does_not_poison_decode();
     test_continuation_only_requires_target_decode();
     test_tool_loop_detector();

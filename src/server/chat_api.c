@@ -61,8 +61,8 @@ static void content_part_push(ember_chat_msg *msg,
 // Content is either a string or an ordered array of parts. Keep the historical
 // flattened text view for the text pipeline, but do not discard image parts:
 // Qwen's M-RoPE positions depend on their exact placement.
-static char *flatten_content(const ember_json *content, ember_chat_msg *msg,
-                             bool *has_images, bool *ok) {
+static char *flatten_content(const ember_json *content, const char *role,
+                             ember_chat_msg *msg, bool *has_images, bool *ok) {
     *ok = true;
     if (!content) return dup_or("", NULL);
     if (content->type == EMBER_JSON_NULL) return dup_or("", NULL);
@@ -103,6 +103,13 @@ static char *flatten_content(const ember_json *content, ember_chat_msg *msg,
                 if (!url || !url[0]) goto invalid;
                 content_part_push(msg, EMBER_CONTENT_IMAGE_URL, url, detail);
                 *has_images = true;
+            } else if (strcmp(type, "refusal") == 0 &&
+                       role && strcmp(role, "assistant") == 0) {
+                const ember_json *refusal = ember_json_get(part, "refusal");
+                if (!refusal || refusal->type != EMBER_JSON_STRING) goto invalid;
+                ember_buf_puts(&b, refusal->u.str);
+                content_part_push(msg, EMBER_CONTENT_TEXT,
+                                  refusal->u.str, NULL);
             } else {
                 // Unknown blocks must not disappear from the model-visible
                 // request. Add explicit support or reject them at the adapter.
@@ -559,9 +566,25 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
         out->messages[i].role = dup_or(role->u.str, "");
         bool content_ok = false;
         out->messages[i].content =
-            flatten_content(ember_json_get(m, "content"), &out->messages[i],
-                            &out->has_images, &content_ok);
+            flatten_content(ember_json_get(m, "content"), role->u.str,
+                            &out->messages[i], &out->has_images, &content_ok);
         if (!content_ok) goto invalid;
+        const ember_json *top_refusal = ember_json_get(m, "refusal");
+        if (top_refusal) {
+            if (strcmp(role->u.str, "assistant") != 0 ||
+                top_refusal->type != EMBER_JSON_STRING) goto invalid;
+            size_t old_len = strlen(out->messages[i].content);
+            size_t refusal_len = strlen(top_refusal->u.str);
+            if (refusal_len > SIZE_MAX - old_len - 1)
+                ember_buf_fatal("refusal content is too large");
+            char *joined = realloc(out->messages[i].content,
+                                   old_len + refusal_len + 1);
+            if (!joined) ember_buf_fatal("out of memory parsing refusal content");
+            memcpy(joined + old_len, top_refusal->u.str, refusal_len + 1);
+            out->messages[i].content = joined;
+            content_part_push(&out->messages[i], EMBER_CONTENT_TEXT,
+                              top_refusal->u.str, NULL);
+        }
         out->messages[i].name =
             dup_or(ember_json_str(name, NULL), NULL);
         out->messages[i].reasoning =
