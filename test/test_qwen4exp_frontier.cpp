@@ -274,6 +274,8 @@ static void test_persistent_gdn_q1() {
     if (!graph)
         std::fprintf(stderr, "GDN frontier build error: %s\n", error.c_str());
     CHECK(graph != nullptr, "persistent fused q1 GDN graph builds");
+    CHECK(dflash::common::qwen4exp_frontier_gdn_sqr_inputs_contiguous(graph),
+          "q1 GDN materializes strided Q/K before HIP unary kernels");
     CHECK(dflash::common::qwen4exp_frontier_gdn_state_transfer_bytes_q1(
               spec) == 1408U,
           "q1 GDN synchronized host-state boundary is explicitly bounded");
@@ -342,6 +344,9 @@ static void test_persistent_gdn_q1() {
         std::fprintf(stderr, "GDN batch build error: %s\n", error.c_str());
     CHECK(batch_graph != nullptr,
           "persistent fused three-row causal GDN graph builds");
+    CHECK(dflash::common::qwen4exp_frontier_gdn_sqr_inputs_contiguous(
+              batch_graph),
+          "batched GDN materializes strided Q/K before HIP unary kernels");
     CHECK(dflash::common::qwen4exp_frontier_gdn_state_transfer_bytes_batch(
               spec, 3) == 1728U,
           "batched GDN transfers one initial and one final recurrent state");

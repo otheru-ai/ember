@@ -502,6 +502,12 @@ bool gdn_vector_shape(const ggml_tensor * tensor, int64_t elements) {
 
 ggml_tensor * exact_l2_norm(ggml_context * ctx, ggml_tensor * tensor,
                             float epsilon) {
+    // Q/K arrive as strided views into the fused QKV convolution output.
+    // CUDA/HIP unary kernels require a contiguous source even though the CPU
+    // backend accepts the view strides, so materialize the logical tensor
+    // before the first unary operation.  Keep the normalized result in that
+    // same logical layout for all following broadcast operations.
+    tensor = ggml_cont(ctx, tensor);
     ggml_tensor * sum = ggml_sum_rows(ctx, ggml_sqr(ctx, tensor));
     ggml_tensor * denominator = ggml_sqrt(
         ctx, ggml_scale_bias(ctx, sum, 1.0f, epsilon));
@@ -731,6 +737,20 @@ void qwen4exp_frontier_gdn_destroy(Qwen4ExpFrontierGdnGraph * graph) {
     if (graph->allocator) ggml_gallocr_free(graph->allocator);
     if (graph->ctx) ggml_free(graph->ctx);
     delete graph;
+}
+
+bool qwen4exp_frontier_gdn_sqr_inputs_contiguous(
+        const Qwen4ExpFrontierGdnGraph * graph) {
+    if (!graph || !graph->graph) return false;
+    bool found = false;
+    const int nodes = ggml_graph_n_nodes(graph->graph);
+    for (int index = 0; index < nodes; ++index) {
+        const ggml_tensor * node = ggml_graph_node(graph->graph, index);
+        if (!node || node->op != GGML_OP_SQR) continue;
+        found = true;
+        if (!node->src[0] || !ggml_is_contiguous(node->src[0])) return false;
+    }
+    return found;
 }
 
 bool qwen4exp_frontier_gdn_eval_q1(

@@ -136,6 +136,11 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
     const Qwen4ExpFrontierGdnWeights & weights, int layer, int n_tokens,
     std::string & error);
 void qwen4exp_frontier_gdn_destroy(Qwen4ExpFrontierGdnGraph * graph);
+// Structural HIP contract: every SQR source in the persistent GDN graph must
+// be contiguous. Q/K begin as strided fused-QKV views, while HIP unary kernels
+// do not implement arbitrary strides. Exposed for GPU-free graph inspection.
+bool qwen4exp_frontier_gdn_sqr_inputs_contiguous(
+    const Qwen4ExpFrontierGdnGraph * graph);
 bool qwen4exp_frontier_gdn_eval_q1(
     Qwen4ExpFrontierGdnGraph * graph, const float * input,
     size_t input_count, const float * conv_state, size_t conv_state_count,
