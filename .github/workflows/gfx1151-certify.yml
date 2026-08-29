@@ -874,10 +874,20 @@ jobs:
       CALIBRATION_IMAGE: ghcr.io/otheru-ai/ember@sha256:7b20cbe1e445ca6d6050e50d3b4e763205503622f6c5f090e40368c2b34c16a6
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 1
+      - name: Materialize calibration sources without a working tree
+        run: |
+          set -euo pipefail
+          source_root="/var/tmp/ember-counter-calibration-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$source_root/scripts" "$source_root/tools"
+          base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TARGET_SHA}"
+          for path in scripts/calibrate_counter_units.sh \
+                      scripts/calibrate_counter_units.py \
+                      tools/bench_counter_traffic.hip; do
+            curl --fail --location --retry 3 --output "$source_root/$path" \
+              "$base/$path"
+          done
+          chmod 0755 "$source_root/scripts/calibrate_counter_units.sh"
+          printf 'CALIBRATION_SOURCE=%s\n' "$source_root" >> "$GITHUB_ENV"
       - name: Acquire exclusive GPU access and stop production
         id: safety
         run: |
@@ -899,7 +909,7 @@ jobs:
           printf 'CALIBRATION_OUT=%s\n' "$out" >>"$GITHUB_ENV"
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
           docker pull "$CALIBRATION_IMAGE"
-          "$GITHUB_WORKSPACE/scripts/calibrate_counter_units.sh" \
+          "$CALIBRATION_SOURCE/scripts/calibrate_counter_units.sh" \
             --image "$CALIBRATION_IMAGE" --out-dir "$out"
           cat "$out/calibration.json"
       - name: Upload raw calibration evidence

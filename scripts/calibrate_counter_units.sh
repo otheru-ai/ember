@@ -66,7 +66,8 @@ if (( QUIESCE )); then
   sudo -n "$PRODUCTION_WRAPPER" mask; MASKED=1
 fi
 
-docker run --rm -v "$PWD:/ember:ro" -v "$OUT_DIR:/out" \
+SOURCE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+docker run --rm -v "$SOURCE_ROOT:/ember:ro" -v "$OUT_DIR:/out" \
   --entrypoint hipcc "$IMAGE" -O3 --offload-arch=gfx1151 \
   -o /out/bench_counter_traffic /ember/tools/bench_counter_traffic.hip
 
