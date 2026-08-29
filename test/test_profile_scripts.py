@@ -213,7 +213,8 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn("rocprofv3-version.txt", body)
         self.assertIn("rocprof-compute-version.txt", body)
         self.assertIn("rocprofv3-counter-info.txt", body)
-        self.assertIn("rocprofv3-avail info --pmc -d 0", body)
+        self.assertIn("rocprofv3-avail info --pmc", body)
+        self.assertNotIn("rocprofv3-avail info --pmc -d 0", body)
         self.assertIn('"selected_definitions"', body)
 
     def test_rocm10_counter_unit_is_not_silently_certified(self):

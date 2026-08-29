@@ -393,7 +393,7 @@ collect_provenance() {
   docker run --rm --entrypoint rocprof-compute "$IMAGE" --version \
     >"$OUT_DIR/rocprof-compute-version.txt" 2>&1
   docker run --rm "${GPU_ARGS[@]}" --entrypoint rocprofv3-avail "$IMAGE" \
-    info --pmc -d 0 >"$OUT_DIR/rocprofv3-counter-info.txt"
+    info --pmc >"$OUT_DIR/rocprofv3-counter-info.txt"
   test -s "$OUT_DIR/image-identity.json"
   test -s "$OUT_DIR/rocprofv3-version.txt"
   test -s "$OUT_DIR/rocprof-compute-version.txt"
@@ -506,7 +506,7 @@ json.dump({
     },
     "counters": sys.argv[3:],
     "counter_metadata": {
-        "query": "rocprofv3-avail info --pmc -d 0",
+        "query": "rocprofv3-avail info --pmc",
         "file": counter_info_name,
         "sha256": counter_info_sha256,
         "selected_definitions": blocks,
