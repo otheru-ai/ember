@@ -135,3 +135,13 @@ continue.
    always passes. Fix: move the push to the per-row point where `index_key` is
    appended. Do not land while the blocker is open.
 
+12. Deferred hardening, after the blocker closes (msg 285): `gated_delta_net.cu`
+   computes one `gb_offset` and indexes **both** `g` and `beta` with **beta's**
+   strides (`:519-527`, and the comment states it). The asserts check each is
+   contiguous but not that they match. It is currently sound only because
+   `qwen4exp_frontier.cpp:1005-1008` reshapes both to `[1, n_heads, n_tokens,
+   1]`. Reshape them differently and it breaks silently, and only above n=1
+   because the `t * sb2` term vanishes at q1. Add
+   `GGML_ASSERT(ggml_are_same_stride(src_g, src_beta))` beside the existing
+   asserts. Vendored file — record in `engine/VENDOR.md` if it lands.
+
