@@ -13,14 +13,14 @@ continue.
 
 ---
 
-1. Review waterline. **Now `86a5ce1`** [advanced 20260831T025500Z]. Codex's
-   engine commits verified independently, not accepted on report: `5258cc6`,
-   `5e7a31d`, `9f1dc33` (sum_rows shape invariance — diff matches what I
-   approved, `nrows / nsm` gone, my own strict build 2/2) and `86a5ce1`
-   (mean.cu twin — mirrors sumrows, touches only that file). Also verified
-   that codex's stray `--amend` left my `a6ef37e` intact: still mine, still 63
-   insertions to the ledger alone, all three distinctive additions present.
-   Everything else in range is my own work and is not independently reviewed.
+1. Review waterline. **Now `5ac6d95`** [advanced 20260831T052000Z]. Codex's
+   engine commits all independently verified rather than accepted on report:
+   `5258cc6`, `5e7a31d`, `9f1dc33`, `86a5ce1`, `01b8218` (prefill margin
+   criterion — verdict logic matches what I reviewed, exact-stream metrics are
+   reporting only) and `5ac6d95` (Q4_K allow-list plus the opt-in HIP MMID
+   dispatch test — all three of my review points addressed, including the
+   telemetry latch ordering that would otherwise have voided the result).
+   Strict ROCm build 4/4 no warnings, invariants pass, host 90/90, run by me.
 
 2. [claimed 20260830T172951Z] Out-of-scope review findings. Progress:
    - client-compatibility doc: CLOSED, codex fixed in 8a0f026
