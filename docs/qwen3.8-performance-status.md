@@ -350,6 +350,35 @@ Codex 325 then ran the corrected combination sweep: **every bit-4 superset is
 exact and every bit-4-absent mask is red.** The isolation holds across the
 whole sweep, not just the single mask-4 run.
 
+### Where in GDN, from the pass/fail pattern
+
+A fresh GDN chunk starts from `S = 0`, and that alone explains why n=1 is
+exact. The recurrence (`gated_delta_net.cu:104-127`, `:288-326`) is:
+
+    kv[col]    = sum_i S[i][col] * k[i]
+    delta[col] = (v[col] - g * kv[col]) * beta
+    S[i][col]  = g * S[i][col] + k[i] * delta[col]
+    attn[col]  = sum_i S[i][col] * q[i]
+
+At n=1, `S = 0`, so `kv = 0` and `delta = v * beta` exactly. **Every term that
+touches the carried state is multiplied by zero and cannot be observed.** At
+n=2 the error is one update deep — enough to perturb, not to reorder the top of
+the distribution. At n=3 it compounds and the argmax flips.
+
+So the defect is in a term multiplied by the carried state: the `g * kv`
+correction in `delta`, the `g * S` decay, or the `S * k` reduction that
+produces `kv`. It is **not** in `v`, `beta`, `q`, the attention output path,
+the register loads, or the initial state load — all exercised identically at
+n=1, which is exact.
+
+Statically the two kernels are **algebraically identical** on the non-KDA path:
+both keep `g` out of the kv reduction and apply it as `v - g*kv`, then decay
+with `g*S + k*delta`. Subgroup indexing checks out — `lane = threadIdx.x %
+WIDTH`, `rows_per_lane = 8`, `row = r*WIDTH + lane` covers 0..127, and
+`__shfl_sync(..., width=16)` confines each exchange to its 16-lane segment.
+That raises the odds of a wave32/subgroup-width assumption that only bites once
+`S` is non-zero.
+
 ### Where in GDN, from source
 
 The suspect kernel is `gated_delta_net_cuda_grouped_cols`
