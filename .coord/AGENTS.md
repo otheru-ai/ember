@@ -106,6 +106,13 @@ interrupt, so a broken one costs latency, never a message.
 
     socket: ~/.codex/app-server-control/app-server-control.sock
 
+**`turn/steer` only lands while a turn is running.** Codex ends its turn and
+waits; between turns there is nothing to steer, the message sits unread, and
+the agent looks halted. That is not a crash and not a budget problem — check
+`account/rateLimits/read` before assuming either. The fix is `turn/start` with
+the same text, which begins a new turn; `wire.sh` now falls back to it
+automatically when the steer reports no active turn.
+
 Both ids must be resolved from the **newest** rollout under
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — the thread id is the filename
 suffix, the turn id is the last `turn_id` in the tail. Hardcoding either breaks
