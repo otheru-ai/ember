@@ -183,6 +183,42 @@ static void test_tool_marker_suppressed(void) {
     free(sse);
 }
 
+static void test_qwen_marker_false_positive_on_dsml_profile(void) {
+    // Regression: a DSML-profile stream whose ordinary prose contains the Qwen
+    // marker used to lose every byte from the marker onward, with no error and
+    // no log. TOOL_STARTS carries "<tool_call>" unconditionally, so the marker
+    // fires and rewinds emit_pos, but main.c's profile-aware
+    // parse_executable_tool_calls reports ordinary assistant text -- which is
+    // exactly why no error or discard branch could fire. The caller then runs
+    // the final update and emit_tools, mirrored here.
+    const char *full =
+        "In Qwen syntax a call is written <tool_call> followed by JSON.";
+    ember_sse_stream st;
+    ember_sse_init(&st, "cc", "m", 1700000000, /*has_tools=*/true, false, false);
+    ember_buf out = {0}, acc = {0};
+    size_t total = strlen(full);
+    for (size_t i = 0; i < total; i += 2) {
+        size_t n = 2 < total - i ? 2 : total - i;
+        ember_buf_append(&acc, full + i, n);
+        ember_sse_update(&st, acc.ptr, acc.len, false, &out);
+    }
+    ember_sse_update(&st, acc.ptr, acc.len, true, &out);
+    const bool had_tools =
+        ember_sse_emit_tools(&st, acc.ptr, acc.len, &out);
+    CHECK(!had_tools, "no tool call is reported for a false-positive marker");
+
+    ember_buf c = {0};
+    collect_field(out.ptr ? out.ptr : "", "content", &c);
+    CHECK(strcmp(c.ptr ? c.ptr : "", full) == 0,
+          "false-positive marker text is delivered whole, not truncated");
+    CHECK(ember_sse_delivered_tool_markup(&st),
+          "the delivered marker is counted as a markup leak, not hidden");
+    ember_buf_free(&c);
+    ember_buf_free(&out);
+    ember_buf_free(&acc);
+    ember_sse_free(&st);
+}
+
 static void test_short_dsml_spelling(void) {
     // Short spelling (leading "<｜" eaten) must also be recognized/suppressed.
     const char *full = "ok<DSML" PIPE "tool_calls>x";
@@ -310,6 +346,7 @@ int main(void) {
     test_split_think_close();
     test_force_close_hint_filtered_from_reasoning();
     test_tool_marker_suppressed();
+    test_qwen_marker_false_positive_on_dsml_profile();
     test_short_dsml_spelling();
     test_utf8_safe_limit_direct();
     test_tool_calls_emitted();

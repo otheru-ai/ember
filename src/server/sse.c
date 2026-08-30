@@ -663,6 +663,53 @@ bool ember_sse_emit_tools(ember_sse_stream *st, const char *raw, size_t raw_len,
         }
         if (n > 0) st->any_tool = true;
         ember_tool_calls_free(&tc);
+        if (n == 0) {
+            // False-positive tool marker. TOOL_STARTS/TOOL_ENDS (:83, :106)
+            // carry the Qwen markers unconditionally, so a DSML-profile stream
+            // whose ordinary prose contains "<tool_call>" switches to
+            // EMBER_SSE_TOOL and rewinds emit_pos to the marker -- while
+            // main.c's parse_executable_tool_calls, which IS profile-aware,
+            // sees report.found == false and correctly reports ordinary
+            // assistant text (main.c:1314-1320). That verdict makes every
+            // error and discard branch in the caller unreachable, so without
+            // this flush every byte from the marker to the end of the turn is
+            // dropped with no error, no log, and a normal "stop".
+            //
+            // This is NOT the ember_sse_discard_tool_block case. That drops a
+            // block which parsed as a call and then failed validation, where
+            // replaying contaminated markup as text is the documented risk.
+            // Here nothing parsed as a call in any syntax family, and the
+            // caller has already classified the same bytes as text.
+            //
+            // Delivering markup as visible content is an outcome this server
+            // already accepts and counts rather than prevents -- see
+            // note_tool_markup_leak (main.c:1698-1718). Tracking the slice
+            // below is what lets that counter fire, which is why the flags are
+            // updated here exactly as the EMBER_SSE_TEXT branch does.
+            if (raw_len > st->tool_start) {
+                const char *slice = raw + st->tool_start;
+                const size_t slice_len = raw_len - st->tool_start;
+                sse_chat_delta_n(st, "content", slice, slice_len, out);
+                st->sent_content = true;
+                if (!st->sent_visible_content)
+                    st->sent_visible_content = slice_has_visible(slice, slice_len);
+                // Unconditional, not slice_has_tool_markup(): st->tool_start
+                // points AT a marker ember_find_tool_start just matched, so
+                // markup is present by construction. It also cannot be
+                // detected by that helper, which recognises DSML only --
+                // ember_text_has_tool_markup (:142-145) adds "<tool_call>" but
+                // the streaming helper does not. Extending the shared helper
+                // instead would make the EMBER_SSE_TEXT branch count the marker
+                // as a leak on requests carrying no tools at all, which is the
+                // false-firing note_tool_markup_leak documents at
+                // main.c:1704-1707.
+                st->delivered_tool_markup = true;
+            }
+            // SUPPRESS makes this idempotent: a second probe returns at the
+            // mode guard above instead of emitting the slice twice.
+            st->emit_pos = raw_len;
+            st->mode = EMBER_SSE_SUPPRESS;
+        }
     }
     return st->any_tool;
 }
