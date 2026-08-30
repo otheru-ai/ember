@@ -235,16 +235,21 @@ bool ember_backend_batch_stats_get(const ember_backend *b,
                                    ember_batch_stats *stats);
 
 // ── engine differential validation ──
-// Runs a greedy autoregressive baseline, restores the exact prefill snapshot,
-// then runs the normal speculative path from that same state.  When disk KV is
-// enabled and the prompt is large enough to persist, it also round-trips the
-// snapshot through disk and repeats the AR decode. With resident batching it
+// Runs a greedy autoregressive baseline. Architectures with a separate
+// production prefill path (currently Qwen's bounded q16 frontier) also run an
+// AR decode from that prefill and compare it with the q=1 baseline. It then
+// restores the exact prefill snapshot and runs the normal speculative path
+// from that same state. When disk KV is enabled and the prompt is large enough
+// to persist, it also round-trips the snapshot through disk and repeats the AR
+// decode. With resident batching it
 // admits two spec-eligible rows; DFLASH_DSPARK_XDNA_REQUIRED additionally
 // requires both rows to report that speculation actually ran. Intended for an
 // explicit startup validation command, not concurrent serving.
 typedef struct {
     bool   ok;
     bool   snapshot_ok;
+    bool   prefill_checked;
+    bool   prefill_exact;
     bool   spec_checked;
     bool   spec_exact;
     bool   disk_checked;
@@ -253,6 +258,7 @@ typedef struct {
     bool   batch_exact;
     bool   batch_spec_required;
     int    baseline_tokens;
+    int    prefill_tokens;
     int    spec_tokens;
     int    disk_tokens;
     int    batch_rows;

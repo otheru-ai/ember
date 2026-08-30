@@ -115,6 +115,7 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("--require-gate", body)
         self.assertNotIn("--prefix-cache-slots 0", body)
         self.assertIn('row.get("spec_ran") is True', body)
+        self.assertIn('prefill.get("checked") and prefill.get("exact")', body)
         self.assertIn("0.0 <= rate < 1.0", body)
         self.assertIn('"spec_verify_ms"', body)
         self.assertIn('"speculation": speculation', body)

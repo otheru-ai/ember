@@ -992,9 +992,14 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             encoding="utf-8"))
         self.assertIn("EMBER_TRACE_TOKENS=1", proof)
         self.assertIn("--validate-tokens 2", proof)
+        self.assertIn('prefill.get("checked") is not True', proof)
         self.assertIn("--kv-cache-dir /first-token/cache", proof)
-        self.assertIn('required = {"baseline", "restored", "fresh", "disk"}', proof)
+        self.assertIn(
+            'required = {"baseline", "prefill", "restored", "fresh", "disk"}',
+            proof,
+        )
         self.assertIn('"first_token_id": first', proof)
+        self.assertIn('"production_prefill_exact": True', proof)
         self.assertIn("ember-gpu-lock acquire", proof)
         self.assertIn("ember-cert-production stop", proof)
         self.assertIn("ember-cert-production mask", proof)

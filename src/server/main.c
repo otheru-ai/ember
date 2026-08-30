@@ -4297,6 +4297,7 @@ static int run_backend_validation(ember_backend *be, const char *path,
         &out,
         "{\"ok\":%s,\"prompt_tokens\":%d,\"requested_tokens\":%d,"
         "\"snapshot_ok\":%s,\"baseline_tokens\":%d,"
+        "\"prefill\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
         "\"spec\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d,"
         "\"accept_rate\":%.6f},"
         "\"disk\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
@@ -4307,6 +4308,8 @@ static int run_backend_validation(ember_backend *be, const char *path,
         "\"detail\":",
         report.ok ? "true" : "false", n_prompt, n_gen,
         report.snapshot_ok ? "true" : "false", report.baseline_tokens,
+        report.prefill_checked ? "true" : "false",
+        report.prefill_exact ? "true" : "false", report.prefill_tokens,
         report.spec_checked ? "true" : "false",
         report.spec_exact ? "true" : "false", report.spec_tokens,
         report.spec_accept_rate,

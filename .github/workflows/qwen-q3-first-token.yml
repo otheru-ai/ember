@@ -271,9 +271,12 @@ jobs:
           root = pathlib.Path(root_raw); validation_path = root / "validation.json"
           log_path = root / "engine.log"
           validation = json.loads(validation_path.read_text())
+          prefill = validation.get("prefill") or {}
           spec = validation.get("spec") or {}; disk = validation.get("disk") or {}
           if (validation.get("ok") is not True or validation.get("snapshot_ok") is not True
                   or validation.get("baseline_tokens") != 2
+                  or prefill.get("checked") is not True or prefill.get("exact") is not True
+                  or prefill.get("tokens") != 2
                   or spec.get("checked") is not True or spec.get("exact") is not True
                   or spec.get("tokens") != 2 or disk.get("checked") is not True
                   or disk.get("exact") is not True or disk.get("tokens") != 2):
@@ -283,7 +286,7 @@ jobs:
           for line in log_path.read_text(errors="replace").splitlines():
               match = pattern.fullmatch(line)
               if match: traces.setdefault(match.group(1), {})[int(match.group(2))] = int(match.group(3))
-          required = {"baseline", "restored", "fresh", "disk"}
+          required = {"baseline", "prefill", "restored", "fresh", "disk"}
           if set(traces) != required or any(set(traces[name]) != {0, 1} for name in required):
               raise SystemExit(f"token trace paths or indices differ: {traces}")
           first = traces["baseline"][0]
@@ -306,7 +309,8 @@ jobs:
               "generation": {"requested_tokens": 2, "first_token_id": first,
                              "token_ids_by_path": {name: [traces[name][i] for i in (0, 1)]
                                                    for name in sorted(required)},
-                             "snapshot_exact": True, "speculative_exact": True,
+                             "snapshot_exact": True, "production_prefill_exact": True,
+                             "speculative_exact": True,
                              "disk_restore_exact": True},
               "evidence": {"validation_json_sha256": sha(validation_path),
                            "engine_log_sha256": sha(log_path)},

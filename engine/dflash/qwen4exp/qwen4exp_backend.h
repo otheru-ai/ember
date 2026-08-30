@@ -30,6 +30,9 @@ public:
     explicit Qwen4ExpBackend(const Qwen4ExpBackendConfig & config);
     ~Qwen4ExpBackend() override;
     bool init();
+    bool validation_compare_production_prefill() const override {
+        return true;
+    }
     bool encode_vision_image(const uint8_t * encoded, size_t encoded_size,
                              EncodedVisionImage & out,
                              std::string & error) override;

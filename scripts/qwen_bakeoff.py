@@ -715,9 +715,13 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
     differential, _, _ = pinned_evidence(
         hardware_path.parent, hardware_files.get("differential"),
         "matching-MTP differential")
+    prefill = differential.get("prefill") or {}
     spec = differential.get("spec") or {}
     rate = spec.get("accept_rate")
-    if (differential.get("ok") is not True or differential.get("snapshot_ok") is not True
+    if (differential.get("ok") is not True or
+            differential.get("snapshot_ok") is not True or
+            prefill.get("checked") is not True or
+            prefill.get("exact") is not True
             or spec.get("checked") is not True or spec.get("exact") is not True
             or isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not 0.0 < float(rate) < 1.0):

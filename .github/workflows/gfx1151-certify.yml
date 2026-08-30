@@ -745,8 +745,10 @@ jobs:
           rows = [json.loads(line) for line in open(timing_path, encoding="utf-8")]
           if evidence.get("ember_revision") != source_sha:
               raise SystemExit("retained evidence revision differs from source spec")
+          prefill = differential.get("prefill") or {}
           spec = differential.get("spec") or {}
           if not (differential.get("ok") and differential.get("snapshot_ok")
+                  and prefill.get("checked") and prefill.get("exact")
                   and spec.get("checked") and spec.get("exact")):
               raise SystemExit("retained 64-token differential is not exact")
           summaries = [row for row in rows if row.get("kind") == "summary"]
@@ -1004,8 +1006,10 @@ jobs:
           profile = json.load(open(profile_path, encoding="utf-8"))
           if evidence.get("ember_revision") != source_sha:
               raise SystemExit("retained evidence revision differs from source spec")
+          prefill = differential.get("prefill") or {}
           spec = differential.get("spec") or {}
           if not (differential.get("ok") and differential.get("snapshot_ok")
+                  and prefill.get("checked") and prefill.get("exact")
                   and spec.get("checked") and spec.get("exact")):
               raise SystemExit("retained 64-token differential is not exact")
           summaries = [row for row in rows if row.get("kind") == "summary"]

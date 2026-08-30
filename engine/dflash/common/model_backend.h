@@ -344,6 +344,16 @@ struct ResidentBatchBackend : ContinuousBatchWorkBackend {
 struct ModelBackend {
     virtual ~ModelBackend() = default;
 
+    // Architectures with a distinct production prefill implementation can
+    // require the differential validator to compare that path against its
+    // authoritative q=1 reference. DeepSeek's release validator deliberately
+    // controls sparse/dense policy elsewhere; Qwen's bounded q16 frontier is
+    // a separate numerical implementation and must never be optimized without
+    // an explicit token-equivalence check.
+    virtual bool validation_compare_production_prefill() const {
+        return false;
+    }
+
     // ── Generation ───────────────────────────────────────────────────
     // Run a full prefill + decode cycle. Backend owns the strategy
     // (autoregressive, speculative, batched, …).

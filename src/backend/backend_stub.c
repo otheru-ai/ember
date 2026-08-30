@@ -272,6 +272,8 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
     memset(report, 0, sizeof(*report));
     report->ok = true;
     report->snapshot_ok = true;
+    report->prefill_checked = false;
+    report->prefill_exact = true;
     report->spec_checked = false;
     report->spec_exact = true;
     report->disk_checked = false;

@@ -1345,6 +1345,24 @@ static bool backend_validate_impl(
         return true;
     }
 
+    GenerateResult production_prefill;
+    report->prefill_checked =
+        b->be->validation_compare_production_prefill();
+    report->prefill_exact = true;
+    if (report->prefill_checked) {
+        GenerateRequest production = ar;
+        production.force_exact_prefill = false;
+        production.snap_slot = -1;
+        production.snap_pos = -1;
+        production_prefill = b->be->generate(production, io);
+        trace_validation_tokens("prefill", production_prefill.tokens);
+        report->prefill_tokens =
+            static_cast<int>(production_prefill.tokens.size());
+        report->prefill_exact =
+            production_prefill.ok() && validation_tokens_equal(
+                baseline.tokens, production_prefill.tokens, report);
+    }
+
     GenerateRequest spec = ar;
     spec.force_ar_decode = false;
     spec.snap_slot = -1;
@@ -1459,14 +1477,19 @@ static bool backend_validate_impl(
          report->batch_spec_rows == report->batch_rows);
     report->ok = report->snapshot_ok && restored_speculative.ok() &&
                  speculative.ok() &&
+                 report->prefill_exact &&
                  report->spec_exact &&
                  (!report->disk_checked || report->disk_exact) &&
                  (!report->batch_checked || report->batch_exact) &&
                  required_batch_spec_ran;
-    if (!restored_speculative.ok() || !speculative.ok()) {
+    if (report->prefill_checked && !production_prefill.ok()) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "production prefill path failed: %.*s",
+                      (int)production_prefill.error_detail().size(),
+                      production_prefill.error_detail().data());
+    } else if (!restored_speculative.ok() || !speculative.ok()) {
         const GenerateResult & failed = restored_speculative.ok()
-            ? speculative
-            : restored_speculative;
+            ? speculative : restored_speculative;
         std::snprintf(report->detail, sizeof(report->detail),
                       "snapshot restore/spec path failed: %.*s",
                       (int)failed.error_detail().size(),
@@ -1476,7 +1499,8 @@ static bool backend_validate_impl(
                       "resident XDNA speculation required but ran for "
                       "%d/%d rows",
                       report->batch_spec_rows, report->batch_rows);
-    } else if (!report->spec_exact || !report->disk_exact ||
+    } else if (!report->prefill_exact || !report->spec_exact ||
+               !report->disk_exact ||
                !report->batch_exact) {
         std::snprintf(report->detail, sizeof(report->detail),
                       "token mismatch at %d: expected=%d actual=%d",
@@ -1487,8 +1511,8 @@ static bool backend_validate_impl(
                       "snapshot/disk exact; DSpark unavailable or did not run");
     } else {
         std::snprintf(report->detail, sizeof(report->detail),
-                      "AR, restored/fresh DSpark, disk, and resident batch "
-                      "are token-exact (%d speculative rows)",
+                      "AR, production prefill, restored/fresh DSpark, disk, "
+                      "and resident batch are token-exact (%d speculative rows)",
                       report->batch_spec_rows);
     }
     return true;
