@@ -23,10 +23,10 @@ This file is 1100 lines and grows by measurement. The state as of
   CAUSE FOUND*
 - Widths 6 and 17 remain red, and every width that fails contains physical-16
   **MMQ** work while every width that passes stays on **MMVQ**. Five of five
-  follow that boundary. This is very likely not a defect — it is our prefill
-  test asserting bit identity between kernel families that exist because they
-  differ. **The decision is the user's.** → *Is bit-exactness the right
-  criterion for batched prefill?*
+  follow that boundary. **Decided 2026-08-31**: prefill is judged by a margin
+  criterion rather than bit-identity, with MTP's q1 replay unchanged. Widths 6
+  and 17 are to be re-run under it. → *DECIDED: prefill uses a margin
+  criterion*
 
 **Performance.** No publishable number exists yet, and none may be published
 while the above is open.
@@ -987,7 +987,60 @@ the f32 precision wall). So:
   replaces — 1.86e-3 vs 2.75e-3 — on the CPU backend alone, before the fp64
   theta the HIP kernel adds.
 
-## Is bit-exactness the right criterion for batched prefill?
+## DECIDED: prefill uses a margin criterion, not bit-identity
+
+**User decision, 2026-08-31.** Option B of the three put to them. Recorded here
+because it is a release criterion and belongs to the user, not to any agent;
+do not relitigate it from the ledger.
+
+### The criterion
+
+> A prefill disagreement between batched and q1 is acceptable **only if** the
+> q1 top-2 margin at the diverging position is smaller than the maximum
+> absolute logit difference measured between the two paths on that same row.
+> Otherwise it fails.
+
+It is self-calibrating — there is no constant to pick or defend. If the two
+paths differ by `d` in logits and the winning token led the runner-up by more
+than `d`, the flip cannot be explained by the observed numerical difference and
+is a real defect. If the margin was inside `d`, the argmax was tied at the
+precision available and either answer is as correct as the other.
+
+**It does not weaken the test.** At width 3 the divergence was 13.4118 against
+19.5071 — a six-logit margin against a first divergence of ~1e-7. That fails
+under this criterion, correctly. The `sum_rows` defect would still have been
+caught.
+
+### What stays bit-exact
+
+MTP verification is unchanged. `qwen4exp_mtp.cpp:320-334` remains the authority
+boundary: no token is committed from batched logits alone, and the accepted
+prefix is replayed through q=1. That equality is load-bearing and this decision
+does not touch it.
+
+### Why prefill differs from MTP
+
+- Upstream has **no q1 path at all**, so the equality is unaskable against the
+  implementation that reaches 345 prefill.
+- Nothing downstream of Ember's prefill consults a q1 prefill; prefill verifies
+  nothing.
+- Enforcing bit-identity would require capping prefill batching at physical
+  width 5, since physical 16 cannot use MMVQ at all — which discards the
+  batching the performance target depends on.
+
+### Implementation
+
+`qwen4exp_backend.cpp` already logs `top1`, `top2` and `margin` through
+`log_numerics_top2`, so the inputs exist. The differential needs, per diverging
+row: the q1 top-2 margin, the max |logit delta| between paths, and a verdict.
+Report all three whether it passes or fails — a pass at a margin close to `d`
+is worth seeing.
+
+Widths 6 and 17 are then re-run under it. Their outcome is an *output* of this
+criterion, not an input to it: if the margins are inside the deltas they pass,
+and if they are not there is a second defect and the criterion has found it.
+
+## Superseded: is bit-exactness the right criterion for batched prefill?
 
 Raised 2026-08-31 after codex 344 measured the first divergence as *floating-
 noise scale* in layer 0's recurrent state, compounding to an output flip only
