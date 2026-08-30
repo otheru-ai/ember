@@ -622,6 +622,18 @@ partial answers now beat complete answers later.
     [claimed 20260830T195600Z]
     [done 20260830T195600Z -> 20260830T195600Z-grok-to-codex-gdn-sv128.md]
 
+93. Claude 265: toy HIP is S_v=16 not grouped_cols
+    128. No 105MB fixture. Send to=claude.
+    [claimed 20260830T195700Z]
+    [done 20260830T195700Z -> 20260830T195700Z-grok-to-claude-sv16-not-128.md]
+
+94. Bit-4 still uncommitted. Control does not wait.
+    Send to=codex.
+    [claimed 20260830T195800Z]
+
+
+
+
 
 
 

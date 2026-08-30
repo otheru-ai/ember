@@ -32,7 +32,40 @@ continue.
    - `<tool_call>` ungated marker: assessed low severity (gated behind
      has_tools at main.c:436 and sse.c:553, so only bites DeepSeek+tools whose
      output literally contains the marker). Fix touches 8 call sites in
-     invariant-heavy sse.c. UPGRADED 20260830T180705Z: traced to SILENT TRUNCATION (sse.c:594-597 switches to TOOL mode, then DSML parser finds nothing at :649-657, so no text and no tool call, no error). Fix = gate 2 markers on profile, 8 call sites. Still deferred as off-goal, see msg 73.
+     invariant-heavy sse.c. UPGRADED 20260830T180705Z: traced to SILENT
+     TRUNCATION. LOCATED PRECISELY 20260830T233000Z, and the earlier fix
+     sketch was wrong:
+
+     Mechanism: `TOOL_STARTS` (`sse.c:83`) carries `"<tool_call>"` and
+     `TOOL_ENDS` (`:106`) `"</tool_call>"` **unconditionally**, so
+     `ember_find_tool_start` fires on any text containing the Qwen marker.
+     `:594-597` then switches the stream to `EMBER_SSE_TOOL` and moves
+     `emit_pos` to `tool_start`. In `ember_sse_emit_tools` (`:649-657`),
+     `st->qwen_tool_syntax` is false for a DeepSeek profile, so it calls
+     `ember_parse_dsml_tool_calls`, which does not understand Qwen syntax and
+     returns 0. `any_tool` stays false, nothing is emitted, no error is raised
+     and the buffered text is gone.
+
+     `qwen_tool_syntax` is set only by `ember_sse_set_qwen_tools` (`:266-269`),
+     so the two markers are live on every profile while only one profile can
+     parse them.
+
+     **Do not** gate the markers as previously sketched: `ember_find_tool_start`
+     / `_end` have **14 call sites** across `sse.c` and `main.c`, and several in
+     `main.c` have no stream state to gate on. Threading a flag through them is
+     a large change to buffer-and-resplit SSE, which `AGENTS.md` names as an
+     invariant.
+
+     Narrow fix instead, one site: in `ember_sse_emit_tools`, when the parser
+     returns `n == 0`, the marker was a false positive — emit the buffered
+     region from `st->tool_start` as ordinary content rather than dropping it.
+     That converts silent truncation into correct passthrough without touching
+     marker detection. **Before writing it**, read what `main.c` does with the
+     `false` return, since that is the half I have not verified.
+
+     Still deferred while the correctness blocker is open: this is off the
+     performance goal and sits in the most invariant-sensitive file in the
+     server.
    Remaining:
    `flatten_content` unknown-block rejection + stale
    `docs/client-compatibility.md`; ungated `<tool_call>` marker in `sse.c`;
