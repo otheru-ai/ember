@@ -119,6 +119,21 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn(
             "if: ${{ always() && steps.safety.outputs.armed == 'yes' }}", proof)
 
+    def test_q3_attestations_verify_the_fully_qualified_exact_revision(self) -> None:
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        signer = (
+            "--signer-workflow "
+            "OtherU-AI/ember/.github/workflows/qwen-q3-first-token.yml"
+        )
+        self.assertEqual(proof.count("gh attestation verify"), 2)
+        self.assertEqual(proof.count(signer), 2)
+        self.assertEqual(proof.count('--source-digest "$TARGET_SHA"'), 2)
+        self.assertEqual(proof.count('--signer-digest "$TARGET_SHA"'), 2)
+        self.assertNotIn(
+            "--signer-workflow .github/workflows/qwen-q3-first-token.yml",
+            proof,
+        )
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {
