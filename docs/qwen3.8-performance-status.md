@@ -202,13 +202,46 @@ with F32 weights. It clears the **padding algebra on the dense path**. It does
 independent" has had its dense half tested and its MoE half not — nor the
 type-101 ROCMFPX quantized path, nor the HIP kernels, nor positions and state.
 
-So the remaining difference lies in MoE routing/expert dispatch, quantization,
-or HIP. Next cut, cheapest first: the same per-row-versus-q1 comparison through
-`moe_batch` on the CPU backend at widths 3, 6, 17 — if routing selects
-different experts for a row depending on batch width, that is a six-logit-class
-error and it shows there. If that is clean too, the discriminator is the
-type-101 dense path at width 3 versus q1 on hardware, which is narrower than
-the full differential. Our default of 3 is an inherited sm_86 (RTX 3090)
+**The MoE half is now eliminated too** (`b5d0bb5`). A batch graph at the cached
+physical width, `width` real rows, zeros to the bucket edge, each real row
+compared against the same row through the q1 graph, at widths 2, 3, 5, 6 and
+16. Passes; mutation-testing fails it at width 2 on both rows. This was the
+half with a plausible coupling — routing picks top-k experts per row, so a
+batch-axis reduction would change which experts a real row dispatches to, at
+whole-logit scale.
+
+Both halves of the sentence at `qwen4exp_frontier.h:104-107` are now tested
+rather than asserted, and both hold.
+
+### Eliminated so far, all at the exact failing widths
+
+| claim | status |
+|---|---|
+| MMQ/MMVQ crossover explains 3/6/17 | refuted — codex 106; bounded impossible for 6 and 17 |
+| magnitude consistent with kernel precision | refuted — 6.1 logits with an argmax flip |
+| dense padding couples rows | refuted — `99dcc3d` |
+| MoE routing couples rows across the batch | refuted — `b5d0bb5` |
+| `sync_fallback` | refuted — 0 dispatches, measured twice |
+
+### What is left
+
+1. the type-101 ROCMFPX quantized path — the CPU tests use F32 weights
+2. the HIP kernels themselves
+3. state the frontier fixtures do not carry: positions, KV, GDN recurrent and
+   conv history across a batch
+
+3 ranks above 2. A quantization or kernel fault should be roughly
+width-uniform; the observed pattern is widths 1 and 2 passing with 3, 6 and 17
+failing, which looks like something that engages only once a batch carries more
+than two tokens of *history*.
+
+Next cut, still GPU-free: **GDN across a batch**.
+`qwen4exp_frontier_gdn_batch` takes `n_tokens`, `conv_state` and
+`recurrent_state`, and `test_persistent_gdn_q1`
+(`test_qwen4exp_frontier.cpp:340`) already exercises the q1 path on the CPU
+backend. Three tokens through the batch entry point against three sequential q1
+steps chaining state is the same shape as the two tests above, on the first
+*stateful* subsystem in the list. Our default of 3 is an inherited sm_86 (RTX 3090)
 crossover measurement, not a gfx1151 one — see the comment at
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2545-2559`, which explicitly says to
 override for other hardware, and note that DeepSeek already overrides it to 4

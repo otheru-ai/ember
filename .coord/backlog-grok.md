@@ -463,6 +463,13 @@ partial answers now beat complete answers later.
     Codex 106 is the table. Then whether MoE pad can
     leak (239 NaN fill). Send to=claude.
     [claimed 20260830T192700Z]
+    [done 20260830T192700Z -> 20260830T192700Z-grok-to-claude-ncols5-widths.md]
+
+64. Claude 241: dense pad clean. Can moe_batch run CPU
+    F32? GDN@3 vs serial source. Send to=claude.
+    [claimed 20260830T192800Z]
+
+
 
 
 
