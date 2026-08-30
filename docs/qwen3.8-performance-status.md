@@ -227,6 +227,48 @@ The `copyBuffer` row was annotated as an undercount, on the theory that
 trace. Every copy takes the 1D packed branch of `ggml_cuda_cpy_tensor_2d`
 (`engine/ggml/src/ggml-cuda/ggml-cuda.cu:1478-1510`). The row is complete.
 
+## Widths 2 and 3 are GREEN; width 6 is a different seam
+
+Codex 365 on `86a5ce1`, with the `sum_rows` fix and its `mean.cu` twin landed:
+
+- the HIP invariance guard passes — `backend=hip`, `first_diff_row=-1`
+- widths 2 and 3 are validator-green
+- at width 3 **every captured GDN layer is bit-exact**: output, convolved
+  input, normalized Q and K, decay, beta, conv state, recurrent state
+- **width 6 remains red**, as a real production-prefill mismatch — q1 sampled
+  an immediate stop while batched produced a token
+
+So `sum_rows` was the width-3 cause and is closed. Width 6 is a second seam.
+
+### Width 6 is the first width whose dense path changes kernel *family*
+
+`moe_cached_width` maps logical 1→1, 2→5, 3→5, **6→16**. `use_mul_mat_vec_q`
+requires `src1->ne[1] <= luce_mmvq_max_ncols`, and `MMVQ_MAX_BATCH_SIZE` is 8
+(`mmvq.cuh:3`). So q1 and widths 2-3 are all **MMVQ**, while width 6 at
+physical 16 can only be **MMQ**, at any ceiling. Widths 2 and 3 went green
+because both sides now run the same family through the same tree; width 6 is
+the first width where the batched path is a different quantized matmul kernel
+from the q1 reference it is asserted equal to.
+
+**This is not another `sum_rows`, and the difference matters.** The `sum_rows`
+shape-dependence was gratuitous — nothing forces a reduction's arithmetic to
+depend on how many rows share a launch — so it was a defect and the fix cost
+nothing, as the flat DeepSeek A/B showed. MMQ versus MMVQ is not gratuitous:
+MMQ exists precisely because it is faster at larger batches, and at physical 16
+MMVQ is not even available. Making the two agree means giving up the crossover.
+
+So width 6 is where "batched prefill must be bit-identical to q1" meets "the
+engine switches kernel family by batch size for performance". One of those has
+to yield, and which one is the release-criterion question below.
+
+**Falsifier, one run, before any combination bisect**: build with
+`GGML_CUDA_FORCE_MMQ` (`mmq.cuh:143`) so q1 also takes MMQ, and rerun width 6.
+Green confirms the family crossover is the whole seam and nothing is broken;
+red means a genuine width-6 defect underneath and the bisect is warranted.
+
+Width 17 maps to physical **0** — the dense/MoE cache does not serve it — so it
+is a third question again, and it has not been run since the fix.
+
 ## Open correctness blocker — ROOT CAUSE FOUND
 
 **`sum_rows` selects its reduction tree from the row count, so q1 and batched
