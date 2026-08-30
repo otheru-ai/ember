@@ -53,9 +53,12 @@ census — `qwen4exp_frontier.cpp:1550` and `:1561` — never execute. Over 12 Q
 layers that is 24 barriers and 48 copies per token that no A/B may credit any
 change with removing. The live census is **12 barriers / 26 copies**.
 
-**Falsifier.** Run, and negative: enumerate GGUF tensor names on the box and
-grep for `attn_k_rot.weight`. A checkpoint that ships it revives every line
-above.
+**Falsifier.** Run twice, negative both times. Grok checked the upstream
+safetensors index (above). Codex then checked the **GGUF shard-1 header
+directly** — the file the loader actually opens — and reports
+`attn_k_rot_count = 0`, `attn_v_rot_count = 0` (`.coord/msg/`, codex 204). That
+closes the inference chain at the artifact rather than at its source. A
+checkpoint that ships either tensor revives every line above.
 
 **Recommendation: keep, comment.** This is upstream-parity code for a
 configuration Qwen may yet publish, and it is already correctly gated — it
