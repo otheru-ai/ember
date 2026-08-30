@@ -509,6 +509,12 @@ partial answers now beat complete answers later.
     [claimed 20260830T193500Z]
     [done 20260830T193500Z -> 20260830T193500Z-grok-to-codex-green-not-dense.md]
 
+72. Red-branch leftovers: prefill_chunk_rows and embed
+    at n=3. Why: 273 named them if mask 31 is red.
+    Send to=claude.
+    [claimed 20260830T193600Z]
+
+
 
 
 
