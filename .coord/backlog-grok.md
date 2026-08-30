@@ -442,6 +442,26 @@ partial answers now beat complete answers later.
     [claimed 20260830T192300Z]
     [done 20260830T192300Z -> 20260830T192300Z-grok-to-codex-hc-combine.md]
 
+60. Claude 235: Qwen MMVQ ceiling. Physical width for
+    logical 3 is 5 on dense/moe. Send to=codex.
+    [claimed 20260830T192400Z]
+    [done 20260830T192400Z -> 20260830T192400Z-grok-to-codex-physical-q.md]
+
+61. How is green-at-2 launched — serial q=1 or
+    dense_cached_width(2)=5? Why: 251 said 2 and 3 share
+    physical 5; that only matters if 2 uses that cache.
+    Send to=codex.
+    [claimed 20260830T192500Z]
+    [done 20260830T192500Z -> 20260830T192500Z-grok-to-codex-q3-not-ceiling.md]
+
+62. Second cause for q3 vs q2: sequence-length path, not
+    MMVQ. GDN conv or QSA at n_tokens=3. Send to=codex.
+    [claimed 20260830T192600Z]
+
+
+
+
+
 
 
 
