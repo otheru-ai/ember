@@ -147,6 +147,14 @@ bool qwen4exp_frontier_hc_eval(
     const float * input, size_t input_count, int n_tokens,
     std::vector<float> & mixed, std::vector<float> * injection,
     std::string & error);
+// Final HC mixing can feed a borrowed output matrix without a host round trip.
+// The output is row-major [n_tokens, projection.ne[1]].
+bool qwen4exp_frontier_hc_output_eval(
+    Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+    const Qwen4ExpFrontierHcSpec & spec, ggml_tensor * norm,
+    ggml_tensor * down, ggml_tensor * up, ggml_tensor * projection,
+    const float * input, size_t input_count, int n_tokens,
+    std::vector<float> & output, std::string & error);
 size_t qwen4exp_frontier_hc_graph_count(
     const Qwen4ExpFrontierDenseCache * cache);
 

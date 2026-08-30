@@ -218,6 +218,7 @@ static void test_persistent_hc_mixer() {
     ggml_tensor * down = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 12, 5);
     ggml_tensor * up = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 5, 12);
     ggml_tensor * inject = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 12, 3);
+    ggml_tensor * output = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 6);
     ggml_set_name(down, "tiny_hc_down");
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     CHECK(buffer != nullptr, "HC weight buffer allocates");
@@ -237,6 +238,8 @@ static void test_persistent_hc_mixer() {
     const std::vector<float> up_weight = patterned_values(60, 0.017f, 13);
     const std::vector<float> inject_weight =
         patterned_values(36, 0.023f, 7);
+    const std::vector<float> output_weight =
+        patterned_values(24, 0.029f, 11);
     ggml_backend_tensor_set(norm, norm_bf16.data(), 0,
                             norm_bf16.size() * sizeof(ggml_bf16_t));
     ggml_backend_tensor_set(down, down_weight.data(), 0,
@@ -245,6 +248,8 @@ static void test_persistent_hc_mixer() {
                             up_weight.size() * sizeof(float));
     ggml_backend_tensor_set(inject, inject_weight.data(), 0,
                             inject_weight.size() * sizeof(float));
+    ggml_backend_tensor_set(output, output_weight.data(), 0,
+                            output_weight.size() * sizeof(float));
 
     std::vector<float> input = patterned_values(36, 0.031f, 17);
     std::vector<float> expected_mixed;
@@ -307,6 +312,25 @@ static void test_persistent_hc_mixer() {
                                  expected_mixed.begin() + 4), 3.0e-5f) &&
               dflash::common::qwen4exp_frontier_hc_graph_count(cache) == 2U,
           "persistent q1 HC graph preserves the decode row and cache bound");
+    std::vector<float> expected_output;
+    for (int token = 0; token < 3; ++token) {
+        const std::vector<float> row(
+            expected_mixed.begin() + token * 4,
+            expected_mixed.begin() + (token + 1) * 4);
+        const std::vector<float> projected =
+            matvec(output_weight, 6, 4, row);
+        expected_output.insert(expected_output.end(), projected.begin(),
+                               projected.end());
+    }
+    std::vector<float> actual_output;
+    const bool output_ok =
+        dflash::common::qwen4exp_frontier_hc_output_eval(
+            cache, backend, spec, norm, down, up, output, input.data(),
+            input.size(), 3, actual_output, error);
+    CHECK(output_ok && close_vectors(actual_output, expected_output, 3.0e-5f),
+          "persistent HC output graph matches scalar mixer and projection");
+    CHECK(dflash::common::qwen4exp_frontier_hc_graph_count(cache) == 3U,
+          "final projection owns one additional bounded HC graph");
     dflash::common::qwen4exp_frontier_dense_cache_destroy(cache);
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);

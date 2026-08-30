@@ -219,7 +219,7 @@ bool Qwen4ExpBackend::init() {
                  "hc_mixer=persistent-q1-q5-q16 "
                  "qsa_projection_batch=q5-q16 "
                  "mtp_qsa=%s "
-                 "verifier_output_batch=q5-q16 "
+                 "final_head=fused-hc-vocab-q1-q5-q16 "
                  "activation_dump=%s\n",
                  max_ctx, weights_.yarn.enabled ? "factor-4" : "off",
                  mtp_depth_ ? "opt-in" : "off", mtp_depth_,

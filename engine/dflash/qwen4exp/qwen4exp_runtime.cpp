@@ -131,6 +131,22 @@ bool hc_mix(const Qwen4ExpWeights & weights, const std::vector<float> & hc,
     return true;
 }
 
+bool hc_output_rows(
+        const Qwen4ExpWeights & weights, Qwen4ExpFrontierDenseCache * cache,
+        ggml_tensor * norm, ggml_tensor * down, ggml_tensor * up,
+        ggml_tensor * projection, const float * hc, size_t hc_count,
+        int n_tokens, std::vector<float> & output, std::string & error) {
+    if (!cache || !hc || n_tokens <= 0 || hc_count !=
+            static_cast<size_t>(kHcDim) * static_cast<size_t>(n_tokens)) {
+        error = "invalid Qwen4Exp final HC rows";
+        return false;
+    }
+    const Qwen4ExpFrontierHcSpec spec{kEmbedding, kHc, kEpsilon};
+    return qwen4exp_frontier_hc_output_eval(
+        cache, weights.backend, spec, norm, down, up, projection, hc,
+        hc_count, n_tokens, output, error);
+}
+
 void hc_combine(std::vector<float> & hc, const std::vector<float> & block,
                 const std::array<float, kHc> & inject) {
     for (int stream = 0; stream < kHc; ++stream) {
@@ -1188,12 +1204,10 @@ static bool step_q1_embedding(const Qwen4ExpWeights & weights,
                                        block, error)) return false;
         hc_combine(state.hc, block, inject);
     }
-    std::vector<float> final;
-    if (!hc_mix(weights, state.hc, weights.output_hc_norm,
-                weights.output_hc_down, weights.output_hc_up, nullptr,
-                final, nullptr, error) ||
-        !matvec(weights.dense_cache, weights.backend, weights.output,
-                final.data(), kEmbedding, logits, error)) return false;
+    if (!hc_output_rows(
+            weights, weights.dense_cache, weights.output_hc_norm,
+            weights.output_hc_down, weights.output_hc_up, weights.output,
+            state.hc.data(), state.hc.size(), 1, logits, error)) return false;
     ++state.cur_pos;
     state.last_token = token;
     return true;
@@ -1538,12 +1552,10 @@ bool qwen4exp_mtp_step_q1(
     hc_combine(state.hc, block, inject);
 
     draft_hc = state.hc;
-    std::vector<float> final;
-    if (!hc_mix(target, state.hc, mtp.output_hc_norm, mtp.output_hc_down,
-                mtp.output_hc_up, nullptr, final, nullptr, error,
-                mtp.dense_cache) ||
-        !matvec(target.dense_cache, target.backend, target.output,
-                final.data(), kEmbedding, logits, error)) return false;
+    if (!hc_output_rows(
+            target, mtp.dense_cache, mtp.output_hc_norm,
+            mtp.output_hc_down, mtp.output_hc_up, target.output,
+            state.hc.data(), state.hc.size(), 1, logits, error)) return false;
     ++state.cur_pos;
     return true;
 }
@@ -1777,10 +1789,10 @@ bool qwen4exp_step_batch_mrope_impl(
     if (row_hc) *row_hc = hc_rows;
     if (row_logits) {
         // The bounded verifier consumes every row, but the final HC
-        // down/up mixer and vocabulary projection are stateless across rows.
-        // Keep one q5/q16 frontier at this boundary instead of returning to
-        // q=1 for three large matrix products per candidate.  This is local
-        // vendored-engine divergence; the authoritative replay below the MTP
+        // The down/up mixer and vocabulary projection are stateless across
+        // rows. Keep them in one q5/q16 frontier instead of returning to a
+        // host boundary between the final HC row and vocabulary head. This is
+        // local vendored-engine divergence; the authoritative replay below the MTP
         // verifier still commits accepted tokens through q=1.
         std::vector<float> final_hc(rows * static_cast<size_t>(kHcDim));
         for (size_t row = 0; row < rows; ++row) {
@@ -1796,14 +1808,12 @@ bool qwen4exp_step_batch_mrope_impl(
             return false;
         }
         const size_t vocabulary = static_cast<size_t>(weights.output->ne[1]);
-        std::vector<float> final_rows, logits;
-        if (!hc_mix_rows(weights, weights.dense_cache,
-                         weights.output_hc_norm, weights.output_hc_down,
-                         weights.output_hc_up, nullptr, rows, final_hc,
-                         final_rows, nullptr, error) ||
-            !matmul_rows(weights.dense_cache, weights.backend,
-                         weights.output, final_rows.data(), kEmbedding,
-                         static_cast<int>(rows), logits, error) ||
+        std::vector<float> logits;
+        if (!hc_output_rows(
+                weights, weights.dense_cache, weights.output_hc_norm,
+                weights.output_hc_down, weights.output_hc_up, weights.output,
+                final_hc.data(), final_hc.size(), static_cast<int>(rows),
+                logits, error) ||
             logits.size() != rows * vocabulary) {
             if (error.empty())
                 error = "Qwen4Exp batched output projection shape mismatch";
@@ -1817,12 +1827,12 @@ bool qwen4exp_step_batch_mrope_impl(
                 begin, begin + static_cast<std::ptrdiff_t>(vocabulary));
         }
     } else if (final_logits) {
-        std::vector<float> final, logits;
-        if (!hc_mix(weights, hc_rows.back(), weights.output_hc_norm,
-                    weights.output_hc_down, weights.output_hc_up, nullptr,
-                    final, nullptr, error) ||
-            !matvec(weights.dense_cache, weights.backend, weights.output,
-                    final.data(), kEmbedding, logits, error)) return false;
+        std::vector<float> logits;
+        if (!hc_output_rows(
+                weights, weights.dense_cache, weights.output_hc_norm,
+                weights.output_hc_down, weights.output_hc_up, weights.output,
+                hc_rows.back().data(), hc_rows.back().size(), 1, logits,
+                error)) return false;
         *final_logits = std::move(logits);
     }
     state.hc = hc_rows.back();

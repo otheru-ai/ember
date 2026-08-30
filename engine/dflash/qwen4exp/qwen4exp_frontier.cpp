@@ -166,6 +166,7 @@ struct Qwen4ExpFrontierHcGraph {
     ggml_tensor * input = nullptr;
     ggml_tensor * mixed = nullptr;
     ggml_tensor * injection = nullptr;
+    ggml_tensor * projected = nullptr;
     Qwen4ExpFrontierHcSpec spec{};
     int n_tokens = 0;
     size_t arena_bytes = 0;
@@ -259,11 +260,13 @@ struct Qwen4ExpFrontierHcKey {
     ggml_tensor * down = nullptr;
     ggml_tensor * up = nullptr;
     ggml_tensor * inject = nullptr;
+    ggml_tensor * projection = nullptr;
     int n_tokens = 0;
 
     bool operator==(const Qwen4ExpFrontierHcKey & other) const {
         return norm == other.norm && down == other.down && up == other.up &&
-               inject == other.inject && n_tokens == other.n_tokens;
+               inject == other.inject && projection == other.projection &&
+               n_tokens == other.n_tokens;
     }
 };
 
@@ -276,6 +279,7 @@ struct Qwen4ExpFrontierHcKeyHash {
         combine(std::hash<ggml_tensor *>{}(key.down));
         combine(std::hash<ggml_tensor *>{}(key.up));
         combine(std::hash<ggml_tensor *>{}(key.inject));
+        combine(std::hash<ggml_tensor *>{}(key.projection));
         combine(std::hash<int>{}(key.n_tokens));
         return value;
     }
@@ -397,12 +401,16 @@ void hc_graph_destroy(Qwen4ExpFrontierHcGraph * graph) {
 Qwen4ExpFrontierHcGraph * hc_graph_create(
         ggml_backend_t backend, const Qwen4ExpFrontierHcSpec & spec,
         ggml_tensor * norm, ggml_tensor * down, ggml_tensor * up,
-        ggml_tensor * inject, int n_tokens, std::string & error) {
+        ggml_tensor * inject, ggml_tensor * projection, int n_tokens,
+        std::string & error) {
     const int64_t hc_dim = static_cast<int64_t>(spec.stream_width) *
                            static_cast<int64_t>(spec.streams);
     const bool inject_valid = !inject ||
         (inject->buffer && ggml_n_dims(inject) == 2 &&
          inject->ne[0] == hc_dim && inject->ne[1] == spec.streams);
+    const bool projection_valid = !projection ||
+        (projection->buffer && ggml_n_dims(projection) == 2 &&
+         projection->ne[0] == spec.stream_width && projection->ne[1] > 0);
     if (!backend || spec.stream_width <= 0 || spec.streams <= 0 ||
         !std::isfinite(spec.epsilon) || spec.epsilon <= 0.0f ||
         n_tokens <= 0 || hc_dim <= 0 || !norm || !norm->buffer ||
@@ -410,7 +418,7 @@ Qwen4ExpFrontierHcGraph * hc_graph_create(
         ggml_n_dims(down) != 2 || down->ne[0] != hc_dim ||
         down->ne[1] <= 0 || !up || !up->buffer ||
         ggml_n_dims(up) != 2 || up->ne[0] != down->ne[1] ||
-        up->ne[1] != hc_dim || !inject_valid) {
+        up->ne[1] != hc_dim || !inject_valid || !projection_valid) {
         error = "invalid Qwen4Exp persistent HC graph shape";
         return nullptr;
     }
@@ -457,10 +465,13 @@ Qwen4ExpFrontierHcGraph * hc_graph_create(
     result->mixed = ggml_reshape_2d(
         ctx, result->mixed, spec.stream_width, n_tokens);
     if (inject) result->injection = ggml_mul_mat(ctx, inject, normalized);
-    ggml_set_output(result->mixed);
+    if (projection)
+        result->projected = ggml_mul_mat(ctx, projection, result->mixed);
+    ggml_set_output(result->projected ? result->projected : result->mixed);
     if (result->injection) ggml_set_output(result->injection);
     result->graph = ggml_new_graph_custom(ctx, 96, false);
-    ggml_build_forward_expand(result->graph, result->mixed);
+    ggml_build_forward_expand(
+        result->graph, result->projected ? result->projected : result->mixed);
     if (result->injection)
         ggml_build_forward_expand(result->graph, result->injection);
     result->allocator = ggml_gallocr_new(
@@ -613,12 +624,15 @@ bool qwen4exp_frontier_dense_eval_rows(
     return true;
 }
 
-bool qwen4exp_frontier_hc_eval(
+namespace {
+bool hc_eval(
         Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
         const Qwen4ExpFrontierHcSpec & spec, ggml_tensor * norm,
         ggml_tensor * down, ggml_tensor * up, ggml_tensor * inject,
+        ggml_tensor * projection,
         const float * input, size_t input_count, int n_tokens,
-        std::vector<float> & mixed, std::vector<float> * injection,
+        std::vector<float> * mixed, std::vector<float> * injection,
+        std::vector<float> * projected,
         std::string & error) {
     const int graph_width = qwen4exp_frontier_dense_cached_width(n_tokens);
     const int64_t hc_dim = static_cast<int64_t>(spec.stream_width) *
@@ -628,25 +642,29 @@ bool qwen4exp_frontier_hc_eval(
                            std::numeric_limits<size_t>::max() ||
         input_count != static_cast<size_t>(hc_dim) *
                            static_cast<size_t>(n_tokens) ||
-        (inject == nullptr) != (injection == nullptr)) {
+        (inject == nullptr) != (injection == nullptr) ||
+        (projection == nullptr) != (projected == nullptr) ||
+        (!mixed && !projected)) {
         error = "invalid Qwen4Exp persistent HC evaluation";
         return false;
     }
     const Qwen4ExpFrontierHcKey key{
-        norm, down, up, inject, graph_width};
+        norm, down, up, inject, projection, graph_width};
     Qwen4ExpFrontierHcGraph *& graph = cache->hc_graphs[key];
     if (!graph) {
         graph = hc_graph_create(backend, spec, norm, down, up, inject,
-                                graph_width, error);
+                                projection, graph_width, error);
         if (!graph) {
             cache->hc_graphs.erase(key);
             return false;
         }
         std::fprintf(stderr,
                      "[qwen-frontier] event=graph_ready component=hc "
-                     "weight=%s logical_q=%d arena_width=%d "
+                     "weight=%s projection=%s logical_q=%d arena_width=%d "
                      "arena_bytes=%zu graph_replay=off\n",
-                     down ? down->name : "none", n_tokens, graph_width,
+                     down ? down->name : "none",
+                     projection ? projection->name : "none", n_tokens,
+                     graph_width,
                      graph->arena_bytes);
     }
     if (graph->backend != backend || graph->spec.stream_width !=
@@ -667,13 +685,15 @@ bool qwen4exp_frontier_hc_eval(
         error = "Qwen4Exp persistent HC graph execution failed";
         return false;
     }
-    const size_t mixed_values = static_cast<size_t>(spec.stream_width) *
-                                static_cast<size_t>(graph_width);
-    mixed.resize(mixed_values);
-    ggml_backend_tensor_get(graph->mixed, mixed.data(), 0,
-                            mixed_values * sizeof(float));
-    mixed.resize(static_cast<size_t>(spec.stream_width) *
-                 static_cast<size_t>(n_tokens));
+    if (mixed) {
+        const size_t mixed_values = static_cast<size_t>(spec.stream_width) *
+                                    static_cast<size_t>(graph_width);
+        mixed->resize(mixed_values);
+        ggml_backend_tensor_get(graph->mixed, mixed->data(), 0,
+                                mixed_values * sizeof(float));
+        mixed->resize(static_cast<size_t>(spec.stream_width) *
+                      static_cast<size_t>(n_tokens));
+    }
     if (injection) {
         const size_t injection_values = static_cast<size_t>(spec.streams) *
                                         static_cast<size_t>(graph_width);
@@ -683,7 +703,45 @@ bool qwen4exp_frontier_hc_eval(
         injection->resize(static_cast<size_t>(spec.streams) *
                           static_cast<size_t>(n_tokens));
     }
+    if (projected) {
+        if (!projection || projection->ne[1] <= 0 ||
+            static_cast<uint64_t>(projection->ne[1]) >
+                std::numeric_limits<size_t>::max() /
+                    static_cast<size_t>(graph_width)) {
+            error = "invalid Qwen4Exp persistent HC output projection";
+            return false;
+        }
+        const size_t output_width = static_cast<size_t>(projection->ne[1]);
+        projected->resize(output_width * static_cast<size_t>(graph_width));
+        ggml_backend_tensor_get(graph->projected, projected->data(), 0,
+                                projected->size() * sizeof(float));
+        projected->resize(output_width * static_cast<size_t>(n_tokens));
+    }
     return true;
+}
+} // namespace
+
+bool qwen4exp_frontier_hc_eval(
+        Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+        const Qwen4ExpFrontierHcSpec & spec, ggml_tensor * norm,
+        ggml_tensor * down, ggml_tensor * up, ggml_tensor * inject,
+        const float * input, size_t input_count, int n_tokens,
+        std::vector<float> & mixed, std::vector<float> * injection,
+        std::string & error) {
+    return hc_eval(cache, backend, spec, norm, down, up, inject, nullptr,
+                   input, input_count, n_tokens, &mixed, injection, nullptr,
+                   error);
+}
+
+bool qwen4exp_frontier_hc_output_eval(
+        Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+        const Qwen4ExpFrontierHcSpec & spec, ggml_tensor * norm,
+        ggml_tensor * down, ggml_tensor * up, ggml_tensor * projection,
+        const float * input, size_t input_count, int n_tokens,
+        std::vector<float> & output, std::string & error) {
+    return hc_eval(cache, backend, spec, norm, down, up, nullptr, projection,
+                   input, input_count, n_tokens, nullptr, nullptr, &output,
+                   error);
 }
 
 size_t qwen4exp_frontier_hc_graph_count(
