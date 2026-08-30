@@ -2262,6 +2262,150 @@ bool qwen4exp_frontier_run_projection_numerics_control(
                      normalized_rms,
                      signed_error / static_cast<double>(values));
     }
+
+    const auto report_subsystem = [&](const char * component,
+                                      const char * target,
+                                      const std::vector<float> & expected,
+                                      const std::vector<float> & actual) {
+        if (expected.empty() || actual.size() != expected.size()) {
+            error = std::string("Qwen4Exp numerics ") + component +
+                    " returned the wrong shape";
+            return false;
+        }
+        double squared_error = 0.0;
+        double squared_reference = 0.0;
+        double signed_error = 0.0;
+        float max_abs = 0.0f;
+        for (size_t index = 0; index < expected.size(); ++index) {
+            const float delta = actual[index] - expected[index];
+            max_abs = std::max(max_abs, std::fabs(delta));
+            squared_error += static_cast<double>(delta) * delta;
+            squared_reference +=
+                static_cast<double>(expected[index]) * expected[index];
+            signed_error += delta;
+        }
+        const double rms = std::sqrt(
+            squared_error / static_cast<double>(expected.size()));
+        const double reference_rms = std::sqrt(
+            squared_reference / static_cast<double>(expected.size()));
+        std::fprintf(stderr,
+                     "[qwen-numerics] event=subsystem_compare component=%s "
+                     "target=%s logical_q=2 values=%zu max_abs=%.9g "
+                     "rms=%.9g reference_rms=%.9g normalized_rms=%.9g "
+                     "mean_error=%.9g\n",
+                     component, target, expected.size(),
+                     static_cast<double>(max_abs), rms, reference_rms,
+                     reference_rms > 0.0 ? rms / reference_rms : 0.0,
+                     signed_error / static_cast<double>(expected.size()));
+        return true;
+    };
+
+    const Qwen4ExpLayer & layer = weights.layers.front();
+    constexpr int kControlRows = 2;
+    constexpr int kEmbedding = 2560;
+    constexpr int kHcDim = 4 * kEmbedding;
+    std::vector<float> hc_input(
+        static_cast<size_t>(kControlRows * kHcDim));
+    for (size_t index = 0; index < hc_input.size(); ++index) {
+        hc_input[index] =
+            0.2f * std::sin(static_cast<float>(index + 7U) * 0.017f) +
+            0.03f * std::cos(static_cast<float>(index + 11U) * 0.043f);
+    }
+    const Qwen4ExpFrontierHcSpec hc_spec{kEmbedding, 4, 1.0e-6f};
+    std::vector<float> hc_reference;
+    std::vector<float> injection_reference;
+    for (int row = 0; row < kControlRows; ++row) {
+        std::vector<float> mixed;
+        std::vector<float> injection;
+        if (!qwen4exp_frontier_hc_eval(
+                weights.dense_cache, weights.backend, hc_spec,
+                layer.hc_attn_norm, layer.hc_attn_down, layer.hc_attn_up,
+                layer.hc_attn_inject,
+                hc_input.data() + static_cast<size_t>(row * kHcDim),
+                static_cast<size_t>(kHcDim), 1, mixed, &injection, error)) {
+            error = "Qwen4Exp numerics q1 HC failed: " + error;
+            return false;
+        }
+        hc_reference.insert(hc_reference.end(), mixed.begin(), mixed.end());
+        injection_reference.insert(
+            injection_reference.end(), injection.begin(), injection.end());
+    }
+    std::vector<float> hc_batch;
+    std::vector<float> injection_batch;
+    if (!qwen4exp_frontier_hc_eval(
+            weights.dense_cache, weights.backend, hc_spec,
+            layer.hc_attn_norm, layer.hc_attn_down, layer.hc_attn_up,
+            layer.hc_attn_inject, hc_input.data(), hc_input.size(),
+            kControlRows, hc_batch, &injection_batch, error) ||
+        !report_subsystem("hc", "mixed", hc_reference, hc_batch) ||
+        !report_subsystem("hc", "injection", injection_reference,
+                          injection_batch)) {
+        if (error.empty()) error = "Qwen4Exp numerics batched HC failed";
+        return false;
+    }
+
+    const std::vector<float> gdn_input(
+        input.begin(), input.begin() + kControlRows * kEmbedding);
+    const std::vector<float> initial_conv(3U * 10240U, 0.0f);
+    const std::vector<float> initial_recurrent(48U * 128U * 128U, 0.0f);
+    std::vector<float> q1_conv = initial_conv;
+    std::vector<float> q1_recurrent = initial_recurrent;
+    std::vector<float> gdn_reference;
+    for (int row = 0; row < kControlRows; ++row) {
+        std::vector<float> row_output;
+        std::vector<float> next_conv;
+        std::vector<float> next_recurrent;
+        if (!qwen4exp_frontier_gdn_q1(
+                weights, 0,
+                gdn_input.data() + static_cast<size_t>(row * kEmbedding),
+                kEmbedding, q1_conv.data(), q1_conv.size(),
+                q1_recurrent.data(), q1_recurrent.size(), row_output,
+                next_conv, next_recurrent, error)) {
+            error = "Qwen4Exp numerics q1 GDN failed: " + error;
+            return false;
+        }
+        gdn_reference.insert(
+            gdn_reference.end(), row_output.begin(), row_output.end());
+        q1_conv = std::move(next_conv);
+        q1_recurrent = std::move(next_recurrent);
+    }
+    std::vector<float> gdn_batch;
+    std::vector<float> batch_conv;
+    std::vector<float> batch_recurrent;
+    if (!qwen4exp_frontier_gdn_batch(
+            weights, 0, gdn_input.data(), gdn_input.size(), kControlRows,
+            initial_conv.data(), initial_conv.size(), initial_recurrent.data(),
+            initial_recurrent.size(), gdn_batch, batch_conv, batch_recurrent,
+            error) ||
+        !report_subsystem("gdn", "output", gdn_reference, gdn_batch) ||
+        !report_subsystem("gdn", "conv_state", q1_conv, batch_conv) ||
+        !report_subsystem(
+            "gdn", "recurrent_state", q1_recurrent, batch_recurrent)) {
+        if (error.empty()) error = "Qwen4Exp numerics batched GDN failed";
+        return false;
+    }
+
+    std::vector<float> moe_reference;
+    for (int row = 0; row < kControlRows; ++row) {
+        std::vector<float> row_output;
+        if (!qwen4exp_frontier_moe_q1(
+                weights, 0,
+                gdn_input.data() + static_cast<size_t>(row * kEmbedding),
+                kEmbedding, row_output, error)) {
+            error = "Qwen4Exp numerics q1 MoE failed: " + error;
+            return false;
+        }
+        moe_reference.insert(
+            moe_reference.end(), row_output.begin(), row_output.end());
+    }
+    std::vector<float> moe_batch;
+    if (!qwen4exp_frontier_moe_batch(
+            weights, 0, gdn_input.data(), gdn_input.size(), kControlRows,
+            moe_batch, error) ||
+        !report_subsystem("moe", "output", moe_reference, moe_batch)) {
+        if (error.empty()) error = "Qwen4Exp numerics batched MoE failed";
+        return false;
+    }
     return true;
 }
 
