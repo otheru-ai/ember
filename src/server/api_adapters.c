@@ -76,7 +76,7 @@ static bool responses_message_content_is_text_only(const ember_json *v,
             continue;
         if (!strcmp(type, "input_image")) {
             set_err(err, err_cap,
-                    "Responses image inputs are not available in this engine build");
+                    "the Responses adapter does not support image inputs; send images through /v1/chat/completions");
             return false;
         }
         set_err(err, err_cap, "unsupported Responses message content block");

@@ -211,7 +211,7 @@ static void test_responses(void) {
         "{\"type\":\"input_image\",\"image_url\":\"https://example.invalid/x.png\"}]}]}");
     memset(err, 0, sizeof(err));
     CHECK(j && !ember_responses_request_parse(j, &r, err, sizeof(err)));
-    CHECK(strstr(err, "image inputs are not available") != NULL);
+    CHECK(strstr(err, "does not support image inputs") != NULL);
     ember_json_free(j);
 
     j = ember_json_parse(
