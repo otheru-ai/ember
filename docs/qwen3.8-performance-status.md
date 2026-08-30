@@ -235,13 +235,32 @@ width-uniform; the observed pattern is widths 1 and 2 passing with 3, 6 and 17
 failing, which looks like something that engages only once a batch carries more
 than two tokens of *history*.
 
-Next cut, still GPU-free: **GDN across a batch**.
-`qwen4exp_frontier_gdn_batch` takes `n_tokens`, `conv_state` and
-`recurrent_state`, and `test_persistent_gdn_q1`
-(`test_qwen4exp_frontier.cpp:340`) already exercises the q1 path on the CPU
-backend. Three tokens through the batch entry point against three sequential q1
-steps chaining state is the same shape as the two tests above, on the first
-*stateful* subsystem in the list. Our default of 3 is an inherited sm_86 (RTX 3090)
+**GDN batching is already covered.** `test_qwen4exp_frontier.cpp:478-545`
+builds a batch graph at n=3 and compares against three sequential scalar rows
+chaining conv and recurrent state; `:547+` repeats at n=16. Output, conv
+frontier, final recurrent state, tolerance 2e-5, plus an exact-replay check. It
+passes. GDN's batched kernel and its state chaining are clear at both failing
+bucket widths.
+
+### The run that separates what is left
+
+`batch_q1_numerics_mask()` (`qwen4exp_runtime.cpp:1618-1641`), consumed at
+`:1695-1700`, exists for exactly this question: it retains the layer-major
+schedule and causal state order while forcing every normally batched subsystem
+through its q=1 graph.
+
+    DFLASH_QWEN_BATCH_FORCE_Q1_NUMERICS=1   -> mask 31
+
+Bits: `Ple=1`, `AttentionHc=2`, `Attention=4`, `FfnHc=8`, `Moe=16`. Codex 106
+ran the ncols5 sweep at **mask 0**; no run at width 3 with mask 31 is on
+record.
+
+- **still fails at mask 31** — no batched kernel is involved, so the defect is
+  in scheduling, composition, or causal state order. That eliminates all five
+  batched subsystems and the batched type-101 kernels in one run, and moves the
+  search into host C++ that can be reviewed GPU-free.
+- **passes** — the defect is in exactly one of the five, and the mask bisects
+  it in three more runs. Our default of 3 is an inherited sm_86 (RTX 3090)
 crossover measurement, not a gfx1151 one — see the comment at
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2545-2559`, which explicitly says to
 override for other hardware, and note that DeepSeek already overrides it to 4

@@ -468,6 +468,14 @@ partial answers now beat complete answers later.
 64. Claude 241: dense pad clean. Can moe_batch run CPU
     F32? GDN@3 vs serial source. Send to=claude.
     [claimed 20260830T192800Z]
+    [done 20260830T192800Z -> 20260830T192800Z-grok-to-claude-moe-cpu-gdn.md]
+
+65. Claude 243 taking GDN@3: already green. Next
+    stateful: PLE dilation or rope/pos at n=3.
+    Send to=claude.
+    [claimed 20260830T192900Z]
+
+
 
 
 
