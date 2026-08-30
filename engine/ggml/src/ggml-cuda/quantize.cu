@@ -243,7 +243,12 @@ static __global__ void quantize_mmq_q8_1(
         }
     }
 
-    const float d_inv = i4_grid ? (amax > 0.0f ? 7.0f / amax : 0.0f) : 127.0f / amax;
+    // Cached q5/q16 graphs zero-fill unused token rows.  Keep those rows a
+    // real zero Q8 block: 0*inf is NaN and integer conversion of that NaN is
+    // undefined even though the corresponding padded output is discarded.
+    const float d_inv = amax > 0.0f
+        ? (i4_grid ? 7.0f : 127.0f) / amax
+        : 0.0f;
     if constexpr (i4_grid) {
         const uint32_t lo4 = rocmi4_w4a4_pack4(xi.x, xi.y, xi.z, xi.w, d_inv);
         const int hi4 = __shfl_xor_sync(0xffffffff, lo4, 1, WARP_SIZE);
@@ -284,7 +289,7 @@ static __global__ void quantize_mmq_q8_1(
             return;
         }
 
-        const float d = 1.0f / d_inv;
+        const float d = d_inv > 0.0f ? 1.0f / d_inv : 0.0f;
 
         y[ib].d2s6[iqs/64] = d;
 
@@ -295,7 +300,8 @@ static __global__ void quantize_mmq_q8_1(
         return;
     }
 
-    const float d = i4_grid ? rocmi4_w4a4_scale(amax) : 1.0f/d_inv;
+    const float d = i4_grid ? rocmi4_w4a4_scale(amax)
+                            : (d_inv > 0.0f ? 1.0f / d_inv : 0.0f);
 
     if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
         y[ib].ds4[iqs/32] = make_half2(d, sum);
