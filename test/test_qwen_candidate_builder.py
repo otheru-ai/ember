@@ -474,9 +474,24 @@ class CandidateBuilderTests(unittest.TestCase):
         })
         shard = candidate / "candidate-00001-of-00001.gguf"
         shard.write_bytes(b"quantized-candidate")
+        intervention_manifest = candidate / "qwen-intervention-manifest.json"
+        write_json(intervention_manifest, {
+            "schema_version": 1, "kind": "directional_ablation",
+            "targets": ["blk.0.attn_output.weight"],
+        })
         record = candidate / "qwen-quant-build-record.json"
         write_json(record, {
             "status": "complete",
+            "experiment": {"kind": "directional_ablation",
+                           "stock_weights_unchanged": False},
+            "intervention": {
+                "manifest_filename": intervention_manifest.name,
+                "manifest_sha256": digest(intervention_manifest),
+                "kind": "directional_ablation",
+                "application_stage": "pre_quantization_encoding",
+                "weight_intervention": True, "prompt_only": False,
+                "target_count": 1, "target_names_sha256": "7" * 64,
+            },
             "bf16_cache": {"cache_id": cache_id,
                             "manifest": {"path": str(cache_manifest),
                                          "sha256": digest(cache_manifest)}},
@@ -487,6 +502,10 @@ class CandidateBuilderTests(unittest.TestCase):
             "output": {"shards": [{"path": str(shard),
                                     "size_bytes": shard.stat().st_size,
                                     "sha256": digest(shard)}]},
+            "staging_transaction": {
+                "committed_directory": str(candidate),
+                "evidence_promoted": [str(intervention_manifest)],
+            },
         })
         assessment = evidence / "assessment.json"
         write_json(assessment, {"candidate_id": "candidate-1", "passed": True})
@@ -667,6 +686,17 @@ class CandidateBuilderTests(unittest.TestCase):
             self.assertTrue(result["recoverable"])
             self.assertFalse(shard.exists())
             self.assertTrue((candidate / "qwen-quant-build-record.json").is_file())
+            authorization = json.loads(retirement.read_text(encoding="utf-8"))
+            self.assertEqual(
+                authorization["intervention_manifest"]["sha256"],
+                digest(candidate / "qwen-intervention-manifest.json"),
+            )
+            completion = json.loads(
+                Path(result["completion"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                completion["intervention_manifest"],
+                authorization["intervention_manifest"],
+            )
 
             rebuilt = root / "rebuilt"
             rebuilt.mkdir()
@@ -676,6 +706,12 @@ class CandidateBuilderTests(unittest.TestCase):
                 (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
             rebuilt_record = rebuilt / "qwen-quant-build-record.json"
             original_record["output"]["shards"][0]["path"] = str(rebuilt_shard)
+            rebuilt_manifest = rebuilt / "qwen-intervention-manifest.json"
+            rebuilt_manifest.write_bytes(
+                (candidate / "qwen-intervention-manifest.json").read_bytes())
+            original_record["staging_transaction"]["committed_directory"] = str(rebuilt)
+            original_record["staging_transaction"]["evidence_promoted"] = [
+                str(rebuilt_manifest)]
             write_json(rebuilt_record, original_record)
             receipt = root / "evidence" / "candidate-1-reconstruction.json"
             # Simulate a process interruption after the shard rename but
@@ -713,6 +749,12 @@ class CandidateBuilderTests(unittest.TestCase):
             rebuilt_record = rebuilt / "qwen-quant-build-record.json"
             original_record = json.loads(
                 (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
+            rebuilt_manifest = rebuilt / "qwen-intervention-manifest.json"
+            rebuilt_manifest.write_bytes(
+                (candidate / "qwen-intervention-manifest.json").read_bytes())
+            original_record["staging_transaction"]["committed_directory"] = str(rebuilt)
+            original_record["staging_transaction"]["evidence_promoted"] = [
+                str(rebuilt_manifest)]
             original_record["output"]["shards"][0] = {
                 "path": str(rebuilt_shard), "size_bytes": rebuilt_shard.stat().st_size,
                 "sha256": digest(rebuilt_shard),
@@ -727,6 +769,84 @@ class CandidateBuilderTests(unittest.TestCase):
                     output=root / "evidence" / "must-not-exist.json",
                 ))
             self.assertFalse(shard.exists())
+
+    def test_reconstruction_requires_retained_intervention_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            retirement = root / "evidence" / "candidate-1-retirement.json"
+            with self.mocked_rolling_loader(record_sha):
+                result = builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha, output=retirement, execute=True,
+                ))
+            rebuilt = root / "rebuilt"
+            rebuilt.mkdir()
+            rebuilt_shard = rebuilt / shard.name
+            rebuilt_shard.write_bytes(b"quantized-candidate")
+            rebuilt_manifest = rebuilt / "qwen-intervention-manifest.json"
+            original_manifest = candidate / "qwen-intervention-manifest.json"
+            rebuilt_manifest.write_bytes(original_manifest.read_bytes())
+            original_record = json.loads(
+                (candidate / "qwen-quant-build-record.json").read_text(encoding="utf-8"))
+            original_record["output"]["shards"][0]["path"] = str(rebuilt_shard)
+            original_record["staging_transaction"]["committed_directory"] = str(rebuilt)
+            original_record["staging_transaction"]["evidence_promoted"] = [
+                str(rebuilt_manifest)]
+            rebuilt_record = rebuilt / "qwen-quant-build-record.json"
+            write_json(rebuilt_record, original_record)
+            original_manifest.unlink()
+            with self.assertRaisesRegex(
+                    builder.BuilderError, "retained intervention manifest"):
+                builder.restore_reconstructable(argparse.Namespace(
+                    retirement_completion=Path(result["completion"]),
+                    retirement_completion_sha256=result["completion_sha256"],
+                    rebuilt_candidate_dir=rebuilt,
+                    rebuilt_build_record_sha256=digest(rebuilt_record),
+                    output=root / "evidence" / "must-not-exist.json",
+                ))
+            self.assertFalse(shard.exists())
+            self.assertTrue(rebuilt_shard.exists())
+
+    def test_retirement_rejects_missing_intervention_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            (candidate / "qwen-intervention-manifest.json").unlink()
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            with self.mocked_rolling_loader(record_sha), self.assertRaisesRegex(
+                    builder.BuilderError, "retained intervention manifest"):
+                builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha,
+                    output=root / "evidence" / "must-not-exist.json", execute=True,
+                ))
+            self.assertTrue(shard.exists())
+
+    def test_retirement_rejects_tampered_intervention_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            candidate, shard, record_sha, _assessment, _assessment_sha = self.make_candidate(root)
+            (candidate / "qwen-intervention-manifest.json").write_bytes(b"tampered")
+            authority, authority_sha = self.make_rolling_authority(
+                root, "candidate-1", record_sha)
+            with self.mocked_rolling_loader(record_sha), self.assertRaisesRegex(
+                    quant.PipelineError, "retained intervention manifest SHA-256"):
+                builder.retire_reconstructable(argparse.Namespace(
+                    retention_authority=authority,
+                    retention_authority_sha256=authority_sha,
+                    candidate_id="candidate-1", candidate_dir=candidate,
+                    build_record_sha256=record_sha,
+                    output=root / "evidence" / "must-not-exist.json", execute=True,
+                ))
+            self.assertTrue(shard.exists())
 
     def test_retirement_rejects_missing_reconstruction_cache_content(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

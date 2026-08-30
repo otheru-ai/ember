@@ -298,8 +298,12 @@ top-one passing intervention, while format keeps its exact top-two passing,
 final-eligible arms. Only a candidate newly displaced by that transition is
 retired, so an already-absent historical loser is never targeted twice. The
 retirement command re-verifies the accumulator and assessment attestations,
-the immutable BF16 cache content address, build-record identity, and exact
-shards before deletion. After balanced confirmation, the separately attested
+the immutable BF16 cache content address, build-record identity, the retained
+candidate-local intervention manifest, and exact shards before deletion. The
+manifest's original byte identity remains bound through retirement completion
+and byte-identical reconstruction, so a modified-weight candidate is never
+called reconstructable from the shared BF16 weights alone. After balanced
+confirmation, the separately attested
 format ledger seals the winner and authorizes reconstructable retirement of the
 runner-up; MTP-depth rows never delete their shared selected model bytes.
 Before the format ledger can name a winner, its two highest-ranked gate-passing

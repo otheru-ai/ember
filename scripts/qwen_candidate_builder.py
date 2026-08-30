@@ -38,9 +38,9 @@ VISION_VOCAB_BASENAME = "Qwen3.8-Flash-Next-vocab-only.gguf"
 ASSESSMENT_SCHEMA = "ember.qwen3.8.candidate-assessment-bundle.v1"
 TOMBSTONE_SCHEMA = "ember.qwen3.8.deleted-loser.v1"
 RECONSTRUCTABLE_RETIREMENT_SCHEMA = (
-    "ember.qwen3.8.reconstructable-candidate-retirement.v1")
+    "ember.qwen3.8.reconstructable-candidate-retirement.v2")
 RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA = (
-    "ember.qwen3.8.reconstructable-candidate-retirement-complete.v1")
+    "ember.qwen3.8.reconstructable-candidate-retirement-complete.v2")
 RECONSTRUCTION_RECEIPT_SCHEMA = "ember.qwen3.8.candidate-reconstruction.v1"
 RETENTION_AUTHORITY_SCHEMA = "ember.qwen3.8.attested-rolling-retention.v1"
 SEALED_RETENTION_AUTHORITY_SCHEMA = "ember.qwen3.8.attested-sealed-retention.v1"
@@ -1155,6 +1155,50 @@ def _validate_reconstruction_cache(
     return manifest_evidence, companion_evidence, cache_dir.parent
 
 
+def _validate_reconstruction_intervention(
+    candidate_dir: Path, record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Prove the candidate-local input needed to reproduce modified weights."""
+    experiment = record.get("experiment")
+    intervention = record.get("intervention")
+    transaction = record.get("staging_transaction")
+    if not isinstance(experiment, dict) or not isinstance(transaction, dict):
+        raise BuilderError(
+            "candidate build record omits its reconstruction experiment transaction")
+    if experiment.get("kind") == "stock_control":
+        if (experiment.get("stock_weights_unchanged") is not True
+                or intervention is not None
+                or transaction.get("evidence_promoted") != []):
+            raise BuilderError("stock reconstruction intervention evidence differs")
+        return None
+    if (experiment.get("kind") != "directional_ablation"
+            or experiment.get("stock_weights_unchanged") is not False
+            or not isinstance(intervention, dict)
+            or intervention.get("kind") != "directional_ablation"
+            or intervention.get("application_stage") != "pre_quantization_encoding"
+            or intervention.get("weight_intervention") is not True
+            or intervention.get("prompt_only") is not False):
+        raise BuilderError(
+            "candidate build record omits its reconstructable weight intervention")
+    filename = intervention.get("manifest_filename")
+    if (not isinstance(filename, str) or not filename
+            or PurePosixPath(filename).name != filename):
+        raise BuilderError("retained intervention manifest filename is unsafe")
+    manifest_path = candidate_dir / filename
+    if (transaction.get("committed_directory") != str(candidate_dir)
+            or transaction.get("evidence_promoted") != [str(manifest_path)]):
+        raise BuilderError(
+            "candidate transaction does not retain its intervention manifest")
+    try:
+        manifest_size = manifest_path.lstat().st_size
+    except OSError as exc:
+        raise BuilderError(
+            f"cannot inspect retained intervention manifest: {exc}") from exc
+    return quant.inspect_exact_file(
+        manifest_path, intervention.get("manifest_sha256"), manifest_size,
+        "retained intervention manifest")
+
+
 def _record_reconstruction_contract(record: dict[str, Any]) -> dict[str, Any]:
     """Select immutable construction inputs while excluding paths and timings."""
     cache = record.get("bf16_cache") or {}
@@ -1169,7 +1213,8 @@ def _record_reconstruction_contract(record: dict[str, Any]) -> dict[str, Any]:
                        "manifest": cache.get("manifest")},
         "companion_inventory_manifest": companion.get("manifest"),
         "intervention": {key: intervention.get(key) for key in (
-            "manifest_sha256", "kind", "application_stage", "weight_intervention",
+            "manifest_filename", "manifest_sha256", "kind", "application_stage",
+            "weight_intervention", "prompt_only", "target_count",
             "target_names_sha256")},
         "profile": {"sha256": profile.get("sha256")},
         "snapshot": {key: snapshot.get(key) for key in ("repo_id", "revision")},
@@ -1238,6 +1283,7 @@ def retire_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
     if artifact.get("build_record_sha256") != args.build_record_sha256:
         raise BuilderError("attested candidate assessment does not bind this build record")
     cache_evidence, companion_evidence, workset_root = _validate_reconstruction_cache(record)
+    intervention_evidence = _validate_reconstruction_intervention(candidate_dir, record)
     if candidate_dir != workset_root.parent / "candidates" / safe_id(
             args.candidate_id, "candidate id"):
         raise BuilderError("candidate directory is not its canonical workset location")
@@ -1250,6 +1296,8 @@ def retire_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
             record_path, args.build_record_sha256, "candidate build record")
         cache_evidence, companion_evidence, current_workset_root = (
             _validate_reconstruction_cache(record))
+        intervention_evidence = _validate_reconstruction_intervention(
+            candidate_dir, record)
         if current_workset_root != workset_root:
             raise BuilderError("candidate reconstruction workset changed under its lease")
         declared = declared_candidate_shards(candidate_dir, record)
@@ -1289,6 +1337,7 @@ def retire_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
             "build_record": record_evidence,
             "bf16_cache_manifest": cache_evidence,
             "companion_inventory_manifest": companion_evidence,
+            "intervention_manifest": intervention_evidence,
             "reconstruction_contract": _record_reconstruction_contract(record),
             "shards": declared,
             "quarantine": quarantine,
@@ -1356,6 +1405,7 @@ def retire_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
             "build_record_retained": record_evidence,
             "bf16_cache_manifest": cache_evidence,
             "companion_inventory_manifest": companion_evidence,
+            "intervention_manifest": intervention_evidence,
             "recoverable": True, "publishes": False,
         }
         if completion.exists() and not completion.is_symlink():
@@ -1390,6 +1440,9 @@ def restore_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
     if (authorization.get("schema") != RECONSTRUCTABLE_RETIREMENT_SCHEMA
             or authorization.get("candidate_id") != completion.get("candidate_id")):
         raise BuilderError("retirement authorization and completion differ")
+    if completion.get("intervention_manifest") != authorization.get(
+            "intervention_manifest"):
+        raise BuilderError("retirement intervention evidence differs")
     candidate_dir = Path(str(authorization.get("candidate_dir", ""))).absolute()
     record_desc = authorization.get("build_record") or {}
     original, original_evidence = quant.read_exact_json_file(
@@ -1408,6 +1461,8 @@ def restore_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
         "fresh reconstruction build record")
     if rebuilt.get("status") != "complete":
         raise BuilderError("fresh reconstruction build record is not complete")
+    rebuilt_intervention_evidence = _validate_reconstruction_intervention(
+        rebuilt_dir, rebuilt)
     contract = authorization.get("reconstruction_contract")
     if (_record_reconstruction_contract(rebuilt) != contract
             or _record_reconstruction_contract(original) != contract):
@@ -1426,6 +1481,20 @@ def restore_reconstructable(args: argparse.Namespace) -> dict[str, Any]:
     workset_root = Path(str(authorization.get("workset_root", ""))).absolute()
     with WorksetLease(workset_root):
         _validate_reconstruction_cache(original)
+        retained_intervention_evidence = _validate_reconstruction_intervention(
+            candidate_dir, original)
+        if retained_intervention_evidence != authorization.get("intervention_manifest"):
+            raise BuilderError(
+                "retained intervention manifest differs from retirement authorization")
+        if ((rebuilt_intervention_evidence is None)
+                != (retained_intervention_evidence is None)
+                or (rebuilt_intervention_evidence is not None
+                    and (rebuilt_intervention_evidence["size_bytes"],
+                         rebuilt_intervention_evidence["sha256"])
+                    != (retained_intervention_evidence["size_bytes"],
+                        retained_intervention_evidence["sha256"]))):
+            raise BuilderError(
+                "fresh rebuild intervention manifest differs from retained input")
         for index, (rebuilt_row, expected_row) in enumerate(
                 zip(rebuilt_rows, expected, strict=True)):
             source = Path(rebuilt_row["path"])
