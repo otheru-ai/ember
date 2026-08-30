@@ -927,6 +927,13 @@ static void test_causal_attention_stateless_ffn_batching() {
             0.001f * static_cast<float>(row) +
             0.02f * static_cast<float>(boundary);
     };
+    const auto qsa_project = [](float input, size_t row, size_t layer) {
+        // Five QSA input matrices are independent across rows. Model their
+        // combined deterministic projection separately from the causal
+        // selector/attention update that consumes prior rows below.
+        return input * (0.94f + 0.003f * static_cast<float>(layer)) -
+            0.002f * static_cast<float>(row);
+    };
     const auto ffn = [](float input, size_t layer) {
         // Stateless per row, like routed/shared MoE after expert selection.
         return input + 0.11f * std::tanh(
@@ -938,7 +945,8 @@ static void test_causal_attention_stateless_ffn_batching() {
     for (size_t row = 0; row < kRows; ++row) {
         float value = seed[row];
         for (size_t layer = 0; layer < kLayers; ++layer) {
-            const float attention_input = project(value, row, layer, 0);
+            const float attention_input = qsa_project(
+                project(value, row, layer, 0), row, layer);
             const float attention_output = attention(
                 attention_input, token_state[layer], row, layer);
             value = ffn(project(attention_output, row, layer, 1), layer);
@@ -950,8 +958,10 @@ static void test_causal_attention_stateless_ffn_batching() {
     std::array<float, kRows> batch_rows = seed;
     for (size_t layer = 0; layer < kLayers; ++layer) {
         std::array<float, kRows> attention_input{};
-        for (size_t row = 0; row < kRows; ++row)
-            attention_input[row] = project(batch_rows[row], row, layer, 0);
+        for (size_t row = 0; row < kRows; ++row) {
+            attention_input[row] = qsa_project(
+                project(batch_rows[row], row, layer, 0), row, layer);
+        }
         std::array<float, kRows> ffn_boundary{};
         for (size_t row = 0; row < kRows; ++row) {
             ffn_boundary[row] = attention(
@@ -968,7 +978,7 @@ static void test_causal_attention_stateless_ffn_batching() {
               std::vector<float>(batch_rows.begin(), batch_rows.end()),
               std::vector<float>(token_rows.begin(), token_rows.end()),
               1.0e-6f),
-          "batching HC projections and stateless FFN rows matches token-major outputs");
+          "batching HC/QSA projections and stateless FFN rows matches token-major outputs");
     CHECK(close_vectors(
               std::vector<float>(batch_state.begin(), batch_state.end()),
               std::vector<float>(token_state.begin(), token_state.end()),

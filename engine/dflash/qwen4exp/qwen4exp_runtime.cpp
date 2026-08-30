@@ -90,12 +90,12 @@ bool rotate_optional(Qwen4ExpFrontierDenseCache * cache,
     }
     const int width = static_cast<int>(rotation->ne[0]);
     std::vector<float> rotated;
-    for (size_t offset = 0; offset < values.size(); offset += static_cast<size_t>(width)) {
-        if (!matvec(cache, backend, rotation, values.data() + offset, width,
-                    rotated, error)) return false;
-        std::copy(rotated.begin(), rotated.end(), values.begin() +
-                  static_cast<std::ptrdiff_t>(offset));
-    }
+    const size_t rows = values.size() / static_cast<size_t>(width);
+    if (rows == 0 || rows >
+            static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        !matmul_rows(cache, backend, rotation, values.data(), width,
+                     static_cast<int>(rows), rotated, error)) return false;
+    values = std::move(rotated);
     return true;
 }
 
@@ -590,89 +590,104 @@ bool run_qsa_scalar(
                   static_cast<int>(attended.size()), output, error);
 }
 
-bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
-             const Qwen4ExpLayer & layer, int layer_index,
-             const std::vector<float> & input,
-             const std::array<int32_t, 3> & position,
-             const std::array<std::vector<int32_t>, 3> & position_history,
-             std::vector<float> & output, std::string & error,
-             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
-    Qwen4ExpFrontierQsaGraph * graph =
-        cache_override ? nullptr : qwen4exp_frontier_qsa_q1(weights,
-                                                             layer_index);
-    if (!graph) {
-        return run_qsa_scalar(weights, state, layer, input, position,
-                              position_history, output, error,
-                              cache_override);
+bool prepare_qsa_row(
+        const Qwen4ExpWeights & weights,
+        const std::array<int32_t, 3> & position,
+        const std::vector<float> & qnorm, const std::vector<float> & knorm,
+        const std::vector<float> & iqnorm, const float * qfull,
+        const float * key, const float * value, const float * index_query,
+        const float * index_key, std::vector<float> & query,
+        std::vector<float> & gate, std::vector<float> & prepared_key,
+        std::vector<float> & prepared_value,
+        std::vector<float> & prepared_index_query,
+        std::vector<float> & prepared_index_key, std::string & error) {
+    if (!qfull || !key || !value || !index_query || !index_key ||
+        qnorm.size() != static_cast<size_t>(kQsaDim) ||
+        knorm.size() != static_cast<size_t>(kQsaDim) ||
+        iqnorm.size() != static_cast<size_t>(kIndexerDim)) {
+        error = "invalid Qwen4Exp prepared QSA row";
+        return false;
     }
+    query.resize(static_cast<size_t>(kQsaHeads * kQsaDim));
+    gate.resize(query.size());
+    for (int head = 0; head < kQsaHeads; ++head) {
+        std::copy_n(qfull + head * 2 * kQsaDim, kQsaDim,
+                    query.data() + head * kQsaDim);
+        std::copy_n(qfull + head * 2 * kQsaDim + kQsaDim, kQsaDim,
+                    gate.data() + head * kQsaDim);
+        rms_norm(query.data() + head * kQsaDim, kQsaDim, qnorm.data());
+        if (!rope(weights, query.data() + head * kQsaDim, kQsaDim,
+                  position.data(), error)) return false;
+    }
+    prepared_key.assign(key, key + kQsaKvHeads * kQsaDim);
+    prepared_value.assign(value, value + kQsaKvHeads * kQsaDim);
+    for (int head = 0; head < kQsaKvHeads; ++head) {
+        rms_norm(prepared_key.data() + head * kQsaDim, kQsaDim,
+                 knorm.data());
+        if (!rope(weights, prepared_key.data() + head * kQsaDim, kQsaDim,
+                  position.data(), error)) return false;
+    }
+    prepared_index_query.assign(
+        index_query, index_query + kIndexerHeads * kIndexerDim);
+    for (int head = 0; head < kIndexerHeads; ++head) {
+        rms_norm(prepared_index_query.data() + head * kIndexerDim,
+                 kIndexerDim, iqnorm.data());
+        if (!rope(weights,
+                  prepared_index_query.data() + head * kIndexerDim,
+                  kIndexerDim, position.data(), error)) return false;
+    }
+    prepared_index_key.assign(index_key, index_key + kIndexerDim);
+    return true;
+}
 
+bool finish_qsa_row(
+        const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+        const Qwen4ExpLayer & layer, Qwen4ExpFrontierQsaGraph * graph,
+        const std::vector<float> & query, const std::vector<float> & gate,
+        const std::vector<float> & key, const std::vector<float> & value,
+        const std::vector<float> & index_query,
+        const std::vector<float> & index_key,
+        const std::array<std::vector<int32_t>, 3> & position_history,
+        std::vector<float> & output, std::string & error) {
+    if (!graph || query.size() != static_cast<size_t>(kQsaHeads * kQsaDim) ||
+        gate.size() != query.size() ||
+        key.size() != static_cast<size_t>(kQsaKvHeads * kQsaDim) ||
+        value.size() != key.size() ||
+        index_query.size() !=
+            static_cast<size_t>(kIndexerHeads * kIndexerDim) ||
+        index_key.size() != static_cast<size_t>(kIndexerDim)) {
+        error = "invalid Qwen4Exp finalized QSA row";
+        return false;
+    }
     const int prior_tokens = static_cast<int>(
         state.index_key.size() / static_cast<size_t>(kIndexerDim));
     const int tokens = prior_tokens + 1;
     std::vector<int32_t> selected;
     const bool dense_selection =
         qwen4exp_qsa_dense_selection(tokens, selected);
-    std::vector<float> qfull, k, v, iq, ik;
-    if (!qwen4exp_frontier_qsa_project_q1(
-            graph, input.data(), input.size(), qfull, k, v, iq, ik,
-            error)) return false;
-
-    std::vector<float> qnorm, knorm;
-    if (!tensor_f32(weights.dense_cache, layer.attn_q_norm, qnorm, error) ||
-        !tensor_f32(weights.dense_cache, layer.attn_k_norm, knorm, error))
-        return false;
-    std::vector<float> iqnorm, iknorm;
-    if (!dense_selection &&
-        (!tensor_f32(weights.dense_cache, layer.index_q_norm, iqnorm, error) ||
-         !tensor_f32(weights.dense_cache, layer.index_k_norm, iknorm, error)))
-        return false;
-
-    std::vector<float> q(static_cast<size_t>(kQsaHeads * kQsaDim));
-    std::vector<float> gate(q.size());
-    for (int head = 0; head < kQsaHeads; ++head) {
-        std::copy_n(qfull.data() + head * 2 * kQsaDim, kQsaDim,
-                    q.data() + head * kQsaDim);
-        std::copy_n(qfull.data() + head * 2 * kQsaDim + kQsaDim, kQsaDim,
-                    gate.data() + head * kQsaDim);
-        rms_norm(q.data() + head * kQsaDim, kQsaDim, qnorm.data());
-        if (!rope(weights, q.data() + head * kQsaDim, kQsaDim,
-                  position.data(), error)) return false;
-    }
-    for (int head = 0; head < kQsaKvHeads; ++head) {
-        rms_norm(k.data() + head * kQsaDim, kQsaDim, knorm.data());
-        if (!rope(weights, k.data() + head * kQsaDim, kQsaDim,
-                  position.data(), error)) return false;
-    }
     if (!dense_selection) {
-        for (int head = 0; head < kIndexerHeads; ++head) {
-            rms_norm(iq.data() + head * kIndexerDim, kIndexerDim,
-                     iqnorm.data());
-            if (!rope(weights, iq.data() + head * kIndexerDim, kIndexerDim,
-                      position.data(), error)) return false;
-        }
-    }
-    // #27774 rotations are executed as one persistent graph for all Q/K/V
-    // heads. The rotated current K/V are not published until attention and
-    // output projection have both completed successfully.
-    if (!qwen4exp_frontier_qsa_rotate_q1(graph, q, k, v, error)) return false;
-
-    if (!dense_selection) {
+        std::vector<float> iknorm;
+        if (!tensor_f32(weights.dense_cache, layer.index_k_norm, iknorm,
+                        error) ||
+            iknorm.size() != static_cast<size_t>(kIndexerDim)) return false;
         const int complete = tokens / 4;
         const int keep = std::min(complete, 512);
         std::vector<std::pair<float, int32_t>> scored;
         scored.reserve(static_cast<size_t>(complete));
         const auto raw_index = [&](int token, int dimension) {
             return token == prior_tokens
-                ? ik[static_cast<size_t>(dimension)]
+                ? index_key[static_cast<size_t>(dimension)]
                 : state.index_key.at(static_cast<size_t>(
                     token * kIndexerDim + dimension));
         };
         for (int block_index = 0; block_index < complete; ++block_index) {
             std::array<float, kIndexerDim> pooled{};
             for (int member = 0; member < 4; ++member)
-                for (int d = 0; d < kIndexerDim; ++d)
-                    pooled[static_cast<size_t>(d)] +=
-                        raw_index(block_index * 4 + member, d) * 0.25f;
+                for (int dimension = 0; dimension < kIndexerDim;
+                     ++dimension) {
+                    pooled[static_cast<size_t>(dimension)] += raw_index(
+                        block_index * 4 + member, dimension) * 0.25f;
+                }
             rms_norm(pooled.data(), kIndexerDim, iknorm.data());
             const size_t group_start = static_cast<size_t>(block_index * 4);
             if (group_start >= position_history[0].size() ||
@@ -691,9 +706,12 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
             float score = 0.0f;
             for (int head = 0; head < kIndexerHeads; ++head) {
                 float dot = 0.0f;
-                for (int d = 0; d < kIndexerDim; ++d)
-                    dot += iq[static_cast<size_t>(head * kIndexerDim + d)] *
-                           pooled[static_cast<size_t>(d)];
+                for (int dimension = 0; dimension < kIndexerDim;
+                     ++dimension) {
+                    dot += index_query[static_cast<size_t>(
+                               head * kIndexerDim + dimension)] *
+                           pooled[static_cast<size_t>(dimension)];
+                }
                 score += std::max(dot, 0.0f);
             }
             scored.emplace_back(
@@ -717,9 +735,8 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
             selected.push_back(tail);
     }
 
-    // Pack the exact selected rows in the graph's [kv_head, token, dim]
-    // layout. Prior cache slabs remain immutable; the prospective current row
-    // is sourced from local projection output.
+    // Pack exact causal rows only after selection. The current projected row
+    // remains private until attention and its output projection both finish.
     const size_t selected_count = selected.size();
     std::vector<float> selected_key(
         static_cast<size_t>(kQsaKvHeads * kQsaDim) * selected_count);
@@ -730,9 +747,9 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
             const size_t destination =
                 (static_cast<size_t>(head) * selected_count + slot) * kQsaDim;
             if (token == prior_tokens) {
-                std::copy_n(k.data() + head * kQsaDim, kQsaDim,
+                std::copy_n(key.data() + head * kQsaDim, kQsaDim,
                             selected_key.data() + destination);
-                std::copy_n(v.data() + head * kQsaDim, kQsaDim,
+                std::copy_n(value.data() + head * kQsaDim, kQsaDim,
                             selected_value.data() + destination);
             } else {
                 const size_t source =
@@ -751,15 +768,154 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         }
     }
     if (!qwen4exp_frontier_qsa_attend_q1(
-            graph, q.data(), q.size(), gate.data(), gate.size(),
+            graph, query.data(), query.size(), gate.data(), gate.size(),
             selected_key.data(), selected_value.data(),
             static_cast<int>(selected_count), output, error)) return false;
+    state.key.append(key.data(), key.size());
+    state.value.append(value.data(), value.size());
+    state.index_key.append(index_key.data(), index_key.size());
+    return true;
+}
 
-    // Transactional publication: compute/download failures above leave the
-    // snapshot-shared append-only cache at its original exact frontier.
-    state.key.append(k.data(), k.size());
-    state.value.append(v.data(), v.size());
-    state.index_key.append(ik.data(), ik.size());
+bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+             const Qwen4ExpLayer & layer, int layer_index,
+             const std::vector<float> & input,
+             const std::array<int32_t, 3> & position,
+             const std::array<std::vector<int32_t>, 3> & position_history,
+             std::vector<float> & output, std::string & error,
+             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
+    Qwen4ExpFrontierQsaGraph * graph =
+        cache_override ? nullptr : qwen4exp_frontier_qsa_q1(weights,
+                                                             layer_index);
+    if (!graph) {
+        return run_qsa_scalar(weights, state, layer, input, position,
+                              position_history, output, error,
+                              cache_override);
+    }
+
+    std::vector<float> qfull, k, v, iq, ik;
+    if (!qwen4exp_frontier_qsa_project_q1(
+            graph, input.data(), input.size(), qfull, k, v, iq, ik,
+            error)) return false;
+
+    std::vector<float> qnorm, knorm, iqnorm;
+    if (!tensor_f32(weights.dense_cache, layer.attn_q_norm, qnorm, error) ||
+        !tensor_f32(weights.dense_cache, layer.attn_k_norm, knorm, error) ||
+        !tensor_f32(weights.dense_cache, layer.index_q_norm, iqnorm, error))
+        return false;
+    std::vector<float> q, gate, prepared_k, prepared_v, prepared_iq,
+                       prepared_ik;
+    if (!prepare_qsa_row(weights, position, qnorm, knorm, iqnorm,
+                         qfull.data(), k.data(), v.data(), iq.data(),
+                         ik.data(), q, gate, prepared_k, prepared_v,
+                         prepared_iq, prepared_ik, error)) return false;
+    // #27774 rotations are executed as one persistent graph for all Q/K/V
+    // heads. The rotated current K/V are not published until attention and
+    // output projection have both completed successfully.
+    if (!qwen4exp_frontier_qsa_rotate_q1(
+            graph, q, prepared_k, prepared_v, error)) return false;
+    return finish_qsa_row(weights, state, layer, graph, q, gate, prepared_k,
+                          prepared_v, prepared_iq, prepared_ik,
+                          position_history, output, error);
+}
+
+bool run_qsa_batch(
+        const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
+        const Qwen4ExpLayer & layer, int layer_index,
+        const std::vector<float> & input,
+        const std::vector<std::array<int32_t, 3>> & positions,
+        const std::array<std::vector<int32_t>, 3> & position_history,
+        std::vector<float> & output, std::string & error) {
+    const size_t rows = positions.size();
+    if (rows == 0 || rows > 16 ||
+        input.size() != rows * static_cast<size_t>(kEmbedding)) {
+        error = "invalid Qwen4Exp batched QSA input";
+        return false;
+    }
+    Qwen4ExpFrontierQsaGraph * graph =
+        qwen4exp_frontier_qsa_q1(weights, layer_index);
+    if (!graph) {
+        output.resize(rows * static_cast<size_t>(kEmbedding));
+        for (size_t row = 0; row < rows; ++row) {
+            const auto begin = input.begin() + static_cast<std::ptrdiff_t>(
+                row * static_cast<size_t>(kEmbedding));
+            const std::vector<float> row_input(
+                begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            std::vector<float> row_output;
+            if (!run_qsa(weights, state, layer, layer_index, row_input,
+                         positions[row], position_history, row_output,
+                         error)) return false;
+            std::copy(row_output.begin(), row_output.end(),
+                      output.begin() + static_cast<std::ptrdiff_t>(
+                          row * static_cast<size_t>(kEmbedding)));
+        }
+        return true;
+    }
+
+    constexpr size_t kQueryGateValues =
+        static_cast<size_t>(2 * kQsaHeads * kQsaDim);
+    constexpr size_t kKvValues =
+        static_cast<size_t>(kQsaKvHeads * kQsaDim);
+    constexpr size_t kIndexQueryValues =
+        static_cast<size_t>(kIndexerHeads * kIndexerDim);
+    constexpr size_t kIndexKeyValues = static_cast<size_t>(kIndexerDim);
+    std::vector<float> qfull, key, value, index_query, index_key;
+    if (!matmul_rows(weights.dense_cache, weights.backend, layer.attn_q,
+                     input.data(), kEmbedding, static_cast<int>(rows),
+                     qfull, error) ||
+        !matmul_rows(weights.dense_cache, weights.backend, layer.attn_k,
+                     input.data(), kEmbedding, static_cast<int>(rows), key,
+                     error) ||
+        !matmul_rows(weights.dense_cache, weights.backend, layer.attn_v,
+                     input.data(), kEmbedding, static_cast<int>(rows), value,
+                     error) ||
+        !matmul_rows(weights.dense_cache, weights.backend, layer.index_q,
+                     input.data(), kEmbedding, static_cast<int>(rows),
+                     index_query, error) ||
+        !matmul_rows(weights.dense_cache, weights.backend, layer.index_k,
+                     input.data(), kEmbedding, static_cast<int>(rows),
+                     index_key, error) ||
+        qfull.size() != rows * kQueryGateValues ||
+        key.size() != rows * kKvValues || value.size() != key.size() ||
+        index_query.size() != rows * kIndexQueryValues ||
+        index_key.size() != rows * kIndexKeyValues) {
+        if (error.empty()) error = "Qwen4Exp batched QSA projection mismatch";
+        return false;
+    }
+    std::vector<float> qnorm, knorm, iqnorm;
+    if (!tensor_f32(weights.dense_cache, layer.attn_q_norm, qnorm, error) ||
+        !tensor_f32(weights.dense_cache, layer.attn_k_norm, knorm, error) ||
+        !tensor_f32(weights.dense_cache, layer.index_q_norm, iqnorm, error))
+        return false;
+
+    output.resize(rows * static_cast<size_t>(kEmbedding));
+    for (size_t row = 0; row < rows; ++row) {
+        std::vector<float> query_row, gate_row, key_row, value_row,
+                           index_query_row, index_key_row;
+        if (!prepare_qsa_row(
+                weights, positions[row], qnorm, knorm, iqnorm,
+                qfull.data() + row * kQueryGateValues,
+                key.data() + row * kKvValues,
+                value.data() + row * kKvValues,
+                index_query.data() + row * kIndexQueryValues,
+                index_key.data() + row * kIndexKeyValues,
+                query_row, gate_row, key_row, value_row, index_query_row,
+                index_key_row, error) ||
+            !qwen4exp_frontier_qsa_rotate_q1(
+                graph, query_row, key_row, value_row, error)) return false;
+        std::vector<float> row_output;
+        if (!finish_qsa_row(weights, state, layer, graph, query_row,
+                            gate_row, key_row, value_row, index_query_row,
+                            index_key_row, position_history, row_output,
+                            error) ||
+            row_output.size() != static_cast<size_t>(kEmbedding)) {
+            if (error.empty()) error = "Qwen4Exp batched QSA output mismatch";
+            return false;
+        }
+        std::copy(row_output.begin(), row_output.end(),
+                  output.begin() + static_cast<std::ptrdiff_t>(
+                      row * static_cast<size_t>(kEmbedding)));
+    }
     return true;
 }
 
@@ -1384,50 +1540,40 @@ bool qwen4exp_batch_layer(
                      attention_inputs, &attention_inject, error)) return false;
 
     const bool qsa = (layer_index + 1) % 4 == 0;
+    std::vector<float> attention_outputs;
     if (qsa) {
         // QSA selection depends on every newly appended raw index-K row. Its
-        // state update remains strictly row ordered; only the HC projection
-        // that produced each independent attention input was batched above.
-        for (size_t row = 0; row < rows; ++row) {
-            state.hc = std::move(hc_rows[row]);
-            const auto input_begin = attention_inputs.begin() +
-                static_cast<std::ptrdiff_t>(row * kEmbedding);
-            const std::vector<float> input(
-                input_begin,
-                input_begin + static_cast<std::ptrdiff_t>(kEmbedding));
-            std::vector<float> block;
-            if (!run_qsa(weights,
-                         state.layers[static_cast<size_t>(layer_index)], layer,
-                         layer_index, input, positions[row],
-                         state.mrope_positions,
-                         block, error)) return false;
-            hc_combine(state.hc, block, attention_inject[row]);
-            hc_rows[row] = std::move(state.hc);
-        }
+        // state update remains strictly row ordered. The independent Q/K/V
+        // and index projections cross one q5/q16 boundary before that loop;
+        // selection, attention, and cache publication do not.
+        if (!run_qsa_batch(
+                weights, state.layers[static_cast<size_t>(layer_index)],
+                layer, layer_index, attention_inputs, positions,
+                state.mrope_positions, attention_outputs, error)) return false;
     } else {
         // GDN is causal internally and executes the exact q2-q16 recurrent
         // sequence in one persistent graph/state boundary.
-        std::vector<float> attention_outputs;
         if (!run_gdn_batch(
                 weights, state.layers[static_cast<size_t>(layer_index)],
                 layer, layer_index, attention_inputs,
                 static_cast<int>(rows), attention_outputs, error))
             return false;
-        if (attention_outputs.size() !=
-            rows * static_cast<size_t>(kEmbedding)) {
-            error = "Qwen4Exp batched GDN returned the wrong output shape";
-            return false;
-        }
-        for (size_t row = 0; row < rows; ++row) {
-            state.hc = std::move(hc_rows[row]);
-            const auto block_begin = attention_outputs.begin() +
-                static_cast<std::ptrdiff_t>(row * kEmbedding);
-            const std::vector<float> block(
-                block_begin,
-                block_begin + static_cast<std::ptrdiff_t>(kEmbedding));
-            hc_combine(state.hc, block, attention_inject[row]);
-            hc_rows[row] = std::move(state.hc);
-        }
+    }
+    if (attention_outputs.size() !=
+        rows * static_cast<size_t>(kEmbedding)) {
+        error = qsa ? "Qwen4Exp batched QSA returned the wrong output shape"
+                    : "Qwen4Exp batched GDN returned the wrong output shape";
+        return false;
+    }
+    for (size_t row = 0; row < rows; ++row) {
+        state.hc = std::move(hc_rows[row]);
+        const auto block_begin = attention_outputs.begin() +
+            static_cast<std::ptrdiff_t>(row * kEmbedding);
+        const std::vector<float> block(
+            block_begin,
+            block_begin + static_cast<std::ptrdiff_t>(kEmbedding));
+        hc_combine(state.hc, block, attention_inject[row]);
+        hc_rows[row] = std::move(state.hc);
     }
 
     std::vector<float> ffn_hc(rows * static_cast<size_t>(kHcDim));
