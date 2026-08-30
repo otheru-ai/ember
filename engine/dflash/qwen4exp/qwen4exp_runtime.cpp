@@ -1538,15 +1538,45 @@ bool qwen4exp_step_batch_mrope_impl(
 
     if (row_hc) *row_hc = hc_rows;
     if (row_logits) {
-        row_logits->reserve(rows);
+        // The bounded verifier consumes every row, but the final HC
+        // down/up mixer and vocabulary projection are stateless across rows.
+        // Keep one q5/q16 frontier at this boundary instead of returning to
+        // q=1 for three large matrix products per candidate.  This is local
+        // vendored-engine divergence; the authoritative replay below the MTP
+        // verifier still commits accepted tokens through q=1.
+        std::vector<float> final_hc(rows * static_cast<size_t>(kHcDim));
         for (size_t row = 0; row < rows; ++row) {
-            std::vector<float> final, logits;
-            if (!hc_mix(weights, hc_rows[row], weights.output_hc_norm,
-                        weights.output_hc_down, weights.output_hc_up, nullptr,
-                        final, nullptr, error) ||
-                !matvec(weights.dense_cache, weights.backend, weights.output,
-                        final.data(), kEmbedding, logits, error)) return false;
-            row_logits->push_back(std::move(logits));
+            std::copy(hc_rows[row].begin(), hc_rows[row].end(),
+                      final_hc.begin() + static_cast<std::ptrdiff_t>(
+                          row * static_cast<size_t>(kHcDim)));
+        }
+        if (!weights.output || weights.output->ne[1] <= 0 ||
+            static_cast<uint64_t>(weights.output->ne[1]) >
+                static_cast<uint64_t>(
+                    std::numeric_limits<size_t>::max() / rows)) {
+            error = "invalid Qwen4Exp batched output projection shape";
+            return false;
+        }
+        const size_t vocabulary = static_cast<size_t>(weights.output->ne[1]);
+        std::vector<float> final_rows, logits;
+        if (!hc_mix_rows(weights, weights.dense_cache,
+                         weights.output_hc_norm, weights.output_hc_down,
+                         weights.output_hc_up, nullptr, rows, final_hc,
+                         final_rows, nullptr, error) ||
+            !matmul_rows(weights.dense_cache, weights.backend,
+                         weights.output, final_rows.data(), kEmbedding,
+                         static_cast<int>(rows), logits, error) ||
+            logits.size() != rows * vocabulary) {
+            if (error.empty())
+                error = "Qwen4Exp batched output projection shape mismatch";
+            return false;
+        }
+        row_logits->resize(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            const auto begin = logits.begin() +
+                static_cast<std::ptrdiff_t>(row * vocabulary);
+            (*row_logits)[row].assign(
+                begin, begin + static_cast<std::ptrdiff_t>(vocabulary));
         }
     } else if (final_logits) {
         std::vector<float> final, logits;

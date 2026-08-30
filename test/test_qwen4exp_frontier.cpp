@@ -974,6 +974,20 @@ static void test_causal_attention_stateless_ffn_batching() {
               std::vector<float>(token_state.begin(), token_state.end()),
               1.0e-6f),
           "causal layer state matches token-major snapshot frontier");
+    std::array<float, kRows> token_logits{};
+    std::array<float, kRows> batch_logits{};
+    for (size_t row = 0; row < kRows; ++row) {
+        // The verifier needs every row's final HC mix and vocabulary logits.
+        // Both are row-independent after the last causal layer, so a q5/q16
+        // matrix boundary is equivalent to the former q1 loop.
+        token_logits[row] = project(token_rows[row], row, kLayers, 2);
+        batch_logits[row] = project(batch_rows[row], row, kLayers, 2);
+    }
+    CHECK(close_vectors(
+              std::vector<float>(batch_logits.begin(), batch_logits.end()),
+              std::vector<float>(token_logits.begin(), token_logits.end()),
+              1.0e-6f),
+          "batched final HC and vocabulary projection preserves every verifier row");
 }
 
 static void test_bounded_cache_and_prefill_policy() {
