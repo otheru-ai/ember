@@ -799,6 +799,37 @@ batched prefill is closer to exact than three sequential q=1 steps, then q=1 is
 the worse reference and the differential is comparing against the wrong side.
 That test is GPU-free.
 
-This only becomes live if the `DFLASH_CUDA_MMVQ_ROCMFP4_UNROLL2=0` falsifier
-leaves the divergence unchanged. If it makes the recurrent state exact, there
-is a real kernel-selection defect and none of this applies.
+**It is live.** Codex 348 ran `DFLASH_CUDA_MMVQ_ROCMFP4_UNROLL2=0` and the
+signature is unchanged: layer 0 output and conv state still exact, recurrent
+state still first differing at head 12 with the same maximum absolute delta,
+layer 2 row 2 still the first output divergence. That clears the q1
+specialization, including the `ssm_alpha`/`ssm_beta` projection-shape hole.
+
+**And the magnitude names the phenomenon.** That delta is `1.1920929e-07` =
+`2^-23`, exactly one float32 ULP near 1.0 — the *floor* for two valid
+roundings, not a defect magnitude. Two paths with different accumulation order
+cannot do better. So "batched disagrees with q1" is no longer evidence of a
+bug; it is evidence that they round differently, which they must.
+
+### The instrument that can answer it
+
+`18e1253` adds a **double-precision** chain of the same recurrence to
+`test_gdn_batch_at_hip_legal_conv_channels`, printing
+
+    [gdn-precision] batched_vs_exact=... serial_q1_vs_exact=... batched_closer=...
+
+Comparing the two float paths to each other cannot say which is correct;
+comparing both to double can. On the CPU backend they land on an identical
+error, `6.24756508e-09`, because the CPU op has no register-versus-memory
+distinction to expose — the control builds the instrument but cannot
+discriminate there.
+
+**Run `test_qwen4exp_frontier` on a HIP build.** The fixture already reaches the
+S_v=128 kernel, so there is no model load and no production quiesce, and:
+
+- `batched_vs_exact < serial_q1_vs_exact` → the batched path is closer to truth
+  than the q=1 reference it is measured against, and the differential is
+  comparing against the worse side — which is what happened with M-RoPE.
+- `serial_q1_vs_exact < batched_vs_exact` → q=1 is the better reference, the
+  batched path is genuinely drifting, and the question becomes how much drift a
+  prefill may carry.
