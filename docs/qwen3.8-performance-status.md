@@ -213,8 +213,21 @@ It does **not** delete that barrier. `finish_qsa_row`
 (`qwen4exp_runtime.cpp:775-909`) still consumes host `index_query` and
 `index_key` for the 4-token pool, the ReLU score and the top-512 selection
 (`:811`, `:812`, `:843`) and appends `index_key` to `state.index_key` at
-`:908`. Those are two of the five gets. So the group goes from depth 5 to depth
-2 and the barrier count stays at 12 until the indexer itself moves on-device.
+`:908`. Those are two of the five gets.
+
+Below 2049 tokens it is better than that, and that is where we certify.
+`qwen4exp_qsa_dense_selection` (`qwen4exp_internal.h:202-210`) is true for
+`n_tokens <= 2048`, and both scorer bodies are gated on `!dense_selection`
+(`qwen4exp_runtime.cpp:640`, `:801`). So `index_query` is downloaded and never
+read, and `index_key`'s payload is never read either — outside the gate only
+`state.index_key.size()` is used, as a token counter (`:599`, `:796`), while
+the append at `:907` is unconditional. See
+[`dead-code-candidates.md`](dead-code-candidates.md) entry 5.
+
+**On the shipped decode path the group therefore goes from depth 5 to depth
+1**, the survivor being `index_key` purely to keep a history for contexts above
+the boundary. It reaches depth 0, and takes the barrier with it, only when that
+history moves on-device. The barrier count stays at 12 until then.
 
 The tranche is still worth taking — three fewer host copies, the head-wise
 `rms_norm` and `rope` off the CPU, and the numerics improvement above — but it

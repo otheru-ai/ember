@@ -152,3 +152,54 @@ one says nothing about the other.
 
 **Recommendation: keep `FORCE OFF`.** The comment is already thorough; no code
 change. `.coord/LOOP.md` also forbids re-opening this.
+
+---
+
+## 5. QSA block scorer — inactive below 2049 tokens, which is where we certify
+
+**Scope:** configuration (context length). **Not dead** — this is the correct
+path above the boundary, and it must keep working.
+
+Raised by grok (`.coord/msg/`, grok 235 and 241) and verified against source.
+
+**Evidence.** `qwen4exp_qsa_dense_selection`
+(`engine/dflash/qwen4exp/qwen4exp_internal.h:202-210`) returns `true` for
+`1 <= n_tokens <= 2048`, selecting every token. Its header comment gives the
+reason: with at most the released 2048-token QSA budget visible, every complete
+four-token block is selected anyway, so the scorer cannot change the result.
+
+Both scorer bodies are gated on `!dense_selection`:
+
+- `qwen4exp_runtime.cpp:640-...` (batch path, `tokens` computed at `:599`)
+- `qwen4exp_runtime.cpp:801-880` (`finish_qsa_row`, `tokens` at `:796`)
+
+Each performs the four-token pooling, `rms_norm`, `rope`, the per-head ReLU dot
+against `index_query`, and the top-512 partial sort.
+
+**What follows, and it is the useful part.** Below the boundary:
+
+- `index_query` is **downloaded and never read**. Its only consumer is the
+  ReLU dot at `:843`, inside the gate.
+- `index_key`'s **payload** is never read either. Its consumers are `:812` and
+  `:650`, both inside the gate. Outside the gate only `state.index_key.size()`
+  is used — at `:599` and `:796` — as a token counter. The unconditional append
+  at `:907` is therefore feeding a buffer that nothing reads until the context
+  crosses 2048.
+
+So of the five downloads in the `qsa_project_q1` group
+(`qwen4exp_frontier.cpp:1506-1511`), **four are unread on the shipped decode
+path** once RMS and rope move into the projection graph, and the fifth carries
+a payload used only as a length. See
+[`qwen3.8-performance-status.md`](qwen3.8-performance-status.md).
+
+**Falsifier.** A decode or certification run above 2048 tokens enters the
+scorer, and every line above becomes live. The certification widths 3, 6 and 17
+do not.
+
+**Recommendation: keep, and do not measure across the boundary.** An A/B run at
+or below 2048 tokens says nothing about the scorer, and must not be credited
+with removing it. If the `index_key` history moves on-device — grok's
+`SET_ROWS` proposal — the append at `:907` and the last download in that group
+go with it; the history still has to exist for the day the context crosses the
+boundary.
+
