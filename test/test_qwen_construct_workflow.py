@@ -1189,6 +1189,11 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("--mtp-depth 3", proof)
         self.assertIn("hardware-measured.json", proof)
         self.assertIn("Measured peak UMA", proof)
+        self.assertIn("differential-decode-comparison.json", proof)
+        self.assertIn("Clean benchmark MTP acceptance", proof)
+        self.assertIn("Same-process AR decode", proof)
+        self.assertIn("Same-process warm MTP decode", proof)
+        self.assertIn("Same-process warm MTP speedup over AR", proof)
         self.assertIn("Attest the complete Q3 benchmark evidence", proof)
         self.assertIn("no quality or performance claim", derivation)
 

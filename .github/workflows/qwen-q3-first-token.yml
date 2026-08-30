@@ -229,6 +229,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in full-benchmark/differential.json \
+                      full-benchmark/differential-decode-comparison.json \
                       full-benchmark/differential-dispatch-server.log \
                       full-benchmark/timing.jsonl \
                       full-benchmark/timing-server.log \
@@ -305,14 +306,21 @@ jobs:
           value = json.load(open(sys.argv[1], encoding="utf-8"))
           performance = value["hard_gates"]["performance"]
           resources = value["resources"]
+          diagnostic = value["differential_decode"]
+          diagnostic_mtp = diagnostic["mtp"]
           print(performance["prefill_2048"]["peak_tps"])
           print(performance["prefill_2048"]["median_tps"])
           print(performance["decode_256_counting"]["median_tps"])
           print(resources["measured_peak_uma_bytes"])
           print(str(value["passed"]).lower())
+          print(value["speculation"]["accept_rate_mean"])
+          print(diagnostic["ar"]["tokens_per_second"])
+          print(diagnostic_mtp["warm_fresh_tokens_per_second"])
+          print(diagnostic_mtp["accept_rate"])
+          print(diagnostic_mtp["warm_speedup_vs_ar"])
           PY
           )
-          (( ${#metrics[@]} == 5 ))
+          (( ${#metrics[@]} == 10 ))
           printf 'q3_hardware=%s\nq3_hardware_sha256=%s\n' \
             "$QWEN_Q3_BENCHMARK_EVIDENCE" \
             "$QWEN_Q3_BENCHMARK_EVIDENCE_SHA256" >>"$GITHUB_OUTPUT"
@@ -324,6 +332,11 @@ jobs:
             echo "Decode median: \`${metrics[2]} tok/s\`"
             echo "Measured peak UMA: \`${metrics[3]} bytes\`"
             echo "Existing release thresholds passed: \`${metrics[4]}\`"
+            echo "Clean benchmark MTP acceptance: \`${metrics[5]}\`"
+            echo "Same-process AR decode: \`${metrics[6]} tok/s\`"
+            echo "Same-process warm MTP decode: \`${metrics[7]} tok/s\`"
+            echo "Same-process MTP acceptance: \`${metrics[8]}\`"
+            echo "Same-process warm MTP speedup over AR: \`${metrics[9]}x\`"
             echo "Evidence: \`$QWEN_FIRST_TOKEN_EVIDENCE\`"
             echo "Evidence SHA-256: \`$QWEN_FIRST_TOKEN_EVIDENCE_SHA256\`"
             echo "Attestation: \`$QWEN_FIRST_TOKEN_BUNDLE\`"
