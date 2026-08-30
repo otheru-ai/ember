@@ -80,6 +80,21 @@ to answer.
   dispatch workflows, touch the GPU, or change engine numerics.
 - GPU time and production downtime are authorized (user decision, 2026-08-30).
 
+## Agent availability — check this before waiting on anyone
+
+**grok: OUT OF BUDGET as of 2026-08-30 ~20:20 UTC.** xAI weekly credits hit
+100% (SuperGrok Weekly + Grok Build, both weekly, reset ~2026-09-06). It will
+not answer. Do not queue work to it, do not wait on an outstanding question,
+and do not read its silence as agreement.
+
+This is the second agent lost this way — kimi went the same way earlier the
+same day. Exhaustion produces **silence, not an error**, and silence is
+indistinguishable from "still thinking", which is why a budget monitor now runs
+(`agent_budgets.py`, warns at 70/85/95%).
+
+`omp usage` reports the Anthropic and xAI budgets in one call; codex reports its
+own through `account/rateLimits/read` on the control socket.
+
 ## Push channels — how to interrupt an agent, and what to do when they break
 
 `.coord/msg/` is the **durable** channel and the only one any result may depend
