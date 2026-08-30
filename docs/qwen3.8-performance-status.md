@@ -283,7 +283,7 @@ and `reduce_rows_f32` (`reduce_rows.cuh:109-144`) strides by exactly that
 width: `for (int i = col; i < ncols; ) { ... i += blockDim.x; }`.
 
 `exact_l2_norm`'s `ggml_sum_rows` sees `ncols = head_dim = 128` and
-`nrows = n_key_heads * n_tokens = 16 * n_tokens`. On gfx1151's 20 CUs:
+`nrows = n_key_heads * n_tokens = 16 * n_tokens`:
 
 | | nrows | branch | blockDim | per thread | tree |
 |---|---|---|---|---|---|
@@ -292,6 +292,15 @@ width: `for (int i = col; i < ncols; ) { ... i += blockDim.x; }`.
 
 Two different accumulation trees over the same 128 values. Neither is wrong;
 they simply cannot round the same.
+
+**On `nsm`.** That branch assignment holds for `nsm <= 24`. An earlier version
+of this section asserted "gfx1151's 20 CUs" as established fact; published
+figures give Strix Halo **40** CUs, which would put q1 and q3 on the *same*
+branch and contradict the measurement. The sound reasoning runs the other way:
+the fix closed width 3, so the branch did differ between them, so `nsm <= 24` —
+consistent with HIP reporting the part's 20 WGPs rather than its 40 CUs through
+`multiProcessorCount`. One line settles it, and it is worth printing once:
+`ggml_cuda_info().devices[id].nsm`.
 
 This accounts for the whole measured signature (codex 354): convolved, decay
 and beta exact — none of them touch `sum_rows`; normalized **Q and K both**
