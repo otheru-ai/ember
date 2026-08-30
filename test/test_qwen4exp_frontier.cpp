@@ -831,6 +831,110 @@ static std::vector<float> reference_qsa_attention(
 // one-ULP divergence compounding over three tokens and 48 layers is plausible
 // or needs another explanation. Which of Ember's two paths is closer to exact
 // is still decided by running the control below on HIP.
+// A reduction's arithmetic must not depend on how many independent reductions
+// are launched alongside it.
+//
+// It did. `ggml_cuda_op_sum_rows` selected its block width from the row count
+// -- 512 threads when `(nrows / nsm) < 2`, otherwise 32 -- and
+// `reduce_rows_f32` strides by exactly that width, so the same row summed
+// through a different tree depending on how many rows shared the launch. On
+// gfx1151's 20 CUs that made `exact_l2_norm` reduce identical 128-value rows
+// one way at q=1 (nrows 16) and another at q=3 (nrows 48), which is what made
+// batched prefill disagree with q=1 and blocked the release.
+//
+// This is the guard for the class, not the instance: identical row data must
+// produce bit-identical sums whichever batch it arrives in. It passes trivially
+// on the CPU backend and is meaningful under DFLASH_QWEN_GDN_TEST_HIP=1, where
+// it fails on any build predating the fix.
+static void test_sum_rows_shape_invariance() {
+    const int ncols = 128;
+    const int narrow = 16;   // q1 shape:  n_key_heads * 1
+    const int wide   = 48;   // q3 shape:  n_key_heads * 3
+
+    const char * hip_value = std::getenv("DFLASH_QWEN_GDN_TEST_HIP");
+    const bool use_hip = hip_value && std::strcmp(hip_value, "1") == 0;
+    ggml_backend_t backend = use_hip
+        ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
+        : ggml_backend_cpu_init();
+    if (use_hip && !backend) {
+        backend = ggml_backend_init_by_type(
+            GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+    }
+    if (!backend) {
+        CHECK(false, "sum_rows shape-invariance backend initializes");
+        return;
+    }
+
+    // Values that straddle zero and do not sum exactly, so a different
+    // accumulation tree actually shows.
+    auto row_value = [&](int row, int col) {
+        return 0.7071f * std::sin(static_cast<float>((row + 1) * 31 + col) * 0.113f) +
+               0.3313f * std::cos(static_cast<float>(col * 7 + row) * 0.037f);
+    };
+
+    auto run = [&](int nrows, std::vector<float> & out) {
+        ggml_init_params params{};
+        params.mem_size = 8U * 1024U * 1024U;
+        params.no_alloc = true;
+        ggml_context * ctx = ggml_init(params);
+        if (!ctx) return false;
+        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ncols, nrows);
+        ggml_tensor * sum = ggml_sum_rows(ctx, x);
+        ggml_backend_buffer_t buffer =
+            ggml_backend_alloc_ctx_tensors(ctx, backend);
+        if (!buffer) { ggml_free(ctx); return false; }
+
+        std::vector<float> host(static_cast<size_t>(ncols) * nrows);
+        for (int row = 0; row < nrows; ++row) {
+            for (int col = 0; col < ncols; ++col) {
+                host[static_cast<size_t>(row) * ncols + col] =
+                    row_value(row, col);
+            }
+        }
+        ggml_backend_tensor_set(x, host.data(), 0, host.size() * sizeof(float));
+
+        ggml_cgraph * graph = ggml_new_graph(ctx);
+        ggml_build_forward_expand(graph, sum);
+        const bool ok =
+            ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
+        if (ok) {
+            out.resize(static_cast<size_t>(nrows));
+            ggml_backend_tensor_get(sum, out.data(), 0,
+                                    out.size() * sizeof(float));
+        }
+        ggml_backend_buffer_free(buffer);
+        ggml_free(ctx);
+        return ok;
+    };
+
+    std::vector<float> narrow_out, wide_out;
+    const bool ok = run(narrow, narrow_out) && run(wide, wide_out);
+    CHECK(ok, "sum_rows runs at both row counts");
+
+    if (ok) {
+        // Rows 0..15 carry identical data in both tensors, so their sums must
+        // be bit-identical. Not close -- identical.
+        size_t first_diff = static_cast<size_t>(narrow);
+        for (int row = 0; row < narrow; ++row) {
+            if (narrow_out[static_cast<size_t>(row)] !=
+                wide_out[static_cast<size_t>(row)]) {
+                first_diff = static_cast<size_t>(row);
+                break;
+            }
+        }
+        std::fprintf(stderr,
+                     "[sum-rows-invariance] backend=%s nrows %d vs %d "
+                     "first_diff_row=%zd\n",
+                     use_hip ? "hip" : "cpu", narrow, wide,
+                     first_diff == static_cast<size_t>(narrow)
+                         ? -1 : static_cast<ssize_t>(first_diff));
+        CHECK(first_diff == static_cast<size_t>(narrow),
+              "identical rows sum bit-identically regardless of how many rows "
+              "share the launch");
+    }
+    ggml_backend_free(backend);
+}
+
 static void test_gdn_recurrent_accumulation_order() {
     using dflash::common::Qwen4ExpFrontierGdnSpec;
     const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 128, 4, 1.0e-6f};
@@ -1830,6 +1934,7 @@ static void test_bounded_cache_and_prefill_policy() {
 int main() {
     test_persistent_hc_mixer();
     test_persistent_gdn_q1();
+    test_sum_rows_shape_invariance();
     test_gdn_recurrent_accumulation_order();
     test_gdn_batch_at_hip_legal_conv_channels();
     test_persistent_qsa_q1();
