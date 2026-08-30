@@ -235,6 +235,12 @@ class HarnessContractTests(unittest.TestCase):
         self.assertIn('name "*$tag*kernel_trace.csv"', body)
         self.assertIn('name "*$tag*counter_collection.csv"', body)
 
+    def test_profiler_cannot_write_bookkeeping_into_checkout(self):
+        body = PROFILE_SH.read_text()
+        self.assertIn('-v "$REPO:/ember:ro"', body)
+        self.assertIn("--workdir /out", body)
+        self.assertNotIn('-v "$REPO:/ember"\n', body)
+
     def test_release_image_does_not_carry_the_profiler(self):
         # The release image is a stripped runtime closure; collect-runtime.sh
         # exists precisely to keep compilers and profilers out of it.

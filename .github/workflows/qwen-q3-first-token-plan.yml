@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: qwen-q3-first-token-plan-${{ github.run_id }}
@@ -49,6 +50,39 @@ jobs:
       REUSABLE_CONSTRUCTION: /var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/construction-q3-ple-first-token-b753813605fb.json
       REUSABLE_CONSTRUCTION_SHA256: a2bbf152f41439a45faa348756d51d725e6f0f651aa973c36c00c63bca6d332a
     steps:
+      - name: Remove bounded legacy profiler residue before checkout
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          profiler_residue="$GITHUB_WORKSPACE/.rocprofv3"
+          if [[ ! -e "$profiler_residue" && ! -L "$profiler_residue" ]]; then
+            exit 0
+          fi
+          test -d "$profiler_residue" && test ! -L "$profiler_residue"
+          docker_config="$RUNNER_TEMP/qwen-plan-cleanup-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          install -d -m 700 "$docker_config"
+          cleanup() {
+            rm -f -- "$docker_config/config.json"
+            rmdir -- "$docker_config" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          export DOCKER_CONFIG="$docker_config"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          builder_tag="$repository:dev-sha-${TARGET_SHA:0:12}"
+          docker pull "$builder_tag"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+            "$builder_tag")" = "$TARGET_SHA"
+          docker run --rm --network none --memory 64m --memory-swap 64m \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 16 \
+            --user 0:0 -v "$profiler_residue:/residue" \
+            --entrypoint /usr/bin/find "$builder_tag" \
+            /residue -mindepth 1 -delete
+          rmdir -- "$profiler_residue"
+          test ! -e "$profiler_residue" && test ! -L "$profiler_residue"
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit_sha }}

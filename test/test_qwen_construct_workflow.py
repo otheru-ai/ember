@@ -579,6 +579,19 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn('test "$(git rev-parse HEAD)" = "$TARGET_SHA"', body)
         self.assertIn("org.opencontainers.image.revision", body)
 
+    def test_legacy_profiler_residue_has_bounded_recovery(self) -> None:
+        plan = Q3_FIRST_TOKEN_PLAN.read_text(encoding="utf-8")
+        cleanup = plan.index("Remove bounded legacy profiler residue before checkout")
+        checkout = plan.index("uses: actions/checkout@")
+        self.assertLess(cleanup, checkout)
+        self.assertIn("packages: read", plan)
+        self.assertIn('profiler_residue="$GITHUB_WORKSPACE/.rocprofv3"', plan)
+        self.assertIn('builder_tag="$repository:dev-sha-${TARGET_SHA:0:12}"', plan)
+        self.assertIn("org.opencontainers.image.revision", plan)
+        self.assertIn('-v "$profiler_residue:/residue"', plan)
+        self.assertIn("/residue -mindepth 1 -delete", plan)
+        self.assertIn('test ! -e "$profiler_residue"', plan)
+
     def test_construction_is_serial_same_path_uid_and_bounded(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("'gfx1151-certification'", body)

@@ -347,7 +347,7 @@ run_pass() {
   esac
 
   local mounts=(
-    -v "$REPO:/ember"
+    -v "$REPO:/ember:ro"
     -v "$outdir:/out"
     -v "$(dirname -- "$MODEL"):/pmodel:ro"
   )
@@ -373,6 +373,7 @@ run_pass() {
   # path with a space would otherwise split and start a server on the wrong file.
   PROFILE_CONTAINER="$name"
   docker run -d --name "$name" --network host "${GPU_ARGS[@]}" "${mounts[@]}" "${env_args[@]}" \
+    --workdir /out \
     --entrypoint rocprofv3 "$IMAGE" \
     "${prof[@]:1}" \
     -- "$BINARY" -m "$model_arg" --host 127.0.0.1 --port "$PORT" --max-ctx 65536 \
