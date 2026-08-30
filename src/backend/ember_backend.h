@@ -253,6 +253,8 @@ typedef struct {
     bool   snapshot_ok;
     bool   prefill_checked;
     bool   prefill_exact;
+    bool   prefill_accepted;
+    bool   prefill_margin_checked;
     bool   spec_checked;
     bool   spec_exact;
     bool   disk_checked;
@@ -268,8 +270,11 @@ typedef struct {
     int    batch_tokens;
     int    batch_spec_rows;
     int    mismatch_index;      // -1 when all compared token streams match
+    int    prefill_numerics_index;
     int32_t expected_token;
     int32_t actual_token;
+    double prefill_q1_top2_margin;
+    double prefill_max_abs_logit_delta;
     double baseline_decode_s;
     double restored_spec_decode_s;
     double spec_decode_s;

@@ -186,6 +186,11 @@ struct GenerateRequest {
     // reference/validation requests; forcing target-only decode must not turn
     // a long prompt into thousands of q=1 graph launches.
     bool                       force_exact_prefill = false;
+    // Validation-only capture of the logits used for each sampled position.
+    // Ordinary serving leaves this false and retains no vocabulary-sized
+    // buffers. The differential validator uses it to apply the self-calibrating
+    // q1-margin versus cross-path-logit-delta criterion.
+    bool                       capture_validation_logits = false;
     // B6 — structural-token greedy sampling. When set, the AR decode loop calls
     // this before sampling each token; returning true forces greedy argmax for
     // that token regardless of the sampler temperature (used to keep tool-call
@@ -237,6 +242,7 @@ struct GenerateResult {
     // succeed() before returning a successful result.
     std::optional<GenerateError> error = GenerateError{};
     std::vector<int32_t>       tokens;
+    std::vector<std::vector<float>> validation_logits;
     int                        prefill_tokens = 0;
     double                     prefill_s   = 0.0;
     double                     decode_s    = 0.0;

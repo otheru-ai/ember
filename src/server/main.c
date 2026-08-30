@@ -4303,7 +4303,10 @@ static int run_backend_validation(ember_backend *be, const char *path,
         "\"snapshot_ok\":%s,\"baseline_tokens\":%d,"
         "\"ar\":{\"tokens\":%d,\"decode_seconds\":%.9f,"
         "\"decode_tokens_per_second\":%.9f},"
-        "\"prefill\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
+        "\"prefill\":{\"checked\":%s,\"exact\":%s,\"accepted\":%s,"
+        "\"margin_checked\":%s,\"numerics_index\":%d,"
+        "\"q1_top2_margin\":%.9g,"
+        "\"max_abs_logit_delta\":%.9g,\"tokens\":%d},"
         "\"spec\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d,"
         "\"accept_rate\":%.6f,\"restored_decode_seconds\":%.9f,"
         "\"fresh_decode_seconds\":%.9f,"
@@ -4318,7 +4321,12 @@ static int run_backend_validation(ember_backend *be, const char *path,
         report.snapshot_ok ? "true" : "false", report.baseline_tokens,
         report.baseline_tokens, report.baseline_decode_s, baseline_decode_tps,
         report.prefill_checked ? "true" : "false",
-        report.prefill_exact ? "true" : "false", report.prefill_tokens,
+        report.prefill_exact ? "true" : "false",
+        report.prefill_accepted ? "true" : "false",
+        report.prefill_margin_checked ? "true" : "false",
+        report.prefill_numerics_index,
+        report.prefill_q1_top2_margin,
+        report.prefill_max_abs_logit_delta, report.prefill_tokens,
         report.spec_checked ? "true" : "false",
         report.spec_exact ? "true" : "false", report.spec_tokens,
         report.spec_accept_rate, report.restored_spec_decode_s,

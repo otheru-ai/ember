@@ -274,6 +274,7 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
     report->snapshot_ok = true;
     report->prefill_checked = false;
     report->prefill_exact = true;
+    report->prefill_accepted = true;
     report->spec_checked = false;
     report->spec_exact = true;
     report->disk_checked = false;
@@ -285,6 +286,7 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
     report->batch_tokens =
         report->batch_checked ? report->batch_rows * n_gen : 0;
     report->mismatch_index = -1;
+    report->prefill_numerics_index = -1;
     report->expected_token = -1;
     report->actual_token = -1;
     snprintf(report->detail, sizeof(report->detail),

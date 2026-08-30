@@ -627,6 +627,8 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         return true;
     };
     while (emitted < request.n_gen && !io.cancelled) {
+        if (request.capture_validation_logits)
+            result.validation_logits.push_back(logits_);
         const int32_t token = sample(request, history);
         if (token == weights_.eos_id || token == weights_.eot_id) break;
         const int remaining_after_base = request.n_gen - emitted - 1;

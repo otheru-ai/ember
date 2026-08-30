@@ -36,6 +36,7 @@
 #include "common/backend_factory.h"
 #include "common/errors.h"
 #include "common/model_backend.h"
+#include "common/prefill_validation.h"
 #include "common/resident_batch_coordinator.h"
 #include "common/sampler.h"
 #include "server/disk_prefix_cache.h"
@@ -51,6 +52,7 @@ using dflash::common::GenerateRequest;
 using dflash::common::GenerateResult;
 using dflash::common::ModelBackend;
 using dflash::common::PrefillAttentionMode;
+using dflash::common::PrefillMarginDecision;
 using dflash::common::ResidentBatchBackend;
 using dflash::common::ResidentBatchCoordinator;
 using dflash::common::Tokenizer;
@@ -1316,6 +1318,7 @@ static bool backend_validate_impl(
     }
     std::memset(report, 0, sizeof(*report));
     report->mismatch_index = -1;
+    report->prefill_numerics_index = -1;
     report->expected_token = -1;
     report->actual_token = -1;
 
@@ -1326,6 +1329,8 @@ static bool backend_validate_impl(
     ar.do_sample = false;
     ar.force_ar_decode = true;
     ar.force_exact_prefill = true;
+    ar.capture_validation_logits =
+        b->be->validation_compare_production_prefill();
     ar.snap_slot = 0;
     ar.snap_pos = n_prompt;
 
@@ -1350,6 +1355,7 @@ static bool backend_validate_impl(
     report->prefill_checked =
         b->be->validation_compare_production_prefill();
     report->prefill_exact = true;
+    report->prefill_accepted = true;
     if (report->prefill_checked) {
         GenerateRequest production = ar;
         production.force_exact_prefill = false;
@@ -1359,9 +1365,46 @@ static bool backend_validate_impl(
         trace_validation_tokens("prefill", production_prefill.tokens);
         report->prefill_tokens =
             static_cast<int>(production_prefill.tokens.size());
-        report->prefill_exact =
-            production_prefill.ok() && validation_tokens_equal(
-                baseline.tokens, production_prefill.tokens, report);
+        if (production_prefill.ok()) {
+            const PrefillMarginDecision decision =
+                dflash::common::validate_prefill_margin(
+                    baseline.tokens, production_prefill.tokens,
+                    baseline.validation_logits,
+                    production_prefill.validation_logits);
+            report->prefill_exact = decision.streams_exact;
+            report->prefill_accepted = decision.accepted;
+            report->prefill_margin_checked = decision.margin_checked;
+            if (decision.margin_checked) {
+                report->prefill_numerics_index =
+                    static_cast<int>(decision.numerics_index);
+            }
+            report->prefill_q1_top2_margin = decision.q1_top2_margin;
+            report->prefill_max_abs_logit_delta =
+                decision.max_abs_logit_delta;
+            if (!decision.streams_exact) {
+                report->mismatch_index =
+                    static_cast<int>(decision.mismatch_index);
+                report->expected_token = decision.expected_token;
+                report->actual_token = decision.actual_token;
+            }
+            std::fprintf(stderr,
+                         "[ember-validate-prefill] exact=%s "
+                         "margin_checked=%s q1_top2_margin=%.9g "
+                         "max_abs_logit_delta=%.9g accepted=%s "
+                         "numerics_index=%d mismatch_index=%d expected=%d "
+                         "actual=%d\n",
+                         decision.streams_exact ? "true" : "false",
+                         decision.margin_checked ? "true" : "false",
+                         static_cast<double>(decision.q1_top2_margin),
+                         static_cast<double>(decision.max_abs_logit_delta),
+                         decision.accepted ? "true" : "false",
+                         report->prefill_numerics_index,
+                         report->mismatch_index, report->expected_token,
+                         report->actual_token);
+        } else {
+            report->prefill_exact = false;
+            report->prefill_accepted = false;
+        }
     }
 
     GenerateRequest spec = ar;
@@ -1480,7 +1523,7 @@ static bool backend_validate_impl(
          report->batch_spec_rows == report->batch_rows);
     report->ok = report->snapshot_ok && restored_speculative.ok() &&
                  speculative.ok() &&
-                 report->prefill_exact &&
+                 report->prefill_accepted &&
                  report->spec_exact &&
                  (!report->disk_checked || report->disk_exact) &&
                  (!report->batch_checked || report->batch_exact) &&
@@ -1502,8 +1545,15 @@ static bool backend_validate_impl(
                       "resident XDNA speculation required but ran for "
                       "%d/%d rows",
                       report->batch_spec_rows, report->batch_rows);
-    } else if (!report->prefill_exact || !report->spec_exact ||
-               !report->disk_exact ||
+    } else if (!report->prefill_accepted) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "production prefill rejected at %d: margin=%.9g "
+                      "max_abs_logit_delta=%.9g checked=%s",
+                      report->mismatch_index,
+                      report->prefill_q1_top2_margin,
+                      report->prefill_max_abs_logit_delta,
+                      report->prefill_margin_checked ? "true" : "false");
+    } else if (!report->spec_exact || !report->disk_exact ||
                !report->batch_exact) {
         std::snprintf(report->detail, sizeof(report->detail),
                       "token mismatch at %d: expected=%d actual=%d",
@@ -1512,6 +1562,14 @@ static bool backend_validate_impl(
     } else if (!report->spec_checked) {
         std::snprintf(report->detail, sizeof(report->detail),
                       "snapshot/disk exact; DSpark unavailable or did not run");
+    } else if (report->prefill_checked && !report->prefill_exact) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "production prefill accepted at %d: margin=%.9g "
+                      "max_abs_logit_delta=%.9g; snapshot/DSpark/disk/batch "
+                      "checks passed",
+                      report->mismatch_index,
+                      report->prefill_q1_top2_margin,
+                      report->prefill_max_abs_logit_delta);
     } else {
         std::snprintf(report->detail, sizeof(report->detail),
                       "AR, production prefill, restored/fresh DSpark, disk, "

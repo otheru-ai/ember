@@ -2,9 +2,11 @@
 
 #include "../engine/dflash/common/model_backend.h"
 #include "../engine/dflash/common/prefill_attention_mode.h"
+#include "../engine/dflash/common/prefill_validation.h"
 #include "../engine/dflash/deepseek4/deepseek4_attention_shape.h"
 
 using dflash::common::PrefillAttentionMode;
+using dflash::common::PrefillMarginDecision;
 using dflash::common::select_prefill_step_mode;
 using dflash::common::deepseek4_attention_shape;
 using dflash::common::deepseek4_decode_flash_eligible;
@@ -136,6 +138,57 @@ int main() {
     CHECK(merged.prefill_mode == "mixed" &&
               merged.prefill_reason == "empty_spec_retry",
           "hidden AR retry reports its mixed execution policy");
+
+    const PrefillMarginDecision exact =
+        dflash::common::validate_prefill_margin(
+            {3, 4}, {3, 4}, {}, {});
+    CHECK(exact.streams_exact && exact.accepted && !exact.margin_checked,
+          "token-exact prefill passes without manufacturing a margin");
+
+    const PrefillMarginDecision exact_with_noise =
+        dflash::common::validate_prefill_margin(
+            {3, 4}, {3, 4},
+            {{3.0f, 2.0f}, {5.0f, 1.0f}},
+            {{3.1f, 2.0f}, {5.5f, 1.0f}});
+    CHECK(exact_with_noise.streams_exact && exact_with_noise.accepted &&
+              exact_with_noise.margin_checked &&
+              exact_with_noise.numerics_index == 1 &&
+              exact_with_noise.max_abs_logit_delta == 0.5f,
+          "token-exact prefill reports its largest observed logit delta");
+
+    const PrefillMarginDecision within_delta =
+        dflash::common::validate_prefill_margin(
+            {0}, {1}, {{1.0f, 0.9f, 0.0f}}, {{0.8f, 1.0f, 0.0f}});
+    CHECK(!within_delta.streams_exact && within_delta.margin_checked &&
+              within_delta.accepted && within_delta.mismatch_index == 0 &&
+              within_delta.expected_token == 0 &&
+              within_delta.actual_token == 1,
+          "prefill disagreement passes when path delta exceeds q1 margin");
+
+    const PrefillMarginDecision outside_delta =
+        dflash::common::validate_prefill_margin(
+            {0}, {1}, {{1.0f, 0.7f}}, {{0.8f, 0.9f}});
+    CHECK(outside_delta.margin_checked && !outside_delta.accepted,
+          "prefill disagreement fails when q1 margin exceeds path delta");
+
+    const PrefillMarginDecision tied_boundary =
+        dflash::common::validate_prefill_margin(
+            {0}, {1}, {{1.0f, 0.5f}}, {{0.5f, 1.0f}});
+    CHECK(tied_boundary.margin_checked && !tied_boundary.accepted,
+          "prefill criterion uses the decided strict margin inequality");
+
+    const PrefillMarginDecision eos_length_mismatch =
+        dflash::common::validate_prefill_margin(
+            {}, {1}, {{1.0f, 0.9f}}, {{0.8f, 1.0f}});
+    CHECK(eos_length_mismatch.margin_checked &&
+              eos_length_mismatch.accepted &&
+              eos_length_mismatch.expected_token == -1,
+          "immediate q1 stop still compares its seed-logit margin");
+
+    const PrefillMarginDecision missing_logits =
+        dflash::common::validate_prefill_margin({0}, {1}, {}, {});
+    CHECK(!missing_logits.margin_checked && !missing_logits.accepted,
+          "prefill disagreement fails closed without captured logits");
     std::printf("──────────────────────────────\n");
     std::printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
