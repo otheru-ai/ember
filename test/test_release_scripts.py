@@ -352,6 +352,17 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("advice.detachedHead", container)
         self.assertNotIn("tags: ['v*']", forgejo_container)
 
+    def test_counter_calibration_does_not_reacquire_workflow_gpu_lock(self) -> None:
+        certify = GITHUB_CERTIFY.read_text()
+        calibration = certify.split(
+            "\n  qwen-calibrate-counter-units:", 1
+        )[1].split("\n  qwen-resume-q3-timing:", 1)[0]
+        self.assertIn(
+            '"$CALIBRATION_SOURCE/scripts/calibrate_counter_units.sh" \\\n'
+            '            --no-quiesce --image "$CALIBRATION_IMAGE"',
+            calibration,
+        )
+
     def test_qwen_control_conversion_is_exact_bounded_and_recoverable(self) -> None:
         container = GITHUB_CONTAINER.read_text()
         certify = GITHUB_CERTIFY.read_text()
