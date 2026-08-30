@@ -60,6 +60,16 @@ directly** — the file the loader actually opens — and reports
 closes the inference chain at the artifact rather than at its source. A
 checkpoint that ships either tensor revives every line above.
 
+**This entry is dead by our own choice, not by upstream's.** The rotations
+exist to make *quantized* KV viable; our cache is F32
+(`Qwen4ExpCowBuffer` stores `float`, `qwen4exp_internal.h:109-124`), which is
+why they are inert. That same choice costs roughly 101 MB of selected-K/V
+assembly and upload per decode token at ctx 2048 — see
+[`qwen3.8-performance-status.md`](qwen3.8-performance-status.md). If KV
+quantization is ever taken, this entry goes **live** and the rotation code
+becomes required rather than tolerated. Do not delete it on the strength of
+today's format.
+
 **Recommendation: keep, comment.** This is upstream-parity code for a
 configuration Qwen may yet publish, and it is already correctly gated — it
 costs one null check per call, not a copy. What it must not do is keep

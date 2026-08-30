@@ -993,3 +993,40 @@ and 412 sit above that cluster, so the first green number will very likely be
 a real result *and* short of the gate. Both things being true at once is the
 expected outcome, not a contradiction, and the ledger should say so before
 anyone has to interpret it under pressure.
+
+## Candidate, unsized: asymmetric KV cache quantization
+
+From a survey of other engines on this part. `julianmb/q38rocm` ships
+**TurboQuant** — K at Q8, V at 4-bit (`-ctk q8_0 -ctv turbo4`) — reporting a
+262K context dropping from 61.4 GB to 20.08 GB. It is a cache *format*, not a
+shader, so unlike the Mesa RADV Wave64 dual-issue work it is portable to a HIP
+engine.
+
+**Ember's QSA KV cache is F32**: `Qwen4ExpCowBuffer` stores `float`
+(`qwen4exp_internal.h:109-124`), and `qwen4exp_model.h:20` states it. At ctx
+2048, where dense selection selects every token:
+
+    per QSA layer   2 x 2048 x 2 heads x 256 dim x 4 B  =  8.4 MB
+    x 12 QSA layers                                     =  101 MB per decode token
+    at Q8 K / 4-bit V                                   =   19 MB  (5.3x less)
+
+**This is a size, not a measurement, and must not be treated as a lever until
+it is one.** The share of decode wall time spent in those uploads is unknown.
+The measurement that decides it: time the `qsa_attend_q1` upload group
+(`qwen4exp_frontier.cpp:1612-1648`) across a 256-token decode as a fraction of
+decode wall time. Low single digits means leave it alone; a double-digit share
+makes it the largest decode-side item on the list.
+
+It also reactivates [`dead-code-candidates.md`](dead-code-candidates.md) entry
+1: the #27774 Hadamard rotations are inert *because* the cache is F32, and they
+are exactly what quantized KV requires.
+
+### Corroborated, no action
+
+- An independent Strix Halo comparison finds "the safe-core / no-graphs control
+  barely changed generation", agreeing with dead-code entry 4 on HIP graph
+  replay.
+- `julianmb/q38rocm` measures 329.86 tok/s prefill at 16K on the HIP backend,
+  sitting with kingjones777's 345/385. Our 412 gate remains above every
+  published number on this part.
+- Mesa RADV Wave64 dual-issue (`KHR_coopmat`) is Vulkan-only and does not port.
