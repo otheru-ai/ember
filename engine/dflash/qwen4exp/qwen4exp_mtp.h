@@ -57,9 +57,10 @@ struct Qwen4ExpMtpState {
 
 // A prompt chunk advances the target over every row, but the draft cache
 // intentionally trails it by one row: token x_(p+1) is paired with target
-// h_p. `preceding_target_hc_row == -1` selects the committed pre-chunk HC;
-// otherwise it selects a row from the target batch output. The pristine first
-// token has no preceding target HC and is the only row omitted from the plan.
+// h_p and uses h_p's position p. `preceding_target_hc_row == -1` selects the
+// committed pre-chunk HC and its position; otherwise it selects the same row
+// from the target batch output and input positions. The pristine first token
+// has no preceding target HC and is the only row omitted from the plan.
 struct Qwen4ExpMtpPromptSyncRow {
     size_t token_row = 0;
     int preceding_target_hc_row = -1;
@@ -68,6 +69,21 @@ struct Qwen4ExpMtpPromptSyncRow {
 bool qwen4exp_mtp_prompt_sync_plan(
     int target_pos_before, int mtp_pos_before, size_t target_rows,
     std::vector<Qwen4ExpMtpPromptSyncRow> & plan, std::string & error);
+bool qwen4exp_mtp_prompt_sync_position(
+    const Qwen4ExpMtpPromptSyncRow & row,
+    const std::array<int32_t, 3> & pre_chunk_target_position,
+    const std::vector<std::array<int32_t, 3>> & target_batch_positions,
+    std::array<int32_t, 3> & position, std::string & error);
+
+// MTP shifts token IDs forward by one without shifting target hidden-state
+// positions: (h_p, x_(p+1)) executes at p. Recursive proposal depth d executes
+// at p+d. This is the Qwen4Exp contract in vLLM PR 53896,
+// vllm/v1/spec_decode/llm_base_proposer.py:set_inputs_first_pass(). Read the
+// authoritative last target M-RoPE row rather than deriving p from token count,
+// which also preserves non-scalar image positions.
+bool qwen4exp_mtp_chain_position(
+    const Qwen4ExpState & target, size_t draft_depth,
+    std::array<int32_t, 3> & position, std::string & error);
 
 struct Qwen4ExpMtpCacheBatchShape {
     size_t rows = 0;
@@ -93,8 +109,9 @@ bool qwen4exp_mtp_matrix_quant_type_valid(
     ggml_type type, std::string & error);
 
 // Snapshot validity is stronger than a scalar position check. The MTP QSA
-// K/V/raw-index caches and all M-RoPE axes must cover exactly the trailing
-// draft frontier, while target_hc remains the target's authoritative h_p.
+// K/V/raw-index caches and all M-RoPE axes must cover exactly the trailing,
+// target-aligned draft frontier, while target_hc remains the target's
+// authoritative h_p.
 bool qwen4exp_mtp_frontier_valid(
     const Qwen4ExpState & target, const Qwen4ExpMtpState & mtp,
     const std::vector<float> & target_hc, std::string & error);

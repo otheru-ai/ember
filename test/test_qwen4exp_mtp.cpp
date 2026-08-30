@@ -339,6 +339,42 @@ static void test_prompt_sync_plan_is_causally_exact() {
         q1_pairs.emplace_back(token, token - 1);
     CHECK(batched_pairs == q1_pairs && target_pos == 37 && mtp_pos == 36,
           "q16 MTP synchronization is differential-equivalent to q1 order");
+
+    const std::array<int32_t, 3> pre_chunk = {70, 80, 90};
+    const std::vector<std::array<int32_t, 3>> positions = {
+        {11, 21, 31}, {12, 22, 32}};
+    std::array<int32_t, 3> selected{};
+    CHECK(qwen4exp_mtp_prompt_sync_plan(16, 15, 2, plan, error) &&
+              qwen4exp_mtp_prompt_sync_position(
+                  plan[0], pre_chunk, positions, selected, error) &&
+              selected == pre_chunk,
+          "continued MTP sync uses the pre-chunk hidden position for token r0");
+    CHECK(qwen4exp_mtp_prompt_sync_position(
+              plan[1], pre_chunk, positions, selected, error) &&
+              selected == positions[0] && selected != positions[1],
+          "MTP sync shifts tokens but keeps the preceding target row position");
+}
+
+static void test_mtp_chain_position_uses_preceding_target_row() {
+    Qwen4ExpState target;
+    target.cur_pos = 3;
+    target.mrope_positions[0] = {4, 5, 11};
+    target.mrope_positions[1] = {4, 7, 13};
+    target.mrope_positions[2] = {4, 9, 17};
+    std::array<int32_t, 3> position{};
+    const std::array<int32_t, 3> first = {11, 13, 17};
+    const std::array<int32_t, 3> recursive = {13, 15, 19};
+    std::string error;
+    CHECK(qwen4exp_mtp_chain_position(target, 0, position, error) &&
+              position == first,
+          "first MTP pair keeps the preceding target hidden position");
+    CHECK(qwen4exp_mtp_chain_position(target, 2, position, error) &&
+              position == recursive,
+          "recursive MTP depth advances from the preceding hidden position");
+    target.mrope_positions[1].pop_back();
+    CHECK(!qwen4exp_mtp_chain_position(target, 0, position, error) &&
+              error.find("coverage") != std::string::npos,
+          "MTP position lookup fails closed on incomplete target history");
 }
 
 static void test_mtp_cache_batch_shape_contract() {
@@ -417,7 +453,7 @@ static void test_mtp_snapshot_frontier_invariant() {
     Qwen4ExpState target;
     target.cur_pos = 4;
     target.hc.assign(10240, 7.0f);
-    for (auto & axis : target.mrope_positions) axis.assign(4, 1);
+    for (auto & axis : target.mrope_positions) axis = {0, 1, 2, 3};
     const std::vector<float> target_key(4U * 512U, 1.0f);
     const std::vector<float> target_value(4U * 512U, 2.0f);
     const std::vector<float> target_index(4U * 128U, 3.0f);
@@ -457,6 +493,13 @@ static void test_mtp_snapshot_frontier_invariant() {
               target, short_position, target_hc, error) &&
               error.find("M-RoPE") != std::string::npos,
           "snapshot rejects incomplete M-RoPE history");
+    Qwen4ExpMtpState shifted_position = mtp;
+    for (auto & axis : shifted_position.mrope_positions)
+        for (int32_t & value : axis) ++value;
+    CHECK(!qwen4exp_mtp_frontier_valid(
+              target, shifted_position, target_hc, error) &&
+              error.find("target-aligned") != std::string::npos,
+          "snapshot rejects the former one-token-shifted MTP history");
     target_hc[0] = 8.0f;
     CHECK(!qwen4exp_mtp_frontier_valid(target, mtp, target_hc, error) &&
               error.find("authoritative") != std::string::npos,
@@ -688,6 +731,7 @@ int main() {
     test_invalid_accept_count_fails_closed();
     test_depth_and_instrumentation_contract();
     test_prompt_sync_plan_is_causally_exact();
+    test_mtp_chain_position_uses_preceding_target_row();
     test_mtp_cache_batch_shape_contract();
     test_mtp_matrix_quant_loader_contract();
     test_mtp_snapshot_frontier_invariant();

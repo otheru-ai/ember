@@ -48,6 +48,58 @@ bool qwen4exp_mtp_prompt_sync_plan(
     return true;
 }
 
+bool qwen4exp_mtp_prompt_sync_position(
+        const Qwen4ExpMtpPromptSyncRow & row,
+        const std::array<int32_t, 3> & pre_chunk_target_position,
+        const std::vector<std::array<int32_t, 3>> & target_batch_positions,
+        std::array<int32_t, 3> & position, std::string & error) {
+    position = {};
+    error.clear();
+    if (row.preceding_target_hc_row == -1) {
+        position = pre_chunk_target_position;
+        return true;
+    }
+    if (row.preceding_target_hc_row < 0 ||
+        static_cast<size_t>(row.preceding_target_hc_row) >=
+            target_batch_positions.size()) {
+        error = "invalid Qwen4Exp MTP preceding target position row";
+        return false;
+    }
+    position = target_batch_positions[
+        static_cast<size_t>(row.preceding_target_hc_row)];
+    return true;
+}
+
+bool qwen4exp_mtp_chain_position(
+        const Qwen4ExpState & target, size_t draft_depth,
+        std::array<int32_t, 3> & position, std::string & error) {
+    position = {};
+    error.clear();
+    if (target.cur_pos <= 0 ||
+        draft_depth > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        error = "invalid Qwen4Exp MTP target position frontier";
+        return false;
+    }
+    const size_t row = static_cast<size_t>(target.cur_pos - 1);
+    for (size_t axis = 0; axis < target.mrope_positions.size(); ++axis) {
+        if (target.mrope_positions[axis].size() !=
+            static_cast<size_t>(target.cur_pos)) {
+            error = "Qwen4Exp MTP target M-RoPE coverage is incomplete";
+            return false;
+        }
+        const int64_t value =
+            static_cast<int64_t>(target.mrope_positions[axis][row]) +
+            static_cast<int64_t>(draft_depth);
+        if (value < std::numeric_limits<int32_t>::min() ||
+            value > std::numeric_limits<int32_t>::max()) {
+            error = "Qwen4Exp MTP chain M-RoPE position is out of range";
+            return false;
+        }
+        position[axis] = static_cast<int32_t>(value);
+    }
+    return true;
+}
+
 bool qwen4exp_mtp_cache_batch_shape(
         size_t rows, Qwen4ExpMtpCacheBatchShape & shape,
         std::string & error) {
@@ -145,6 +197,16 @@ bool qwen4exp_mtp_frontier_valid(
         if (axis.size() != rows) {
             error = "Qwen4Exp MTP snapshot M-RoPE coverage is incomplete";
             return false;
+        }
+    }
+    for (size_t axis = 0; axis < mtp.mrope_positions.size(); ++axis) {
+        for (size_t row = 0; row < rows; ++row) {
+            if (mtp.mrope_positions[axis][row] !=
+                target.mrope_positions[axis][row]) {
+                error = "Qwen4Exp MTP snapshot M-RoPE history is not "
+                        "target-aligned";
+                return false;
+            }
         }
     }
     return true;

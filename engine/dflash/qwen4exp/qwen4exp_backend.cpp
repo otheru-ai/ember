@@ -380,6 +380,13 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         if (chunk_rows >= 2) {
             const int target_pos_before = state_.cur_pos;
             const std::vector<float> pre_chunk_target_hc = mtp_target_hc_;
+            std::array<int32_t, 3> pre_chunk_target_position{};
+            if (mtp_depth_ && target_pos_before > 0 &&
+                !qwen4exp_mtp_chain_position(
+                    state_, 0, pre_chunk_target_position, error)) {
+                result.fail(GenerateErrorCode::PrefillFailed, error);
+                return result;
+            }
             const auto first = request.prompt.begin() + i;
             std::vector<int32_t> tokens(
                 first, first + static_cast<std::ptrdiff_t>(chunk_rows));
@@ -419,13 +426,20 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 sync_positions.reserve(sync_plan.size());
                 for (const Qwen4ExpMtpPromptSyncRow & sync : sync_plan) {
                     sync_tokens.push_back(tokens[sync.token_row]);
-                    sync_positions.push_back(positions[sync.token_row]);
+                    std::array<int32_t, 3> sync_position{};
+                    if (!qwen4exp_mtp_prompt_sync_position(
+                            sync, pre_chunk_target_position, positions,
+                            sync_position, error)) {
+                        result.fail(GenerateErrorCode::PrefillFailed, error);
+                        return result;
+                    }
+                    sync_positions.push_back(sync_position);
                     if (sync.preceding_target_hc_row < 0) {
                         sync_target_hc.push_back(pre_chunk_target_hc);
                     } else {
-                        sync_target_hc.push_back(target_row_hc[
-                            static_cast<size_t>(
-                                sync.preceding_target_hc_row)]);
+                        const size_t preceding = static_cast<size_t>(
+                            sync.preceding_target_hc_row);
+                        sync_target_hc.push_back(target_row_hc[preceding]);
                     }
                 }
                 if (!qwen4exp_mtp_sync_cache_batch(
@@ -468,12 +482,18 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 row * Qwen4ExpVisionContract::output_hidden_size;
         }
         if (mtp_depth_ && !mtp_target_hc_.empty()) {
+            std::array<int32_t, 3> mtp_position{};
+            if (!qwen4exp_mtp_chain_position(
+                    state_, 0, mtp_position, error)) {
+                result.fail(GenerateErrorCode::PrefillFailed, error);
+                return result;
+            }
             if (!qwen4exp_mtp_sync_cache_q1(
                     weights_, mtp_weights_, mtp_state_,
                     request.prompt[static_cast<size_t>(i)], supplied_embedding,
                     supplied_embedding ? Qwen4ExpVisionContract::output_hidden_size : 0U,
                     mtp_target_hc_.data(),
-                    mtp_target_hc_.size(), position, error)) {
+                    mtp_target_hc_.size(), mtp_position, error)) {
                 result.fail(GenerateErrorCode::PrefillFailed,
                             "Qwen4Exp MTP prompt synchronization failed: " + error);
                 return result;
@@ -553,10 +573,13 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         }
         const int32_t p = static_cast<int32_t>(decode_position);
         if (mtp_depth_) {
+            std::array<int32_t, 3> mtp_position{};
             if (mtp_target_hc_.size() != 10240 ||
+                !qwen4exp_mtp_chain_position(
+                    state_, 0, mtp_position, error) ||
                 !qwen4exp_mtp_sync_cache_q1(
                     weights_, mtp_weights_, mtp_state_, token, nullptr, 0,
-                    mtp_target_hc_.data(), mtp_target_hc_.size(), {p, p, p},
+                    mtp_target_hc_.data(), mtp_target_hc_.size(), mtp_position,
                     error)) return false;
         }
         if (!qwen4exp_step_q1_mrope(weights_, state_, token, {p, p, p},
@@ -599,18 +622,15 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         int32_t proposal_input = token;
         const auto head_start = Clock::now();
         for (int depth = 0; depth < proposal_depth; ++depth) {
-            const int64_t pos64 = static_cast<int64_t>(state_.cur_pos) +
-                                  rope_delta + depth;
-            if (pos64 < 0 || pos64 > std::numeric_limits<int32_t>::max()) {
-                error = "Qwen4Exp MTP proposal M-RoPE position is out of range";
-                break;
-            }
             std::vector<float> next_hc;
-            const int32_t p = static_cast<int32_t>(pos64);
+            std::array<int32_t, 3> mtp_position{};
+            if (!qwen4exp_mtp_chain_position(
+                    state_, static_cast<size_t>(depth), mtp_position, error))
+                break;
             if (!qwen4exp_mtp_step_q1(
                     weights_, mtp_weights_, proposal_state, proposal_input,
                     nullptr, 0, proposal_hc.data(), proposal_hc.size(),
-                    {p, p, p}, proposal_logits, next_hc, error)) break;
+                    mtp_position, proposal_logits, next_hc, error)) break;
             if (depth == 0) persistent_after_base = proposal_state;
             const int32_t candidate = argmax_logits(proposal_logits);
             if (candidate < 0) {
@@ -679,7 +699,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                     weights_, mtp_weights_, mtp_state_, accepted_token,
                     nullptr, 0, verify_output.row_hc[i].data(),
                     verify_output.row_hc[i].size(),
-                    verify_rows[i + 1].mrope_position, error)) {
+                    verify_rows[i].mrope_position, error)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "Qwen4Exp MTP accepted draft advance failed: " + error);
                 result.decode_s = seconds_since(decode_start);
