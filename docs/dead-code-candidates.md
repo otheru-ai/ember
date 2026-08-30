@@ -203,3 +203,37 @@ with removing it. If the `index_key` history moves on-device — grok's
 go with it; the history still has to exist for the day the context crosses the
 boundary.
 
+---
+
+## 6. HIP `GGML_OP_MEAN` reduction — no producer in the shipped graph
+
+**Scope:** configuration (current source call graph). Vendored code. Not
+architecture or checkpoint deadness.
+
+**Evidence.** The HIP backend implements `ggml_cuda_op_mean` in
+`engine/ggml/src/ggml-cuda/mean.cu:13` and dispatches `GGML_OP_MEAN` from
+`engine/ggml/src/ggml-cuda/ggml-cuda.cu:3141-3142`. A source-tree search for
+`ggml_mean(` under both `engine/dflash/` and `src/` returns no matches, so no
+shipped Ember or dflash graph can construct the op. The generic ggml API and
+CPU/HIP dispatch remain live for other consumers of the vendored engine.
+
+This is registered not merely because it is unused: the HIP backend dispatches
+many operations and Ember constructs only a fraction of them. It earns an
+entry because it carried the byte-for-byte twin of the `sum_rows` defect that
+blocked the release; a future caller would otherwise revive a costly and
+non-obvious correctness failure. An unused op belongs here only when something
+about it would mislead performance accounting or bite a future reader.
+
+**Consequence for measurement.** Do not count the `mean.cu` launch or its
+reduction heuristic in Ember's Qwen or DeepSeek kernel accounting. The latent
+row-count-dependent reduction-tree defect there was fixed alongside the live
+`sumrows.cu` defect so that a future caller cannot revive the same correctness
+failure.
+
+**Falsifier.** Any new `ggml_mean(` producer in `engine/dflash/` or `src/`, or a
+runtime trace from a shipped Ember configuration containing `GGML_OP_MEAN`,
+makes the path live and requires removing or narrowing this entry.
+
+**Recommendation: keep.** This is vendored ggml functionality and is correctly
+available to graphs that request it. Keep the shape-invariant reduction fix;
+do not delete the operator merely because today's shipped graphs do not use it.
