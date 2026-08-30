@@ -80,7 +80,8 @@ appearing in performance accounting as if it ran. Comment the gate at
 
 ## 2. `ggml_flash_attn_ext_set_prec(GGML_PREC_F32)` — inert on gfx1151
 
-**Scope:** architecture, conditional on a build flag.
+**Scope:** architecture, conditional on a build flag. **Flash attention only —
+see the scope warning at the end of this entry.**
 
 `qwen4exp_frontier.cpp:1307` requests F32 precision on the QSA attention node.
 
@@ -100,6 +101,24 @@ so does any A/B that compares against it.
 **Recommendation: keep, comment.** Deleting it would silently change behaviour
 the day rocWMMA FA is enabled. But it should not be cited as evidence that QSA
 attention runs in F32 on this hardware — it is not.
+
+**Scope warning, added 20260831T091500Z — do not generalise this entry.**
+`GGML_PREC_F32` is inert for **flash attention**. It is **live for `mul_mat`**:
+`ggml_cuda_op_mul_mat_cublas` selects F16 operands for a quantized contiguous
+`src0` only when `dst->op_params[0] == GGML_PREC_DEFAULT`, so setting
+`GGML_PREC_F32` there is exactly what forces the dequantize-to-F32 +
+`cublasSgemm` branch. Read as "the flag does nothing on this hardware", this
+entry would argue against the one mechanism that produces an F32 reference.
+
+One further trap, found while checking that: the precision request **is**
+dropped on the routed-expert path. `ggml_cuda_mul_mat_id`'s `sync_fallback`
+builds its per-expert destination with
+`memset(&dst_slice, 0, sizeof(dst_slice))` (`ggml-cuda.cu:2816-2817`), and
+`GGML_PREC_DEFAULT` is 0 — so every recursive `mul_mat` inside it sees the
+default regardless of what the caller set. A `GGML_PREC_F32` reference would
+therefore be F32 for dense matrices and F16 for every expert, with nothing in
+the logs to say so. This is why the F32 reference uses an explicit env
+(`DFLASH_CUBLAS_F32_REFERENCE`) rather than the upstream knob.
 
 ---
 
