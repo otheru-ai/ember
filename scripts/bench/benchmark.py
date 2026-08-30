@@ -307,6 +307,67 @@ HARD_GATE_PREFILL_TPS = 412.0
 HARD_GATE_DECODE_TPS = 39.49
 HARD_GATE_PREFILL_TOKENS = 2074
 HARD_GATE_SAMPLES = 3
+DIFFERENTIAL_DECODE_SCHEMA = "ember.qwen3.8.differential-decode-comparison.v1"
+DIFFERENTIAL_DECODE_PURPOSE = "same_process_diagnostic_not_hard_gate_timing"
+DIFFERENTIAL_DECODE_TOKENS = 64
+
+
+def validate_differential_decode(value: object) -> dict:
+    """Validate and independently derive the same-process AR/MTP diagnostic.
+
+    The diagnostic is deliberately not a hard-gate timing sample, but it is
+    release evidence: every consumer must agree on its exact shape and must
+    derive rates from token counts and durations rather than trusting emitted
+    summary scalars.
+    """
+    if not isinstance(value, dict) or set(value) != {
+            "schema", "purpose", "tokens_per_path", "ar", "mtp"}:
+        raise ValueError("differential decode evidence is malformed")
+    ar = value.get("ar")
+    mtp = value.get("mtp")
+    if (value.get("schema") != DIFFERENTIAL_DECODE_SCHEMA
+            or value.get("purpose") != DIFFERENTIAL_DECODE_PURPOSE
+            or value.get("tokens_per_path") != DIFFERENTIAL_DECODE_TOKENS
+            or not isinstance(ar, dict)
+            or set(ar) != {"decode_seconds", "tokens_per_second"}
+            or not isinstance(mtp, dict)
+            or set(mtp) != {"accept_rate", "restored_decode_seconds",
+                            "warm_fresh_decode_seconds",
+                            "warm_fresh_tokens_per_second",
+                            "warm_speedup_vs_ar"}):
+        raise ValueError("differential decode contract differs")
+
+    def finite(item: object, label: str) -> float:
+        if (isinstance(item, bool) or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))):
+            raise ValueError(f"{label} is not finite")
+        return float(item)
+
+    ar_s = finite(ar.get("decode_seconds"), "differential AR seconds")
+    ar_tps = finite(ar.get("tokens_per_second"), "differential AR rate")
+    restored_s = finite(
+        mtp.get("restored_decode_seconds"),
+        "restored differential MTP seconds")
+    warm_s = finite(
+        mtp.get("warm_fresh_decode_seconds"),
+        "warm differential MTP seconds")
+    warm_tps = finite(
+        mtp.get("warm_fresh_tokens_per_second"),
+        "warm differential MTP rate")
+    speedup = finite(
+        mtp.get("warm_speedup_vs_ar"), "differential MTP speedup")
+    accept_rate = finite(
+        mtp.get("accept_rate"), "differential MTP acceptance")
+    if min(ar_s, ar_tps, restored_s, warm_s, warm_tps, speedup) <= 0.0:
+        raise ValueError("differential decode timing is not positive")
+    if not 0.0 <= accept_rate < 1.0:
+        raise ValueError("differential MTP acceptance is out of range")
+    tokens = float(DIFFERENTIAL_DECODE_TOKENS)
+    if (not math.isclose(ar_tps, tokens / ar_s, rel_tol=1.0e-6)
+            or not math.isclose(warm_tps, tokens / warm_s, rel_tol=1.0e-6)
+            or not math.isclose(speedup, warm_tps / ar_tps, rel_tol=1.0e-6)):
+        raise ValueError("differential decode derivation differs")
+    return value
 
 
 def derived_tps(tokens: object, milliseconds: object, declared: object,

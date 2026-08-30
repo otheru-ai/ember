@@ -442,7 +442,10 @@ lists both pinned intervention tools; it does not infer “Heretic” from a nam
    from its 64-token warm AR baseline, first restored MTP pass, and warm fresh
    MTP pass. This same-process comparison attributes whether speculation helps
    before another model load; it is diagnostic evidence and does not replace
-   the separate three-sample unprofiled 2,074/256 hard gate.
+   the separate three-sample unprofiled 2,074/256 hard gate. Both the matched
+   Q3/IU4 comparator and the final candidate bakeoff independently derive its
+   rates and speedup from the pinned 64-token durations; the hardware summary
+   must exactly reproduce the pinned diagnostic.
    Qwen's embedded MTP path must not be described as a separate draft-model
    file unless the implementation actually requires one.
    Certification must explicitly exercise the PR #27742 bring-up hazards:

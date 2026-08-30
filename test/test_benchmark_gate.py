@@ -182,6 +182,29 @@ class BenchmarkGateTest(unittest.TestCase):
             protocol=benchmark.QWEN_HARD_GATE_PROTOCOL)
         self.assertEqual(gate["protocol"], benchmark.QWEN_HARD_GATE_PROTOCOL)
 
+    def test_differential_decode_rates_are_independently_derived(self) -> None:
+        evidence = {
+            "schema": benchmark.DIFFERENTIAL_DECODE_SCHEMA,
+            "purpose": benchmark.DIFFERENTIAL_DECODE_PURPOSE,
+            "tokens_per_path": benchmark.DIFFERENTIAL_DECODE_TOKENS,
+            "ar": {"decode_seconds": 2.0, "tokens_per_second": 32.0},
+            "mtp": {
+                "accept_rate": 0.5,
+                "restored_decode_seconds": 1.7,
+                "warm_fresh_decode_seconds": 1.6,
+                "warm_fresh_tokens_per_second": 40.0,
+                "warm_speedup_vs_ar": 1.25,
+            },
+        }
+        self.assertIs(benchmark.validate_differential_decode(evidence), evidence)
+        evidence["mtp"]["warm_speedup_vs_ar"] = 1.0
+        with self.assertRaisesRegex(ValueError, "derivation differs"):
+            benchmark.validate_differential_decode(evidence)
+        evidence["mtp"]["warm_speedup_vs_ar"] = 1.25
+        evidence["mtp"]["accept_rate"] = 1.0
+        with self.assertRaisesRegex(ValueError, "acceptance is out of range"):
+            benchmark.validate_differential_decode(evidence)
+
     def test_http_error_preserves_bounded_backend_response(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             suite = benchmark.Suite(

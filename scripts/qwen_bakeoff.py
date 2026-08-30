@@ -726,6 +726,17 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
             or isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not 0.0 < float(rate) < 1.0):
         raise BakeoffError("matching-MTP differential is not exact or did not exercise accept/reject")
+    differential_decode_record, _, _ = pinned_evidence(
+        hardware_path.parent, hardware_files.get("differential_decode"),
+        "matching-MTP differential decode")
+    try:
+        differential_decode = BENCHMARK_MODULE.validate_differential_decode(
+            differential_decode_record)
+    except ValueError as exc:
+        raise BakeoffError(f"matching-MTP {exc}") from exc
+    if hardware.get("differential_decode") != differential_decode:
+        raise BakeoffError(
+            "matching-MTP differential decode summary differs from pinned evidence")
     hardware_timing_sha, hardware_timing_path = pinned_evidence_path(
         hardware_path.parent, hardware_files.get("timing"), "matching-MTP timing")
     if (hardware_timing_sha != (evidence["matching_mtp_timing"] or {}).get("sha256")
@@ -784,6 +795,7 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
         raise BakeoffError("hardware run used a different MTP companion")
 
     derived = {**facts, "differential_correctness_pass": True,
+               "differential_decode": differential_decode,
                "artifact_bytes": artifact_bytes,
                "companion_artifact_bytes": companion_bytes}
     expected_row = {

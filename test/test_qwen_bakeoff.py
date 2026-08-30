@@ -1222,11 +1222,26 @@ class BakeoffTest(unittest.TestCase):
                 "prefill": {"checked": True, "exact": True},
                 "spec": {"checked": True, "exact": True, "accept_rate": 0.5},
             })
+            differential_decode_value = {
+                "schema": qb.BENCHMARK_MODULE.DIFFERENTIAL_DECODE_SCHEMA,
+                "purpose": qb.BENCHMARK_MODULE.DIFFERENTIAL_DECODE_PURPOSE,
+                "tokens_per_path": qb.BENCHMARK_MODULE.DIFFERENTIAL_DECODE_TOKENS,
+                "ar": {"decode_seconds": 2.0, "tokens_per_second": 32.0},
+                "mtp": {
+                    "accept_rate": 0.5,
+                    "restored_decode_seconds": 1.7,
+                    "warm_fresh_decode_seconds": 1.6,
+                    "warm_fresh_tokens_per_second": 40.0,
+                    "warm_speedup_vs_ar": 1.25,
+                },
+            }
+            differential_decode = put(
+                "differential-decode.json", differential_decode_value)
             memory = put("memory.json", {"resources": resources,
                                           "performance": hard_gate,
                                           "hard_fit": memory_gate,
                                           "speculation": speculation})
-            hardware = put("hardware.json", {
+            hardware_value = {
                 "schema": "ember.qwen3.8.real-weight-gate.v2", "publish_approved": False,
                 "certification_scope": "measurement_only_not_certified",
                 "model": {"ordered_inventory": {"shards": [shard]}},
@@ -1235,11 +1250,13 @@ class BakeoffTest(unittest.TestCase):
                 "resources": resources,
                 "speculation": speculation,
                 "hard_gates": {"performance": hard_gate, "memory": memory_gate},
+                "differential_decode": differential_decode_value,
                 "evidence": {"quant_build_record": {
                     "path": "build.json", "sha256": row["build_record_sha256"]},
                     "timing": hardware_timing, "differential": differential,
-                    "memory": memory},
-            })
+                    "differential_decode": differential_decode, "memory": memory},
+            }
+            hardware = put("hardware.json", hardware_value)
             manifest = {
                 "schema": qb.RESULT_SCHEMA,
                 "candidate_id": row["candidate_id"], "status": "complete", "publishes": False,
@@ -1305,6 +1322,40 @@ class BakeoffTest(unittest.TestCase):
             row["mtp_depth"] = 3
             row["prefill_tps_samples"][0] += 1.0
             with self.assertRaisesRegex(qb.BakeoffError, "independently derived"):
+                qb.validate_measurement_evidence(row)
+            row["prefill_tps_samples"][0] -= 1.0
+
+            alternate_decode = json.loads(json.dumps(differential_decode_value))
+            alternate_decode["ar"] = {
+                "decode_seconds": 4.0, "tokens_per_second": 16.0}
+            alternate_decode["mtp"].update({
+                "restored_decode_seconds": 3.4,
+                "warm_fresh_decode_seconds": 3.2,
+                "warm_fresh_tokens_per_second": 20.0,
+                "warm_speedup_vs_ar": 1.25,
+            })
+            hardware_value["differential_decode"] = alternate_decode
+            hardware = put("hardware.json", hardware_value)
+            manifest["evidence"]["matching_mtp_hardware_measurement"] = hardware
+            manifest_desc = put("result.json", manifest)
+            row["evidence_manifest"] = {
+                **manifest_desc, "schema": manifest["schema"]}
+            with self.assertRaisesRegex(qb.BakeoffError, "summary differs"):
+                qb.validate_measurement_evidence(row)
+
+            # Even a fully rehashed evidence chain must fail when the emitted
+            # diagnostic scalar no longer follows from its token/time facts.
+            differential_decode_value["mtp"]["warm_speedup_vs_ar"] = 1.0
+            differential_decode = put(
+                "differential-decode.json", differential_decode_value)
+            hardware_value["differential_decode"] = differential_decode_value
+            hardware_value["evidence"]["differential_decode"] = differential_decode
+            hardware = put("hardware.json", hardware_value)
+            manifest["evidence"]["matching_mtp_hardware_measurement"] = hardware
+            manifest_desc = put("result.json", manifest)
+            row["evidence_manifest"] = {
+                **manifest_desc, "schema": manifest["schema"]}
+            with self.assertRaisesRegex(qb.BakeoffError, "derivation differs"):
                 qb.validate_measurement_evidence(row)
 
 

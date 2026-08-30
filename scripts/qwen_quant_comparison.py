@@ -38,7 +38,7 @@ PAIR_BINDING_SCHEMA = "ember.qwen3.8.q3-iu4-construction-pair.v1"
 HARDWARE_SCHEMA = "ember.qwen3.8.real-weight-gate.v2"
 KERNEL_RUNTIME_SCHEMA = "ember.qwen3.8.w4a8-dispatch-evidence.v1"
 KERNEL_BUILD_SCHEMA = "ember.qwen3.8.w4a8-build-evidence.v1"
-DIFFERENTIAL_DECODE_SCHEMA = "ember.qwen3.8.differential-decode-comparison.v1"
+DIFFERENTIAL_DECODE_SCHEMA = bakeoff.BENCHMARK_MODULE.DIFFERENTIAL_DECODE_SCHEMA
 CONSTRUCTION_SCHEMA = "ember.qwen3.8.candidate-construction.v1"
 COMPANION_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
 Q3_ARM = "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head"
@@ -422,48 +422,10 @@ def _exact_path_descriptor(value: Any, base: Path, label: str) -> Path:
 
 
 def validate_differential_decode(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != {
-            "schema", "purpose", "tokens_per_path", "ar", "mtp"}:
-        raise ComparisonError(f"{label} differential decode evidence is malformed")
-    ar = value.get("ar")
-    mtp = value.get("mtp")
-    if (value.get("schema") != DIFFERENTIAL_DECODE_SCHEMA
-            or value.get("purpose") !=
-               "same_process_diagnostic_not_hard_gate_timing"
-            or value.get("tokens_per_path") != 64
-            or not isinstance(ar, dict)
-            or set(ar) != {"decode_seconds", "tokens_per_second"}
-            or not isinstance(mtp, dict)
-            or set(mtp) != {"accept_rate", "restored_decode_seconds",
-                            "warm_fresh_decode_seconds",
-                            "warm_fresh_tokens_per_second",
-                            "warm_speedup_vs_ar"}):
-        raise ComparisonError(f"{label} differential decode contract differs")
-    ar_s = _finite(ar.get("decode_seconds"), f"{label} differential AR seconds")
-    ar_tps = _finite(ar.get("tokens_per_second"), f"{label} differential AR rate")
-    restored_s = _finite(
-        mtp.get("restored_decode_seconds"),
-        f"{label} restored differential MTP seconds")
-    warm_s = _finite(
-        mtp.get("warm_fresh_decode_seconds"),
-        f"{label} warm differential MTP seconds")
-    warm_tps = _finite(
-        mtp.get("warm_fresh_tokens_per_second"),
-        f"{label} warm differential MTP rate")
-    speedup = _finite(
-        mtp.get("warm_speedup_vs_ar"),
-        f"{label} differential MTP speedup")
-    accept_rate = _finite(
-        mtp.get("accept_rate"), f"{label} differential MTP acceptance")
-    if min(ar_s, ar_tps, restored_s, warm_s, warm_tps, speedup) <= 0.0:
-        raise ComparisonError(f"{label} differential decode timing is not positive")
-    if not 0.0 <= accept_rate < 1.0:
-        raise ComparisonError(f"{label} differential MTP acceptance is out of range")
-    if (not math.isclose(ar_tps, 64.0 / ar_s, rel_tol=1.0e-6)
-            or not math.isclose(warm_tps, 64.0 / warm_s, rel_tol=1.0e-6)
-            or not math.isclose(speedup, warm_tps / ar_tps, rel_tol=1.0e-6)):
-        raise ComparisonError(f"{label} differential decode derivation differs")
-    return value
+    try:
+        return bakeoff.BENCHMARK_MODULE.validate_differential_decode(value)
+    except ValueError as exc:
+        raise ComparisonError(f"{label} {exc}") from exc
 
 
 def validate_hardware(path: Path, digest: str, construction: dict[str, Any],

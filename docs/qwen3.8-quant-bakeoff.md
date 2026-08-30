@@ -390,7 +390,11 @@ deltas for each. This exposes speculation drift instead of silently attributing
 it to the main quant format. Its output carries
 `selection_allowed:false`: sequential Q3-then-IU4 measurements are useful for
 understanding the format tradeoff, but only the fresh-process ABBAAB gate may
-select the release bundle.
+select the release bundle. The final bakeoff evidence validator independently
+recomputes the 64-token AR and warm-MTP rates and speedup from the pinned
+durations, and requires the hardware summary to equal that pinned diagnostic;
+there is therefore no weaker publication path that merely trusts its emitted
+throughput scalars.
 
 IU4 construction is separately gated by the `matched-iu4-plan` branch-dispatch
 operation. It accepts the complete Q3 construction and hardware records,
