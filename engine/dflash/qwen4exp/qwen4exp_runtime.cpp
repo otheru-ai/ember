@@ -106,36 +106,27 @@ bool hc_mix(const Qwen4ExpWeights & weights, const std::vector<float> & hc,
             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
     Qwen4ExpFrontierDenseCache * cache =
         cache_override ? cache_override : weights.dense_cache;
-    if (hc.size() != kHcDim) { error = "invalid Qwen4Exp HC state"; return false; }
-    std::vector<float> norm_weight;
-    if (!tensor_f32(cache, norm, norm_weight, error) ||
-        norm_weight.size() != kHcDim)
+    if (hc.size() != static_cast<size_t>(kHcDim)) {
+        error = "invalid Qwen4Exp HC state";
         return false;
-    std::vector<float> xn = hc;
-    for (int stream = 0; stream < kHc; ++stream)
-        rms_norm(xn.data() + stream * kEmbedding, kEmbedding, nullptr);
-    for (int i = 0; i < kHcDim; ++i) xn[i] *= norm_weight[i];
-
-    std::vector<float> low;
-    if (!matvec(cache, weights.backend, down, xn.data(), kHcDim, low, error))
-        return false;
-    for (float & value : low) value = silu(value / static_cast<float>(kHc));
-    std::vector<float> gate;
-    if (!matvec(cache, weights.backend, up, low.data(),
-                static_cast<int>(low.size()), gate, error) ||
-        gate.size() != kHcDim) return false;
-    for (float & value : gate) value = sigmoid(value);
-    mixed.assign(kEmbedding, 0.0f);
-    for (int stream = 0; stream < kHc; ++stream)
-        for (int i = 0; i < kEmbedding; ++i)
-            mixed[i] += xn[stream * kEmbedding + i] *
-                        gate[stream * kEmbedding + i] / static_cast<float>(kHc);
+    }
+    const Qwen4ExpFrontierHcSpec spec{
+        kEmbedding, kHc, kEpsilon};
+    std::vector<float> raw_injection;
+    if (!qwen4exp_frontier_hc_eval(
+            cache, weights.backend, spec, norm, down, up, inject_weight,
+            hc.data(), hc.size(), 1, mixed,
+            inject ? &raw_injection : nullptr, error)) return false;
     if (inject) {
-        std::vector<float> raw;
-        if (!matvec(cache, weights.backend, inject_weight, xn.data(), kHcDim,
-                    raw, error) || raw.size() != kHc)
+        if (raw_injection.size() != static_cast<size_t>(kHc)) {
+            error = "Qwen4Exp HC graph returned an invalid injection";
             return false;
-        std::copy(raw.begin(), raw.end(), inject->begin());
+        }
+        std::copy(raw_injection.begin(), raw_injection.end(), inject->begin());
+    }
+    if (mixed.size() != static_cast<size_t>(kEmbedding)) {
+        error = "Qwen4Exp HC graph returned an invalid mixed row";
+        return false;
     }
     return true;
 }
@@ -1383,58 +1374,31 @@ bool hc_mix_rows(const Qwen4ExpWeights & target,
                  std::string & error) {
     if (!norm || !down || !up || (inject_rows && !inject_weight) ||
         rows == 0 || rows > 16 ||
-        hc_rows.size() != rows * 10240U ||
-        down->ne[1] <= 0 ||
-        down->ne[1] > std::numeric_limits<int>::max()) {
+        hc_rows.size() != rows * static_cast<size_t>(kHcDim)) {
         error = "invalid Qwen4Exp HC row batch shape";
         return false;
     }
-    std::vector<float> norm_weight;
-    if (!tensor_f32(cache, norm, norm_weight, error) ||
-        norm_weight.size() != 10240U) return false;
-    std::vector<float> normalized = hc_rows;
-    for (size_t row = 0; row < rows; ++row) {
-        float * base = normalized.data() + row * 10240U;
-        for (size_t stream = 0; stream < 4U; ++stream)
-            rms_norm(base + stream * 2560U, kEmbedding, nullptr);
-        for (size_t value = 0; value < 10240U; ++value)
-            base[value] *= norm_weight[value];
-    }
-    const int low_width = static_cast<int>(down->ne[1]);
-    std::vector<float> low;
-    if (!matmul_rows(cache, target.backend, down,
-                     normalized.data(), kHcDim, static_cast<int>(rows), low,
-                     error) ||
-        low.size() != rows * static_cast<size_t>(low_width)) return false;
-    for (float & value : low)
-        value = silu(value / static_cast<float>(kHc));
-    std::vector<float> gate;
-    if (!matmul_rows(cache, target.backend, up, low.data(),
-                     low_width, static_cast<int>(rows), gate, error) ||
-        gate.size() != rows * 10240U) return false;
-    for (float & value : gate) value = sigmoid(value);
-
-    mixed_rows.assign(rows * 2560U, 0.0f);
-    for (size_t row = 0; row < rows; ++row) {
-        for (size_t stream = 0; stream < 4U; ++stream) {
-            for (size_t channel = 0; channel < 2560U; ++channel) {
-                const size_t hc_offset =
-                    (row * 4U + stream) * 2560U + channel;
-                mixed_rows[row * 2560U + channel] +=
-                    normalized[hc_offset] * gate[hc_offset] /
-                    static_cast<float>(kHc);
-            }
-        }
+    const Qwen4ExpFrontierHcSpec spec{
+        kEmbedding, kHc, kEpsilon};
+    std::vector<float> raw_injection;
+    if (!qwen4exp_frontier_hc_eval(
+            cache, target.backend, spec, norm, down, up, inject_weight,
+            hc_rows.data(), hc_rows.size(), static_cast<int>(rows),
+            mixed_rows, inject_rows ? &raw_injection : nullptr, error))
+        return false;
+    if (mixed_rows.size() != rows * static_cast<size_t>(kEmbedding)) {
+        error = "Qwen4Exp HC graph returned invalid batch rows";
+        return false;
     }
     if (inject_rows) {
-        std::vector<float> raw;
-        if (!matmul_rows(cache, target.backend, inject_weight,
-                         normalized.data(), kHcDim,
-                         static_cast<int>(rows), raw, error) ||
-            raw.size() != rows * static_cast<size_t>(kHc)) return false;
+        if (raw_injection.size() != rows * static_cast<size_t>(kHc)) {
+            error = "Qwen4Exp HC graph returned invalid batch injections";
+            return false;
+        }
         inject_rows->resize(rows);
         for (size_t row = 0; row < rows; ++row) {
-            std::copy_n(raw.data() + row * static_cast<size_t>(kHc), kHc,
+            std::copy_n(raw_injection.data() +
+                            row * static_cast<size_t>(kHc), kHc,
                         (*inject_rows)[row].begin());
         }
     }

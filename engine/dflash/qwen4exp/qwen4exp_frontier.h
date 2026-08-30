@@ -88,6 +88,12 @@ struct Qwen4ExpFrontierQsaWeights {
     ggml_tensor * value_rotation = nullptr;
 };
 
+struct Qwen4ExpFrontierHcSpec {
+    int stream_width = 0;
+    int streams = 0;
+    float epsilon = 1.0e-6f;
+};
+
 constexpr int kQwen4ExpFrontierMoeMaxBatch = 16;
 constexpr int kQwen4ExpFrontierMoeMtpBatch = 5;
 constexpr int kQwen4ExpFrontierMoeCachedGraphsPerLayer = 3;
@@ -127,6 +133,21 @@ bool qwen4exp_frontier_static_f32(
 size_t qwen4exp_frontier_dense_graph_count(
     const Qwen4ExpFrontierDenseCache * cache);
 size_t qwen4exp_frontier_static_f32_count(
+    const Qwen4ExpFrontierDenseCache * cache);
+
+// Persistent HC pre-mixer used by both attention and FFN boundaries. It keeps
+// per-stream RMSNorm, learned normalization, down/silu/up gating, stream mean,
+// and optional injection in one backend graph. q2-q5 and q6-q16 reuse the same
+// bounded cache widths as ordinary dense projections; padding rows are
+// independent and discarded.
+bool qwen4exp_frontier_hc_eval(
+    Qwen4ExpFrontierDenseCache * cache, ggml_backend_t backend,
+    const Qwen4ExpFrontierHcSpec & spec, ggml_tensor * norm,
+    ggml_tensor * down, ggml_tensor * up, ggml_tensor * inject,
+    const float * input, size_t input_count, int n_tokens,
+    std::vector<float> & mixed, std::vector<float> * injection,
+    std::string & error);
+size_t qwen4exp_frontier_hc_graph_count(
     const Qwen4ExpFrontierDenseCache * cache);
 
 // The q1 GDN graph fuses all four input projections, depthwise convolution,

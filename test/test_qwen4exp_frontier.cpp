@@ -199,6 +199,120 @@ static bool close_vectors(const std::vector<float> & actual,
                           const std::vector<float> & expected,
                           float tolerance = 2.0e-5f);
 
+static void test_persistent_hc_mixer() {
+    using dflash::common::Qwen4ExpFrontierHcSpec;
+    const Qwen4ExpFrontierHcSpec spec{4, 3, 1.0e-6f};
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    CHECK(backend != nullptr, "HC CPU backend initializes");
+    if (!backend) return;
+    ggml_init_params params{};
+    params.mem_size = 128U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    CHECK(ctx != nullptr, "HC weight context initializes");
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return;
+    }
+    ggml_tensor * norm = ggml_new_tensor_1d(ctx, GGML_TYPE_BF16, 12);
+    ggml_tensor * down = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 12, 5);
+    ggml_tensor * up = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 5, 12);
+    ggml_tensor * inject = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 12, 3);
+    ggml_set_name(down, "tiny_hc_down");
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    CHECK(buffer != nullptr, "HC weight buffer allocates");
+    if (!buffer) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return;
+    }
+    const std::vector<float> norm_f32 = patterned_values(12, 0.07f, 9);
+    std::vector<ggml_bf16_t> norm_bf16(norm_f32.size());
+    std::vector<float> decoded_norm(norm_f32.size());
+    for (size_t index = 0; index < norm_f32.size(); ++index) {
+        norm_bf16[index] = ggml_fp32_to_bf16(norm_f32[index]);
+        decoded_norm[index] = ggml_bf16_to_fp32(norm_bf16[index]);
+    }
+    const std::vector<float> down_weight = patterned_values(60, 0.019f, 11);
+    const std::vector<float> up_weight = patterned_values(60, 0.017f, 13);
+    const std::vector<float> inject_weight =
+        patterned_values(36, 0.023f, 7);
+    ggml_backend_tensor_set(norm, norm_bf16.data(), 0,
+                            norm_bf16.size() * sizeof(ggml_bf16_t));
+    ggml_backend_tensor_set(down, down_weight.data(), 0,
+                            down_weight.size() * sizeof(float));
+    ggml_backend_tensor_set(up, up_weight.data(), 0,
+                            up_weight.size() * sizeof(float));
+    ggml_backend_tensor_set(inject, inject_weight.data(), 0,
+                            inject_weight.size() * sizeof(float));
+
+    std::vector<float> input = patterned_values(36, 0.031f, 17);
+    std::vector<float> expected_mixed;
+    std::vector<float> expected_injection;
+    for (int token = 0; token < 3; ++token) {
+        std::vector<float> normalized(
+            input.begin() + token * 12, input.begin() + (token + 1) * 12);
+        for (int stream = 0; stream < 3; ++stream) {
+            float sum = 0.0f;
+            for (int channel = 0; channel < 4; ++channel) {
+                const float value = normalized[static_cast<size_t>(
+                    stream * 4 + channel)];
+                sum += value * value;
+            }
+            const float scale = 1.0f / std::sqrt(sum / 4.0f + spec.epsilon);
+            for (int channel = 0; channel < 4; ++channel) {
+                const size_t index = static_cast<size_t>(
+                    stream * 4 + channel);
+                normalized[index] *= scale * decoded_norm[index];
+            }
+        }
+        std::vector<float> low = matvec(down_weight, 5, 12, normalized);
+        for (float & value : low) value = silu(value / 3.0f);
+        std::vector<float> gate = matvec(up_weight, 12, 5, low);
+        for (float & value : gate) value = sigmoid(value);
+        for (int channel = 0; channel < 4; ++channel) {
+            float mixed = 0.0f;
+            for (int stream = 0; stream < 3; ++stream) {
+                const size_t index = static_cast<size_t>(
+                    stream * 4 + channel);
+                mixed += normalized[index] * gate[index] / 3.0f;
+            }
+            expected_mixed.push_back(mixed);
+        }
+        const std::vector<float> row_injection =
+            matvec(inject_weight, 3, 12, normalized);
+        expected_injection.insert(expected_injection.end(),
+                                  row_injection.begin(), row_injection.end());
+    }
+
+    dflash::common::Qwen4ExpFrontierDenseCache * cache =
+        dflash::common::qwen4exp_frontier_dense_cache_create();
+    std::vector<float> mixed, injection_values;
+    std::string error;
+    const bool batch_ok = dflash::common::qwen4exp_frontier_hc_eval(
+        cache, backend, spec, norm, down, up, inject, input.data(),
+        input.size(), 3, mixed, &injection_values, error);
+    CHECK(batch_ok && close_vectors(mixed, expected_mixed, 3.0e-5f) &&
+              close_vectors(injection_values, expected_injection, 3.0e-5f),
+          "persistent q5 HC graph matches scalar normalization and gating");
+    CHECK(dflash::common::qwen4exp_frontier_hc_graph_count(cache) == 1U,
+          "three HC rows allocate one bounded q5 graph");
+    std::vector<float> q1_mixed, q1_injection;
+    const bool q1_ok = dflash::common::qwen4exp_frontier_hc_eval(
+        cache, backend, spec, norm, down, up, inject, input.data(), 12, 1,
+        q1_mixed, &q1_injection, error);
+    CHECK(q1_ok && close_vectors(
+              q1_mixed,
+              std::vector<float>(expected_mixed.begin(),
+                                 expected_mixed.begin() + 4), 3.0e-5f) &&
+              dflash::common::qwen4exp_frontier_hc_graph_count(cache) == 2U,
+          "persistent q1 HC graph preserves the decode row and cache bound");
+    dflash::common::qwen4exp_frontier_dense_cache_destroy(cache);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 static void test_persistent_gdn_q1() {
     using dflash::common::Qwen4ExpFrontierGdnGraph;
     using dflash::common::Qwen4ExpFrontierGdnSpec;
@@ -1193,6 +1307,7 @@ static void test_bounded_cache_and_prefill_policy() {
 }
 
 int main() {
+    test_persistent_hc_mixer();
     test_persistent_gdn_q1();
     test_persistent_qsa_q1();
     test_causal_attention_stateless_ffn_batching();
