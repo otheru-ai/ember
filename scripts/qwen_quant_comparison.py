@@ -38,6 +38,7 @@ PAIR_BINDING_SCHEMA = "ember.qwen3.8.q3-iu4-construction-pair.v1"
 HARDWARE_SCHEMA = "ember.qwen3.8.real-weight-gate.v2"
 KERNEL_RUNTIME_SCHEMA = "ember.qwen3.8.w4a8-dispatch-evidence.v1"
 KERNEL_BUILD_SCHEMA = "ember.qwen3.8.w4a8-build-evidence.v1"
+DIFFERENTIAL_DECODE_SCHEMA = "ember.qwen3.8.differential-decode-comparison.v1"
 CONSTRUCTION_SCHEMA = "ember.qwen3.8.candidate-construction.v1"
 COMPANION_SCHEMA = "ember.qwen3.8-flash-next.companion-inventory.v1"
 Q3_ARM = "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head"
@@ -420,6 +421,51 @@ def _exact_path_descriptor(value: Any, base: Path, label: str) -> Path:
     return path.resolve()
 
 
+def validate_differential_decode(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+            "schema", "purpose", "tokens_per_path", "ar", "mtp"}:
+        raise ComparisonError(f"{label} differential decode evidence is malformed")
+    ar = value.get("ar")
+    mtp = value.get("mtp")
+    if (value.get("schema") != DIFFERENTIAL_DECODE_SCHEMA
+            or value.get("purpose") !=
+               "same_process_diagnostic_not_hard_gate_timing"
+            or value.get("tokens_per_path") != 64
+            or not isinstance(ar, dict)
+            or set(ar) != {"decode_seconds", "tokens_per_second"}
+            or not isinstance(mtp, dict)
+            or set(mtp) != {"accept_rate", "restored_decode_seconds",
+                            "warm_fresh_decode_seconds",
+                            "warm_fresh_tokens_per_second",
+                            "warm_speedup_vs_ar"}):
+        raise ComparisonError(f"{label} differential decode contract differs")
+    ar_s = _finite(ar.get("decode_seconds"), f"{label} differential AR seconds")
+    ar_tps = _finite(ar.get("tokens_per_second"), f"{label} differential AR rate")
+    restored_s = _finite(
+        mtp.get("restored_decode_seconds"),
+        f"{label} restored differential MTP seconds")
+    warm_s = _finite(
+        mtp.get("warm_fresh_decode_seconds"),
+        f"{label} warm differential MTP seconds")
+    warm_tps = _finite(
+        mtp.get("warm_fresh_tokens_per_second"),
+        f"{label} warm differential MTP rate")
+    speedup = _finite(
+        mtp.get("warm_speedup_vs_ar"),
+        f"{label} differential MTP speedup")
+    accept_rate = _finite(
+        mtp.get("accept_rate"), f"{label} differential MTP acceptance")
+    if min(ar_s, ar_tps, restored_s, warm_s, warm_tps, speedup) <= 0.0:
+        raise ComparisonError(f"{label} differential decode timing is not positive")
+    if not 0.0 <= accept_rate < 1.0:
+        raise ComparisonError(f"{label} differential MTP acceptance is out of range")
+    if (not math.isclose(ar_tps, 64.0 / ar_s, rel_tol=1.0e-6)
+            or not math.isclose(warm_tps, 64.0 / warm_s, rel_tol=1.0e-6)
+            or not math.isclose(speedup, warm_tps / ar_tps, rel_tol=1.0e-6)):
+        raise ComparisonError(f"{label} differential decode derivation differs")
+    return value
+
+
 def validate_hardware(path: Path, digest: str, construction: dict[str, Any],
                       label: str) -> dict[str, Any]:
     value, resolved = exact_json(path, digest, f"{label} hardware evidence")
@@ -438,6 +484,11 @@ def validate_hardware(path: Path, digest: str, construction: dict[str, Any],
     timing_mode_record, _ = exact_relative_json(
         evidence.get("timing_kernel_mode"), resolved.parent,
         f"{label} timing kernel mode evidence")
+    differential_decode_record, _ = exact_relative_json(
+        evidence.get("differential_decode"), resolved.parent,
+        f"{label} differential decode evidence")
+    differential_decode = validate_differential_decode(
+        differential_decode_record, label)
     timing_path = _exact_path_descriptor(
         evidence.get("timing"), resolved.parent, f"{label} clean timing")
     timing_digest = str((evidence.get("timing") or {}).get("sha256"))
@@ -528,6 +579,7 @@ def validate_hardware(path: Path, digest: str, construction: dict[str, Any],
             or memory != facts["memory_gate"]
             or value.get("resources") != facts["resources"]
             or value.get("speculation") != facts["mtp_speculation"]
+            or value.get("differential_decode") != differential_decode
             or value.get("kernel_runtime") != kernel_runtime
             or value.get("kernel_build") != kernel_build
             or timing_mode != timing_mode_record
@@ -549,6 +601,7 @@ def validate_hardware(path: Path, digest: str, construction: dict[str, Any],
         "sha256": digest,
         "contract": contract,
         "facts": facts,
+        "differential_decode": differential_decode,
         "artifact_bytes": sum(row["size_bytes"] for row in construction_rows),
         "runtime_identity": {
             "runtime_revision": descriptor["runtime_revision"],
@@ -599,6 +652,9 @@ def make_arm_evidence_binding(construction: dict[str, Any],
         "observations": {
             "prefill_tps_samples": facts["prefill_tps_samples"],
             "decode_tps_samples": facts["decode_tps_samples"],
+            "clean_mtp_accept_rate": facts["mtp_speculation"][
+                "accept_rate_mean"],
+            "differential_decode": hardware["differential_decode"],
             "resources": facts["resources"],
         },
         "publishes": False,
@@ -741,6 +797,9 @@ def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any]
 
     def metrics(hardware: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
         value = hardware["value"]
+        differential = hardware["differential_decode"]
+        differential_ar = differential["ar"]
+        differential_mtp = differential["mtp"]
         prefill = [_finite(item, "prefill sample") for item in facts["prefill_tps_samples"]]
         decode = [_finite(item, "decode sample") for item in facts["decode_tps_samples"]]
         resources = facts["resources"]
@@ -750,6 +809,20 @@ def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any]
             "prefill_median_tps": statistics.median(prefill),
             "decode_tps_samples": decode,
             "decode_median_tps": statistics.median(decode),
+            "clean_mtp_accept_rate": _finite(
+                facts["mtp_speculation"]["accept_rate_mean"],
+                "clean MTP acceptance"),
+            "differential_ar_tps": _finite(
+                differential_ar["tokens_per_second"], "differential AR rate"),
+            "differential_warm_mtp_tps": _finite(
+                differential_mtp["warm_fresh_tokens_per_second"],
+                "differential warm MTP rate"),
+            "differential_mtp_accept_rate": _finite(
+                differential_mtp["accept_rate"],
+                "differential MTP acceptance"),
+            "differential_warm_mtp_speedup_vs_ar": _finite(
+                differential_mtp["warm_speedup_vs_ar"],
+                "differential warm MTP speedup"),
             "artifact_bytes": hardware["artifact_bytes"],
             "measured_peak_rss_bytes": resources.get("measured_peak_rss_bytes"),
             "measured_peak_gtt_bytes": resources.get("measured_peak_gtt_bytes"),
@@ -767,6 +840,9 @@ def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any]
     iu4_metrics = metrics(iu4_hardware, iu4_facts)
     delta_fields = (
         "prefill_peak_tps", "prefill_median_tps", "decode_median_tps",
+        "clean_mtp_accept_rate", "differential_ar_tps",
+        "differential_warm_mtp_tps", "differential_mtp_accept_rate",
+        "differential_warm_mtp_speedup_vs_ar",
         "artifact_bytes", "measured_peak_rss_bytes", "measured_peak_gtt_bytes",
         "measured_peak_uma_bytes",
     )

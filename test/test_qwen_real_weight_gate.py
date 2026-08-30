@@ -424,9 +424,25 @@ def restore_reconstructable():
             }
             facts = {
                 "prefill_tps_samples": prefill, "decode_tps_samples": decode,
+                "mtp_speculation": {
+                    "accept_rate_mean": 0.75 if name == "q3" else 0.80},
                 "resources": {"measured_peak_rss_bytes": 70_000_000_000,
                               "measured_peak_gtt_bytes": 5_000_000_000,
                               "measured_peak_uma_bytes": 75_000_000_000},
+            }
+            ar_tps = 20.0 if name == "q3" else 22.0
+            mtp_tps = 25.0 if name == "q3" else 27.0
+            differential = {
+                "schema": quant_comparison.DIFFERENTIAL_DECODE_SCHEMA,
+                "purpose": "same_process_diagnostic_not_hard_gate_timing",
+                "tokens_per_path": 64,
+                "ar": {"decode_seconds": 64.0 / ar_tps,
+                       "tokens_per_second": ar_tps},
+                "mtp": {"accept_rate": 0.70 if name == "q3" else 0.78,
+                        "restored_decode_seconds": 64.0 / mtp_tps + 0.1,
+                        "warm_fresh_decode_seconds": 64.0 / mtp_tps,
+                        "warm_fresh_tokens_per_second": mtp_tps,
+                        "warm_speedup_vs_ar": mtp_tps / ar_tps},
             }
             hardware = {
                 "value": {"hard_gates": {"performance": {"passed": True},
@@ -435,6 +451,7 @@ def restore_reconstructable():
                           "timing_kernel_mode": {"configured_mmq_mode": mode}},
                 "path": f"/{name}-hardware.json", "sha256": "f" * 64,
                 "contract": copy.deepcopy(contract), "facts": facts,
+                "differential_decode": differential,
                 "artifact_bytes": 80_000_000_000,
                 "runtime_identity": copy.deepcopy(runtime),
             }
@@ -451,6 +468,10 @@ def restore_reconstructable():
         comparison = quant_comparison.make_comparison(q3c, q3h, iu4c, iu4h)
         self.assertFalse(comparison["selection_allowed"])
         self.assertEqual(comparison["deltas"]["iu4_minus_q3_decode_median_tps"], 2.0)
+        self.assertEqual(
+            comparison["deltas"]["iu4_minus_q3_differential_ar_tps"], 2.0)
+        self.assertAlmostEqual(
+            comparison["deltas"]["iu4_minus_q3_clean_mtp_accept_rate"], 0.05)
         self.assertEqual(comparison["matched_identity"]["mtp"]["depth"], 3)
 
         mutations = (
@@ -470,6 +491,14 @@ def restore_reconstructable():
                 mutate(changed_c, changed_h)
                 with self.assertRaisesRegex(quant_comparison.ComparisonError, message):
                     quant_comparison.make_comparison(q3c, q3h, changed_c, changed_h)
+
+        invalid_differential = copy.deepcopy(q3h["differential_decode"])
+        invalid_differential["mtp"]["warm_speedup_vs_ar"] = 99.0
+        with self.assertRaisesRegex(
+                quant_comparison.ComparisonError,
+                "differential decode derivation differs"):
+            quant_comparison.validate_differential_decode(
+                invalid_differential, "Q3")
 
     def test_q3_iu4_comparison_cli_revalidates_pinned_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -598,6 +627,25 @@ def restore_reconstructable():
                     "confirmation": "clean_timing_startup_marker",
                     "passed": True,
                 })
+                ar_tps = 16.0 if label == "q3" else 20.0
+                warm_mtp_tps = 32.0 if label == "q3" else 40.0
+                differential_decode_value = {
+                    "schema": quant_comparison.DIFFERENTIAL_DECODE_SCHEMA,
+                    "purpose": "same_process_diagnostic_not_hard_gate_timing",
+                    "tokens_per_path": 64,
+                    "ar": {"decode_seconds": 64.0 / ar_tps,
+                           "tokens_per_second": ar_tps},
+                    "mtp": {
+                        "accept_rate": 0.70 if label == "q3" else 0.80,
+                        "restored_decode_seconds": 64.0 / warm_mtp_tps + 0.1,
+                        "warm_fresh_decode_seconds": 64.0 / warm_mtp_tps,
+                        "warm_fresh_tokens_per_second": warm_mtp_tps,
+                        "warm_speedup_vs_ar": warm_mtp_tps / ar_tps,
+                    },
+                }
+                differential_decode = write_json(
+                    directory / "differential-decode-comparison.json",
+                    differential_decode_value)
                 hardware = write_json(directory / "hardware-measured.json", {
                     "schema": quant_comparison.HARDWARE_SCHEMA,
                     "publish_approved": False,
@@ -621,6 +669,7 @@ def restore_reconstructable():
                     "kernel_build": json.loads(kernel_build.read_text()),
                     "timing_kernel_mode": json.loads(timing_mode.read_text()),
                     "benchmark_contract": contract,
+                    "differential_decode": differential_decode_value,
                     "evidence": {"timing": {"path": timing.name,
                                                "sha256": digest(timing)},
                                  "benchmark_contract": {
@@ -634,7 +683,10 @@ def restore_reconstructable():
                                      "sha256": digest(kernel_build)},
                                  "timing_kernel_mode": {
                                      "path": timing_mode.name,
-                                     "sha256": digest(timing_mode)}},
+                                     "sha256": digest(timing_mode)},
+                                 "differential_decode": {
+                                     "path": differential_decode.name,
+                                     "sha256": digest(differential_decode)}},
                 })
                 return construction, hardware
 
@@ -660,6 +712,9 @@ def restore_reconstructable():
                              quant_comparison.ARM_EVIDENCE_SCHEMA)
             self.assertEqual(q3_evidence["construction"]["quantization_arm"],
                              quant_comparison.Q3_ARM)
+            self.assertEqual(
+                q3_evidence["observations"]["differential_decode"]["mtp"]
+                ["warm_speedup_vs_ar"], 2.0)
             q3_construction_value = quant_comparison._construction(
                 q3_construction, digest(q3_construction),
                 quant_comparison.Q3_ARM, "Q3")
@@ -734,6 +789,11 @@ def restore_reconstructable():
             value = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(value["schema"], quant_comparison.COMPARISON_SCHEMA)
             self.assertEqual(value["deltas"]["iu4_minus_q3_decode_median_tps"], 2.0)
+            self.assertEqual(
+                value["deltas"]["iu4_minus_q3_differential_ar_tps"], 4.0)
+            self.assertEqual(
+                value["deltas"]["iu4_minus_q3_differential_warm_mtp_tps"],
+                8.0)
             self.assertEqual(value["interpretation"],
                              "descriptive_sequential_comparison_not_counterbalanced_selection")
 
@@ -751,6 +811,24 @@ def restore_reconstructable():
             ], cwd=ROOT, text=True, capture_output=True)
             self.assertNotEqual(repeated.returncode, 0)
             self.assertIn("output must be one new absolute path", repeated.stderr)
+
+            differential_path = root / "q3" / "differential-decode-comparison.json"
+            differential_value = json.loads(
+                differential_path.read_text(encoding="utf-8"))
+            differential_value["mtp"]["warm_speedup_vs_ar"] = 99.0
+            write_json(differential_path, differential_value)
+            tampered = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"),
+                "validate-arm", "--arm", "q3",
+                "--construction", str(q3_construction),
+                "--construction-sha256", digest(q3_construction),
+                "--hardware", str(q3_hardware),
+                "--hardware-sha256", digest(q3_hardware),
+                "--output", str(root / "tampered-arm.json"),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn("differential decode evidence SHA-256 differs",
+                          tampered.stderr)
 
     def test_kernel_runtime_evidence_requires_actual_dispatch_controls(self) -> None:
         startup = (

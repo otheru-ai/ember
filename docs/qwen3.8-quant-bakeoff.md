@@ -351,7 +351,10 @@ confirmation timing.
 The requested Q3-then-IU4 iteration also has a narrower descriptive comparison
 that is deliberately separate from release selection. Every new full hardware
 run writes `benchmark-contract.json` and embeds the same object plus its digest
-in `hardware-measured.json`. The contract binds the benchmark and gate driver
+in `hardware-measured.json`. It also binds the validator's
+`differential-decode-comparison.json`: 64-token warm AR, restored MTP, and warm
+fresh MTP durations, acceptance, and MTP-versus-AR speedup. This diagnostic is
+kept distinct from hard-gate timing. The contract binds the benchmark and gate driver
 bytes, exact 2074/256 protocol, calibrated prompt construction and prompt
 digests, three-sample statistics, native MTP requirement, and the separation of
 clean timing from profile/counter passes. After Q3 has completed, build and run
@@ -382,7 +385,9 @@ The comparator fails closed unless both inputs share the exact BF16 cache,
 profile, capture, intervention configuration and manifest, selection plan,
 FAST MTP bytes and depth, runtime images/binary/format contract, and benchmark
 workload contract. It reports sample-level throughput, memory, artifact-size,
-and IU4-minus-Q3 deltas. Its output carries
+clean-run MTP acceptance, same-process AR/MTP diagnostics, and IU4-minus-Q3
+deltas for each. This exposes speculation drift instead of silently attributing
+it to the main quant format. Its output carries
 `selection_allowed:false`: sequential Q3-then-IU4 measurements are useful for
 understanding the format tradeoff, but only the fresh-process ABBAAB gate may
 select the release bundle.
