@@ -8,6 +8,47 @@ Recording methodology is `docs/qwen3.8-performance-baseline.md`. The target
 figures come from `docs/performance.md` (DeepSeek-V4-Flash on the same
 gfx1151 host).
 
+## Where this stands — read this first
+
+This file is 1100 lines and grows by measurement. The state as of
+2026-08-31, with pointers rather than repetition:
+
+**Correctness.** Two causes were found, one fixed, one awaiting a decision.
+
+- `sum_rows` selected its reduction tree from the row count, so q1 and batched
+  could not agree. **Fixed** (`9f1dc33`), twin in `mean.cu` fixed (`86a5ce1`),
+  guarded by `test_sum_rows_shape_invariance` (`f021309`), and screened against
+  the shared DeepSeek path with an interleaved A/B that came back flat. Widths
+  2, 3, 4 and 5 are now validator-green. → *Open correctness blocker — ROOT
+  CAUSE FOUND*
+- Widths 6 and 17 remain red, and every width that fails contains physical-16
+  **MMQ** work while every width that passes stays on **MMVQ**. Five of five
+  follow that boundary. This is very likely not a defect — it is our prefill
+  test asserting bit identity between kernel families that exist because they
+  differ. **The decision is the user's.** → *Is bit-exactness the right
+  criterion for batched prefill?*
+
+**Performance.** No publishable number exists yet, and none may be published
+while the above is open.
+
+- Best valid measurement: prefill peak **39.40** against a 412 gate, decode
+  median **12.13** against 39.49 (`faa5307`, hard gate, exact binary).
+- The gap is architectural, not a missing kernel: a working implementation on
+  this same silicon reaches **345 prefill** by building **one graph** for the
+  whole model. Ours runs 12 host barriers per layer group at 15.6% GPU busy.
+  → *The 345-prefill reference implementation*
+- Tranches 1, 2 and 3 are each mapped onto that reference rather than inferred.
+  Order: 1, 2, then 3 — the indexer scorer does not execute at our
+  certification widths at all.
+- Sized but deliberately **not** promoted to a lever: asymmetric KV cache
+  quantization, ~101 MB of upload per decode token at ctx 2048.
+  → *Candidate, unsized*
+
+**Expect this.** Every published number on this part sits at 22.6-28.1 decode
+and 345-385 prefill. Our gates are 39.49 and 412. The first green measurement
+will very likely be a real result *and* short of the gate; both are true at
+once. → *What the first publishable number requires*
+
 ## Target
 
 | metric | target | source |
