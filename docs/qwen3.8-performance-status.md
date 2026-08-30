@@ -100,6 +100,48 @@ the fourteen groups hold a single copy where `get_async` immediately followed
 by `synchronize` is the blocking copy it replaced. The measurement agrees with
 the structure, not with the original guess.
 
+## The 345-prefill reference implementation
+
+`github.com/kingjones30/ROCmFPX` — llama.cpp plus a patch combining qwen4exp
+with the ROCmFP4 tensor types. Its README claims **345 tok/s prefill, 22.6 tok/s
+generation** for Qwen3.8-Flash-Next on gfx1151; the HF card
+`kingjones777/Qwen3.8-Flash-Next-ROCmFP4-STRIX_LEAN-GGUF` gives ROCm 7.2.4,
+`-DGGML_HIP=ON -DGPU_TARGETS=gfx1151 -DGGML_NATIVE=ON`, and
+`--n-gpu-layers 999 --flash-attn on --fit off --ctx-size 131072 --threads 16`.
+Quantization is comparable to ours: MoE at type 101, attention split 100/101,
+PLE at Q5_1, head Q6_K, 4.78 bpw.
+
+The graph builder is `src/models/qwen4exp.cpp`, 1193 lines, kept for reference
+at [`docs/reference/qwen4exp_upstream.cpp`](reference/qwen4exp_upstream.cpp)
+(MIT, not vendored, not built).
+
+**It is one graph.** `llama_model_qwen4exp::build_arch_graph(const
+llm_graph_params &)` at `:187` expands all 48 layers — GDN, QSA, MoE, PLE —
+into a single `llm_graph_context` and dispatches once. Grepping the whole file
+for host round trips returns **one** hit: an index-array
+`ggml_backend_tensor_set` at `:1014`. There is no per-layer `tensor_get` and no
+host barrier inside the layer loop. Recurrent state is read on device through
+`build_rs(inp, ssm_states_all, ...)` (`:758`) and advanced on device with
+`ggml_build_forward_expand(gf, ggml_cpy(ctx0, ggml_cont(ctx0, tail), dst))`
+(`:1070`). Their q/k/v extraction from the conv output (`:775-790`) is
+structurally the same as ours.
+
+**So the 345 is not a kernel we lack or a flag we failed to set. It is the
+absence of our host boundary** — 12 live barriers per layer group, 15.6% GPU
+busy, 95.55% of long-tail idle attributable to late host submission.
+
+That makes tranches 1-3 steps toward an implementation that exists and hits the
+number, rather than speculative optimizations: tranche 1 maps to their q/k/v
+path, tranche 2 to `build_rs` + `ggml_cpy`, tranche 3 to their device-side
+cache write. Diff each against the reference rather than designing from
+scratch, but do not copy wholesale — our runtime carries a snapshot and
+rollback contract their graph does not.
+
+**Caveat on the target.** Their ladder is 345 at ~3.3k tokens and 385 at ~7k
+(fixed prompt, run 1 dropped, median of 3). Our 412 gate is above their entire
+cluster, so matching this implementation reaches their band; it does not by
+itself clear the gate.
+
 ## Gap decomposition
 
 Residency headroom alone, if GPU busy went to 100% with no other change:
