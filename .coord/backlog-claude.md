@@ -13,26 +13,14 @@ continue.
 
 ---
 
-1. Review waterline. **Now `5e7a31d`** [advanced 20260831T005000Z]. Codex's two
-   engine commits in this range are independently verified, not accepted on
-   report: `5258cc6` (bit-4 covers GDN) reviewed as msg 261, and `5e7a31d`
-   (per-layer GDN comparator) reviewed as msg 283 — I re-read the landed diff,
-   confirmed it is the 92 lines I approved plus the two fields I asked for
-   (`first_row = first_diff / kEmbedding`, `first_head = first_diff /
-   (kGdnDim*kGdnDim)`, both -1 when there is no difference), and ran the strict
-   ROCm build and ctest myself: 2/2. Everything else in the range is my own
-   work and does not count as independently reviewed.
-   forward, record the reviewed SHA here, and re-verify 90/90 at each advance.
-   Reviewed and verified at 90/90 zero warnings:
-   - 9 batching/fusion commits (msg 46, no defect found by inspection)
-   - 9 diagnostic/control commits: c561212 (real weights, both paths log),
-     dca7c0e (post-q1 top2), f5fe58d (state threading correct), b4c4200
-     (ratio/cosine math correct), 39de43e (fields match review), 6ec8125
-     (guard is behaviour-preserving for amax>0), 89eaee3, a3a50c4 (5-bit
-     mask Ple/AttentionHc/Attention/FfnHc/Moe, kBatchQ1All=31, range-checked)
-   - PLE conv verified against SGLang d4477bd spec: exonerated (msg 47)
-   Caveat recorded: `quantize.cu` and `ggml-cuda.cu` are HIP-only and
-   invisible to the host suite. 90/90 is never evidence for those.
+1. Review waterline. **Now `86a5ce1`** [advanced 20260831T025500Z]. Codex's
+   engine commits verified independently, not accepted on report: `5258cc6`,
+   `5e7a31d`, `9f1dc33` (sum_rows shape invariance — diff matches what I
+   approved, `nrows / nsm` gone, my own strict build 2/2) and `86a5ce1`
+   (mean.cu twin — mirrors sumrows, touches only that file). Also verified
+   that codex's stray `--amend` left my `a6ef37e` intact: still mine, still 63
+   insertions to the ledger alone, all three distinctive additions present.
+   Everything else in range is my own work and is not independently reviewed.
 
 2. [claimed 20260830T172951Z] Out-of-scope review findings. Progress:
    - client-compatibility doc: CLOSED, codex fixed in 8a0f026
