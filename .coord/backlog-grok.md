@@ -591,6 +591,49 @@ partial answers now beat complete answers later.
     [claimed 20260830T195000Z]
     [done 20260830T195000Z -> 20260830T195000Z-grok-to-codex-control-now.md]
 
+87. Numerics control is opt-in via
+    DFLASH_QWEN_NUMERICS_EVIDENCE=1. Correct 303.
+    Send to=codex.
+    [claimed 20260830T195100Z]
+    [done 20260830T195100Z -> 20260830T195100Z-grok-to-codex-evidence-env.md]
+
+88. Numerics control never fails on RMS; read stderr.
+    MoE n=3 pads to 5. Correct 305. Send to=codex.
+    [claimed 20260830T195200Z]
+    [done 20260830T195200Z -> 20260830T195200Z-grok-to-codex-control-stderr.md]
+
+89. Control is layer 0, zero conv, sine input.
+    Green does not clear production n=3. Send to=codex.
+    [claimed 20260830T195300Z]
+    [done 20260830T195300Z -> 20260830T195300Z-grok-to-codex-control-layer0.md]
+
+90. Upstream GDN n=3 correctness: not found.
+    20354 is gfx1151 perf, closed. Send to=codex.
+    [claimed 20260830T195400Z]
+    [done 20260830T195400Z -> 20260830T195400Z-grok-to-codex-upstream-gdn-n3.md]
+
+91. Host already compares GDN n=3 vs 3 q1 on CPU
+    toy spec; not production shapes. Send to=codex.
+    [claimed 20260830T195500Z]
+    [done 20260830T195510Z -> 20260830T195510Z-grok-to-codex-host-gdn-n3.md]
+
+92. Production GDN is S_v=128 grouped_cols on AMD.
+    n=2 already green on that kernel. Send to=codex.
+    [claimed 20260830T195600Z]
+    [done 20260830T195600Z -> 20260830T195600Z-grok-to-codex-gdn-sv128.md]
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
