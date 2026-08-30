@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../src/backend/ember_backend.h"
 #include "../src/common/buf.h"
 #include "../src/common/json.h"
 #include "../src/model/chat_template.h"
@@ -170,6 +171,28 @@ static void qa_model_card_bounds(void) {
     ember_model_card_free(&c);
 }
 
+static void qa_validation_timing_contract(void) {
+    char *error = NULL;
+    ember_backend_config config = {0};
+    config.model_path = "stub";
+    config.max_ctx = 128;
+    config.model_name = "stub-model";
+    ember_backend *backend = ember_backend_load(&config, &error);
+    CHECK(backend != NULL, "validation timing stub backend loads");
+    free(error);
+    if (!backend) return;
+
+    const int32_t prompt[] = {1, 2};
+    ember_validation_report report;
+    CHECK(ember_backend_validate(backend, prompt, 2, 8, &report) && report.ok,
+          "validation timing report crosses the backend ABI");
+    CHECK(report.baseline_tokens == 8 && report.baseline_decode_s == 0.0 &&
+              report.restored_spec_decode_s == 0.0 &&
+              report.spec_decode_s == 0.0,
+          "GPU-free validation never fabricates AR or MTP timing evidence");
+    ember_backend_free(backend);
+}
+
 int main(void) {
     printf("ember QA gauntlet (GPU-free half of QA_BEFORE_RELEASES)\n");
     qa_streaming();
@@ -179,6 +202,7 @@ int main(void) {
     qa_json_adversarial();
     qa_template_edges();
     qa_model_card_bounds();
+    qa_validation_timing_contract();
     printf("──────────────────────────────\n  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

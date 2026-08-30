@@ -241,7 +241,10 @@ bool ember_backend_batch_stats_get(const ember_backend *b,
 // restores the exact prefill snapshot and runs the normal speculative path
 // from that same state. When disk KV is enabled and the prompt is large enough
 // to persist, it also round-trips the snapshot through disk and repeats the AR
-// decode. With resident batching it
+// decode. The report retains raw decode durations for the warm AR baseline,
+// the first snapshot-restored speculative pass, and the subsequent warm fresh
+// speculative pass. These are same-process diagnostic evidence, not substitutes
+// for the separate unprofiled hard-gate timing sweep. With resident batching it
 // admits two spec-eligible rows; DFLASH_DSPARK_XDNA_REQUIRED additionally
 // requires both rows to report that speculation actually ran. Intended for an
 // explicit startup validation command, not concurrent serving.
@@ -267,6 +270,9 @@ typedef struct {
     int    mismatch_index;      // -1 when all compared token streams match
     int32_t expected_token;
     int32_t actual_token;
+    double baseline_decode_s;
+    double restored_spec_decode_s;
+    double spec_decode_s;
     double spec_accept_rate;
     double batch_spec_accept_rate;
     char   detail[192];

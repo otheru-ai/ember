@@ -474,8 +474,9 @@ docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
   2>"$OUT_DIR/differential-dispatch-server.log"
 docker rm "$CONTAINER" >/dev/null
 CONTAINER=""
-python3 - "$OUT_DIR/differential.json" <<'PY'
-import json, sys
+python3 - "$OUT_DIR/differential.json" \
+  "$OUT_DIR/differential-decode-comparison.json" <<'PY'
+import json, math, sys
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 prefill = report.get("prefill") or {}
 spec = report.get("spec") or {}
@@ -488,6 +489,40 @@ if not isinstance(rate, (int, float)) or not 0.0 <= rate < 1.0:
     raise SystemExit(
         "differential did not exercise a rejected candidate/strict replay; "
         f"accept_rate={rate!r}")
+ar = report.get("ar") or {}
+if report.get("requested_tokens") != 64 or report.get("baseline_tokens") != 64:
+    raise SystemExit("differential AR baseline did not emit the requested 64 tokens")
+if ar.get("tokens") != 64 or spec.get("tokens") != 64:
+    raise SystemExit("differential AR/MTP timing rows do not cover the same 64 tokens")
+def positive_finite(section, key):
+    value = section.get(key)
+    if (not isinstance(value, (int, float)) or isinstance(value, bool) or
+            not math.isfinite(float(value)) or float(value) <= 0.0):
+        raise SystemExit(f"differential timing field {key} is not positive: {value!r}")
+    return float(value)
+ar_s = positive_finite(ar, "decode_seconds")
+ar_tps = positive_finite(ar, "decode_tokens_per_second")
+restored_spec_s = positive_finite(spec, "restored_decode_seconds")
+fresh_spec_s = positive_finite(spec, "fresh_decode_seconds")
+fresh_spec_tps = positive_finite(spec, "fresh_decode_tokens_per_second")
+if not math.isclose(ar_tps, 64.0 / ar_s, rel_tol=1.0e-6):
+    raise SystemExit("differential AR timing rate is inconsistent with raw duration")
+if not math.isclose(fresh_spec_tps, 64.0 / fresh_spec_s, rel_tol=1.0e-6):
+    raise SystemExit("differential MTP timing rate is inconsistent with raw duration")
+comparison = {
+    "schema": "ember.qwen3.8.differential-decode-comparison.v1",
+    "purpose": "same_process_diagnostic_not_hard_gate_timing",
+    "tokens_per_path": 64,
+    "ar": {"decode_seconds": ar_s, "tokens_per_second": ar_tps},
+    "mtp": {"accept_rate": float(rate),
+            "restored_decode_seconds": restored_spec_s,
+            "warm_fresh_decode_seconds": fresh_spec_s,
+            "warm_fresh_tokens_per_second": fresh_spec_tps,
+            "warm_speedup_vs_ar": fresh_spec_tps / ar_tps},
+}
+with open(sys.argv[2], "x", encoding="utf-8") as stream:
+    json.dump(comparison, stream, indent=2, sort_keys=True)
+    stream.write("\n")
 PY
 python3 "$DISPATCH_EVIDENCE" \
   --log "$OUT_DIR/differential-dispatch-server.log" \
@@ -695,6 +730,8 @@ kernel_runtime = json.load(open(os.path.join(out, "kernel-runtime-evidence.json"
 kernel_build = json.load(open(os.path.join(out, "w4a8-build-evidence.json"), encoding="utf-8"))
 timing_kernel_mode = json.load(open(os.path.join(out, "timing-kernel-mode.json"), encoding="utf-8"))
 benchmark_contract = json.load(open(os.path.join(out, "benchmark-contract.json"), encoding="utf-8"))
+differential_decode = json.load(open(
+    os.path.join(out, "differential-decode-comparison.json"), encoding="utf-8"))
 passed = bool(memory["performance"].get("passed") and memory["hard_fit"].get("passed"))
 record = {
     "schema": "ember.qwen3.8.real-weight-gate.v2",
@@ -722,9 +759,14 @@ record = {
     "kernel_build": kernel_build,
     "timing_kernel_mode": timing_kernel_mode,
     "benchmark_contract": benchmark_contract,
+    "differential_decode": differential_decode,
     "evidence": {
         "differential": {"path": "differential.json",
                          "sha256": sha(os.path.join(out, "differential.json"))},
+        "differential_decode": {
+            "path": "differential-decode-comparison.json",
+            "sha256": sha(os.path.join(
+                out, "differential-decode-comparison.json"))},
         "timing": {"path": "timing.jsonl",
                    "sha256": sha(os.path.join(out, "timing.jsonl"))},
         "memory": {"path": "memory-evidence.json",

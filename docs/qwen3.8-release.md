@@ -438,6 +438,11 @@ lists both pinned intervention tools; it does not infer “Heretic” from a nam
 7. On the dedicated gfx1151 runner, verify cold load, representative prefill,
    autoregressive decode, context growth, memory high-water mark, determinism,
    and restart behavior. Use the exact candidate digest and disposable KV data.
+   The differential validator retains `differential-decode-comparison.json`
+   from its 64-token warm AR baseline, first restored MTP pass, and warm fresh
+   MTP pass. This same-process comparison attributes whether speculation helps
+   before another model load; it is diagnostic evidence and does not replace
+   the separate three-sample unprofiled 2,074/256 hard gate.
    Qwen's embedded MTP path must not be described as a separate draft-model
    file unless the implementation actually requires one.
    Certification must explicitly exercise the PR #27742 bring-up hazards:

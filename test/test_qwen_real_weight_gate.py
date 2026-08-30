@@ -111,6 +111,19 @@ class QwenRealWeightGateTest(unittest.TestCase):
             ["bash", str(GATE), *args], cwd=ROOT, env=env,
             text=True, capture_output=True)
 
+    def run_differential_timing_parser(
+            self, report: dict, directory: Path) -> subprocess.CompletedProcess[str]:
+        body = GATE.read_text(encoding="utf-8")
+        marker = '"$OUT_DIR/differential-decode-comparison.json" <<\'PY\''
+        start = body.index("\n", body.index(marker)) + 1
+        end = body.index("\nPY\n", start)
+        source = directory / "differential.json"
+        output = directory / "differential-decode-comparison.json"
+        source.write_text(json.dumps(report), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, "-", str(source), str(output)],
+            input=body[start:end], cwd=ROOT, text=True, capture_output=True)
+
     def test_shell_contracts_are_syntactically_valid(self) -> None:
         for path in (GATE, PROFILE):
             subprocess.run(["bash", "-n", str(path)], check=True,
@@ -179,6 +192,13 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn('row.get("spec_ran") is True', body)
         self.assertIn('prefill.get("checked") and prefill.get("exact")', body)
         self.assertIn("0.0 <= rate < 1.0", body)
+        self.assertIn('report.get("baseline_tokens") != 64', body)
+        self.assertIn('positive_finite(ar, "decode_seconds")', body)
+        self.assertIn('positive_finite(spec, "fresh_decode_seconds")', body)
+        self.assertIn('"warm_speedup_vs_ar": fresh_spec_tps / ar_tps', body)
+        self.assertIn('"purpose": "same_process_diagnostic_not_hard_gate_timing"', body)
+        self.assertIn('"differential_decode": differential_decode', body)
+        self.assertIn('"path": "differential-decode-comparison.json"', body)
         self.assertIn('"spec_verify_ms"', body)
         self.assertIn('"speculation": speculation', body)
         self.assertIn('"speculation": memory["speculation"]', body)
@@ -232,6 +252,52 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4=OFF", dockerfile)
         self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF", dockerfile)
         self.assertIn("ARG EMBER_HIP_EXPORT_METRICS=OFF", dockerfile)
+
+    def test_differential_timing_parser_records_warm_ar_mtp_comparison(self) -> None:
+        report = {
+            "ok": True, "requested_tokens": 64, "snapshot_ok": True,
+            "baseline_tokens": 64,
+            "ar": {"tokens": 64, "decode_seconds": 4.0,
+                   "decode_tokens_per_second": 16.0},
+            "prefill": {"checked": True, "exact": True},
+            "spec": {"checked": True, "exact": True, "tokens": 64,
+                     "accept_rate": 0.75,
+                     "restored_decode_seconds": 3.0,
+                     "fresh_decode_seconds": 2.0,
+                     "fresh_decode_tokens_per_second": 32.0},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            result = self.run_differential_timing_parser(report, directory)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            comparison = json.loads((
+                directory / "differential-decode-comparison.json").read_text(
+                    encoding="utf-8"))
+        self.assertEqual(
+            comparison["schema"],
+            "ember.qwen3.8.differential-decode-comparison.v1")
+        self.assertEqual(comparison["mtp"]["warm_speedup_vs_ar"], 2.0)
+        self.assertEqual(
+            comparison["purpose"],
+            "same_process_diagnostic_not_hard_gate_timing")
+
+    def test_differential_timing_parser_rejects_missing_duration(self) -> None:
+        report = {
+            "ok": True, "requested_tokens": 64, "snapshot_ok": True,
+            "baseline_tokens": 64,
+            "ar": {"tokens": 64, "decode_seconds": 4.0,
+                   "decode_tokens_per_second": 16.0},
+            "prefill": {"checked": True, "exact": True},
+            "spec": {"checked": True, "exact": True, "tokens": 64,
+                     "accept_rate": 0.75,
+                     "restored_decode_seconds": 3.0,
+                     "fresh_decode_tokens_per_second": 32.0},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.run_differential_timing_parser(
+                report, Path(temporary))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fresh_decode_seconds is not positive", result.stderr)
 
     def test_hardware_gate_seals_a_matched_comparison_contract(self) -> None:
         body = GATE.read_text(encoding="utf-8")

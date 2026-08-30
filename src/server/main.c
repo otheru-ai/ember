@@ -4293,13 +4293,21 @@ static int run_backend_validation(ember_backend *be, const char *path,
     }
 
     ember_buf out = {0};
+    double baseline_decode_tps = report.baseline_decode_s > 0.0
+        ? (double)report.baseline_tokens / report.baseline_decode_s : 0.0;
+    double spec_decode_tps = report.spec_decode_s > 0.0
+        ? (double)report.spec_tokens / report.spec_decode_s : 0.0;
     ember_buf_printf(
         &out,
         "{\"ok\":%s,\"prompt_tokens\":%d,\"requested_tokens\":%d,"
         "\"snapshot_ok\":%s,\"baseline_tokens\":%d,"
+        "\"ar\":{\"tokens\":%d,\"decode_seconds\":%.9f,"
+        "\"decode_tokens_per_second\":%.9f},"
         "\"prefill\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
         "\"spec\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d,"
-        "\"accept_rate\":%.6f},"
+        "\"accept_rate\":%.6f,\"restored_decode_seconds\":%.9f,"
+        "\"fresh_decode_seconds\":%.9f,"
+        "\"fresh_decode_tokens_per_second\":%.9f},"
         "\"disk\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d},"
         "\"batch\":{\"checked\":%s,\"exact\":%s,\"rows\":%d,\"tokens\":%d,"
         "\"spec_required\":%s,\"spec_rows\":%d,"
@@ -4308,11 +4316,13 @@ static int run_backend_validation(ember_backend *be, const char *path,
         "\"detail\":",
         report.ok ? "true" : "false", n_prompt, n_gen,
         report.snapshot_ok ? "true" : "false", report.baseline_tokens,
+        report.baseline_tokens, report.baseline_decode_s, baseline_decode_tps,
         report.prefill_checked ? "true" : "false",
         report.prefill_exact ? "true" : "false", report.prefill_tokens,
         report.spec_checked ? "true" : "false",
         report.spec_exact ? "true" : "false", report.spec_tokens,
-        report.spec_accept_rate,
+        report.spec_accept_rate, report.restored_spec_decode_s,
+        report.spec_decode_s, spec_decode_tps,
         report.disk_checked ? "true" : "false",
         report.disk_exact ? "true" : "false", report.disk_tokens,
         report.batch_checked ? "true" : "false",

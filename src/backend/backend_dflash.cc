@@ -1333,6 +1333,7 @@ static bool backend_validate_impl(
     GenerateResult baseline = b->be->generate(ar, io);
     trace_validation_tokens("baseline", baseline.tokens);
     report->baseline_tokens = (int)baseline.tokens.size();
+    report->baseline_decode_s = baseline.decode_s;
     report->snapshot_ok =
         baseline.ok() && baseline.snapshot_saved &&
         b->be->snapshot_used(0) &&
@@ -1372,8 +1373,10 @@ static bool backend_validate_impl(
     // passive feature capture during exact prefill leaves target logits intact.
     GenerateResult restored_speculative =
         b->be->restore_and_generate(0, spec, io);
+    report->restored_spec_decode_s = restored_speculative.decode_s;
     trace_validation_tokens("restored", restored_speculative.tokens);
     GenerateResult speculative = b->be->generate(spec, io);
+    report->spec_decode_s = speculative.decode_s;
     trace_validation_tokens("fresh", speculative.tokens);
     report->spec_tokens = (int)speculative.tokens.size();
     report->spec_checked =
