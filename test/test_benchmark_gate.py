@@ -202,6 +202,47 @@ class BenchmarkGateTest(unittest.TestCase):
             self.assertEqual(len(record["response_body"].encode()), 4096)
             self.assertTrue(record["response_body_truncated"])
 
+    def test_request_preserves_and_summarizes_speculative_timings(self) -> None:
+        body = {
+            "choices": [{"finish_reason": "length"}],
+            "usage": {
+                "prompt_tokens": 64,
+                "completion_tokens": 256,
+                "accept_rate": 0.25,
+                "timings": {
+                    "prefill_tokens": 64,
+                    "prefill_ms": 100.0,
+                    "prefill_tokens_per_sec": 640.0,
+                    "decode_ms": 6400.0,
+                    "decode_tokens_per_sec": 40.0,
+                    "spec_cycles": 32,
+                    "spec_provider_age_ms": 320.0,
+                    "spec_provider_block_ms": 64.0,
+                    "spec_head_ms": 96.0,
+                    "spec_verify_ms": 3200.0,
+                },
+                "backend": {"spec_ran": True},
+            },
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            suite = benchmark.Suite(
+                "http://127.0.0.1:1/v1/chat/completions",
+                Path(raw) / "timing.jsonl", 1.0, "test")
+            response = io.BytesIO(json.dumps(body).encode())
+            with mock.patch.object(benchmark.urllib.request, "urlopen",
+                                   return_value=response):
+                record = suite.request(
+                    "decode", "prompt", 256, group="decode-256", repeat=1)
+            self.assertEqual(record["spec_cycles"], 32)
+            self.assertEqual(record["spec_head_ms"], 96.0)
+            self.assertEqual(record["spec_verify_ms"], 3200.0)
+            speculation = suite.summarize()["decode-256"]["speculation"]
+            self.assertTrue(speculation["timing_complete"])
+            self.assertEqual(speculation["cycles"], 32)
+            self.assertEqual(speculation["accept_rate_mean"], 0.25)
+            self.assertEqual(speculation["spec_head_ms_per_cycle"], 3.0)
+            self.assertEqual(speculation["spec_verify_ms_per_cycle"], 100.0)
+
     def test_quant_build_record_binds_complete_ordered_shards(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

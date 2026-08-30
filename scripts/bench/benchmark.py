@@ -418,6 +418,11 @@ class Suite:
                 "decode_tps_rounding_consistent": decode_tps_consistent,
                 "restored_prefix": usage.get("restored_prefix"),
                 "accept_rate": usage.get("accept_rate"),
+                "spec_cycles": timings.get("spec_cycles"),
+                "spec_provider_age_ms": timings.get("spec_provider_age_ms"),
+                "spec_provider_block_ms": timings.get("spec_provider_block_ms"),
+                "spec_head_ms": timings.get("spec_head_ms"),
+                "spec_verify_ms": timings.get("spec_verify_ms"),
                 "spec_ran": backend.get("spec_ran"),
                 "prefill_mode": backend.get("prefill_mode"),
                 "prefill_reason": backend.get("prefill_reason"),
@@ -488,6 +493,50 @@ class Suite:
                 "prefill_tps_median": statistics.median(prefill) if prefill else None,
                 "decode_tps_median": statistics.median(decode) if decode else None,
             }
+            spec_records = [record for record in records
+                            if record.get("spec_ran") is True]
+            if spec_records:
+                timing_keys = (
+                    "spec_provider_age_ms", "spec_provider_block_ms",
+                    "spec_head_ms", "spec_verify_ms",
+                )
+                timing_complete = all(
+                    isinstance(record.get("spec_cycles"), int)
+                    and not isinstance(record.get("spec_cycles"), bool)
+                    and record["spec_cycles"] >= 0
+                    and all(
+                        isinstance(record.get(key), (int, float))
+                        and not isinstance(record.get(key), bool)
+                        and math.isfinite(float(record[key]))
+                        and float(record[key]) >= 0.0
+                        for key in timing_keys)
+                    for record in spec_records)
+                cycles = (sum(record["spec_cycles"] for record in spec_records)
+                          if timing_complete else None)
+                summary[group]["speculation"] = {
+                    "samples": len(spec_records),
+                    "timing_complete": timing_complete,
+                    "cycles": cycles,
+                    "accept_rate_mean": statistics.fmean(
+                        float(record["accept_rate"])
+                        for record in spec_records
+                        if isinstance(record.get("accept_rate"), (int, float))
+                        and not isinstance(record.get("accept_rate"), bool)
+                        and math.isfinite(float(record["accept_rate"])))
+                    if any(
+                        isinstance(record.get("accept_rate"), (int, float))
+                        and not isinstance(record.get("accept_rate"), bool)
+                        and math.isfinite(float(record["accept_rate"]))
+                        for record in spec_records) else None,
+                }
+                for key in timing_keys:
+                    total = (sum(float(record[key]) for record in spec_records)
+                             if timing_complete else None)
+                    summary[group]["speculation"][f"{key}_total"] = total
+                    summary[group]["speculation"][f"{key}_per_cycle"] = (
+                        total / cycles
+                        if total is not None and cycles is not None and cycles > 0
+                        else None)
         return summary
 
 
