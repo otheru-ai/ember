@@ -229,6 +229,11 @@ trace. Every copy takes the 1D packed branch of `ggml_cuda_cpy_tensor_2d`
 
 ## Open correctness blocker
 
+> **A release-criteria question is now attached to this section and belongs to
+> the user, not to any agent.** See "Is bit-exactness the right criterion?"
+> below.
+
+
 q=1 and batched prefill disagree from batch width 2.
 
 **The "root cause isolated" claim is withdrawn.** It was true of width 2 only.
@@ -757,3 +762,43 @@ the f32 precision wall). So:
   YaRN the graph path is already closer to exact than the host scalar it
   replaces — 1.86e-3 vs 2.75e-3 — on the CPU backend alone, before the fp64
   theta the HIP kernel adds.
+
+## Is bit-exactness the right criterion for batched prefill?
+
+Raised 2026-08-31 after codex 344 measured the first divergence as *floating-
+noise scale* in layer 0's recurrent state, compounding to an output flip only
+by layer 2 row 2.
+
+**The engine already documents this phenomenon.** `qwen4exp_mtp.cpp:320-327`,
+in shipped code:
+
+> The layer-major verifier is a proposal accelerator, not an authority
+> boundary. A different reduction order can move a near-tied argmax even when
+> every tensor/state update is otherwise valid. The gfx1151 Q3 differential
+> caught exactly that after 29 emitted tokens...
+
+The response there was **architectural, not numerical**: never commit a token
+from batched logits alone, replay the accepted prefix through q=1 (`:326-334`).
+
+**The analogy is not automatic, and the difference is the whole question.** MTP
+verification produces a *proposal*, and a wrong one is caught by the q=1 replay
+behind it. Prefill produces the *hidden state every later token depends on*,
+with no replay behind it — so a merely differently-rounded batched prefill
+still hands decoding a different starting state and nothing downstream catches
+it.
+
+So: does the width-3 differential assert bit-exactness between batched and q=1
+prefill — a property this engine's own MTP design declines to rely on — or
+something weaker that should be written down?
+
+**Do not answer this from the ledger.** What should come first is both paths
+compared against a **double-precision scalar reference**, the way the rope
+numerics resolved the same shape of question (where the graph path turned out
+*closer* to exact than the host scalar it was being measured against). If
+batched prefill is closer to exact than three sequential q=1 steps, then q=1 is
+the worse reference and the differential is comparing against the wrong side.
+That test is GPU-free.
+
+This only becomes live if the `DFLASH_CUDA_MMVQ_ROCMFP4_UNROLL2=0` falsifier
+leaves the divergence unchanged. If it makes the recurrent state exact, there
+is a real kernel-selection defect and none of this applies.
