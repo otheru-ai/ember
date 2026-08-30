@@ -537,7 +537,14 @@ rather than asserted, and both hold.
 | magnitude consistent with kernel precision | refuted — 6.1 logits with an argmax flip |
 | dense padding couples rows | refuted — `99dcc3d` |
 | MoE routing couples rows across the batch | refuted — `b5d0bb5` |
-| `sync_fallback` | refuted — 0 dispatches, measured twice |
+| `sync_fallback` | refuted — **0 of 4924** MoE dispatches, measured twice |
+
+`sync_fallback`'s denominator is load-bearing and belongs here rather than in
+`docs/dead-code-candidates.md`, which points at this table. "0 dispatches" on
+its own is a much weaker claim than 0 of 4924 — a null result is only as strong
+as its sample. The figure matters twice over: it is the evidence for dead-code
+entry 3, and it is the reason the F32 dequantized reference gates on width 2,
+since that reference routes every expert through this never-exercised path.
 
 ### What is left
 
