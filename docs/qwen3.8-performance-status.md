@@ -261,10 +261,24 @@ So width 6 is where "batched prefill must be bit-identical to q1" meets "the
 engine switches kernel family by batch size for performance". One of those has
 to yield, and which one is the release-criterion question below.
 
-**Falsifier, one run, before any combination bisect**: build with
-`GGML_CUDA_FORCE_MMQ` (`mmq.cuh:143`) so q1 also takes MMQ, and rerun width 6.
-Green confirms the family crossover is the whole seam and nothing is broken;
-red means a genuine width-6 defect underneath and the bisect is warranted.
+**Correction**: an earlier version named `GGML_CUDA_FORCE_MMQ` as the
+falsifier. That was wrong — the macro gates `ggml_cuda_should_use_mmq`, not the
+earlier `use_mul_mat_vec_q` branch at `ggml-cuda.cu:2591`, so it never moves q1
+off MMVQ. Codex ran it and correctly voided the result (codex 371).
+
+**Falsifier that needs no code**: run **widths 4 and 5**. `moe_cached_width`
+maps both to physical **5**, so they are batched, MMVQ, and identical in
+composition to width 6, which maps to physical **16** and can only be MMQ.
+
+| logical | physical | family | result |
+|---|---|---|---|
+| 2, 3 | 5 | MMVQ | green |
+| 4, 5 | 5 | MMVQ | **not yet run** |
+| 6 | 16 | MMQ | red |
+
+Green at 4 and 5 places the transition exactly at the physical 5→16 crossover.
+Red at either kills the family hypothesis and puts the break inside the MMVQ
+band.
 
 Width 17 maps to physical **0** — the dense/MoE cache does not serve it — so it
 is a third question again, and it has not been run since the fix.
@@ -1030,3 +1044,31 @@ are exactly what quantized KV requires.
   sitting with kingjones777's 345/385. Our 412 gate remains above every
   published number on this part.
 - Mesa RADV Wave64 dual-issue (`KHR_coopmat`) is Vulkan-only and does not port.
+
+## The reference has no q1 path at all
+
+`docs/reference/qwen4exp_upstream.cpp`, all 1193 lines, grepped for
+`n_tokens == 1`, `n_seq_tokens == 1`, `== 1)`, `q1`, `single token`: **zero
+matches**. There is one `build_arch_graph`, and a single token is a ubatch of
+one through it. No q1 builder, no q1 arena, no q1 kernel selection — and
+therefore no possibility of a q1-versus-batched disagreement. The question this
+blocker asks cannot be posed against that implementation.
+
+**So the bit-equality requirement is self-imposed**, and its two sources are
+not equally load-bearing:
+
+- **MTP verification** — real. A proposal accelerator needs an authority to
+  check against, and `qwen4exp_mtp.cpp:320-327` already handles the argmax
+  consequence architecturally rather than numerically. That stays.
+- **Prefill** — a *test* choice. Prefill verifies nothing, and nothing
+  downstream consults a q1 prefill. The width-N differential compares batched
+  prefill against q1 stepping because we built it that way.
+
+Width 6 is therefore not "the engine is broken at width 6" but "our prefill
+test asserts an equality that upstream's architecture makes meaningless,
+between two kernel families that exist because they differ".
+
+**And the two threads are one piece of work.** Collapsing to a single graph is
+the entire 345-prefill result, and it also dissolves this class of correctness
+question, because there stops being a second path to disagree with. Every stage
+moved into the graph is a stage that can no longer disagree with itself.
