@@ -1568,8 +1568,8 @@ int main() {
               "MTP frontier evaluation rejects a wrong input width");
         dflash::common::qwen4exp_frontier_mtp_destroy(mtp);
         graph = nullptr;
-        CHECK(mtp.frontier_moe == nullptr,
-              "MTP companion destroys its graph before weight storage");
+        CHECK(mtp.frontier_moe == nullptr && mtp.frontier_qsa == nullptr,
+              "MTP companion destroys its graphs before weight storage");
         CHECK(!dflash::common::qwen4exp_frontier_mtp_moe_q1(
                   mtp, inputs[0].data(), inputs[0].size(), wrong, error),
               "MTP execution fails closed without its GPU frontier graph");

@@ -218,10 +218,13 @@ bool Qwen4ExpBackend::init() {
                  "ple_projection_batch=q5-q16 "
                  "hc_mixer=persistent-q1-q5-q16 "
                  "qsa_projection_batch=q5-q16 "
+                 "mtp_qsa=%s "
                  "verifier_output_batch=q5-q16 "
                  "activation_dump=%s\n",
                  max_ctx, weights_.yarn.enabled ? "factor-4" : "off",
                  mtp_depth_ ? "opt-in" : "off", mtp_depth_,
+                 mtp_weights_.frontier_qsa ? "persistent-q1" :
+                     (mtp_depth_ ? "scalar-debug" : "off"),
                  activation_dump_path_.empty() ? "off" : "on");
     std::fprintf(stderr,
                  "[qwen-load] component=backend hip_init_ms=%.3f "

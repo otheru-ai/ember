@@ -2240,15 +2240,35 @@ bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
         weights.dense_cache = nullptr;
         return false;
     }
+    const bool qsa_enabled = env_enabled("EMBER_QWEN_FRONTIER_QSA", true);
+    const Qwen4ExpFrontierQsaSpec qsa_spec{2560, 24, 2, 256, 4, 128};
+    if (qsa_enabled) {
+        const Qwen4ExpFrontierQsaWeights qsa_weights{
+            layer.attn_q, layer.attn_k, layer.attn_v, layer.index_q,
+            layer.index_k, layer.attn_output, layer.self_k_rot,
+            layer.self_v_rot};
+        weights.frontier_qsa = qwen4exp_frontier_qsa_create_q1(
+            weights.backend, qsa_spec, qsa_weights, 48, error);
+        if (!weights.frontier_qsa) {
+            qwen4exp_frontier_mtp_destroy(weights);
+            return false;
+        }
+    }
     std::fprintf(stderr,
                  "[qwen-frontier] event=ready component=mtp_moe graphs=1 "
-                 "tokens_per_graph=1 arena_bytes=%zu weight_copies=0 "
+                 "tokens_per_graph=1 arena_bytes=%zu "
+                 "component_mtp_qsa_enabled=%s qsa_graphs=%d "
+                 "qsa_base_arena_bytes=%zu weight_copies=0 "
                  "graph_replay=off\n",
-                 weights.frontier_moe->arena_bytes);
+                 weights.frontier_moe->arena_bytes,
+                 qsa_enabled ? "true" : "false", qsa_enabled ? 1 : 0,
+                 qwen4exp_frontier_qsa_arena_bytes(weights.frontier_qsa));
     return true;
 }
 
 void qwen4exp_frontier_mtp_destroy(Qwen4ExpMtpWeights & weights) {
+    qwen4exp_frontier_qsa_destroy(weights.frontier_qsa);
+    weights.frontier_qsa = nullptr;
     qwen4exp_frontier_moe_destroy(weights.frontier_moe);
     weights.frontier_moe = nullptr;
     qwen4exp_frontier_dense_cache_destroy(weights.dense_cache);

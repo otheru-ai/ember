@@ -758,6 +758,7 @@ bool prepare_qsa_row(
 bool finish_qsa_row(
         const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
         const Qwen4ExpLayer & layer, Qwen4ExpFrontierQsaGraph * graph,
+        Qwen4ExpFrontierDenseCache * cache,
         const std::vector<float> & query, const std::vector<float> & gate,
         const std::vector<float> & key, const std::vector<float> & value,
         const std::vector<float> & index_query,
@@ -782,8 +783,7 @@ bool finish_qsa_row(
         qwen4exp_qsa_dense_selection(tokens, selected);
     if (!dense_selection) {
         std::vector<float> iknorm;
-        if (!tensor_f32(weights.dense_cache, layer.index_k_norm, iknorm,
-                        error) ||
+        if (!tensor_f32(cache, layer.index_k_norm, iknorm, error) ||
             iknorm.size() != static_cast<size_t>(kIndexerDim)) return false;
         const int complete = tokens / 4;
         const int keep = std::min(complete, 512);
@@ -898,10 +898,14 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
              const std::array<int32_t, 3> & position,
              const std::array<std::vector<int32_t>, 3> & position_history,
              std::vector<float> & output, std::string & error,
-             Qwen4ExpFrontierDenseCache * cache_override = nullptr) {
-    Qwen4ExpFrontierQsaGraph * graph =
-        cache_override ? nullptr : qwen4exp_frontier_qsa_q1(weights,
-                                                             layer_index);
+             Qwen4ExpFrontierDenseCache * cache_override = nullptr,
+             Qwen4ExpFrontierQsaGraph * graph_override = nullptr) {
+    Qwen4ExpFrontierDenseCache * cache =
+        cache_override ? cache_override : weights.dense_cache;
+    Qwen4ExpFrontierQsaGraph * graph = graph_override
+        ? graph_override
+        : (cache_override ? nullptr
+                          : qwen4exp_frontier_qsa_q1(weights, layer_index));
     if (!graph) {
         return run_qsa_scalar(weights, state, layer, input, position,
                               position_history, output, error,
@@ -914,9 +918,9 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
             error)) return false;
 
     std::vector<float> qnorm, knorm, iqnorm;
-    if (!tensor_f32(weights.dense_cache, layer.attn_q_norm, qnorm, error) ||
-        !tensor_f32(weights.dense_cache, layer.attn_k_norm, knorm, error) ||
-        !tensor_f32(weights.dense_cache, layer.index_q_norm, iqnorm, error))
+    if (!tensor_f32(cache, layer.attn_q_norm, qnorm, error) ||
+        !tensor_f32(cache, layer.attn_k_norm, knorm, error) ||
+        !tensor_f32(cache, layer.index_q_norm, iqnorm, error))
         return false;
     std::vector<float> q, gate, prepared_k, prepared_v, prepared_iq,
                        prepared_ik;
@@ -929,8 +933,8 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
     // output projection have both completed successfully.
     if (!qwen4exp_frontier_qsa_rotate_q1(
             graph, q, prepared_k, prepared_v, error)) return false;
-    return finish_qsa_row(weights, state, layer, graph, q, gate, prepared_k,
-                          prepared_v, prepared_iq, prepared_ik,
+    return finish_qsa_row(weights, state, layer, graph, cache, q, gate,
+                          prepared_k, prepared_v, prepared_iq, prepared_ik,
                           position_history, output, error);
 }
 
@@ -1019,10 +1023,10 @@ bool run_qsa_batch(
             !qwen4exp_frontier_qsa_rotate_q1(
                 graph, query_row, key_row, value_row, error)) return false;
         std::vector<float> row_output;
-        if (!finish_qsa_row(weights, state, layer, graph, query_row,
-                            gate_row, key_row, value_row, index_query_row,
-                            index_key_row, position_history, row_output,
-                            error) ||
+        if (!finish_qsa_row(weights, state, layer, graph,
+                            weights.dense_cache, query_row, gate_row, key_row,
+                            value_row, index_query_row, index_key_row,
+                            position_history, row_output, error) ||
             row_output.size() != static_cast<size_t>(kEmbedding)) {
             if (error.empty()) error = "Qwen4Exp batched QSA output mismatch";
             return false;
@@ -1521,7 +1525,8 @@ bool qwen4exp_mtp_step_q1(
                 mtp.layer.hc_attn_inject, mixed, &inject, error,
                 mtp.dense_cache) ||
         !run_qsa(target, state.qsa, mtp.layer, -1, mixed, mrope_position,
-                 state.mrope_positions, block, error, mtp.dense_cache))
+                 state.mrope_positions, block, error, mtp.dense_cache,
+                 mtp.frontier_qsa))
         return false;
     hc_combine(state.hc, block, inject);
     if (!hc_mix(target, state.hc, mtp.layer.hc_ffn_norm,
