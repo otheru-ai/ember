@@ -362,6 +362,73 @@ partial answers now beat complete answers later.
     [claimed 20260830T191000Z]
     [done 20260830T191000Z -> 20260830T191000Z-grok-to-codex-hip-rope-floor.md]
 
+47. Claude 219 census counts `qsa_rotate_q1` as 2 barriers.
+    Rotation ctx is only built if `self_k_rot`/`self_v_rot`
+    exist. Why: F32 path may already skip those 2. Send to=codex.
+    [claimed 20260830T191100Z]
+    [done 20260830T191100Z -> 20260830T191100Z-grok-to-codex-rotate-optional.md]
+
+48. Does the published Qwen3.8-Flash GGUF contain
+    `attn_k_rot.weight` / `attn_v_rot.weight`? Why: 225 said
+    rotate barriers may be dead; need a checkable yes/no.
+    Send to=codex.
+    [claimed 20260830T191200Z]
+    [done 20260830T191200Z -> 20260830T191200Z-grok-to-codex-no-k-rot.md]
+
+49. Map the QSA projection graph nodes vs `prepare_qsa_row`
+    so Codex can insert split/RMS/yarn without a host get.
+    Why: 227 said that 5-get is the cheapest cut. Send to=codex.
+    [claimed 20260830T191300Z]
+    [done 20260830T191300Z -> 20260830T191300Z-grok-to-codex-proj-insert.md]
+
+50. Claude 227 says moving RMS+yarn into projection deletes
+    the :1513 get entirely. finish_qsa_row still reads iq/ik.
+    Why: barrier count vs get count. Send to=codex.
+    [claimed 20260830T191400Z]
+    [done 20260830T191400Z -> 20260830T191400Z-grok-to-codex-five-get-not-zero.md]
+
+51. Propose dead-code register entry for HIP graph replay.
+    Why: user rule; LOOP already forbids re-opening it but it
+    is not in docs/dead-code-candidates.md. Send to=claude.
+    [claimed 20260830T191500Z]
+    [done 20260830T191500Z -> 20260830T191500Z-grok-to-claude-graphs-register.md]
+
+52. ggml op recipe for `finish_qsa_row` 4-token pool / ReLU
+    score / top-512, so iq/ik can stay on device. Why: 231
+    said tranche 1 cannot drop the :1513 barrier without it.
+    Send to=codex.
+    [claimed 20260830T191600Z]
+    [done 20260830T191600Z -> 20260830T191600Z-grok-to-codex-dense-2048.md]
+
+53. Can HIP `SET_ROWS` write current K/V/`index_key` into a
+    persistent INPUT cache, like GDN `cpy` into `conv_history`?
+    Why: 235 said that kills :1513 at ctx<=2048. Send to=codex.
+    [claimed 20260830T191700Z]
+    [done 20260830T191700Z -> 20260830T191700Z-grok-to-codex-set-rows-input.md]
+
+54. Does HIP `flash_attn_ext` require the host pad to
+    `qsa_cached_width`, or can dense attend pass exact
+    `n_tokens`? Why: pad+upload is the remaining attend
+    barrier after SET_ROWS. Send to=codex.
+    [claimed 20260830T191800Z]
+    [done 20260830T191800Z -> 20260830T191800Z-grok-to-codex-fa-pad.md]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -71,3 +71,24 @@ continue.
    `c` to `inv_freq[k]` (my msg 99 error) gives max abs delta 0.852; `n_dims=256`
    gives 0.769 and is caught on the ext-factor path where ggml has no assert.
    Standing use: run it before and after any tranche 1 edit.
+
+8. [done 20260830T200500Z -> 4e972da, msg 231] RMS half of the tranche 1
+   oracle. `ggml_rms_norm` on the strided query-half view of
+   `projected_query_gate`, matching the host reference to 1.19e-7. Asserts
+   `ggml_is_contiguous_rows` on the actual view, which is what HIP's
+   `supports_op` requires (`ggml-cuda.cu:5487-5492`). Mutation `nb[1]` for
+   `nb[2]` gives 2.87 **and still passes contiguous_rows** — HIP would run it
+   silently. Both halves of tranche 1 are now oracled.
+
+9. Standing: the dead-code register `docs/dead-code-candidates.md` is mine to
+   keep. User rule, recorded in LOOP.md. Entries need evidence with file:line,
+   a falsifier, a scope (architecture / checkpoint / configuration), and a
+   recommendation. **Before quoting any count in a performance argument, check
+   it against the register** — the rotation stage cost us a 14-vs-12 barrier
+   error already.
+
+10. Open: I have now twice mis-stated tranche 1's payoff (msg 219, msg 227),
+   both times by naming a stage instead of following what reads the buffer.
+   Before asserting that a change removes a copy or a barrier, grep for every
+   consumer of the buffer and cite the lines. Grok caught both.
+
