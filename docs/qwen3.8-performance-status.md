@@ -152,9 +152,48 @@ trace. Every copy takes the 1D packed branch of `ggml_cuda_cpy_tensor_2d`
 
 ## Open correctness blocker
 
-q=1 and batched prefill disagree from batch width 2. Root cause isolated to
-choosing MMQ at physical width q5: `LUCE_MMVQ_MAX_NCOLS=5` makes seed and both
-AR steps bit-identical. Our default of 3 is an inherited sm_86 (RTX 3090)
+q=1 and batched prefill disagree from batch width 2.
+
+**The "root cause isolated" claim is withdrawn.** It was true of width 2 only.
+Codex ran the sweep under `LUCE_MMVQ_MAX_NCOLS=5` at `a3a50c4` (`.coord/msg/`
+codex 106, evidence under
+`ncols5-width-sweep-a3a50c4-20260830T191000Z/`):
+
+| prompt tokens | result at ceiling 5 |
+|---|---|
+| 2 | pass, seed and AR logits bit-identical |
+| 3 | fail index 1, expected 830 actual 198 |
+| 6 | fail index 0, expected 10459 actual 87 |
+| 17 | fail index 0, expected 87 actual 830 |
+
+This is what the width map predicts (see below): the ceiling can only move
+logical widths 2-5, and it moved 2. Widths 3, 6 and 17 have **no candidate
+cause**.
+
+**And the second cause is not a kernel-precision story.** At width 3 the
+batched seed logit for token 830 is 13.4118 against 19.5071 at q=1 — a 6.1
+absolute shift that flips the argmax. MMQ-versus-MMVQ is quantization rounding;
+it perturbs a logit far below that and does not reorder the top of the
+distribution. Whatever is wrong at 3, 6 and 17 is structural — wrong data,
+wrong positions, wrong routing, or padding reaching a real row — not
+arithmetic. The entire MMQ/MMVQ family can be set aside for these three.
+
+`LUCE_MMVQ_MAX_NCOLS=5` remains justified on gfx1151 as a *throughput* default
+(35.65 versus 34.69 tok/s), and must not be gated as the correctness closer.
+
+### Named suspect: the pad-independence assumption
+
+`qwen4exp_frontier.h:104-107` states that logical 2-5 are zero-padded to
+physical 5 and that "MoE rows are independent, so padding cannot change a real
+row". That is an assertion in a comment, not a tested invariant, and it sits
+exactly where the failures are.
+
+It does not obviously explain why 2 passes and 3 fails when both are physical 5
+— but it is cheap to falsify decisively: **fill the pad rows with NaN instead
+of zero.** If any real row's output becomes NaN, padding reaches real rows and
+the assumption is false. If every real row is unchanged, the assumption holds
+at that width and the suspect is eliminated. No GPU sweep, one fill change and
+one comparison per width. Our default of 3 is an inherited sm_86 (RTX 3090)
 crossover measurement, not a gfx1151 one — see the comment at
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2545-2559`, which explicitly says to
 override for other hardware, and note that DeepSeek already overrides it to 4
@@ -184,10 +223,24 @@ differs from the logical width (`qwen4exp_frontier.h:266-269` already speaks of
 "physical q=1 [...] q=5/q=16", so they are known to diverge here), or there is
 a second cause and raising the ceiling will move 6 and 17 but leave 3 red.
 
-Logging `src0->type`, `src1->ne[1]` and the chosen kernel at
-`ggml-cuda.cu:2582-2585` for logical widths 2, 3, 6, 17 separates them in one
-run. Until it does, treat "`LUCE_MMVQ_MAX_NCOLS=5` makes it bit-exact" as a
-measurement whose mechanism is not yet established.
+**The width map bounds what the ceiling could ever have explained.**
+`qwen4exp_frontier_moe_cached_width` (`frontier.cpp:309-317`), which
+`dense_cached_width` reuses verbatim (`:319-321`), maps logical to physical:
+
+| logical | physical | ceiling 3 | ceiling 5 |
+|---|---|---|---|
+| 1 | 1 | MMVQ | MMVQ |
+| 2, 3, 4, 5 | 5 | MMQ | MMVQ |
+| 6 … 16 | 16 | MMQ | MMQ |
+| 17+ | 0 — cache does not serve it | — | — |
+
+QSA uses a different map (`:323-333`): 3→16, 6→16, 17→64.
+
+`MMVQ_MAX_BATCH_SIZE` is **8** (`mmvq.cuh:3`), so physical width 16 cannot take
+MMVQ at any ceiling. Therefore **`LUCE_MMVQ_MAX_NCOLS` can only ever change
+logical widths 2-5. It cannot touch 6, and 17 never reaches that cache.** The
+measured sweep above matches that bound exactly, which is the strongest reason
+to trust it.
 
 If the fix is a Qwen-side default, note that the ceiling is latched on the
 first `mul_mat` and never re-read, so any `setenv` must precede it — backend
