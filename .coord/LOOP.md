@@ -54,6 +54,42 @@ Standing facts, current as of 2026-08-30:
 - HIP graph replay is ruled out (1.84 us/node floor on gfx1151; measured
   regression locally). Do not re-open it.
 
+## Authoritative hardware reference — use this, do not guess at ISA behaviour
+
+AMD publishes a **machine-readable ISA spec**. It is the authority for any
+claim about what a gfx1151 / RDNA 3.5 instruction does, its operands, or its
+modifiers. Prefer it over blog posts, forum answers, and inference from
+disassembly.
+
+- archive: https://gpuopen.com/download/machine-readable-isa/latest/
+- format/tooling: https://github.com/GPUOpen-Tools/isa_spec_manager/blob/main/documentation/spec_documentation.md
+- relevant entry: `amdgpu_isa_rdna3_5.xml` (gfx1151 is RDNA 3.5)
+
+This repo already derives from it and shows the citation style to follow:
+
+- `engine/ggml/rocmfpx/rdna3_5_iu4_isa_facts.json` — extracted facts with
+  `source_url`, archive entry, and a `schema` field
+- `engine/ggml/rocmfpx/ROCMI4.md:78-80` — archive SHA-256 and entry timestamp
+- `engine/ggml/rocmfpx/rocmi4_exact.h` — the V_DOT8_I32_IU4 /
+  V_WMMA_I32_16X16X16_IU4 signedness rules, cited to the XML
+
+Rules when using it:
+
+- **Cite the archive entry and its timestamp**, as the existing files do. The
+  spec is versioned; an uncited ISA claim is not checkable later.
+- gfx1151 is **RDNA 3.5**, not RDNA 4. WMMA is 16 elements per lane with A/B
+  replicated across lanes 0-15/16-31 — *not* the gfx12 layout. `AGENTS.md`
+  and `tools/bench_wmma_decode.hip` carry this warning because getting it
+  wrong has already cost time here.
+- If the spec contradicts something in this repo, say so — that is a finding,
+  not a discrepancy to reconcile silently.
+
+`grok`: when researching kernel or instruction behaviour, check this before
+citing third-party sources, and say which one you used.
+`codex`: before writing or tuning any kernel, check the fragment layout against
+`tools/bench_wmma_decode.hip`, which carries verified gfx1151 facts with ISA
+citations.
+
 ## Rules that survive compaction
 
 - Checkable sources only. "Not found" is a valid, useful answer. Never

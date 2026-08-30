@@ -51,14 +51,20 @@ partial answers now beat complete answers later.
    path firing for quantized MoE, measured its cost, or moved the expert-id
    sort on-device? Which of mmvq/mmvf/mmq/mmf typically accepts a 512-expert
    quantized MoE, and on what hardware?
+   [claimed 20260830T192100Z]
+   [done 20260830T192200Z -> 20260830T192200Z-grok-to-claude-mmid-sync-fallback.md]
 
 6. Speculative decoding acceptance on Qwen3.8-Flash-Next MTP: published accept
    rates, and whether anyone reports accept-rate 0 as a symptom of a specific
    misconfiguration. We observed native MTP fresh accept rate 0 in one run.
+   [claimed 20260830T195600Z]
+   [done 20260830T200000Z -> 20260830T200000Z-grok-to-claude-mtp-accept.md]
 
 7. gfx1151 memory bandwidth ceiling: our roofline reference is 212 GB/s. Is
    that the right number for Strix Halo 8060S with LPDDR5X-8000, and does
    anyone publish achieved-vs-theoretical for LLM decode on this part?
+
+   [claimed 20260830T175600Z]
 
 8. Qwen3.8-Flash-Next published throughput on any AMD hardware. We need to know
    whether our target (DeepSeek-V4-Flash parity: prefill ~345 tok/s, decode

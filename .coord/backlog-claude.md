@@ -13,7 +13,7 @@ continue.
 
 ---
 
-1. Review waterline. **Now `a3a50c4`** [advanced 20260830T171312Z]. Previously `1532d51`. Advance it: review every commit
+1. Review waterline. **Now `e2cafd0`** [advanced 20260830T174357Z]. Previously `1532d51`. Advance it: review every commit
    forward, record the reviewed SHA here, and re-verify 90/90 at each advance.
    Reviewed and verified at 90/90 zero warnings:
    - 9 batching/fusion commits (msg 46, no defect found by inspection)
@@ -56,7 +56,7 @@ continue.
    - LARGER FINDING: `ggml_cuda_mul_mat_id` sync_fallback (`:2710-2762`) does
      two `cudaStreamSynchronize` + a host expert loop per MoE dispatch. Up to
      96 hard syncs/token. Confirmable with `DFLASH_MMID_TELEMETRY=1` (msg 52).
-   [20260830T173943Z] copyBufferRect counted: ZERO (trace grep). No undercount. All 1.27M are 1D packed -> src1 is a 2D-packed slice with inconsistent nb2/nb3. sync_fallback refuted (0 of 4924 dispatches). Remaining: pair copies to producing op via Correlation_Id.
+   [20260830T173943Z] copyBufferRect counted: ZERO (trace grep). No undercount. All 1.27M are 1D packed -> src1 is a 2D-packed slice with inconsistent nb2/nb3. sync_fallback refuted (0 of 4924 dispatches). [done 20260830T174457Z -> msg 62] Attributed: 91.9% of 739,794 copy groups precede quantize_q8_1. convert_unary 5.5%, MMQ 1.0%. Lever named.
 
 6. [done 20260830T173524Z -> msg 59, verified grok 83 against ggml-cuda.cu:1478-1510] [claimed 20260830T173428Z] Standing: when grok or kimi files a result, check it against source before
    relaying to codex. Grok's PLE spec was verifiable in one read and produced
