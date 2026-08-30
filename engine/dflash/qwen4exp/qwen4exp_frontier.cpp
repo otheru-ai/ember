@@ -569,10 +569,18 @@ bool qwen4exp_frontier_dense_eval(
     std::copy_n(input, real_input_values, graph->padded_input.data());
     std::fill_n(graph->padded_input.data() + real_input_values,
                 graph->padded_input.size() - real_input_values, 0.0f);
-    ggml_backend_tensor_set(graph->input, graph->padded_input.data(), 0,
-                            graph->padded_input.size() * sizeof(float));
-    if (ggml_backend_graph_compute(backend, graph->graph) !=
+    // Keep each persistent-graph exchange on the backend stream and establish
+    // one host visibility barrier after its final download.  The synchronous
+    // tensor helpers use a separate per-thread stream and synchronize after
+    // every copy; on gfx1151 that made these graph seams dominate the measured
+    // long-tail idle time.  CPU backends preserve the old ordering through the
+    // async API's synchronous fallback.
+    ggml_backend_tensor_set_async(
+        backend, graph->input, graph->padded_input.data(), 0,
+        graph->padded_input.size() * sizeof(float));
+    if (ggml_backend_graph_compute_async(backend, graph->graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(backend);
         error = "Qwen4Exp persistent dense graph execution failed";
         return false;
     }
@@ -588,8 +596,11 @@ bool qwen4exp_frontier_dense_eval(
     const size_t full_output_values = static_cast<size_t>(weight->ne[1]) *
                                       static_cast<size_t>(graph_width);
     output.resize(full_output_values);
-    ggml_backend_tensor_get(graph->output, output.data(), 0,
-                            full_output_values * sizeof(float));
+    ggml_backend_tensor_get_async(
+        backend, graph->output, output.data(), 0,
+        full_output_values * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(backend);
     output.resize(static_cast<size_t>(weight->ne[1]) *
                   static_cast<size_t>(n_tokens));
     return true;
@@ -677,11 +688,13 @@ bool hc_eval(
     std::fill(graph->padded_input.begin() +
                   static_cast<std::ptrdiff_t>(input_count),
               graph->padded_input.end(), 0.0f);
-    ggml_backend_tensor_set(graph->input, graph->padded_input.data(), 0,
-                            graph->padded_input.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        backend, graph->input, graph->padded_input.data(), 0,
+        graph->padded_input.size() * sizeof(float));
     const ProfileRange range(graph->profile_label);
-    if (ggml_backend_graph_compute(backend, graph->graph) !=
+    if (ggml_backend_graph_compute_async(backend, graph->graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(backend);
         error = "Qwen4Exp persistent HC graph execution failed";
         return false;
     }
@@ -689,19 +702,17 @@ bool hc_eval(
         const size_t mixed_values = static_cast<size_t>(spec.stream_width) *
                                     static_cast<size_t>(graph_width);
         mixed->resize(mixed_values);
-        ggml_backend_tensor_get(graph->mixed, mixed->data(), 0,
-                                mixed_values * sizeof(float));
-        mixed->resize(static_cast<size_t>(spec.stream_width) *
-                      static_cast<size_t>(n_tokens));
+        ggml_backend_tensor_get_async(
+            backend, graph->mixed, mixed->data(), 0,
+            mixed_values * sizeof(float));
     }
     if (injection) {
         const size_t injection_values = static_cast<size_t>(spec.streams) *
                                         static_cast<size_t>(graph_width);
         injection->resize(injection_values);
-        ggml_backend_tensor_get(graph->injection, injection->data(), 0,
-                                injection_values * sizeof(float));
-        injection->resize(static_cast<size_t>(spec.streams) *
-                          static_cast<size_t>(n_tokens));
+        ggml_backend_tensor_get_async(
+            backend, graph->injection, injection->data(), 0,
+            injection_values * sizeof(float));
     }
     if (projected) {
         if (!projection || projection->ne[1] <= 0 ||
@@ -713,10 +724,21 @@ bool hc_eval(
         }
         const size_t output_width = static_cast<size_t>(projection->ne[1]);
         projected->resize(output_width * static_cast<size_t>(graph_width));
-        ggml_backend_tensor_get(graph->projected, projected->data(), 0,
-                                projected->size() * sizeof(float));
-        projected->resize(output_width * static_cast<size_t>(n_tokens));
+        ggml_backend_tensor_get_async(
+            backend, graph->projected, projected->data(), 0,
+            projected->size() * sizeof(float));
     }
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(backend);
+    if (mixed)
+        mixed->resize(static_cast<size_t>(spec.stream_width) *
+                      static_cast<size_t>(n_tokens));
+    if (injection)
+        injection->resize(static_cast<size_t>(spec.streams) *
+                          static_cast<size_t>(n_tokens));
+    if (projected)
+        projected->resize(static_cast<size_t>(projection->ne[1]) *
+                          static_cast<size_t>(n_tokens));
     return true;
 }
 } // namespace
@@ -1103,32 +1125,41 @@ bool qwen4exp_frontier_gdn_eval_batch(
                 conv_state[tap * conv_channels + channel];
         }
     }
-    ggml_backend_tensor_set(graph->input, input, 0,
-                            input_count * sizeof(float));
-    ggml_backend_tensor_set(graph->conv_history, graph->conv_window.data(), 0,
-                            graph->conv_window.size() * sizeof(float));
-    ggml_backend_tensor_set(graph->recurrent_state, recurrent_state, 0,
-                            recurrent_state_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->input, input, 0,
+        input_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->conv_history, graph->conv_window.data(), 0,
+        graph->conv_window.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->recurrent_state, recurrent_state, 0,
+        recurrent_state_count * sizeof(float));
     const ProfileRange range(graph->profile_label);
-    if (ggml_backend_graph_compute(graph->backend, graph->graph) !=
+    if (ggml_backend_graph_compute_async(graph->backend, graph->graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
         error = "Qwen4Exp persistent GDN graph execution failed";
         return false;
     }
 
     output.resize(static_cast<size_t>(spec.n_embd) * n_tokens);
-    ggml_backend_tensor_get(graph->output, output.data(), 0,
-                            output.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->output, output.data(), 0,
+        output.size() * sizeof(float));
     std::vector<float> qkv(conv_channels * n_tokens);
-    ggml_backend_tensor_get(graph->qkv, qkv.data(), 0,
-                            qkv.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->qkv, qkv.data(), 0,
+        qkv.size() * sizeof(float));
     next_recurrent_state.resize(expected_recurrent);
     const size_t attention_values = static_cast<size_t>(spec.n_heads) *
                                     static_cast<size_t>(spec.head_dim) *
                                     n_tokens;
-    ggml_backend_tensor_get(graph->gdn, next_recurrent_state.data(),
-                            attention_values * sizeof(float),
-                            next_recurrent_state.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->gdn, next_recurrent_state.data(),
+        attention_values * sizeof(float),
+        next_recurrent_state.size() * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
 
     next_conv_state.resize(expected_conv);
     const size_t retained_history = n_tokens >= history
@@ -1445,11 +1476,14 @@ bool qwen4exp_frontier_qsa_project_q1(
         error = "invalid Qwen4Exp QSA projection evaluation";
         return false;
     }
-    ggml_backend_tensor_set(graph->projection_input, input, 0,
-                            input_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->projection_input, input, 0,
+        input_count * sizeof(float));
     const ProfileRange range(graph->projection_profile_label);
-    if (ggml_backend_graph_compute(graph->backend, graph->projection.graph) !=
+    if (ggml_backend_graph_compute_async(
+            graph->backend, graph->projection.graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
         error = "Qwen4Exp QSA projection graph execution failed";
         return false;
     }
@@ -1460,16 +1494,23 @@ bool qwen4exp_frontier_qsa_project_q1(
     index_query.resize(
         static_cast<size_t>(spec.n_index_heads * spec.index_dim));
     index_key.resize(static_cast<size_t>(spec.index_dim));
-    ggml_backend_tensor_get(graph->projected_query_gate, query_gate.data(), 0,
-                            query_gate.size() * sizeof(float));
-    ggml_backend_tensor_get(graph->projected_key, key.data(), 0,
-                            key.size() * sizeof(float));
-    ggml_backend_tensor_get(graph->projected_value, value.data(), 0,
-                            value.size() * sizeof(float));
-    ggml_backend_tensor_get(graph->projected_index_query, index_query.data(),
-                            0, index_query.size() * sizeof(float));
-    ggml_backend_tensor_get(graph->projected_index_key, index_key.data(), 0,
-                            index_key.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_query_gate, query_gate.data(), 0,
+        query_gate.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_key, key.data(), 0,
+        key.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_value, value.data(), 0,
+        value.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_index_query, index_query.data(), 0,
+        index_query.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_index_key, index_key.data(), 0,
+        index_key.size() * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
     return true;
 }
 
@@ -1496,20 +1537,28 @@ bool qwen4exp_frontier_qsa_rotate_q1(
     query_key.reserve(q_values + kv_values);
     query_key.insert(query_key.end(), query.begin(), query.end());
     query_key.insert(query_key.end(), key.begin(), key.end());
-    ggml_backend_tensor_set(graph->rotation_query_key, query_key.data(), 0,
-                            query_key.size() * sizeof(float));
-    ggml_backend_tensor_set(graph->rotation_value, value.data(), 0,
-                            value.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->rotation_query_key, query_key.data(), 0,
+        query_key.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->rotation_value, value.data(), 0,
+        value.size() * sizeof(float));
     const ProfileRange range(graph->rotation_profile_label);
-    if (ggml_backend_graph_compute(graph->backend, graph->rotation.graph) !=
+    if (ggml_backend_graph_compute_async(
+            graph->backend, graph->rotation.graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
         error = "Qwen4Exp QSA rotation graph execution failed";
         return false;
     }
-    ggml_backend_tensor_get(graph->rotated_query_key, query_key.data(), 0,
-                            query_key.size() * sizeof(float));
-    ggml_backend_tensor_get(graph->rotated_value, value.data(), 0,
-                            value.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->rotated_query_key, query_key.data(), 0,
+        query_key.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->rotated_value, value.data(), 0,
+        value.size() * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
     std::copy_n(query_key.data(), q_values, query.data());
     std::copy_n(query_key.data() + q_values, kv_values, key.data());
     return true;
@@ -1577,26 +1626,35 @@ bool qwen4exp_frontier_qsa_attend_q1(
                 ggml_fp32_to_fp16(0.0f));
     std::fill(attention->padded_mask.begin() + selected_tokens,
               attention->padded_mask.end(), ggml_fp32_to_fp16(-INFINITY));
-    ggml_backend_tensor_set(attention->query, query, 0,
-                            query_count * sizeof(float));
-    ggml_backend_tensor_set(attention->gate, gate, 0,
-                            gate_count * sizeof(float));
-    ggml_backend_tensor_set(attention->key, attention->padded_key.data(), 0,
-                            attention->padded_key.size() * sizeof(float));
-    ggml_backend_tensor_set(attention->value, attention->padded_value.data(), 0,
-                            attention->padded_value.size() * sizeof(float));
-    ggml_backend_tensor_set(attention->mask, attention->padded_mask.data(), 0,
-                            attention->padded_mask.size() *
-                                sizeof(ggml_fp16_t));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->query, query, 0,
+        query_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->gate, gate, 0,
+        gate_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->key, attention->padded_key.data(), 0,
+        attention->padded_key.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->value, attention->padded_value.data(), 0,
+        attention->padded_value.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->mask, attention->padded_mask.data(), 0,
+        attention->padded_mask.size() * sizeof(ggml_fp16_t));
     const ProfileRange range(attention->profile_label);
-    if (ggml_backend_graph_compute(graph->backend, attention->graph) !=
+    if (ggml_backend_graph_compute_async(
+            graph->backend, attention->graph) !=
         GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
         error = "Qwen4Exp QSA attention graph execution failed";
         return false;
     }
     output.resize(static_cast<size_t>(spec.n_embd));
-    ggml_backend_tensor_get(attention->output, output.data(), 0,
-                            output.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, attention->output, output.data(), 0,
+        output.size() * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
     return true;
 }
 
@@ -1818,20 +1876,25 @@ bool qwen4exp_frontier_moe_eval(Qwen4ExpFrontierMoeGraph * graph,
         error = "invalid Qwen4Exp frontier MoE evaluation";
         return false;
     }
-    ggml_backend_tensor_set(graph->input, input, 0,
-                            input_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->input, input, 0,
+        input_count * sizeof(float));
     const auto begin = std::chrono::steady_clock::now();
     const ProfileRange range(graph->profile_label);
     const ggml_status status =
-        ggml_backend_graph_compute(graph->backend, graph->graph);
-    const auto end = std::chrono::steady_clock::now();
+        ggml_backend_graph_compute_async(graph->backend, graph->graph);
     if (status != GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
         error = "Qwen4Exp frontier MoE graph execution failed";
         return false;
     }
     output.resize(input_count);
-    ggml_backend_tensor_get(graph->output, output.data(), 0,
-                            output.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->output, output.data(), 0,
+        output.size() * sizeof(float));
+    // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
+    const auto end = std::chrono::steady_clock::now();
     ++graph->calls;
     graph->compute_us += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
