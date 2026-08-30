@@ -34,6 +34,7 @@ import qwen_selection_corpus_stage as selection_stage  # noqa: E402
 import qwen_candidate_request as candidate_request  # noqa: E402
 import qwen_reuse_candidate as reuse_candidate  # noqa: E402
 import qwen_integrity_cache as integrity_cache  # noqa: E402
+import qwen_quant_handoff as quant_handoff  # noqa: E402
 
 
 def first_token_fixture(root: Path, mutation: str = "") -> list[str]:
@@ -1278,6 +1279,109 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn(
             "needs.qwen-call-matched-iu4-plan.outputs.operation_request",
             matched_job)
+
+    def test_quant_next_stage_handoffs_are_exact_create_only_and_nonexecuting(self) -> None:
+        revision = "1" * 40
+        request_output = quant_handoff.REQUEST_ROOT / "construction-iu4-handoff.json"
+        comparison_output = quant_handoff.COMPARISON_ROOT / "q3-iu4-handoff"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            envelope = root / "matched-envelope.json"
+            matched = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_handoff.py"),
+                "matched-iu4", "--ember-revision", revision,
+                "--q3-construction", "/var/tmp/qwen/q3-construction.json",
+                "--q3-construction-sha256", "2" * 64,
+                "--q3-hardware", "/var/tmp/qwen/q3-hardware.json",
+                "--q3-hardware-sha256", "3" * 64,
+                "--candidate-id", "iu4-matched-handoff",
+                "--construction-request-output", str(request_output),
+                "--output", str(envelope),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            handoff = json.loads(matched.stdout)
+            value = json.loads(envelope.read_text(encoding="utf-8"))
+            raw_envelope = envelope.read_bytes()
+            self.assertEqual(handoff["schema"], quant_handoff.HANDOFF_SCHEMA)
+            self.assertFalse(handoff["dispatches"])
+            self.assertEqual(handoff["operation"], "matched-iu4-plan")
+            self.assertEqual(handoff["workflow_dispatch_inputs"]["commit_sha"],
+                             revision)
+            self.assertEqual(
+                base64.b64decode(handoff["envelope_base64"], validate=True),
+                raw_envelope)
+            self.assertEqual(handoff["envelope_sha256"],
+                             hashlib.sha256(raw_envelope).hexdigest())
+            self.assertEqual(value["operation"], "matched-iu4-plan")
+            self.assertFalse(value["publishes"])
+            self.assertFalse(value["deletes"])
+            self.assertEqual(value["inputs"]["construction_request_output"],
+                             str(request_output))
+            repeated = subprocess.run(matched.args, cwd=ROOT, text=True,
+                                      capture_output=True)
+            self.assertEqual(repeated.returncode, 2)
+            self.assertIn("File exists", repeated.stderr)
+
+            comparison_envelope = root / "comparison-envelope.json"
+            compared = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_handoff.py"),
+                "quant-compare", "--ember-revision", revision,
+                "--q3-construction", "/var/tmp/qwen/q3-construction.json",
+                "--q3-construction-sha256", "2" * 64,
+                "--q3-hardware", "/var/tmp/qwen/q3-hardware.json",
+                "--q3-hardware-sha256", "3" * 64,
+                "--iu4-construction", "/var/tmp/qwen/iu4-construction.json",
+                "--iu4-construction-sha256", "4" * 64,
+                "--comparison-output", str(comparison_output),
+                "--output", str(comparison_envelope),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            comparison = json.loads(comparison_envelope.read_text(encoding="utf-8"))
+            self.assertEqual(comparison["operation"], "quant-compare")
+            self.assertEqual(comparison["inputs"]["output"],
+                             str(comparison_output))
+
+            escaped_args = list(matched.args)
+            escaped_args[escaped_args.index("--construction-request-output") + 1] = (
+                "/tmp/construction-iu4-handoff.json")
+            escaped_args[escaped_args.index("--output") + 1] = str(
+                root / "escaped.json")
+            escaped = subprocess.run(escaped_args, cwd=ROOT, text=True,
+                                     capture_output=True)
+            self.assertEqual(escaped.returncode, 2)
+            self.assertIn("safe child", escaped.stderr)
+            self.assertFalse((root / "escaped.json").exists())
+
+    def test_completed_hardware_stages_emit_review_only_next_operation_handoffs(self) -> None:
+        dispatcher = DISPATCHER.read_text(encoding="utf-8")
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        helper = (ROOT / "scripts/qwen_quant_handoff.py").read_text(
+            encoding="utf-8")
+        self.assertIn("q3_hardware:", proof)
+        self.assertIn("steps.handoff.outputs.q3_hardware", proof)
+        self.assertIn("q3_hardware_sha256", proof)
+        self.assertIn("qwen-prepare-matched-iu4-handoff:", dispatcher)
+        self.assertIn("qwen-prepare-quant-compare-handoff:", dispatcher)
+        self.assertEqual(dispatcher.count("/scripts/qwen_quant_handoff.py\""), 2)
+        self.assertIn('python3 "$helper" matched-iu4', dispatcher)
+        self.assertIn('python3 "$helper" quant-compare', dispatcher)
+        self.assertIn("No IU4 construction workflow was dispatched by this job.",
+                      dispatcher)
+        self.assertIn("No comparison workflow was dispatched by this job.",
+                      dispatcher)
+        self.assertNotIn("gh workflow run", dispatcher)
+        self.assertNotIn("import subprocess", helper)
+        self.assertNotIn("import urllib", helper)
+        self.assertNotIn("import socket", helper)
+        for marker, following in (
+                ("  qwen-prepare-quant-compare-handoff:",
+                 "  qwen-plan-q3-first-token:"),
+                ("  qwen-prepare-matched-iu4-handoff:",
+                 "  qwen-diagnose-first-token:")):
+            job = dispatcher[dispatcher.index(marker):dispatcher.index(following)]
+            for forbidden in ("ember-gpu-lock", "ember-cert-production",
+                              "calibrate_counter_units", "docker run"):
+                self.assertNotIn(forbidden, job)
 
     def test_candidate_reuse_rebinds_runtime_without_changing_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

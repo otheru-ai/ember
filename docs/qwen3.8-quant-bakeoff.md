@@ -396,6 +396,12 @@ no GPU and the dispatcher cannot call the ordinary constructor until planning
 succeeds. The request remains nonpublishing and nondeleting; this descriptive
 comparison arm is not promoted into the release selector.
 
+The completed Q3 job uploads a non-executing `matched-iu4-plan` handoff for
+review, and the completed IU4 construction job uploads the corresponding
+`quant-compare` handoff. Each artifact binds the exact revision, runner-local
+paths and digests, decoded envelope, strict base64, and envelope SHA-256. No
+job automatically crosses either review boundary or dispatches its successor.
+
 The subsequent supported hardware entrypoint is the `quant-compare`
 branch-dispatch operation routed to `qwen-q3-iu4-compare.yml`. Its digest-bound
 envelope names

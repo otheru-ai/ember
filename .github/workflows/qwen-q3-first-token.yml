@@ -15,6 +15,11 @@ on:
       construction_descriptor_sha256:
         required: true
         type: string
+    outputs:
+      q3_hardware:
+        value: ${{ jobs.first-token.outputs.q3_hardware }}
+      q3_hardware_sha256:
+        value: ${{ jobs.first-token.outputs.q3_hardware_sha256 }}
 
 permissions:
   contents: read
@@ -31,6 +36,9 @@ jobs:
   first-token:
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 1440
+    outputs:
+      q3_hardware: ${{ steps.handoff.outputs.q3_hardware }}
+      q3_hardware_sha256: ${{ steps.handoff.outputs.q3_hardware_sha256 }}
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
       CANDIDATE_ID: ${{ inputs.candidate_id }}
@@ -287,6 +295,7 @@ jobs:
           rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
 
       - name: Record the measured first-token handoff
+        id: handoff
         if: success()
         run: |
           first="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["generation"]["first_token_id"])' \
@@ -304,6 +313,9 @@ jobs:
           PY
           )
           (( ${#metrics[@]} == 5 ))
+          printf 'q3_hardware=%s\nq3_hardware_sha256=%s\n' \
+            "$QWEN_Q3_BENCHMARK_EVIDENCE" \
+            "$QWEN_Q3_BENCHMARK_EVIDENCE_SHA256" >>"$GITHUB_OUTPUT"
           {
             echo '## Qwen Q3 PLE differential and full benchmark completed'
             echo

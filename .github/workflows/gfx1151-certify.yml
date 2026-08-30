@@ -555,6 +555,58 @@ jobs:
       operation_request_sha256: ${{ needs.qwen-call-matched-iu4-plan.outputs.operation_request_sha256 }}
     secrets: inherit
 
+  qwen-prepare-quant-compare-handoff:
+    needs: [qwen-dispatch-envelope, qwen-build-matched-iu4]
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'matched-iu4-plan'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      Q3_CONSTRUCTION: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction }}
+      Q3_CONSTRUCTION_SHA256: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction_sha256 }}
+      Q3_HARDWARE: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware }}
+      Q3_HARDWARE_SHA256: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware_sha256 }}
+      IU4_CONSTRUCTION: ${{ needs.qwen-build-matched-iu4.outputs.construction_descriptor }}
+      IU4_CONSTRUCTION_SHA256: ${{ needs.qwen-build-matched-iu4.outputs.construction_descriptor_sha256 }}
+    steps:
+      - name: Prepare the reviewable quant-comparison handoff without dispatching
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          root="$RUNNER_TEMP/qwen-quant-compare-handoff"
+          install -d -m 700 "$root"
+          helper="$root/qwen_quant_handoff.py"
+          curl --fail --location --retry 3 --output "$helper" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TARGET_SHA}/scripts/qwen_quant_handoff.py"
+          output="/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/comparisons/q3-iu4-${TARGET_SHA:0:12}-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 "$helper" quant-compare \
+            --ember-revision "$TARGET_SHA" \
+            --q3-construction "$Q3_CONSTRUCTION" \
+            --q3-construction-sha256 "$Q3_CONSTRUCTION_SHA256" \
+            --q3-hardware "$Q3_HARDWARE" \
+            --q3-hardware-sha256 "$Q3_HARDWARE_SHA256" \
+            --iu4-construction "$IU4_CONSTRUCTION" \
+            --iu4-construction-sha256 "$IU4_CONSTRUCTION_SHA256" \
+            --comparison-output "$output" \
+            --output "$root/envelope.json" | tee "$root/handoff.json"
+          printf 'QWEN_NEXT_HANDOFF=%s\n' "$root" >>"$GITHUB_ENV"
+          {
+            echo '## Matched IU4 construction complete; comparison awaits review'
+            echo
+            echo 'The uploaded handoff contains the exact nonpublishing `quant-compare` dispatch inputs.'
+            echo 'No comparison workflow was dispatched by this job.'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the non-executing quant-comparison handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qwen-quant-compare-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QWEN_NEXT_HANDOFF }}
+          if-no-files-found: error
+          retention-days: 30
+
   qwen-plan-q3-first-token:
     if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
     uses: ./.github/workflows/qwen-q3-first-token-plan.yml
@@ -589,6 +641,56 @@ jobs:
       construction_descriptor: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor }}
       construction_descriptor_sha256: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor_sha256 }}
     secrets: inherit
+
+  qwen-prepare-matched-iu4-handoff:
+    needs: [qwen-build-q3-first-token, qwen-prove-q3-first-token]
+    if: inputs.release_version == 'qwen-q3-first-token-v1-20260828'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      TARGET_SHA: ${{ inputs.commit_sha }}
+      Q3_CONSTRUCTION: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor }}
+      Q3_CONSTRUCTION_SHA256: ${{ needs.qwen-build-q3-first-token.outputs.construction_descriptor_sha256 }}
+      Q3_HARDWARE: ${{ needs.qwen-prove-q3-first-token.outputs.q3_hardware }}
+      Q3_HARDWARE_SHA256: ${{ needs.qwen-prove-q3-first-token.outputs.q3_hardware_sha256 }}
+    steps:
+      - name: Prepare the reviewable matched-IU4 handoff without dispatching
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          root="$RUNNER_TEMP/qwen-matched-iu4-handoff"
+          install -d -m 700 "$root"
+          helper="$root/qwen_quant_handoff.py"
+          curl --fail --location --retry 3 --output "$helper" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TARGET_SHA}/scripts/qwen_quant_handoff.py"
+          short="${TARGET_SHA:0:12}"
+          python3 "$helper" matched-iu4 \
+            --ember-revision "$TARGET_SHA" \
+            --q3-construction "$Q3_CONSTRUCTION" \
+            --q3-construction-sha256 "$Q3_CONSTRUCTION_SHA256" \
+            --q3-hardware "$Q3_HARDWARE" \
+            --q3-hardware-sha256 "$Q3_HARDWARE_SHA256" \
+            --candidate-id "iu4-matched-$short" \
+            --construction-request-output \
+              "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/operation-requests/construction-iu4-matched-$short.json" \
+            --output "$root/envelope.json" | tee "$root/handoff.json"
+          printf 'QWEN_NEXT_HANDOFF=%s\n' "$root" >>"$GITHUB_ENV"
+          {
+            echo '## Complete Q3 evidence ready for review'
+            echo
+            echo 'The uploaded handoff contains the exact nonpublishing `matched-iu4-plan` dispatch inputs.'
+            echo 'No IU4 construction workflow was dispatched by this job.'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the non-executing matched-IU4 handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qwen-matched-iu4-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.QWEN_NEXT_HANDOFF }}
+          if-no-files-found: error
+          retention-days: 30
 
   qwen-diagnose-first-token:
     # Read-only recovery for a failed proof whose bounded output remains on the

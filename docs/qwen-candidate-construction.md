@@ -257,6 +257,15 @@ the ordinary constructor. Thus IU4 construction cannot begin before the Q3
 benchmark is complete, and the exceptional comparison row is not mislabeled
 as a release-selectable format winner.
 
+Successful Q3 proof and matched-IU4 construction jobs each upload a create-only
+next-operation handoff. The handoff contains the decoded envelope, its exact
+base64 and SHA-256, and the four `gfx1151-certify.yml` dispatch inputs. Q3 emits
+`matched-iu4-plan`; IU4 construction emits `quant-compare`. These handoffs do
+not invoke GitHub or acquire the GPU: they preserve an explicit operator review
+between stages while eliminating manual path, digest, and base64 transcription.
+[`qwen_quant_handoff.py`](../scripts/qwen_quant_handoff.py) enforces the fixed
+request/comparison roots and create-only output locally.
+
 After that matched IU4 construction, the separate `quant-compare` operation
 accepts exact path/SHA-256 pairs for both construction descriptors and the
 retained Q3 hardware record plus a new fixed-root output directory. The
