@@ -322,7 +322,46 @@ same reference. `hc_mix` and `hc_mix_rows` differ only in the `n_tokens`
 argument and the row-major slice of `raw_injection` (`:1418-1422`);
 `hc_combine` (`:151-158`) is per-row scalar arithmetic, identical in both.
 
-### Named suspect, untested: the gfx1151 type-101 MMVQ specializations
+### ISOLATED: `run_gdn_batch()` at width 3
+
+Codex 234, run `q3-gdn-mask4-eec1c68-static`, binary SHA-256
+`a095fb75cc7e1c6a4636b458a1b446a40b8c95ac90313cc6b38998955e7bc64c`.
+
+With the corrected diagnostic bit 4 serializing **only** the attention families
+— QSA through `run_qsa()` and GDN through causal row-ordered `run_gdn()` — the
+exact Q3 width-3 differential goes **green**:
+
+    q1 top2       830 @ 19.5070915, 1543 @ 15.118576
+    batched top2  identical
+    production prefill exact: true
+
+QSA, PLE, both HC mixers and MoE all remained on their **batched** paths. The
+only new serialization against the previously red mask 4 is GDN. So the defect
+is in `run_gdn_batch()` at width 3, or in its three-step HIP graph/state
+boundary.
+
+**This refutes the MMVQ specialization suspect recorded below, and it is
+withdrawn.** MoE, HC, PLE and QSA all ran batched at physical width 5 through
+the generic MMVQ path in the green run. If the generic-versus-`unroll2` kernel
+difference were the cause, that run could not have been exact. It was the
+strongest-looking lead available and it was wrong.
+
+It also resolves the 2-versus-3 residual that broke every other hypothesis.
+GDN is the one **recurrent** subsystem: a chunked recurrent kernel failing at
+n=3 while passing at n=2 needs no width-keyed story at all, only a tile or
+grouped-column boundary that n=2 does not cross.
+
+**And it vindicates the caveat on our own GDN coverage.** Every CPU GDN test
+passes — batch versus sequential at n=3 and n=16, output, conv frontier and
+final recurrent state — because they run head_dim 4 with 40 convolution
+channels and head_dim 16 with 128. Production is head_dim 128 with 10240
+channels, and `gated_delta_net.cu` at `S_v = 128` is what none of them reach.
+Grok raised exactly this (msgs 273, 313) and it was pointing at the defect.
+`56dfb0f` is now the cheapest way to reproduce on hardware without a full model
+load: it is the only GDN fixture whose shape HIP accepts, so pointing
+`test_qwen4exp_frontier` at a HIP backend exercises the real kernel.
+
+### WITHDRAWN suspect: the gfx1151 type-101 MMVQ specializations
 
 `engine/ggml/src/ggml-cuda/mmvq.cu:1495-1516` selects a **different kernel** by
 `ncols_dst`, for `Q4_0_ROCMFP4_FAST` on gfx1151 only:
