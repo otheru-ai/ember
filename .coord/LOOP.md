@@ -198,6 +198,25 @@ replay is a real authority boundary; the reference implementation has no q=1
 path at all and therefore cannot pose the question. Know which you are in
 before you write the assertion.
 
+**Swept 20260831T073000Z.** Known members and their status:
+
+| Site | Status |
+|---|---|
+| `sumrows.cu` | FIXED `9f1dc33` — block width `ncols`-only |
+| `mean.cu` | FIXED `86a5ce1` — byte-for-byte twin of the above |
+| `softmax.cu:330-332` | **CLEAN** — `nth` doubles to `ncols_x`, one block per row; the `nsm` cooperative path `:347-351` is gated on `mask == nullptr && scale == 1.0f` so attention softmax cannot reach it |
+| `fattn-common.cuh:1116-1120` | **OPEN** — `ntiles_x = ceil(Q->ne[1]/ncols1)`, so the KV split count (`nblocks_stream_k` `:1163-1176`, `parallel_blocks` occupancy search `:1186-1200`) steps with batch width. Deliberate upstream. Not shown to affect widths 1-17; widths 2-5 are bit-identical through the whole model, which bounds `ncols1` from below. Experiment filed as msg 362 |
+
+Two rules from the sweep:
+
+- **The CPU backend does not execute any of these heuristics.** A guard for
+  this class cannot live in the host suite or the container; it has to run on
+  the runner. Do not claim a host-suite test covers it.
+- `nsm` in a launch config is not by itself the defect. `sumrows.cu` still
+  uses it for `max_blocks`, which sets how many rows a block strides over —
+  the tree depends on `blockDim.x` alone. Check what the value feeds before
+  filing it.
+
 ## Dead code: tag it, do not silently route around it
 
 If you find engine code that cannot execute on what we ship — gfx1151 /
