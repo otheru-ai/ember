@@ -92,3 +92,13 @@ continue.
    Before asserting that a change removes a copy or a barrier, grep for every
    consumer of the buffer and cite the lines. Grok caught both.
 
+11. Review finding, deferred until the correctness blocker closes (msg 247):
+   `qwen4exp_runtime.cpp:1909-1917` pushes every batch row's position into
+   `state.mrope_positions` before the layer loop, while the serial path pushes
+   one per token at `:1161-1162`. Within a batch the position history runs
+   ahead of the KV state, which the comment at `:1918-1921` implicitly denies.
+   Inert at ctx <= 2048 — only the `!dense_selection` scorer reads it — but it
+   weakens the bounds guard at `:832-836` from a real check into one that
+   always passes. Fix: move the push to the per-row point where `index_key` is
+   appended. Do not land while the blocker is open.
+

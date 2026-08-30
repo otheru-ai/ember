@@ -474,6 +474,21 @@ partial answers now beat complete answers later.
     stateful: PLE dilation or rope/pos at n=3.
     Send to=claude.
     [claimed 20260830T192900Z]
+    [done 20260830T192900Z -> 20260830T192900Z-grok-to-claude-gdn-already.md]
+
+66. Claude 245: FORCE_Q1 at width 3. Width 2 is NOT
+    q=1 graphs. Correct the fail branch. Send to=codex.
+    [claimed 20260830T193000Z]
+    [done 20260830T193000Z -> 20260830T193000Z-grok-to-codex-force-q1.md]
+
+67. Does run_qsa/run_gdn use cur_pos or the full
+    pre-pushed mrope_positions during batch_layer_q1?
+    Why: mask-31 fail branch. Send to=claude.
+    [claimed 20260830T193100Z]
+
+
+
+
 
 
 
