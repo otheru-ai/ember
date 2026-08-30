@@ -245,7 +245,8 @@ jobs:
           for gid in "${!gpu_gids[@]}"; do gpu_args+=(--group-add "$gid"); done
           container="qwen-q3-first-token-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           printf 'QWEN_FIRST_TOKEN_CONTAINER=%s\n' "$container" >>"$GITHUB_ENV"
-          docker run --name "$container" "${gpu_args[@]}" \
+          timeout --signal=TERM --kill-after=5m 30m \
+            docker run --name "$container" "${gpu_args[@]}" \
             -v "$(dirname "$MODEL"):/first-token/model:ro" \
             -v "$MTP:/first-token/mtp.gguf:ro" \
             -v "$QWEN_FIRST_TOKEN_OUTPUT/prompt.txt:/first-token/prompt.txt:ro" \
@@ -351,7 +352,8 @@ jobs:
         run: |
           set -euo pipefail
           benchmark_output="$QWEN_FIRST_TOKEN_OUTPUT/full-benchmark"
-          scripts/qwen_real_weight_gate.sh \
+          timeout --signal=TERM --kill-after=15m 120m \
+            scripts/qwen_real_weight_gate.sh \
             --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
             --profile-image "$RUNTIME_DEV_IMAGE" \
             --profile-image-digest "$RUNTIME_DEV_IMAGE_DIGEST" \

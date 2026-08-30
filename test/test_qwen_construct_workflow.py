@@ -108,6 +108,17 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("disk validator requires >=512 prompt tokens", proof)
         self.assertNotIn("for i in range(180)", proof)
 
+    def test_q3_gpu_proof_phases_have_cleanup_aware_timeouts(self) -> None:
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        self.assertIn(
+            "timeout --signal=TERM --kill-after=5m 30m \\\n"
+            "            docker run --name", proof)
+        self.assertIn(
+            "timeout --signal=TERM --kill-after=15m 120m \\\n"
+            "            scripts/qwen_real_weight_gate.sh", proof)
+        self.assertIn(
+            "if: ${{ always() && steps.safety.outputs.armed == 'yes' }}", proof)
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {
