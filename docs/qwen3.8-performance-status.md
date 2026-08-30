@@ -65,6 +65,41 @@ Improvement over measurement 1: prefill peak **1.53x**, decode median
 fails at prompt widths 3, 6 and 17. Correctness is not established, so this
 number describes an engine we would not ship.
 
+### 3. Hard gate @ `faa5307`, `LUCE_MMVQ_MAX_NCOLS=5` — valid, and failing
+
+The first complete unprofiled hard-gate run on an exact binary (codex 215,
+evidence `hardgate-timing-faa5307-ncols5-20260830T191000Z/`).
+
+| | measured | gate |
+|---|---|---|
+| prefill median | 39.1807 | — |
+| prefill peak | **39.4019** | 412.0 |
+| decode median | **12.1333** | 39.49 |
+
+Prefill samples 39.0978 / 39.1807 / 39.4019, decode 12.1571 / 12.1333 / 12.1138.
+Every prefill sample evaluated exactly 2074 tokens and every decode sample
+completed exactly 256; all declared-rate rounding checks true. MTP acceptance
+0.767 on every retained decode sample. Memory gate passed: peak RSS 68.88 GB,
+peak UMA 76.21 GB. Binary SHA-256
+`f56b9e2bdf931f486082290813fe1bfd89fc72a79e27bd7f5d5d7b72b36d9e51`. Production
+restored, GPU lock free.
+
+**This is a valid measurement of a failing configuration, not a publishable
+number** — the correctness blocker is open, so what it measures is not yet a
+correct engine. Prefill is 10.5x short of the gate and decode 3.3x short.
+
+Against the earlier `a3a50c4` + ncols5 gate: median prefill +4.86%, peak
++3.54%, median decode +3.20%. Those runs were not interleaved, so that is not
+sole attribution to `faa5307`; the dedicated ABBA probe isolated `faa5307` at
+**+2.35%** on the calibrated 294-token workload.
+
+That +2.35% is the async tranche's real value, and it settles the prediction
+recorded above. A ~1.2x was expected and withdrawn on structural grounds — the
+tranche converts 30 copies to async but removes **zero** barriers, and seven of
+the fourteen groups hold a single copy where `get_async` immediately followed
+by `synchronize` is the blocking copy it replaced. The measurement agrees with
+the structure, not with the original guess.
+
 ## Gap decomposition
 
 Residency headroom alone, if GPU busy went to 100% with no other change:
@@ -286,6 +321,36 @@ reference including injection values, then at n=1 against the first row of the
 same reference. `hc_mix` and `hc_mix_rows` differ only in the `n_tokens`
 argument and the row-major slice of `raw_injection` (`:1418-1422`);
 `hc_combine` (`:151-158`) is per-row scalar arithmetic, identical in both.
+
+### Named suspect, untested: the gfx1151 type-101 MMVQ specializations
+
+`engine/ggml/src/ggml-cuda/mmvq.cu:1495-1516` selects a **different kernel** by
+`ncols_dst`, for `Q4_0_ROCMFP4_FAST` on gfx1151 only:
+
+    ncols_dst == 1  ->  mul_mat_vec_rocmfp4_unroll2_launch
+    ncols_dst == 4  ->  mul_mat_vec_rocmfp4_4col_reuse_launch
+    otherwise       ->  the generic path
+
+Their bit-exactness is asserted only in a comment — "Each preserves the
+original per-lane K traversal and accumulation order" — which is the same kind
+of claim the pad-independence comment made before it was tested.
+
+The consequence is sharp: **q=1 runs `unroll2` and batched runs generic**, and
+the differential compares batched against q=1. If those two kernels are not
+bit-identical, the differential fails *and the reference itself may be the
+wrong side*. "Mask 31 green" would then mean only that `unroll2` agrees with
+`unroll2`.
+
+Profile matches the failure exactly: HIP-only, type-101-only, `ncols`-dependent,
+and invisible to every CPU/F32 test above.
+
+Falsifier, one run, no new kernel: add an env guard forcing the generic path
+(the neighbouring code already uses `DFLASH_CUDA_MMVQ_*`), then compare q=1 with
+the specialization against q=1 without it. If they differ, the comment is false.
+
+Residual that does not fit yet, stated rather than papered over: widths 2 and 3
+both map to physical 5, so any kernel-selection story still has to explain why
+2 passes.
 
 ### Coverage is now complete at width 3
 
