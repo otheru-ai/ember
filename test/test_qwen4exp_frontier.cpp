@@ -1767,10 +1767,12 @@ static void test_persistent_qsa_prepared_resident() {
     weights.index_query = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
     weights.index_key = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
     weights.output = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 64);
-    weights.query_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
-    weights.key_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
+    weights.query_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_BF16, 64);
+    weights.key_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_BF16, 64);
     weights.index_query_norm =
-        ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
+        ggml_new_tensor_1d(ctx, GGML_TYPE_BF16, 64);
+    ggml_tensor * invalid_query_norm =
+        ggml_new_tensor_1d(ctx, GGML_TYPE_Q8_0, 64);
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     CHECK(buffer != nullptr, "resident QSA weight buffer allocates");
     if (!buffer) {
@@ -1793,7 +1795,10 @@ static void test_persistent_qsa_prepared_resident() {
     std::vector<float> norm(64U);
     for (size_t index = 0; index < norm.size(); ++index)
         norm[index] = 0.75f + 0.01f * static_cast<float>(index % 23U);
-    const std::array<std::pair<ggml_tensor *, const std::vector<float> *>, 9>
+    std::vector<ggml_bf16_t> norm_bf16(norm.size());
+    for (size_t index = 0; index < norm.size(); ++index)
+        norm_bf16[index] = ggml_fp32_to_bf16(norm[index]);
+    const std::array<std::pair<ggml_tensor *, const std::vector<float> *>, 6>
         uploads{{
             {weights.query, &query_weight},
             {weights.key, &key_weight},
@@ -1801,13 +1806,15 @@ static void test_persistent_qsa_prepared_resident() {
             {weights.index_query, &index_query_weight},
             {weights.index_key, &index_key_weight},
             {weights.output, &output_weight},
-            {weights.query_norm, &norm},
-            {weights.key_norm, &norm},
-            {weights.index_query_norm, &norm},
         }};
     for (const auto & upload : uploads) {
         ggml_backend_tensor_set(upload.first, upload.second->data(), 0,
                                 upload.second->size() * sizeof(float));
+    }
+    for (ggml_tensor * norm_tensor : {weights.query_norm, weights.key_norm,
+                                      weights.index_query_norm}) {
+        ggml_backend_tensor_set(norm_tensor, norm_bf16.data(), 0,
+                                norm_bf16.size() * sizeof(ggml_bf16_t));
     }
     std::string error;
     Qwen4ExpFrontierQsaGraph * graph =
@@ -1817,7 +1824,7 @@ static void test_persistent_qsa_prepared_resident() {
         std::fprintf(stderr, "resident QSA build error: %s\n", error.c_str());
     CHECK(graph != nullptr &&
               dflash::common::qwen4exp_frontier_qsa_can_keep_prepared(graph),
-          "resident QSA graph exposes prepared projection handoff");
+          "resident QSA graph mirrors BF16 norms and exposes prepared handoff");
     if (graph) {
         const std::vector<float> input = patterned_values(64U, 0.013f, 21);
         const int32_t position[3] = {37, 37, 37};
@@ -1888,6 +1895,14 @@ static void test_persistent_qsa_prepared_resident() {
                   close_vectors(resident_q3_output, host_q3_output, 2.0e-5f),
               "right-aligned resident current row matches q3 host staging");
     }
+    weights.query_norm = invalid_query_norm;
+    Qwen4ExpFrontierQsaGraph * invalid_graph =
+        dflash::common::qwen4exp_frontier_qsa_create_q1(
+            backend, spec, weights, -1, error);
+    CHECK(invalid_graph == nullptr && error.find("query norm") !=
+              std::string::npos,
+          "resident QSA rejects unsupported norm storage at construction");
+    dflash::common::qwen4exp_frontier_qsa_destroy(invalid_graph);
     dflash::common::qwen4exp_frontier_qsa_destroy(graph);
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);

@@ -1259,6 +1259,13 @@ bool qsa_vector(const ggml_tensor * tensor, int64_t count) {
            ggml_nelements(tensor) == count;
 }
 
+bool qsa_norm_vector(const ggml_tensor * tensor, int64_t count) {
+    return qsa_vector(tensor, count) &&
+           (tensor->type == GGML_TYPE_F32 ||
+            tensor->type == GGML_TYPE_F16 ||
+            tensor->type == GGML_TYPE_BF16);
+}
+
 void qsa_subgraph_destroy(Qwen4ExpFrontierQsaSubgraph & graph) {
     if (graph.allocator) ggml_gallocr_free(graph.allocator);
     if (graph.ctx) ggml_free(graph.ctx);
@@ -1446,10 +1453,19 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
     const bool value_rotation_valid = !weights.value_rotation ||
         qsa_matrix(weights.value_rotation, spec.head_dim, spec.head_dim);
     const bool prepare = qsa_prepare_spec_valid(spec);
-    const bool preparation_weights_valid = !prepare ||
-        (qsa_vector(weights.query_norm, spec.head_dim) &&
-         qsa_vector(weights.key_norm, spec.head_dim) &&
-         qsa_vector(weights.index_query_norm, spec.index_dim));
+    if (prepare && !qsa_norm_vector(weights.query_norm, spec.head_dim)) {
+        error = "invalid Qwen4Exp persistent QSA query norm contract";
+        return nullptr;
+    }
+    if (prepare && !qsa_norm_vector(weights.key_norm, spec.head_dim)) {
+        error = "invalid Qwen4Exp persistent QSA key norm contract";
+        return nullptr;
+    }
+    if (prepare &&
+        !qsa_norm_vector(weights.index_query_norm, spec.index_dim)) {
+        error = "invalid Qwen4Exp persistent QSA index-query norm contract";
+        return nullptr;
+    }
     if (!backend || !qsa_spec_valid(spec) ||
         !qsa_matrix(weights.query, spec.n_embd, 2 * q_values) ||
         !qsa_matrix(weights.key, spec.n_embd, kv_values) ||
@@ -1457,9 +1473,18 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
         !qsa_matrix(weights.index_query, spec.n_embd, iq_values) ||
         !qsa_matrix(weights.index_key, spec.n_embd, spec.index_dim) ||
         !qsa_matrix(weights.output, q_values, spec.n_embd) ||
-        !key_rotation_valid || !value_rotation_valid ||
-        !preparation_weights_valid) {
+        !key_rotation_valid || !value_rotation_valid) {
         error = "invalid Qwen4Exp persistent QSA tensor contract";
+        return nullptr;
+    }
+    std::vector<float> query_norm_f32, key_norm_f32, index_query_norm_f32;
+    if (prepare &&
+        (!download_tensor_f32(
+             weights.query_norm, query_norm_f32, error) ||
+         !download_tensor_f32(weights.key_norm, key_norm_f32, error) ||
+         !download_tensor_f32(
+             weights.index_query_norm, index_query_norm_f32, error))) {
+        error = "Qwen4Exp QSA norm mirror initialization failed: " + error;
         return nullptr;
     }
     std::unique_ptr<Qwen4ExpFrontierQsaGraph> result(
@@ -1502,7 +1527,25 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
     ggml_set_output(result->projected_value);
     ggml_set_output(result->projected_index_query);
     ggml_set_output(result->projected_index_key);
+    ggml_tensor * query_norm_f32_tensor = nullptr;
+    ggml_tensor * key_norm_f32_tensor = nullptr;
+    ggml_tensor * index_query_norm_f32_tensor = nullptr;
     if (prepare) {
+        query_norm_f32_tensor = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_F32, spec.head_dim);
+        key_norm_f32_tensor = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_F32, spec.head_dim);
+        index_query_norm_f32_tensor = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_F32, spec.index_dim);
+        ggml_set_input(query_norm_f32_tensor);
+        ggml_set_input(key_norm_f32_tensor);
+        ggml_set_input(index_query_norm_f32_tensor);
+        // These mirrors are uploaded once and reused by every projection.
+        // INPUT alone does not reserve a gallocr buffer after its last read;
+        // OUTPUT ownership keeps their static contents live across executions.
+        ggml_set_output(query_norm_f32_tensor);
+        ggml_set_output(key_norm_f32_tensor);
+        ggml_set_output(index_query_norm_f32_tensor);
         result->projection_position = ggml_new_tensor_1d(
             ctx, GGML_TYPE_I32, GGML_MROPE_SECTIONS);
         ggml_set_input(result->projection_position);
@@ -1526,8 +1569,13 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
                 static_cast<size_t>(2 * spec.head_dim) * sizeof(float),
                 static_cast<size_t>(spec.head_dim) * sizeof(float)),
             spec.head_dim, spec.n_heads);
+        // MTP companions deliberately keep norm vectors in BF16. The HIP
+        // binary-broadcast MUL accepts only an F32/F16 right operand, so these
+        // graph-owned F32 mirrors are decoded and uploaded once at construction
+        // instead of adding three casts to every q=1 projection.
         query = ggml_mul(
-            ctx, ggml_rms_norm(ctx, query, spec.epsilon), weights.query_norm);
+            ctx, ggml_rms_norm(ctx, query, spec.epsilon),
+            query_norm_f32_tensor);
         result->prepared_query = ggml_rope_multi(
             ctx, query, result->projection_position, nullptr,
             EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
@@ -1537,7 +1585,8 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
         ggml_tensor * key = ggml_reshape_2d(
             ctx, result->projected_key, spec.head_dim, spec.n_kv_heads);
         key = ggml_mul(
-            ctx, ggml_rms_norm(ctx, key, spec.epsilon), weights.key_norm);
+            ctx, ggml_rms_norm(ctx, key, spec.epsilon),
+            key_norm_f32_tensor);
         result->prepared_key = ggml_rope_multi(
             ctx, key, result->projection_position, nullptr,
             EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
@@ -1551,7 +1600,7 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
             spec.n_index_heads);
         index_query = ggml_mul(
             ctx, ggml_rms_norm(ctx, index_query, spec.epsilon),
-            weights.index_query_norm);
+            index_query_norm_f32_tensor);
         result->prepared_index_query = ggml_rope_multi(
             ctx, index_query, result->projection_position, nullptr,
             EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
@@ -1590,6 +1639,21 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
                       "Qwen4Exp QSA projection graph allocation failed")) {
         qwen4exp_frontier_qsa_destroy(result.release());
         return nullptr;
+    }
+    if (prepare) {
+        // projection owns one immutable graph and allocator for its lifetime;
+        // no later reserve/reallocation may replace these uploaded buffers.
+        // If allocator reuse across graph shapes is introduced, re-upload the
+        // mirrors after every successful reserve before computing the graph.
+        ggml_backend_tensor_set(
+            query_norm_f32_tensor, query_norm_f32.data(), 0,
+            query_norm_f32.size() * sizeof(float));
+        ggml_backend_tensor_set(
+            key_norm_f32_tensor, key_norm_f32.data(), 0,
+            key_norm_f32.size() * sizeof(float));
+        ggml_backend_tensor_set(
+            index_query_norm_f32_tensor, index_query_norm_f32.data(), 0,
+            index_query_norm_f32.size() * sizeof(float));
     }
 
     if (weights.key_rotation || weights.value_rotation) {
