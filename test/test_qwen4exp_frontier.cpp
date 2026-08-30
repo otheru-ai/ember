@@ -797,6 +797,126 @@ static std::vector<float> reference_qsa_attention(
 // backend and still not the 128-wide production kernel, but unlike the fixture
 // above it is a shape HIP would accept, so pointing it at a HIP build later
 // exercises the real dispatch instead of a fallback.
+// Which accumulation order is closer to exact?
+//
+// The hardware divergence between batched GDN and three sequential q1 steps
+// measures 1.1920929e-07 -- exactly 2^-23, one float32 ULP near 1.0. That is
+// the floor for two valid roundings, so it says the two paths round
+// differently and nothing about which is right. Comparing them to each other
+// never can.
+//
+// The structural difference is where the recurrent state lives between tokens:
+// the batched kernel carries it across the token loop without storing it,
+// while q1 writes it to a float buffer and reads it back on the next step. The
+// control above cannot expose that, because on the CPU backend both paths
+// store to the same std::vector<float>.
+//
+// So model the two orders directly and measure both against a double chain:
+//
+//   carried  -- state stays in double across the three tokens, rounded to
+//               float once at the end
+//   rounded  -- state is rounded to float after every token
+//
+// **This does not model the two HIP paths, and must not be read as doing so.**
+// The grouped kernel holds `state_shard` in *float* registers
+// (gated_delta_net.cu:253), so the batched path rounds to float per element
+// too; the real difference between it and q1 is FMA contraction and scheduling
+// at a different loop trip count, not float versus double. A faithful model of
+// that cannot be written portably in C++.
+//
+// What this does establish is the recurrence's *sensitivity*: how much error a
+// rounding at the token boundary actually costs, which bounds whether a
+// one-ULP divergence compounding over three tokens and 48 layers is plausible
+// or needs another explanation. Which of Ember's two paths is closer to exact
+// is still decided by running the control below on HIP.
+static void test_gdn_recurrent_accumulation_order() {
+    using dflash::common::Qwen4ExpFrontierGdnSpec;
+    const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 128, 4, 1.0e-6f};
+    const int channels =
+        (2 * spec.n_key_heads + spec.n_heads) * spec.head_dim;
+    const int core_values = spec.n_heads * spec.head_dim;
+
+    const std::vector<float> qkv_weight =
+        patterned_values(static_cast<size_t>(spec.n_embd) * channels, 0.017f, 11);
+    const std::vector<float> alpha_weight =
+        patterned_values(static_cast<size_t>(spec.n_embd) * spec.n_heads, 0.019f, 7);
+    const std::vector<float> beta_weight =
+        patterned_values(static_cast<size_t>(spec.n_embd) * spec.n_heads, 0.023f, 5);
+    const std::vector<float> conv_weight =
+        patterned_values(static_cast<size_t>(spec.conv_width) * channels, 0.021f, 13);
+    const std::vector<float> a = patterned_values(spec.n_heads, -0.031f, 5);
+    const std::vector<float> dt = patterned_values(spec.n_heads, 0.007f, 3);
+    (void) core_values;
+
+    const std::vector<float> initial_conv = patterned_values(
+        static_cast<size_t>(spec.conv_width - 1) * channels, 0.009f, 7);
+    const std::vector<float> initial_recurrent = patterned_values(
+        static_cast<size_t>(spec.n_heads) * spec.head_dim * spec.head_dim,
+        0.004f, 9);
+
+    std::vector<std::vector<float>> rows;
+    for (int row = 0; row < 3; ++row) {
+        rows.push_back(patterned_values(spec.n_embd, 0.037f, row + 2));
+    }
+
+    auto chain = [&](bool round_between_tokens) {
+        std::vector<double> conv(initial_conv.begin(), initial_conv.end());
+        std::vector<double> rec(initial_recurrent.begin(),
+                                initial_recurrent.end());
+        for (const std::vector<float> & row : rows) {
+            std::vector<double> next_conv;
+            rec = reference_gdn_recurrent_double(
+                spec, qkv_weight, alpha_weight, beta_weight, conv_weight,
+                a, dt, row, conv, rec, next_conv);
+            conv = next_conv;
+            if (round_between_tokens) {
+                for (double & value : rec)
+                    value = static_cast<double>(static_cast<float>(value));
+                for (double & value : conv)
+                    value = static_cast<double>(static_cast<float>(value));
+            }
+        }
+        return rec;
+    };
+
+    const std::vector<double> exact   = chain(false);
+    const std::vector<double> carried = chain(false);
+    const std::vector<double> rounded = chain(true);
+
+    auto worst = [&](const std::vector<double> & candidate) {
+        double m = 0.0;
+        for (size_t i = 0; i < candidate.size() && i < exact.size(); ++i) {
+            m = std::max(m, std::fabs(candidate[i] - exact[i]));
+        }
+        return m;
+    };
+
+    // `carried` is the same computation as `exact`; rounding to float once at
+    // the end is what a non-spilling kernel does, so its only error is that
+    // final rounding.
+    std::vector<double> carried_f32 = carried;
+    for (double & value : carried_f32)
+        value = static_cast<double>(static_cast<float>(value));
+
+    const double carried_error = worst(carried_f32);
+    const double rounded_error = worst(rounded);
+
+    std::fprintf(stderr,
+                 "[gdn-accumulation] carried_vs_exact=%.9g "
+                 "rounded_vs_exact=%.9g ratio=%.4g\n",
+                 carried_error, rounded_error,
+                 carried_error > 0.0 ? rounded_error / carried_error : 0.0);
+
+    CHECK(rounded_error > 0.0,
+          "rounding the recurrent state between tokens loses precision");
+    CHECK(carried_error <= rounded_error,
+          "carrying the recurrent state across tokens is at least as close to "
+          "exact as rounding it between them");
+    CHECK(rounded_error < 1.0e-6,
+          "token-boundary rounding stays within a few ULP over three tokens, "
+          "so a compounding one-ULP divergence is the expected scale");
+}
+
 static void test_gdn_batch_at_hip_legal_conv_channels() {
     using dflash::common::Qwen4ExpFrontierGdnGraph;
     using dflash::common::Qwen4ExpFrontierGdnSpec;
@@ -880,6 +1000,7 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
     }
 
     std::string error;
+    setenv("DFLASH_QWEN_GDN_BATCH_COMPARE", "1", 1);
     Qwen4ExpFrontierGdnGraph * batch_graph =
         dflash::common::qwen4exp_frontier_gdn_create_batch(
             backend, spec, weights, -1, 3, error);
@@ -920,6 +1041,22 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
               "HIP-legal GDN batch advances convolution state exactly");
         CHECK(ok && close_vectors(next_recurrent, expected_recurrent, 2.0e-5f),
               "HIP-legal GDN batch final recurrent state matches scalar rows");
+        dflash::common::Qwen4ExpFrontierGdnInputs captured;
+        const bool capture_ok =
+            dflash::common::qwen4exp_frontier_gdn_capture_inputs(
+                batch_graph, captured, error);
+        CHECK(capture_ok &&
+                  captured.convolved.size() ==
+                      static_cast<size_t>(3 * channels) &&
+                  captured.q.size() ==
+                      static_cast<size_t>(3 * core_values) &&
+                  captured.k.size() ==
+                      static_cast<size_t>(3 * core_values) &&
+                  captured.decay.size() ==
+                      static_cast<size_t>(3 * spec.n_heads) &&
+                  captured.beta.size() ==
+                      static_cast<size_t>(3 * spec.n_heads),
+              "GDN comparator captures every recurrence input tensor");
 
         // Which side is right? The batched path keeps the recurrent state in
         // registers across the token loop; three sequential q1 steps round-trip
@@ -996,6 +1133,7 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
     ggml_backend_buffer_free(buffer);
     ggml_free(ctx);
     ggml_backend_free(backend);
+    unsetenv("DFLASH_QWEN_GDN_BATCH_COMPARE");
 }
 
 static void test_persistent_qsa_q1() {
@@ -1679,6 +1817,7 @@ static void test_bounded_cache_and_prefill_policy() {
 int main() {
     test_persistent_hc_mixer();
     test_persistent_gdn_q1();
+    test_gdn_recurrent_accumulation_order();
     test_gdn_batch_at_hip_legal_conv_channels();
     test_persistent_qsa_q1();
     test_causal_attention_stateless_ffn_batching();
