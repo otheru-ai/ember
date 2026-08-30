@@ -205,9 +205,20 @@ copies per token that no A/B may be credited with removing.
 
 The YaRN rope is not in this table at all: it runs on the host in
 `prepare_qsa_row` (`qwen4exp_runtime.cpp:745-770`), between the project
-download barrier and the attend upload barrier. What tranche 1 removes is the
-**5-get at `:1513`**, which exists only so the host can run `rms_norm` + `rope`
-on those tensors, plus the head-wise host arithmetic itself.
+download barrier and the attend upload barrier. What tranche 1 targets is the
+**5-get at `:1513`**, which exists so the host can run `rms_norm` + `rope` on
+those tensors.
+
+It does **not** delete that barrier. `finish_qsa_row`
+(`qwen4exp_runtime.cpp:775-909`) still consumes host `index_query` and
+`index_key` for the 4-token pool, the ReLU score and the top-512 selection
+(`:811`, `:812`, `:843`) and appends `index_key` to `state.index_key` at
+`:908`. Those are two of the five gets. So the group goes from depth 5 to depth
+2 and the barrier count stays at 12 until the indexer itself moves on-device.
+
+The tranche is still worth taking — three fewer host copies, the head-wise
+`rms_norm` and `rope` off the CPU, and the numerics improvement above — but it
+must not be measured as "one barrier deleted".
 
 Consequence for `faa5307`, which converted those 30 copies to async: it removes
 **zero** barriers. It only lets copies overlap *within* a group, and seven of

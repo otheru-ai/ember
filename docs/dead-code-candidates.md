@@ -106,3 +106,49 @@ as a suspected source of per-token hard syncs and refuted.
 **Recommendation: no action.** Vendored; upstream needs it for cases we do not
 hit. Recorded so the next person does not re-derive it as a lever. See
 `docs/qwen3.8-performance-status.md`.
+
+---
+
+## 4. HIP graph replay — permanently disabled, do not re-open
+
+**Scope:** configuration (build cache) + architecture (the capture key never
+stabilizes on our workload).
+
+Proposed by grok (`.coord/msg/`, grok 233) and verified against source.
+
+**A framing correction to that proposal.** This is not dead code in the sense
+of the entries above — the capture path in vendored ggml is live for anyone who
+builds with it. It is a **permanently disabled configuration**, registered here
+for the same reason: it keeps being rediscovered as an obvious win, and it must
+never be credited in an A/B.
+
+**Evidence.** `engine/CMakeLists.txt:18` —
+`set(GGML_HIP_GRAPHS OFF CACHE BOOL "" FORCE)`. `FORCE` is deliberate: a plain
+option default does not overwrite an existing build-tree cache entry, so an
+incremental tree could otherwise keep `ON`. The comment at `:19-48` carries the
+measurements:
+
+    graphs ON : prefill 22.9 tok/s, decode 21.39 tok/s
+    graphs OFF: prefill 24.6 tok/s, decode 22.29 tok/s   (+7.4% / +4.2%)
+
+and the 2026-08-22 re-measurement after the first diagnosis proved wrong.
+Widening `DS4_COMP_PAD_STRIDE` to 256 still produced 64 graph-mismatch and 224
+warmup-churn events, and prefill regressed at every context length (213.0 /
+327.1 / 397.4 / 338.6 / 311.4 OFF against 206.8 / 317.7 / 391.0 / 332.4 / 308.0
+ON, at 154 / 538 / 2074 / 8218 / 16410 tokens).
+
+Root cause is recorded in the comment: `[graph-mismatch] node=0 op=VIEW
+name=ds4_raw_kv_1`. The raw MLA KV cache is a sliding-window ring, so the write
+row rotates every token and the view offset is baked into the captured
+topology. The graph is invalidated once per token; no pad stride can affect it.
+
+**Falsifier.** `GGML_HIP_GRAPHS=ON` with a graph key carrying no per-token VIEW
+offset, plus a decode A/B that beats OFF. Not shown. The one fix proposed —
+widening the pad stride — was tested and failed.
+
+**Do not conflate.** Qwen's *persistent graphs* are ggml compute graphs built
+once and re-dispatched. They are unrelated to HIP graph replay. A claim about
+one says nothing about the other.
+
+**Recommendation: keep `FORCE OFF`.** The comment is already thorough; no code
+change. `.coord/LOOP.md` also forbids re-opening this.
