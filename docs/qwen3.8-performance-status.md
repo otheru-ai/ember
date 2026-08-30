@@ -350,6 +350,29 @@ Codex 325 then ran the corrected combination sweep: **every bit-4 superset is
 exact and every bit-4-absent mask is red.** The isolation holds across the
 whole sweep, not just the single mask-4 run.
 
+### Grouped-cols exonerated; suspicion moves to GDN's inputs
+
+Codex 338 ran `DFLASH_GDN_NO_GROUPED_COLS` at width 3. **Real width 3 is red
+both with and without it** — two different kernels, the same wrong answer. They
+share very little code, so both carrying the same arithmetic fault is unlikely.
+That moves the suspicion **off the kernel and onto its inputs**: the batch
+graph is handing GDN something different from what three sequential q1 steps
+hand it.
+
+The seam is `qwen4exp_frontier.cpp:954-1000` — `ggml_ssm_conv`, the q/k/v
+`view_4d`s into `convolved` (strided `nb2 = conv_channels`), `exact_l2_norm`,
+and the `repeat_4d` GQA expansion. Those views are the part of the seam whose
+shape changes with width; the q1 graph builds them at `n_tokens = 1`.
+
+**The synthetic half of that run proved nothing, and the fixture was at fault.**
+`launch_gated_delta_net` switches on `S_v` (`gated_delta_net.cu:397-440`), so
+the control's `head_dim = 16` selected `gated_delta_net_cuda<16, ...>` — a
+separate template instantiation sharing no code with the S_v=128 path, with the
+grouped-cols specialization not even compiled into that call. Green with and
+without the guard is exactly what a fixture that never reached either kernel
+would produce. Fixed in `4e9a6aa`: `head_dim = 128`, 1024 conv channels (still
+`% 128 == 0`), both properties asserted in the test.
+
 ### Where in GDN, from the pass/fail pattern
 
 A fresh GDN chunk starts from `S = 0`, and that alone explains why n=1 is
