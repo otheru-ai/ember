@@ -10,18 +10,16 @@ void sum_rows_f32_cuda(const float * x, float * dst, const int ncols, const int 
     // is unchanged, so this is bit-identical to the uncapped launch.
     const int64_t max_blocks = (int64_t) nsm * 128;
     const dim3 block_nums(nrows > max_blocks ? max_blocks : nrows, 1, 1);
-    if ((nrows / nsm) < 2) {
-        const dim3 block_dims(512, 1, 1);
-        reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(x, dst, ncols, nrows);
-    } else {
-        // Short rows: the block-per-row path would give each lane one element
-        // and spend the butterfly adding zeros. Bit-exact, see reduce_rows.cuh.
-        if (reduce_rows_short_f32_cuda</*norm=*/false>(x, dst, ncols, nrows, stream)) {
-            return;
-        }
-        const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
-        reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(x, dst, ncols, nrows);
+    // The reduction tree must depend only on row width.  Selecting blockDim
+    // from nrows made q=1 and batched GDN L2 normalization reduce the same 128
+    // values through 512- and 32-thread trees respectively on gfx1151.
+    // Short rows: the block-per-row path would give each lane one element and
+    // spend the butterfly adding zeros. Bit-exact, see reduce_rows.cuh.
+    if (reduce_rows_short_f32_cuda</*norm=*/false>(x, dst, ncols, nrows, stream)) {
+        return;
     }
+    const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
+    reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(x, dst, ncols, nrows);
 }
 
 void ggml_cuda_op_sum_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -45,18 +43,11 @@ void ggml_cuda_op_sum_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     // is unchanged, so this is bit-identical to the uncapped launch.
     const int64_t max_blocks = (int64_t) nsm * 128;
     const dim3 block_nums(nrows > max_blocks ? max_blocks : nrows, 1, 1);
-    if ((nrows / nsm) < 2) {
-        // Increase num threads to 512 for small nrows to better hide the latency
-        const dim3 block_dims(512, 1, 1);
-        reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
-    } else {
-        // Short rows: the block-per-row path would give each lane one element
-        // and spend the butterfly adding zeros. Bit-exact, see reduce_rows.cuh.
-        if (reduce_rows_short_f32_cuda</*norm=*/false>(src0_d, dst_d, ncols, nrows, stream)) {
-            return;
-        }
-        // Enough active SMs to hide latency, use smaller blocks to allow better scheduling
-        const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
-        reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
+    // Keep the arithmetic tree invariant when only the number of independent
+    // rows changes.  Grid capping may vary with nrows; block width may not.
+    if (reduce_rows_short_f32_cuda</*norm=*/false>(src0_d, dst_d, ncols, nrows, stream)) {
+        return;
     }
+    const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
+    reduce_rows_f32</*norm=*/false><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols, nrows);
 }
