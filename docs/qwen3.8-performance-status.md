@@ -275,7 +275,7 @@ composition to width 6, which maps to physical **16** and can only be MMQ.
 | 2, 3 | 5 | MMVQ | **green** |
 | 4, 5 | 5 | MMVQ | **green** (codex 374) |
 | 6 | 16 | MMQ | **red** |
-| 17 | 0 — cache does not serve it | — | not run |
+| 17 | chunks to **16 + 1** | MMQ then MMVQ | **red** (codex 376) |
 
 **Run, and the boundary is exact.** Widths 4 and 5 are validator-green on
 `86a5ce1`. Every width whose physical bucket is 5 passes; the first width whose
@@ -302,9 +302,17 @@ Three things bear on it, all recorded above:
 - `qwen4exp_mtp.cpp:320-327` already declines to rely on this kind of equality
   where it *does* matter, and answers it architecturally.
 
-Width 17 should still be measured — it maps to physical 0, so the dense/MoE
-cache does not serve it and it is a third question, not a fourth data point on
-this one.
+**Width 17 is measured, and it strengthens the case rather than complicating
+it.** I had recorded it as a third question because `moe_cached_width(17)`
+returns 0. Codex corrected that from source: `dense_eval_rows` processes 17 as
+a **max-16 chunk plus one row**, so the path still crosses the physical-16 MMQ
+boundary. It is a fourth data point on the same question, not an independent
+one.
+
+**The correlation is now complete across every width measured**: 2, 3, 4 and 5
+stay entirely on MMVQ and are green; 6 and 17 both contain physical-16 MMQ work
+and are red against the q1 MMVQ reference. Five of five widths follow the
+family boundary exactly, with no exceptions in either direction.
 
 Width 17 maps to physical **0** — the dense/MoE cache does not serve it — so it
 is a third question again, and it has not been run since the fix.
