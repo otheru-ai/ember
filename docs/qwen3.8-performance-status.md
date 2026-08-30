@@ -44,10 +44,20 @@ while the above is open.
   quantization, ~101 MB of upload per decode token at ctx 2048.
   → *Candidate, unsized*
 
-**Expect this.** Every published number on this part sits at 22.6-28.1 decode
-and 345-385 prefill. Our gates are 39.49 and 412. The first green measurement
-will very likely be a real result *and* short of the gate; both are true at
-once. → *What the first publishable number requires*
+**Expect this.** Most published numbers on this part sit at 22.6-28.1 decode
+and 345-385 prefill, below our 39.49 and 412 gates, so the first green
+measurement will very likely be a real result *and* short of target.
+
+**Correction 2026-08-31**: an earlier version of this line said our gates sit
+above *every* published number. They do not.
+`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF` claims **423 t/s
+prefill** and **up to 40 tok/s** decode with adaptive drafting on Strix Halo —
+both above our gates. The caveat is real and load-bearing: 423 is measured at
+**512 tokens** where our gate is at **2074**, and prefill falls with length on
+every ladder observed (that model's own drops to 138 at 128k). Not a
+like-for-like refutation, but "nobody has exceeded our gates" was too strong.
+→ *What the first publishable number requires*,
+[`qwen3.8-external-gguf-compatibility.md`](qwen3.8-external-gguf-compatibility.md)
 
 ## Target
 
