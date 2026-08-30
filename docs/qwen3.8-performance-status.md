@@ -142,8 +142,13 @@ Not throughput, but the shape of the problem. Still believed current.
 | achieved bandwidth | 11.29 GB/s | 12.79 GB/s |
 
 Roofline is 212 GB/s, so this is launch- and synchronization-bound, not
-bandwidth-bound. `copyBuffer` is undercounted: `cudaMemcpy2DAsync` lowers to
-`__amd_rocclr_copyBufferRect`, a separate rocprof name not included above.
+bandwidth-bound.
+
+The `copyBuffer` row was annotated as an undercount, on the theory that
+`cudaMemcpy2DAsync` lowers to a separately-named `__amd_rocclr_copyBufferRect`.
+**That was checked and is false**: `copyBufferRect` appears zero times in the
+trace. Every copy takes the 1D packed branch of `ggml_cuda_cpy_tensor_2d`
+(`engine/ggml/src/ggml-cuda/ggml-cuda.cu:1478-1510`). The row is complete.
 
 ## Open correctness blocker
 
@@ -164,3 +169,78 @@ ROCm 10 gfx1151 calibration (run 33288846711) measured `FETCH_SIZE` at 64-byte
 and `WRITE_SIZE` at 128-byte transactions, relative RMSE ~0.0012. `AGENTS.md`
 previously asserted KiB. Any bandwidth figure computed under the KiB assumption
 is wrong by 16x/8x.
+
+## Host-barrier census @ `faa5307` (static, `qwen4exp_frontier.cpp`)
+
+Grouping each run of `ggml_backend_tensor_get_async` / `_set_async` by the
+`ggml_backend_synchronize` that terminates it:
+
+| copies | barrier | function |
+|---|---|---|
+| 1 | :583 | `dense_eval` (:542) |
+| 1 | :603 | `dense_eval` |
+| 1 | :697 | `hc_eval` (:639) |
+| 3 | :732 | `hc_eval` |
+| 3 | :1140 | `gdn_eval_batch` (:1096) |
+| 3 | :1162 | `gdn_eval_batch` |
+| 1 | :1486 | `qsa_project_q1` (:1468) |
+| 5 | :1513 | `qsa_project_q1` |
+| 2 | :1550 | `qsa_rotate_q1` (:1517) |
+| 2 | :1561 | `qsa_rotate_q1` |
+| 5 | :1648 | `qsa_attend_q1` (:1567) |
+| 1 | :1657 | `qsa_attend_q1` |
+| 1 | :1887 | `moe_eval` (:1869) |
+| 1 | :1896 | `moe_eval` |
+
+**14 barriers, 30 copies, 7 stages, every stage a barrier pair** — one closing
+the upload run, one closing the download run.
+
+Consequence for `faa5307`, which converted those 30 copies to async: it removes
+**zero** barriers. It only lets copies overlap *within* a group, and seven of
+the fourteen groups hold exactly one copy, where a `get_async` immediately
+followed by `synchronize` is the blocking `get` it replaced. So it can act on
+23 of 30 copies across 7 groups of depth 2,2,3,3,3,5,5.
+
+An earlier ~1.2x prediction for this tranche is **withdrawn** — it was not
+derived from this structure. Whether the reachable saving is large depends on
+whether copy cost is latency- or transfer-dominated, which the pending A/B
+answers and the structure does not.
+
+What the structure does establish: whatever fraction of decode time is barrier
+latency is untouched by `faa5307` and moves only with the stage-removal
+tranches. The measurement that sizes it is a per-barrier counter dumped per
+decode token, not a static call count — `dense_eval`, `hc_eval` and `moe_eval`
+are called from a dozen sites across `qwen4exp_frontier.cpp` and
+`qwen4exp_runtime.cpp`.
+
+## RoPE numerics: the host scalar degrades with position
+
+From `test/test_qwen_rope_graph_oracle.cpp` (`3cc509e`), which carries a
+double-precision reference. Max absolute error of the host scalar
+`ember_qwen_yarn_apply` against exact, yarn off / on:
+
+| pos | yarn off | yarn on |
+|---|---|---|
+| 7 | 1.56e-07 | 2.05e-07 |
+| 1024 | 1.76e-05 | 2.00e-05 |
+| 2074 | 4.37e-05 | 4.97e-05 |
+| 65536 | 9.33e-04 | 1.06e-03 |
+| 131072 | 2.11e-03 | 2.40e-03 |
+| 262143 | 5.65e-03 | 6.43e-03 |
+
+`powf(1e7, 2k/64)` carries ~1 ulp and the angle multiplies that by `pos`; there
+is no mod-2pi reduction (`qwen_yarn.c:107`). The worst pair is k=1 or 2, not
+k=0, because `inv_freq[0]` is exactly 1.0 and `pos * 1.0` is exact for integer
+`pos` below 2^24.
+
+The HIP `ggml_rope_multi` kernel computes theta in double and defers the
+reduction (`rope.cu:15-29`, added explicitly because `freq_base = 1e7` is past
+the f32 precision wall). So:
+
+- A HIP-vs-host disagreement at long positions is HIP being right. Do not gate
+  a HIP differential on host agreement at long `pos`, and do not tune the
+  kernel to match.
+- Tranche 1 **improves** numerics rather than risking them. At pos 262141 under
+  YaRN the graph path is already closer to exact than the host scalar it
+  replaces — 1.86e-3 vs 2.75e-3 — on the CPU backend alone, before the fp64
+  theta the HIP kernel adds.
