@@ -39,20 +39,33 @@ Make Ember's Qwen3.8-Flash-Next inference engine on AMD Strix Halo (gfx1151)
 meet or exceed DeepSeek-V4-Flash: **prefill peak ~345 tok/s, decode 23.6-23.8
 tok/s AR**. It is not met until a valid measurement says so.
 
-Standing facts, current as of 2026-08-30:
+**Measurements live in [`docs/qwen3.8-performance-status.md`](../docs/qwen3.8-performance-status.md),
+and only there.** Do not copy numbers into this file.
 
-- No trustworthy Qwen performance number exists yet. The only complete
-  measurement (decode 4.498 / prefill 24.756 at `c5cb7a2`) predates the
-  correctness validator and may itself be numerically divergent.
-- A q1-vs-batched prefill correctness bug is being closed. Root cause isolated:
-  choosing MMQ at physical width q5. `LUCE_MMVQ_MAX_NCOLS=5` makes it
-  bit-exact. Our default of 3 is an inherited sm_86 RTX 3090 number, not a
-  gfx1151 measurement.
-- Performance is launch- and synchronization-bound, not bandwidth-bound: GPU
-  busy is 13.9% of prefill wall time, 32.4% of decode, achieved 11.29/12.79
-  GB/s against a 212 GB/s roofline.
-- HIP graph replay is ruled out (1.84 us/node floor on gfx1151; measured
-  regression locally). Do not re-open it.
+That rule is the point, not tidiness. This section previously carried its own
+copy of the bottleneck figures and of the correctness root cause. The root
+cause was **withdrawn** on 2026-08-30 — `LUCE_MMVQ_MAX_NCOLS=5` closed width 2
+and nothing else — and this file went on asserting it as a standing fact that
+every agent reads after compaction. `CLAUDE.md` documents the same failure
+happening between itself and `AGENTS.md`. Two documents with the same headings
+diverge; the one nobody is measuring against goes stale and then misleads.
+
+So the durable statements only, none of them a number:
+
+- **No trustworthy Qwen performance number exists yet.** Every measurement so
+  far is superseded or diagnostic. Check the ledger before quoting one.
+- **The correctness blocker is open and its cause is unknown.** Anything you
+  read describing it as isolated is stale. The ledger carries what has been
+  eliminated and what the next run is.
+- **Performance is launch- and synchronization-bound, not bandwidth-bound.**
+  This one has survived every re-measurement; the figures behind it are in the
+  ledger.
+- **HIP graph replay is ruled out** (1.84 us/node floor on gfx1151, and a
+  measured regression). Do not re-open it. See
+  [`docs/dead-code-candidates.md`](../docs/dead-code-candidates.md) entry 4,
+  and do not confuse it with Qwen's persistent *ggml compute* graphs.
+- **Check `docs/dead-code-candidates.md` before counting anything.** Several
+  paths in the accounting do not execute on the shipped configuration.
 
 ## Authoritative hardware reference — use this, do not guess at ISA behaviour
 
@@ -95,9 +108,9 @@ citations.
 We lost most of 2026-08-30 to three successive wrong targets, each abandoned
 after a GPU run:
 
-1. **copy elimination** — from a 1.03:1 count ratio. Refuted: copies are 0.5%
-   of wall time, and the attribution was an artifact of pairing kernels without
-   filtering `Stream_Id`.
+1. **copy elimination** — from a 1.03:1 count ratio. Refuted: the attribution
+   was an artifact of pairing kernels without filtering `Stream_Id`, so it
+   measured co-occurrence rather than adjacency.
 2. **kernel fusion** — from an aggregate dispatch count. Constrained: fusion
    loses on RDNA3 to VGPR pressure (three independent sources).
 3. **dispatch count** — from a 52 us mean gap. Wrong: the median gap is 10.4 us

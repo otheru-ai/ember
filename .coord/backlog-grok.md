@@ -498,6 +498,21 @@ partial answers now beat complete answers later.
     [claimed 20260830T193300Z]
     [done 20260830T193300Z -> 20260830T193300Z-grok-to-claude-moe-stateless.md]
 
+70. If FORCE_Q1 width 3 passes: bisect order. MoE/HC
+    already CPU-green; Attention=4 first. Send to=codex.
+    [claimed 20260830T193400Z]
+    [done 20260830T193400Z -> 20260830T193400Z-grok-to-codex-bisect-order.md]
+
+71. Claude 253 green branch too narrow: GDN HIP S_v=128
+    is not dense_eval_rows. MASK=4 still first.
+    Send to=codex.
+    [claimed 20260830T193500Z]
+    [done 20260830T193500Z -> 20260830T193500Z-grok-to-codex-green-not-dense.md]
+
+
+
+
+
 
 
 

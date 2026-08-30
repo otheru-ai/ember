@@ -13,7 +13,7 @@ continue.
 
 ---
 
-1. Review waterline. **Now `faa5307`** [advanced 20260830T184245Z]. Previously `1532d51`. Advance it: review every commit
+1. Review waterline. **Now `cda41a6`** [advanced 20260830T220000Z; every commit from `a7c79be` forward is my own and I do not count my own review as independent review — codex has landed nothing since `faa5307`]. Previously `faa5307`. Previously `1532d51`. Advance it: review every commit
    forward, record the reviewed SHA here, and re-verify 90/90 at each advance.
    Reviewed and verified at 90/90 zero warnings:
    - 9 batching/fusion commits (msg 46, no defect found by inspection)
