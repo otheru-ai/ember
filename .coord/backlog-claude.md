@@ -13,7 +13,19 @@ continue.
 
 ---
 
-1. Review waterline. **Now `1ee72b8`** [advanced 20260831T070000Z]. Tranche 1
+1. Review waterline. **Now `8c67086`** [advanced 20260831T084500Z]. `8c67086`
+   (`fix(engine): mirror QSA norms in F32`) verified at the commit, not the
+   pre-commit tree: working tree clean, container full engine suite **94/94**,
+   0 warnings. It fixes the hardware red I caused — the tranche 1 spec passed
+   the checkpoint's BF16 norm straight into `ggml_mul`, which `binbcast.cu:376`
+   rejects. Root cause was mine (msg 365); `qsa_vector` validated shape only,
+   and the host path it replaced never saw the stored type because
+   `download_tensor_f32` decodes. Fix: F32 mirrors decoded once at
+   construction, pinned INPUT+OUTPUT, with `qsa_norm_vector` failing closed on
+   any other storage. The realloc hazard I raised in msg 367 was **withdrawn
+   as unreachable** in msg 368, from source: `qsa_allocate` calls
+   `alloc_graph` exactly once and the replay path never re-enters it.
+   Prior waterline `1ee72b8` [advanced 20260831T070000Z]. Tranche 1
    (`1ee72b8`, resident QSA preparation) accepted after a FIRST-HAND build:
    `ember-rocm:10.0-dev` container per `AGENTS.md:100`, Release + `EMBER_ENGINE`
    + `EMBER_STRICT`, `build-claude-review/` — 0 warnings, frontier 126/0,
