@@ -18,7 +18,7 @@ Do not publish any performance number while the correctness blocker is open.
 
 ---
 
-1. **The correctness blocker. Nothing else outranks it.**
+1. **The correctness blocker. Nothing else outranks it.** [claimed 20260830T200352Z]
    `docs/qwen3.8-performance-status.md` is the live state. Current position:
    under `LUCE_MMVQ_MAX_NCOLS=5` at `a3a50c4`, width 2 passes and widths 3, 6
    and 17 fail; every singleton mask 1/2/4/8/16 is red and mask 31 is green.
