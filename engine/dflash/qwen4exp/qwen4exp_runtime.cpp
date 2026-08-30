@@ -1616,9 +1616,28 @@ bool qwen4exp_mtp_sync_cache_batch(
 }
 
 namespace {
-bool force_batch_q1_numerics() {
-    const char * value = std::getenv("DFLASH_QWEN_BATCH_FORCE_Q1_NUMERICS");
-    return value && std::strcmp(value, "1") == 0;
+enum Qwen4ExpBatchQ1Mask : int {
+    kBatchQ1Ple = 1,
+    kBatchQ1AttentionHc = 2,
+    kBatchQ1Attention = 4,
+    kBatchQ1FfnHc = 8,
+    kBatchQ1Moe = 16,
+    kBatchQ1All = 31,
+};
+
+int batch_q1_numerics_mask() {
+    static const int mask = []() {
+        const char * force_all =
+            std::getenv("DFLASH_QWEN_BATCH_FORCE_Q1_NUMERICS");
+        if (force_all && std::strcmp(force_all, "1") == 0)
+            return static_cast<int>(kBatchQ1All);
+        const char * value = std::getenv("DFLASH_QWEN_BATCH_Q1_MASK");
+        if (!value || !*value) return 0;
+        const long parsed = std::strtol(value, nullptr, 10);
+        return parsed >= 0 && parsed <= kBatchQ1All
+            ? static_cast<int>(parsed) : 0;
+    }();
+    return mask;
 }
 
 bool qwen4exp_batch_layer_q1(
@@ -1673,17 +1692,28 @@ bool qwen4exp_batch_layer(
     const size_t rows = tokens.size();
     const Qwen4ExpLayer & layer =
         weights.layers[static_cast<size_t>(layer_index)];
+    const int q1_mask = batch_q1_numerics_mask();
     // Diagnostic-only: retain the layer-major schedule and causal state order
     // while forcing every normally batched subsystem through its q=1 graph.
     // This separates a scheduling/composition defect from MMQ-vs-MMVQ
     // arithmetic without changing the production path.
-    if (force_batch_q1_numerics()) {
+    if (q1_mask == kBatchQ1All) {
         return qwen4exp_batch_layer_q1(
             weights, state, tokens, positions, hc_rows, layer_index, error);
     }
-    if (layer_index == 1 &&
-        !run_ple_batch(weights, state, layer, tokens, hc_rows, error))
-        return false;
+    if (layer_index == 1) {
+        if (q1_mask & kBatchQ1Ple) {
+            for (size_t row = 0; row < rows; ++row) {
+                state.hc = std::move(hc_rows[row]);
+                if (!run_ple(weights, state, layer, tokens[row], error))
+                    return false;
+                hc_rows[row] = std::move(state.hc);
+            }
+        } else if (!run_ple_batch(
+                       weights, state, layer, tokens, hc_rows, error)) {
+            return false;
+        }
+    }
     std::vector<float> attention_hc(rows * static_cast<size_t>(kHcDim));
     for (size_t row = 0; row < rows; ++row) {
         state.hc = std::move(hc_rows[row]);
@@ -1695,14 +1725,49 @@ bool qwen4exp_batch_layer(
 
     std::vector<float> attention_inputs;
     std::vector<std::array<float, kHc>> attention_inject;
-    if (!hc_mix_rows(weights, weights.dense_cache, layer.hc_attn_norm,
-                     layer.hc_attn_down, layer.hc_attn_up,
-                     layer.hc_attn_inject, rows, attention_hc,
-                     attention_inputs, &attention_inject, error)) return false;
+    if (q1_mask & kBatchQ1AttentionHc) {
+        attention_inputs.resize(rows * static_cast<size_t>(kEmbedding));
+        attention_inject.resize(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            std::vector<float> mixed;
+            if (!hc_mix(weights, hc_rows[row], layer.hc_attn_norm,
+                        layer.hc_attn_down, layer.hc_attn_up,
+                        layer.hc_attn_inject, mixed,
+                        &attention_inject[row], error)) return false;
+            std::copy(mixed.begin(), mixed.end(),
+                      attention_inputs.begin() + static_cast<std::ptrdiff_t>(
+                          row * static_cast<size_t>(kEmbedding)));
+        }
+    } else if (!hc_mix_rows(
+                   weights, weights.dense_cache, layer.hc_attn_norm,
+                   layer.hc_attn_down, layer.hc_attn_up,
+                   layer.hc_attn_inject, rows, attention_hc,
+                   attention_inputs, &attention_inject, error)) {
+        return false;
+    }
 
     const bool qsa = (layer_index + 1) % 4 == 0;
     std::vector<float> attention_outputs;
-    if (qsa) {
+    if ((q1_mask & kBatchQ1Attention) && qsa) {
+        attention_outputs.resize(rows * static_cast<size_t>(kEmbedding));
+        for (size_t row = 0; row < rows; ++row) {
+            const auto begin = attention_inputs.begin() +
+                static_cast<std::ptrdiff_t>(
+                    row * static_cast<size_t>(kEmbedding));
+            const std::vector<float> row_input(
+                begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            std::vector<float> block;
+            if (!run_qsa(
+                    weights,
+                    state.layers[static_cast<size_t>(layer_index)], layer,
+                    layer_index, row_input, positions[row],
+                    state.mrope_positions, block, error)) return false;
+            std::copy(block.begin(), block.end(),
+                      attention_outputs.begin() +
+                          static_cast<std::ptrdiff_t>(
+                              row * static_cast<size_t>(kEmbedding)));
+        }
+    } else if (qsa) {
         // QSA selection depends on every newly appended raw index-K row. Its
         // state update remains strictly row ordered. The independent Q/K/V
         // and index projections cross one q5/q16 boundary before that loop;
@@ -1745,13 +1810,30 @@ bool qwen4exp_batch_layer(
     }
     std::vector<float> ffn_inputs;
     std::vector<std::array<float, kHc>> ffn_inject;
-    if (!hc_mix_rows(weights, weights.dense_cache, layer.hc_ffn_norm,
-                     layer.hc_ffn_down, layer.hc_ffn_up,
-                     layer.hc_ffn_inject, rows, ffn_hc, ffn_inputs,
-                     &ffn_inject, error)) return false;
+    if (q1_mask & kBatchQ1FfnHc) {
+        ffn_inputs.resize(rows * static_cast<size_t>(kEmbedding));
+        ffn_inject.resize(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            std::vector<float> mixed;
+            if (!hc_mix(weights, hc_rows[row], layer.hc_ffn_norm,
+                        layer.hc_ffn_down, layer.hc_ffn_up,
+                        layer.hc_ffn_inject, mixed, &ffn_inject[row],
+                        error)) return false;
+            std::copy(mixed.begin(), mixed.end(),
+                      ffn_inputs.begin() + static_cast<std::ptrdiff_t>(
+                          row * static_cast<size_t>(kEmbedding)));
+        }
+    } else if (!hc_mix_rows(
+                   weights, weights.dense_cache, layer.hc_ffn_norm,
+                   layer.hc_ffn_down, layer.hc_ffn_up,
+                   layer.hc_ffn_inject, rows, ffn_hc, ffn_inputs,
+                   &ffn_inject, error)) {
+        return false;
+    }
 
     std::vector<float> ffn_outputs;
-    if (qwen4exp_frontier_moe_available(weights, layer_index)) {
+    if (!(q1_mask & kBatchQ1Moe) &&
+        qwen4exp_frontier_moe_available(weights, layer_index)) {
         if (!qwen4exp_frontier_moe_batch(
                 weights, layer_index, ffn_inputs.data(), ffn_inputs.size(),
                 static_cast<int>(rows), ffn_outputs, error)) return false;
