@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -934,9 +936,18 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
     CHECK(spec.head_dim == 128,
           "GDN control runs the S_v=128 kernel production dispatches to");
 
-    ggml_backend_t backend = ggml_backend_cpu_init();
+    const char * hip_value = std::getenv("DFLASH_QWEN_GDN_TEST_HIP");
+    const bool use_hip = hip_value && std::strcmp(hip_value, "1") == 0;
+    ggml_backend_t backend = use_hip
+        ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
+        : ggml_backend_cpu_init();
+    if (use_hip && !backend) {
+        backend = ggml_backend_init_by_type(
+            GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+    }
     if (!backend) {
-        CHECK(false, "GDN control backend initializes");
+        CHECK(false, use_hip ? "GDN HIP control backend initializes" :
+                              "GDN control backend initializes");
         return;
     }
     ggml_init_params params{};
@@ -1049,9 +1060,11 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
                   captured.convolved.size() ==
                       static_cast<size_t>(3 * channels) &&
                   captured.q.size() ==
-                      static_cast<size_t>(3 * core_values) &&
+                      static_cast<size_t>(
+                          3 * spec.n_key_heads * spec.head_dim) &&
                   captured.k.size() ==
-                      static_cast<size_t>(3 * core_values) &&
+                      static_cast<size_t>(
+                          3 * spec.n_key_heads * spec.head_dim) &&
                   captured.decay.size() ==
                       static_cast<size_t>(3 * spec.n_heads) &&
                   captured.beta.size() ==
@@ -1119,9 +1132,9 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
             const double batched_error = worst(next_recurrent);
             const double serial_error = worst(serial_recurrent);
             std::fprintf(stderr,
-                         "[gdn-precision] batched_vs_exact=%.9g "
+                         "[gdn-precision] backend=%s batched_vs_exact=%.9g "
                          "serial_q1_vs_exact=%.9g batched_closer=%s\n",
-                         batched_error, serial_error,
+                         use_hip ? "hip" : "cpu", batched_error, serial_error,
                          batched_error <= serial_error ? "true" : "false");
             CHECK(batched_error > 0.0 && serial_error > 0.0,
                   "both float paths differ from the double reference, as "

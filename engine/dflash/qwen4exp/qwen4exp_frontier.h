@@ -68,6 +68,18 @@ struct Qwen4ExpFrontierGdnWeights {
     ggml_tensor * output = nullptr;
 };
 
+// Diagnostic-only capture of the values consumed by the recurrent GDN
+// operator. `convolved` also contains V; Q/K are captured before their
+// value-preserving head repeat, and decay/beta before value-preserving reshape.
+// Using real pre-view nodes keeps allocator liveness checkable.
+struct Qwen4ExpFrontierGdnInputs {
+    std::vector<float> convolved;
+    std::vector<float> q;
+    std::vector<float> k;
+    std::vector<float> decay;
+    std::vector<float> beta;
+};
+
 struct Qwen4ExpFrontierQsaSpec {
     int n_embd = 0;
     int n_heads = 0;
@@ -191,6 +203,12 @@ bool qwen4exp_frontier_gdn_eval_batch(
     const float * recurrent_state, size_t recurrent_state_count,
     std::vector<float> & output, std::vector<float> & next_conv_state,
     std::vector<float> & next_recurrent_state, std::string & error);
+bool qwen4exp_frontier_gdn_capture_inputs(
+    Qwen4ExpFrontierGdnGraph * graph, Qwen4ExpFrontierGdnInputs & inputs,
+    std::string & error);
+bool qwen4exp_frontier_gdn_capture_inputs(
+    const Qwen4ExpWeights & weights, int layer, int n_tokens,
+    Qwen4ExpFrontierGdnInputs & inputs, std::string & error);
 uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_q1(
     const Qwen4ExpFrontierGdnSpec & spec);
 uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_batch(

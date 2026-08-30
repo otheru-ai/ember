@@ -183,12 +183,18 @@ struct Qwen4ExpFrontierGdnGraph {
     ggml_tensor * conv_history = nullptr;
     ggml_tensor * recurrent_state = nullptr;
     ggml_tensor * qkv = nullptr;
+    ggml_tensor * convolved = nullptr;
+    ggml_tensor * q = nullptr;
+    ggml_tensor * k = nullptr;
+    ggml_tensor * decay = nullptr;
+    ggml_tensor * beta = nullptr;
     ggml_tensor * gdn = nullptr;
     ggml_tensor * output = nullptr;
     Qwen4ExpFrontierGdnSpec spec{};
     int n_tokens = 1;
     int layer = -1;
     size_t arena_bytes = 0;
+    bool capture_inputs = false;
     std::vector<float> conv_window;
     char profile_label[64]{};
 };
@@ -898,6 +904,9 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
     result->spec = spec;
     result->n_tokens = n_tokens;
     result->layer = layer;
+    const char * capture_value = std::getenv("DFLASH_QWEN_GDN_BATCH_COMPARE");
+    result->capture_inputs =
+        capture_value && std::strcmp(capture_value, "1") == 0;
     result->conv_window.resize(
         static_cast<size_t>(spec.conv_width - 1) *
         static_cast<size_t>(conv_channels));
@@ -959,6 +968,7 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
         ctx, result->conv_history, current, 0);
     ggml_tensor * convolved = ggml_silu(
         ctx, ggml_ssm_conv(ctx, conv_input, conv_weight));
+    result->convolved = convolved;
     set_gdn_name(convolved, layer, "conv_silu");
 
     const size_t element_bytes = sizeof(float);
@@ -986,6 +996,8 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
         2U * key_values * element_bytes);
     q = exact_l2_norm(ctx, q, spec.epsilon);
     k = exact_l2_norm(ctx, k, spec.epsilon);
+    result->q = q;
+    result->k = k;
     const int repeat = spec.n_heads / spec.n_key_heads;
     q = ggml_reshape_4d(
         ctx, q, spec.head_dim, 1, spec.n_key_heads, n_tokens);
@@ -999,13 +1011,15 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
         ctx, q, spec.head_dim, spec.n_heads, n_tokens, 1);
     k = ggml_reshape_4d(
         ctx, k, spec.head_dim, spec.n_heads, n_tokens, 1);
-
     ggml_tensor * decay = ggml_mul(
         ctx, ggml_softplus(ctx, ggml_add(ctx, alpha, dt)), a);
+    result->decay = decay;
     decay = ggml_reshape_4d(
         ctx, decay, 1, spec.n_heads, n_tokens, 1);
+    beta = ggml_sigmoid(ctx, beta);
+    result->beta = beta;
     beta = ggml_reshape_4d(
-        ctx, ggml_sigmoid(ctx, beta), 1, spec.n_heads, n_tokens, 1);
+        ctx, beta, 1, spec.n_heads, n_tokens, 1);
     result->gdn = ggml_gated_delta_net(
         ctx, q, k, v, decay, beta, result->recurrent_state);
     ggml_gated_delta_net_set_skip_intermediate(result->gdn, true);
@@ -1030,6 +1044,15 @@ Qwen4ExpFrontierGdnGraph * qwen4exp_frontier_gdn_create_batch(
     ggml_set_output(result->qkv);
     ggml_set_output(result->gdn);
     ggml_set_output(result->output);
+    if (result->capture_inputs) {
+        // The real-layer comparator is opt-in.  Preserve these intermediates
+        // only for that diagnostic so the default serving arena is unchanged.
+        ggml_set_output(result->convolved);
+        ggml_set_output(result->q);
+        ggml_set_output(result->k);
+        ggml_set_output(result->decay);
+        ggml_set_output(result->beta);
+    }
     result->graph = ggml_new_graph_custom(ctx, 128, false);
     ggml_build_forward_expand(result->graph, result->qkv);
     ggml_build_forward_expand(result->graph, result->gdn);
@@ -2551,6 +2574,53 @@ bool qwen4exp_frontier_gdn_batch(
         graph, input, input_count, conv_state, conv_state_count,
         recurrent_state, recurrent_state_count, output, next_conv_state,
         next_recurrent_state, error);
+}
+
+bool qwen4exp_frontier_gdn_capture_inputs(
+        Qwen4ExpFrontierGdnGraph * graph,
+        Qwen4ExpFrontierGdnInputs & inputs, std::string & error) {
+    if (!graph || !graph->capture_inputs || !graph->convolved || !graph->q ||
+        !graph->k || !graph->decay || !graph->beta) {
+        error = "Qwen4Exp GDN input capture is not enabled";
+        return false;
+    }
+    const std::array<std::pair<ggml_tensor *, std::vector<float> *>, 5>
+        captures{{
+            {graph->convolved, &inputs.convolved},
+            {graph->q, &inputs.q},
+            {graph->k, &inputs.k},
+            {graph->decay, &inputs.decay},
+            {graph->beta, &inputs.beta},
+        }};
+    for (const auto & capture : captures) {
+        if (capture.first->type != GGML_TYPE_F32 ||
+            !ggml_is_contiguous(capture.first)) {
+            error = "Qwen4Exp GDN input capture tensor is not contiguous F32";
+            return false;
+        }
+        capture.second->resize(static_cast<size_t>(
+            ggml_nelements(capture.first)));
+        ggml_backend_tensor_get_async(
+            graph->backend, capture.first, capture.second->data(), 0,
+            capture.second->size() * sizeof(float));
+    }
+    ggml_backend_synchronize(graph->backend);
+    return true;
+}
+
+bool qwen4exp_frontier_gdn_capture_inputs(
+        const Qwen4ExpWeights & weights, int layer, int n_tokens,
+        Qwen4ExpFrontierGdnInputs & inputs, std::string & error) {
+    if (!weights.frontier || layer < 0 || n_tokens < 1 ||
+        n_tokens > kQwen4ExpFrontierMoeMaxBatch ||
+        static_cast<size_t>(layer) >= weights.frontier->gdn.size()) {
+        error = "Qwen4Exp GDN input capture graph is unavailable";
+        return false;
+    }
+    Qwen4ExpFrontierGdnGraph * graph =
+        weights.frontier->gdn[static_cast<size_t>(layer)]
+                             [static_cast<size_t>(n_tokens)];
+    return qwen4exp_frontier_gdn_capture_inputs(graph, inputs, error);
 }
 
 bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,

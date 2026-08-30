@@ -1878,6 +1878,25 @@ bool qwen4exp_batch_layer(
                 static_cast<int>(rows), attention_outputs, error))
             return false;
         if (compare_gdn) {
+            Qwen4ExpFrontierGdnInputs batch_inputs;
+            if (!qwen4exp_frontier_gdn_capture_inputs(
+                    weights, layer_index, static_cast<int>(rows), batch_inputs,
+                    error)) return false;
+            Qwen4ExpFrontierGdnInputs reference_inputs;
+            const auto append_inputs = [](
+                    Qwen4ExpFrontierGdnInputs & destination,
+                    const Qwen4ExpFrontierGdnInputs & source) {
+                destination.convolved.insert(destination.convolved.end(),
+                    source.convolved.begin(), source.convolved.end());
+                destination.q.insert(destination.q.end(),
+                    source.q.begin(), source.q.end());
+                destination.k.insert(destination.k.end(),
+                    source.k.begin(), source.k.end());
+                destination.decay.insert(destination.decay.end(),
+                    source.decay.begin(), source.decay.end());
+                destination.beta.insert(destination.beta.end(),
+                    source.beta.begin(), source.beta.end());
+            };
             std::vector<float> reference_outputs(
                 rows * static_cast<size_t>(kEmbedding));
             for (size_t row = 0; row < rows; ++row) {
@@ -1889,6 +1908,10 @@ bool qwen4exp_batch_layer(
                 std::vector<float> block;
                 if (!run_gdn(weights, reference_state, layer, layer_index,
                              row_input, block, error)) return false;
+                Qwen4ExpFrontierGdnInputs row_inputs;
+                if (!qwen4exp_frontier_gdn_capture_inputs(
+                        weights, layer_index, 1, row_inputs, error)) return false;
+                append_inputs(reference_inputs, row_inputs);
                 if (block.size() != static_cast<size_t>(kEmbedding)) {
                     error = "Qwen4Exp diagnostic q1 GDN returned the wrong shape";
                     return false;
@@ -1901,6 +1924,19 @@ bool qwen4exp_batch_layer(
             report_gdn_batch_compare(
                 layer_index, "output", reference_outputs,
                 attention_outputs);
+            report_gdn_batch_compare(
+                layer_index, "convolved", reference_inputs.convolved,
+                batch_inputs.convolved);
+            report_gdn_batch_compare(
+                layer_index, "q", reference_inputs.q, batch_inputs.q);
+            report_gdn_batch_compare(
+                layer_index, "k", reference_inputs.k, batch_inputs.k);
+            report_gdn_batch_compare(
+                layer_index, "decay", reference_inputs.decay,
+                batch_inputs.decay);
+            report_gdn_batch_compare(
+                layer_index, "beta", reference_inputs.beta,
+                batch_inputs.beta);
             const Qwen4ExpLayerState & actual_state =
                 state.layers[static_cast<size_t>(layer_index)];
             if (reference_state.conv && actual_state.conv)
