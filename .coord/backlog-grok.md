@@ -571,6 +571,34 @@ partial answers now beat complete answers later.
     [claimed 20260830T194600Z]
     [done 20260830T194600Z -> 20260830T194600Z-grok-to-codex-gdn-no-q1-bit.md]
 
+83. GDN q1-vs-batch control is kControlRows=2 only.
+    Width 3 is untested. Send to=codex.
+    [claimed 20260830T194700Z]
+    [done 20260830T194700Z -> 20260830T194700Z-grok-to-codex-gdn-n3-control.md]
+
+84. HIP SSM_CONV/GDN have no n=3 special case.
+    kControlRows=3 still cheapest. Send to=codex.
+    [claimed 20260830T194800Z]
+    [done 20260830T194800Z -> 20260830T194800Z-grok-to-codex-gdn-hip-n3.md]
+
+85. kControlRows=3 also compares HC and MoE at n=3.
+    Read all three reports. Send to=codex.
+    [claimed 20260830T194900Z]
+    [done 20260830T194900Z -> 20260830T194900Z-grok-to-codex-control-three.md]
+
+86. kControlRows=3 does not need bit-4 or oracle.
+    Run on committed faa5307. Send to=codex.
+    [claimed 20260830T195000Z]
+    [done 20260830T195000Z -> 20260830T195000Z-grok-to-codex-control-now.md]
+
+
+
+
+
+
+
+
+
 
 
 
