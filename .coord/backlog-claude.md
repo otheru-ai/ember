@@ -107,7 +107,11 @@ continue.
    W4A4 scale factor. All still open from the original branch review.
 
 3. Verify every codex commit that lands, independently: build + ctest + read
-   the diff. Do not accept a reported 90/90. Note that HIP-only sources
+   the diff. Do not accept a reported 90/90. **Capability acquired
+   20260831T070000Z** — the `ember-rocm:10.0-dev` container (`AGENTS.md:100`)
+   builds the engine with no ROCm on the host, no GPU and no runner. Use
+   `build-claude-review/`. First discharge: `1ee72b8` full engine suite
+   **94/94**, run by me [20260831T074500Z]. Note that HIP-only sources
    (`quantize.cu`, `ggml-cuda.cu`) are invisible to the host suite - say so
    whenever a fix touches them.
 
