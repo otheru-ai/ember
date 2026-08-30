@@ -364,43 +364,27 @@ The seam is `qwen4exp_frontier.cpp:954-1000` — `ggml_ssm_conv`, the q/k/v
 and the `repeat_4d` GQA expansion. Those views are the part of the seam whose
 shape changes with width; the q1 graph builds them at `n_tokens = 1`.
 
-**The synthetic half of that run proved nothing, and the fixture was at fault.**
-`launch_gated_delta_net` switches on `S_v` (`gated_delta_net.cu:397-440`), so
-the control's `head_dim = 16` selected `gated_delta_net_cuda<16, ...>` — a
-separate template instantiation sharing no code with the S_v=128 path, with the
-grouped-cols specialization not even compiled into that call. Green with and
-without the guard is exactly what a fixture that never reached either kernel
-would produce. Fixed in `4e9a6aa`: `head_dim = 128`, 1024 conv channels (still
-`% 128 == 0`), both properties asserted in the test.
+**Correction (codex 345).** An earlier version of this section claimed the
+synthetic half of that run was vacuous because the fixture ran `head_dim = 16`.
+That was wrong, and it conflated two different controls.
 
-### The S_v=128 kernel passes on HIP at n=3 with non-zero state
+Codex 338 changed `kControlRows` inside
+`qwen4exp_frontier_run_projection_numerics_control()`, which uses
+`weights.layers.front()` from the **loaded real model** and calls the
+production GDN frontiers. Its recurrent record holds 786,432 values — exactly
+48 x 128 x 128 — so it exercised production `S_v = 128` in both grouped and
+no-grouped modes. It was not vacuous.
 
-Codex 341, run `qwen-gdn-sv128-unit-3e2047c`, on the corrected fixture
-(`4e9a6aa`): the HIP graph matches the scalar reference at n=3 **with non-zero
-initial state** — the condition the zero-state argument says is necessary to
-observe the fault at all.
+The `head_dim = 16` mistake belonged to a *different*, GPU-free fixture,
+`test_gdn_batch_at_hip_legal_conv_channels()`, fixed in `4e9a6aa`. That fix
+stands on its own, but it does not explain codex 338 and must not be used to.
 
-So at 4 heads / 2 key heads / 1024 conv channels, the S_v=128 GDN kernel, its
-`ssm_conv` window, the q/k/v views and the state carry are all **correct on
-real hardware at the failing width**. Combined with grouped-cols being
-exonerated, that is the kernel largely cleared.
-
-What the control does *not* cover, and therefore what is left:
-
-- **Scale.** 4 heads against 48, 2 key heads against 16, 1024 conv channels
-  against 10240, `n_embd` 8 against 2560. Grid extent in the grouped kernel is
-  `(H, n_seqs, ...)`, so `H` is the one axis that changes with head count.
-- **Real data.** The fixture uses patterned weights. A data-dependent fault —
-  range, overflow, a denormal — would not show.
-- **Depth.** The real path runs 36 GDN layers. A per-layer-exact kernel can
-  still produce a wrong answer if something accumulates across layers, and
-  nothing so far distinguishes "one GDN call is wrong" from "GDN calls are
-  right and something between them is not".
-
-The per-layer comparator (codex 339, reviewed and approved) separates exactly
-those: it holds `attention_inputs` fixed and varies only batched-versus-serial,
-per layer, on the real model. Its first diverging layer is the answer; later
-layers are fed contaminated inputs and are not independent evidence.
+Read together with codex 344, the synthetic production-shape control had
+**already shown the same pattern as real inputs**: output and conv state exact,
+recurrent state non-exact at floating-noise scale. **Real data is not required
+to reproduce the first recurrent divergence** — depth is what makes it visible
+in the output. That makes the defect reproducible far more cheaply than a full
+model run.
 
 ### Where in GDN, from the pass/fail pattern
 
