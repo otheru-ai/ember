@@ -1,7 +1,7 @@
 // Extract a normalized chat-completion request from a parsed JSON body.
 // Handles content as a plain string or an ordered content-part array. Text
-// keeps a flattened compatibility view; image URLs are preserved and cause a
-// fail-closed response until the backend vision seam is available.
+// keeps a flattened compatibility view; image URLs are preserved for the lazy
+// Qwen vision provider and fail closed when that backend seam is unavailable.
 #ifndef EMBER_CHAT_API_H
 #define EMBER_CHAT_API_H
 
@@ -34,9 +34,8 @@ typedef enum {
 
 // Ordered message content. `content` below remains the flattened text view
 // used by the existing text pipeline, while these parts preserve image
-// placement for Qwen4Exp vision. The server currently fails closed before
-// generation when an image is present; retaining the exact order here avoids
-// designing the eventual vision ABI around an already-lossy parser.
+// placement for Qwen4Exp vision. Exact order is load-bearing for embedding
+// splice offsets and three-axis M-RoPE positions.
 typedef enum {
     EMBER_CONTENT_TEXT,
     EMBER_CONTENT_IMAGE_URL,

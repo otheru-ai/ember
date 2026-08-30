@@ -535,7 +535,9 @@ decode decision from the pinned evidence, checks the exact three-sample
 performance/memory gates, binds the selected model inventory to every planned
 package byte, and records the runtime image, Ember revision, engine-binary
 digest, tensor-format contract, ordered model inventory, selected MTP, BF16
-mmproj, provider/reference revision, and cold/warm residency record. It uses only the Python standard library,
+mmproj, provider/reference revision, cold/warm residency record, exact projected
+rows, and pinned image-grounded visible-answer checks for both synthetic vision
+cases. It uses only the Python standard library,
 does not read credentials, and does not contact the Hub.
 
 The resulting `ember.qwen3.8.hf-publication-envelope.v3` authorizes only its

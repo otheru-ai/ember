@@ -17,19 +17,25 @@ import sys
 from typing import Any
 
 
-CORPUS_SCHEMA = "ember.qwen3.8.vision-differential-corpus.v1"
+CORPUS_SCHEMA = "ember.qwen3.8.vision-differential-corpus.v2"
 IDENTITY_SCHEMA = "ember.qwen3.8.vision-runtime-identity.v1"
-EVIDENCE_SCHEMA = "ember.qwen3.8.vision-differential-evidence.v1"
+EVIDENCE_SCHEMA = "ember.qwen3.8.vision-differential-evidence.v2"
 MODEL_REVISION = "f5d08274bafd880402bd16f5e3e6c514136ec06c"
 LLAMA_REVISION = "abdc7a0bf815d3b83e26dd523c6960e4dd597e82"
-CORPUS_SHA256 = "ea723d93b6f6f0b36b608ca42fcbe3653d5f4388a04ab046e0e3bff0ec2f724c"
+CORPUS_SHA256 = "cd4f9f3d7908466908304ca5a7f6548cf880656da2c769956d69332141310d56"
 CASES = {
     "checkerboard-56": {
         "image_sha256": "339bb609557896a9de3eef73d08de863e94a596e9a0efa061d03562112fa1d75",
-        "prompt_sha256": "77215e48a3a67b27202d14922ce6bb6e85ead5dde86c71099de21cc7ba459c3d"},
+        "prompt_sha256": "77215e48a3a67b27202d14922ce6bb6e85ead5dde86c71099de21cc7ba459c3d",
+        "response_contract_sha256": "e5f18168aa6909034fd6b6dea2fb9d082bc65a0a7e44e39ef05b2f1894e0e239",
+        "required_any": [["blue"], ["white"],
+                         ["checkerboard", "checker", "checkered"]],
+        "ordered_any": []},
     "rgb-bands-84x56": {
         "image_sha256": "e883a8dafa672931b3e55ee8456efd2fbc0c3e68b59993529ad2a140d243f132",
-        "prompt_sha256": "06325b7b90fa4f7f1f92fb1af5d53401c2851fbd90b1f335ea74c7acbedcb831"},
+        "prompt_sha256": "06325b7b90fa4f7f1f92fb1af5d53401c2851fbd90b1f335ea74c7acbedcb831",
+        "response_contract_sha256": "caccf082ce64dd99fbb9084a651e795d8ccf3002046dc3ac6c66b4c26359469d",
+        "required_any": [], "ordered_any": [["red"], ["green"], ["blue"]]},
 }
 ATOL = 1.0e-5
 RTOL = 1.0e-5
@@ -123,12 +129,36 @@ def load_corpus(path: Path, expected: str) -> tuple[dict, list[tuple[dict, bytes
     seen = set()
     for row in cases:
         if (not isinstance(row, dict) or set(row) != {
-                "id", "prompt", "mime_type", "image_sha256", "image_base64"}
+                "id", "prompt", "response_contract", "mime_type",
+                "image_sha256", "image_base64"}
                 or CASE_ID.fullmatch(str(row.get("id"))) is None
                 or row["id"] in seen or row.get("mime_type") != "image/png"
                 or not isinstance(row.get("prompt"), str) or not row["prompt"].strip()
                 or HEX64.fullmatch(str(row.get("image_sha256"))) is None):
             raise VisionEvidenceError("vision corpus case is malformed")
+        response_contract = row["response_contract"]
+        if (not isinstance(response_contract, dict)
+                or set(response_contract) != {"required_any", "ordered_any"}):
+            raise VisionEvidenceError("vision response contract is malformed")
+        for field in ("required_any", "ordered_any"):
+            groups = response_contract[field]
+            if (not isinstance(groups, list)
+                    or any(not isinstance(group, list) or not group
+                           or any(not isinstance(term, str) or not term
+                                  or term != term.casefold()
+                                  or re.fullmatch(r"[a-z][a-z -]*", term) is None
+                                  for term in group)
+                           for group in groups)):
+                raise VisionEvidenceError("vision response contract terms are malformed")
+        if not response_contract["required_any"] and not response_contract["ordered_any"]:
+            raise VisionEvidenceError("vision response contract is empty")
+        expected_case = CASES.get(row["id"])
+        if (not expected_case
+                or response_contract["required_any"] != expected_case["required_any"]
+                or response_contract["ordered_any"] != expected_case["ordered_any"]
+                or sha256_bytes(canonical(response_contract)) !=
+                   expected_case["response_contract_sha256"]):
+            raise VisionEvidenceError("vision response contract identity differs")
         try:
             image = base64.b64decode(row["image_base64"], validate=True)
         except (ValueError, TypeError) as exc:
@@ -156,7 +186,8 @@ def materialize(args: argparse.Namespace) -> dict[str, Any]:
         request_path = root / f"{row['id']}.request.json"
         write_new(image_path, image)
         request = {"model": "qwen3.8-flash-next", "temperature": 0,
-                   "max_tokens": 8, "stream": False, "messages": [{
+                   "reasoning_effort": "none", "max_tokens": 32,
+                   "stream": False, "messages": [{
                        "role": "user", "content": [
                            {"type": "image_url", "image_url": {"url":
                             f"data:{row['mime_type']};base64,{row['image_base64']}"}},
@@ -211,6 +242,42 @@ def comparison(observed_path: Path, reference_path: Path, label: str) -> dict:
             "reference": {"path": str(reference_path.absolute()),
                            "size_bytes": len(reference_raw),
                            "sha256": sha256_bytes(reference_raw)}}
+
+
+def response_semantics(text: str, contract: dict[str, Any], label: str) -> dict:
+    folded = text.casefold()
+
+    def find_term(term: str, start: int = 0) -> tuple[int, int] | None:
+        match = re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)",
+                          folded[start:])
+        return None if match is None else (start + match.start(), start + match.end())
+
+    required_matches = []
+    for group in contract["required_any"]:
+        match = next(((term, found) for term in group
+                      if (found := find_term(term)) is not None), None)
+        if match is None:
+            raise VisionEvidenceError(
+                f"{label} omits required image-grounded response term")
+        required_matches.append(match[0])
+
+    ordered_matches = []
+    cursor = 0
+    for group in contract["ordered_any"]:
+        candidates = [(term, found) for term in group
+                      if (found := find_term(term, cursor)) is not None]
+        if not candidates:
+            raise VisionEvidenceError(
+                f"{label} omits or misorders image-grounded response terms")
+        term, found = min(candidates, key=lambda item: item[1][0])
+        ordered_matches.append(term)
+        cursor = found[1]
+
+    return {"passed": True,
+            "contract_sha256": sha256_bytes(canonical(contract)),
+            "visible_text_sha256": sha256_bytes(text.encode()),
+            "required_matches": required_matches,
+            "ordered_matches": ordered_matches}
 
 
 def validate_identity(value: dict) -> None:
@@ -373,12 +440,16 @@ def finalize(args: argparse.Namespace) -> dict:
                     or not isinstance(choices[0], dict)
                     or not isinstance(message, dict)
                     or not isinstance(visible, str) or not isinstance(reasoning, str)
-                    or not (visible.strip() or reasoning.strip())):
+                    or not visible.strip()):
                 raise VisionEvidenceError("Ember image-text response is incomplete")
+            semantics = response_semantics(
+                visible, row["response_contract"],
+                f"{run_name}/{row['id']} response")
             result = comparison(observed, reference, f"{run_name}/{row['id']}")
             result.update({"run": run_name, "case_id": row["id"],
                            "image_sha256": row["image_sha256"],
                            "prompt_sha256": sha256_bytes(row["prompt"].encode()),
+                           "response_semantics": semantics,
                            "response": descriptor(response.absolute(), "Ember response")})
             comparisons.append(result)
     return {"schema": EVIDENCE_SCHEMA, "status": "passed", "passed": True,
@@ -393,6 +464,7 @@ def finalize(args: argparse.Namespace) -> dict:
                           "measurement": residency,
                           "certified_peak_cap_bytes": MAX_CERTIFIED_BYTES},
             "release_gate": {"real_weight_differential": True,
+                             "image_grounded_generation": True,
                              "cold_warm_residency_captured": True,
                              "publication_requires_exact_evidence_sha256": True}}
 
@@ -419,6 +491,7 @@ def verify(value: dict, expected_revision: str | None = None) -> dict:
             or value.get("runs") != ["cold", "warm"]
             or value.get("release_gate") != {
                 "real_weight_differential": True,
+                "image_grounded_generation": True,
                 "cold_warm_residency_captured": True,
                 "publication_requires_exact_evidence_sha256": True}):
         raise VisionEvidenceError("vision evidence gate/tolerance contract differs")
@@ -428,7 +501,8 @@ def verify(value: dict, expected_revision: str | None = None) -> dict:
     expected_row_fields = {
         "shape", "values_compared", "max_absolute_error", "max_relative_error",
         "max_tolerance_ratio", "mismatches", "ember", "reference", "run",
-        "case_id", "image_sha256", "prompt_sha256", "response"}
+        "case_id", "image_sha256", "prompt_sha256", "response_semantics",
+        "response"}
     if any(not isinstance(row, dict) or set(row) != expected_row_fields for row in rows):
         raise VisionEvidenceError("vision comparison row fields differ")
     keys = {(row["run"], row["case_id"]) for row in rows}
@@ -458,8 +532,29 @@ def verify(value: dict, expected_revision: str | None = None) -> dict:
         validate_descriptor(row["ember"], "Ember capture", expected_size=capture_size)
         validate_descriptor(row["reference"], "reference capture", expected_size=capture_size)
         validate_descriptor(row["response"], "Ember response")
+        expected_case = CASES[row["case_id"]]
+        semantics = row["response_semantics"]
+        if (not isinstance(semantics, dict)
+                or set(semantics) != {"passed", "contract_sha256",
+                                      "visible_text_sha256", "required_matches",
+                                      "ordered_matches"}
+                or semantics.get("passed") is not True
+                or semantics.get("contract_sha256") !=
+                   expected_case["response_contract_sha256"]
+                or HEX64.fullmatch(str(semantics.get("visible_text_sha256"))) is None
+                or not isinstance(semantics.get("required_matches"), list)
+                or not isinstance(semantics.get("ordered_matches"), list)
+                or len(semantics["required_matches"]) !=
+                   len(expected_case["required_any"])
+                or len(semantics["ordered_matches"]) !=
+                   len(expected_case["ordered_any"])
+                or any(term not in group for term, group in zip(
+                    semantics["required_matches"], expected_case["required_any"]))
+                or any(term not in group for term, group in zip(
+                    semantics["ordered_matches"], expected_case["ordered_any"]))):
+            raise VisionEvidenceError("vision response semantic proof differs")
     validate_descriptor(value.get("corpus"), "corpus", expected_sha256=CORPUS_SHA256,
-                        expected_size=1306)
+                        expected_size=1659)
     if (value["identity"]["corpus"].get("sha256") != CORPUS_SHA256
             or any(row.get("image_sha256") != CASES[row["case_id"]]["image_sha256"]
                    or row.get("prompt_sha256") != CASES[row["case_id"]]["prompt_sha256"]

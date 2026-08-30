@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "qwen_vision_differential.py"
 GATE = ROOT / "scripts" / "qwen_vision_real_weight_gate.sh"
 SAMPLER = ROOT / "scripts" / "qwen_vision_residency.py"
-CORPUS = ROOT / "share" / "quant_eval" / "qwen3.8-vision-differential-v1.json"
+CORPUS = ROOT / "share" / "quant_eval" / "qwen3.8-vision-differential-v2.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "qwen-gfx1151-vision.yml"
 DISPATCH = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
 PUBLICATION = ROOT / "scripts" / "qwen_publication_envelope.py"
@@ -54,6 +54,8 @@ class QwenVisionHardwareGateTest(unittest.TestCase):
                 self.assertEqual(sha(Path(row["image"]["path"])), row["image"]["sha256"])
                 request = json.loads(Path(row["request"]["path"]).read_text())
                 self.assertEqual(request["temperature"], 0)
+                self.assertEqual(request["reasoning_effort"], "none")
+                self.assertEqual(request["max_tokens"], 32)
                 self.assertTrue(request["messages"][0]["content"][0]
                                 ["image_url"]["url"].startswith("data:image/png;base64,"))
 
@@ -63,13 +65,17 @@ class QwenVisionHardwareGateTest(unittest.TestCase):
         ember = root / "ember"; reference = root / "reference"; responses = root / "responses"
         ember.mkdir(); reference.mkdir(); responses.mkdir()
         values = [float(i % 17) / 16 for i in range(2560)]
+        response_texts = {
+            "checkerboard-56": "A blue and white checkerboard pattern.",
+            "rgb-bands-84x56": "red, green, blue",
+        }
         for case_index, (row, _image) in enumerate(cases):
             write_capture(reference / f"{row['id']}.f32", values)
             for run_index, run in enumerate(("cold", "warm")):
                 write_capture(ember / f"ember.{run_index * len(cases) + case_index:06d}.f32",
                               [value + (1e-7 if run == "warm" else 0) for value in values])
                 (responses / f"{run}-{row['id']}.json").write_text(json.dumps({
-                    "choices": [{"message": {"content": "deterministic fixture"}}]}))
+                    "choices": [{"message": {"content": response_texts[row["id"]]}}]}))
         identity_path = root / "identity.json"
         identity_path.write_text(json.dumps({
             "schema": vision.IDENTITY_SCHEMA,
@@ -200,6 +206,12 @@ class QwenVisionHardwareGateTest(unittest.TestCase):
             changed["comparisons"][0]["response"]["path"] = "relative.json"
             mutations.append(("descriptor", changed))
             changed = copy.deepcopy(baseline)
+            changed["comparisons"][0]["response_semantics"]["passed"] = False
+            mutations.append(("semantic proof", changed))
+            changed = copy.deepcopy(baseline)
+            changed["comparisons"][0]["response_semantics"]["ordered_matches"] = ["blue"]
+            mutations.append(("semantic proof", changed))
+            changed = copy.deepcopy(baseline)
             changed["corpus"]["sha256"] = "0" * 64
             mutations.append(("corpus SHA", changed))
             changed = copy.deepcopy(baseline)
@@ -224,6 +236,24 @@ class QwenVisionHardwareGateTest(unittest.TestCase):
             response.write_text(json.dumps({"choices": [{"message": {
                 "content": "", "reasoning_content": ""}}]}))
             with self.assertRaisesRegex(vision.VisionEvidenceError, "incomplete"):
+                vision.finalize(args)
+
+    def test_ungrounded_or_misordered_response_is_not_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            args = self.fixture(Path(raw))
+            response = args.response_dir / "cold-checkerboard-56.json"
+            response.write_text(json.dumps({"choices": [{"message": {
+                "content": "A geometric pattern."}}]}))
+            with self.assertRaisesRegex(vision.VisionEvidenceError,
+                                        "image-grounded response term"):
+                vision.finalize(args)
+        with tempfile.TemporaryDirectory() as raw:
+            args = self.fixture(Path(raw))
+            response = args.response_dir / "warm-rgb-bands-84x56.json"
+            response.write_text(json.dumps({"choices": [{"message": {
+                "content": "blue, green, red"}}]}))
+            with self.assertRaisesRegex(vision.VisionEvidenceError,
+                                        "misorders image-grounded response terms"):
                 vision.finalize(args)
 
     def test_gate_is_exclusive_unprivileged_and_restores_production(self) -> None:

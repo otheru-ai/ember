@@ -17,9 +17,9 @@
 //   035e22731a7fd70b9854b3a2d64ec68e9b1a45d3
 //
 // This interface accepts only already-encoded image rows.  It deliberately
-// does not decode files/URLs, preprocess pixels, or execute the ViT.  Callers
-// must fail closed until such a provider is installed and real-weight
-// differential validation passes.
+// does not decode files/URLs, preprocess pixels, or execute the ViT; the lazy
+// provider owns those operations.  Callers fail closed when that provider is
+// absent or when its rows do not satisfy this contract.
 
 #pragma once
 

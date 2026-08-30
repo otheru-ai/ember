@@ -6,7 +6,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GPU_LOCK=/usr/local/sbin/ember-gpu-lock
 PRODUCTION=/usr/local/sbin/ember-cert-production
 PRODUCTION_HEALTH=http://127.0.0.1:8000/health
-CORPUS="$REPO/share/quant_eval/qwen3.8-vision-differential-v1.json"
+CORPUS="$REPO/share/quant_eval/qwen3.8-vision-differential-v2.json"
 COMPARE="$REPO/scripts/qwen_vision_differential.py"
 SAMPLER="$REPO/scripts/qwen_vision_residency.py"
 IMAGE=""; DEV_IMAGE=""; MODEL=""; MODEL_SHA256=""
@@ -68,7 +68,7 @@ plan:
   BF16 mmproj      $MMPROJ
   vocab-only GGUF  $VISION_VOCAB
   corpus           $CORPUS ($corpus_sha)
-  differential     two images, cold and warm, float32 atol=1e-5 rtol=1e-5
+  differential     two images, cold/warm float32 atol=1e-5 rtol=1e-5, image-grounded answers
   residency        phase-separated host RSS, amdgpu GTT, and UMA
   production       stop+mask; unconditional unmask/restore and health proof
   publication      forbidden; evidence is consumed by the protected envelope

@@ -4,8 +4,9 @@
 // path.  The converter splits the temporal-2 Conv3D kernel into two GGUF
 // tensors and uses the stock v.blk.*, v.post_ln, and mm.{0,2} names.  Checking
 // that exact inventory prevents a partially converted tower from appearing
-// usable.  The provider seam remains empty in the current backend, so attempts
-// to encode pixels fail closed.
+// usable.  The runtime provider is built from the pinned rotated-KV follow-up
+// PR #27774 revision abdc7a0bf815d3b83e26dd523c6960e4dd597e82 and remains
+// lazy: an unconfigured or invalid provider fails closed.
 
 #pragma once
 
@@ -73,8 +74,8 @@ struct Qwen4ExpVisionEncoderProvider {
 
 // Executes an installed encoder over processor-produced flattened patches.
 // Expected input is [T*H*W, 3*2*16*16], and output is
-// [T*(H/2)*(W/2),2560].  A null provider is the ordinary current state and
-// returns a descriptive error; it never fabricates or ignores image rows.
+// [T*(H/2)*(W/2),2560].  A null provider returns a descriptive error; it never
+// fabricates or ignores image rows.
 bool qwen4exp_encode_vision_patches(
     const Qwen4ExpVisionEncoderProvider * provider,
     const std::vector<float> & flattened_patches,
