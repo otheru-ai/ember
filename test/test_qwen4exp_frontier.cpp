@@ -1670,6 +1670,97 @@ int main() {
 
     dflash::common::qwen4exp_frontier_moe_destroy(graph);
 
+    // The MoE half of the pad-independence claim.
+    //
+    // qwen4exp_frontier.h:104-107 says padding "cannot change a real row"
+    // because "MoE rows are independent". The dense half of that sentence is
+    // tested above through dense_eval_rows. This is the other half, and it is
+    // the one with a plausible coupling: routing picks top-k experts per row,
+    // and anything that reduced across the batch axis would let a padded row
+    // change which experts a real row is dispatched to. That is a
+    // whole-logit-scale error, not a rounding one.
+    //
+    // Widths cover both physical buckets and both bands the HIP differential
+    // fails on. CPU backend with F32 weights, so this constrains the graph
+    // algebra and not the quantized or HIP paths.
+    {
+        Qwen4ExpFrontierMoeGraph * q1_graph =
+            dflash::common::qwen4exp_frontier_moe_create(
+                backend, spec, weights, 0, error);
+        CHECK(q1_graph != nullptr, "q1 MoE graph builds for the pad control");
+
+        const int moe_pad_widths[] = {2, 3, 5, 6, 16};
+        bool moe_pad_independent = q1_graph != nullptr;
+        for (int width : moe_pad_widths) {
+            if (!moe_pad_independent) break;
+            const int physical =
+                dflash::common::qwen4exp_frontier_moe_cached_width(width);
+            Qwen4ExpFrontierMoeGraph * batch_graph =
+                dflash::common::qwen4exp_frontier_moe_create_batch(
+                    backend, spec, weights, 0, physical, error);
+            if (!batch_graph) {
+                moe_pad_independent = false;
+                std::fprintf(stderr,
+                             "[moe-pad] width %d physical %d: graph build "
+                             "failed: %s\n",
+                             width, physical, error.c_str());
+                break;
+            }
+
+            // `width` real rows followed by zero padding out to `physical`.
+            std::vector<float> padded(
+                static_cast<size_t>(physical) * spec.n_embd, 0.0f);
+            for (int row = 0; row < width; ++row) {
+                for (int d = 0; d < spec.n_embd; ++d) {
+                    padded[static_cast<size_t>(row) * spec.n_embd +
+                           static_cast<size_t>(d)] =
+                        0.4f * static_cast<float>((row + 1) * (d + 1) % 7) -
+                        1.1f * static_cast<float>((row + d) % 3);
+                }
+            }
+
+            std::vector<float> batched;
+            if (!dflash::common::qwen4exp_frontier_moe_eval(
+                    batch_graph, padded.data(), padded.size(), batched,
+                    error)) {
+                moe_pad_independent = false;
+                std::fprintf(stderr, "[moe-pad] width %d eval failed: %s\n",
+                             width, error.c_str());
+                dflash::common::qwen4exp_frontier_moe_destroy(batch_graph);
+                break;
+            }
+
+            for (int row = 0; row < width; ++row) {
+                std::vector<float> alone;
+                const float * row_input =
+                    padded.data() + static_cast<size_t>(row) * spec.n_embd;
+                if (!dflash::common::qwen4exp_frontier_moe_eval(
+                        q1_graph, row_input,
+                        static_cast<size_t>(spec.n_embd), alone, error)) {
+                    moe_pad_independent = false;
+                    break;
+                }
+                const std::vector<float> from_batch(
+                    batched.begin() +
+                        static_cast<std::ptrdiff_t>(row) * spec.n_embd,
+                    batched.begin() +
+                        static_cast<std::ptrdiff_t>(row + 1) * spec.n_embd);
+                if (!close_vectors(from_batch, alone)) {
+                    moe_pad_independent = false;
+                    std::fprintf(stderr,
+                                 "[moe-pad] width %d (physical %d) row %d "
+                                 "differs from its q1 evaluation\n",
+                                 width, physical, row);
+                }
+            }
+            dflash::common::qwen4exp_frontier_moe_destroy(batch_graph);
+        }
+        CHECK(moe_pad_independent,
+              "every real MoE row in a zero-padded batch equals its q1 "
+              "evaluation");
+        dflash::common::qwen4exp_frontier_moe_destroy(q1_graph);
+    }
+
     Qwen4ExpFrontierMoeWeights split_weights = weights;
     split_weights.experts_gate_up = nullptr;
     split_weights.experts_gate = experts_gate;
