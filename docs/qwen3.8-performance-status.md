@@ -46,6 +46,70 @@ The hard gates encoded in the certification workflow are `decode_256_median_tps
 
 **There is currently no trustworthy Qwen performance number.**
 
+### 2. Diagnostic timing @ `a3a50c4`, `LUCE_MMVQ_MAX_NCOLS=5` — NOT PUBLISHABLE
+
+| metric | measured | gate | short by |
+|---|---|---|---|
+| prefill 2074 median | 37.366 tok/s | — | — |
+| prefill 2074 peak | 38.055 tok/s | 412.0 | **10.83x** |
+| decode 256 median | 11.757 tok/s | 39.49 | **3.36x** |
+
+MTP depth 3, accept rate 0.767, three exact-shape samples, shape-match and
+rounding checks true. Clean timing pass only, no counters.
+
+Improvement over measurement 1: prefill peak **1.53x**, decode median
+**2.61x**. Attributable to the fusion/batching commits between `c5cb7a2` and
+`a3a50c4` plus the raised MMVQ threshold.
+
+**Why it is not publishable:** the `ncols5` multi-width differential still
+fails at prompt widths 3, 6 and 17. Correctness is not established, so this
+number describes an engine we would not ship.
+
+## Gap decomposition
+
+Residency headroom alone, if GPU busy went to 100% with no other change:
+
+| | busy now | headroom | gap to close | covered |
+|---|---|---|---|---|
+| prefill | 13.9% | 7.19x | 10.83x | **66%** |
+| decode | 32.4% | 3.09x | 3.36x | **92%** |
+
+So the launch/synchronization problem accounts for most of the remaining gap,
+and nearly all of it on decode. That is consistent with the copy attribution
+(91.9% of 739,794 copy groups immediately precede `quantize_q8_1`) and argues
+the contiguity fix is the highest-value remaining work, not kernel tuning.
+
+Prefill needs roughly 1.5x beyond perfect residency; decode needs almost
+nothing beyond it.
+
+## External calibration — the target is achievable, others reach it
+
+Independent published results for this model on gfx1151-class hardware:
+
+| source | hardware | decode | note |
+|---|---|---|---|
+| llama.cpp PR 27842, Vulkan/RADV | Strix Halo gfx1151 | **25.2 tok/s** baseline, 38.7-48.7 with MTP n-max 3 | UD-IQ4_XS + Q8_0 draft, greedy |
+| HF agentionai ROCmFP4-FAST MTP | Radeon 8060S (gfx1151) | **28.1 tok/s** baseline, 31.8-32.4 with MTP | temp 0 |
+
+Both land near the 23.6-23.8 tok/s DeepSeek-parity target, so the target is
+neither conservative nor unreachable for this model on this silicon. Our
+current 11.757 is roughly **2.4x below what a stock llama.cpp Vulkan build
+already achieves on the same part**.
+
+That reframes the work: we are not chasing an unproven number, we are behind a
+published one.
+
+## MTP acceptance is healthy, not a lever
+
+Measured 0.767 at depth 3. Published working band for n-max=3 on this model is
+**0.61-0.86** (PR 27842: 0.718 code / 0.652 prose / 0.918 list; agentionai
+gfx1151: 0.612). PR 27842 also finds n-max 8 loses on gfx1151 on both
+acceptance and rollback copies, and recommends 3 — which is what we run.
+
+No tuning needed here. An accept rate of exactly 0, as seen in the failed run
+`33320454087`, is a distinct wiring failure rather than a weak draft head, and
+should be read that way if it recurs.
+
 ## Known bottleneck evidence (run 33289399556 profiler)
 
 Not throughput, but the shape of the problem. Still believed current.
