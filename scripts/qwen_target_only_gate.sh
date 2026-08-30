@@ -556,7 +556,9 @@ done
 
 log "running profiler passes separately from timing"
 "$PROFILE_SCRIPT" --no-quiesce --image "$PROFILE_IMAGE" --binary "$BINARY" \
-  --model "$MODEL" --port "$PORT" --out-dir "$OUT_DIR/profile"
+  --model "$MODEL" --port "$PORT" \
+  --prefill-words 2048 --decode-tokens 256 --gap-secs 3 \
+  --out-dir "$OUT_DIR/profile"
 cp "$COUNTER_CALIBRATION" "$OUT_DIR/profile/counter-calibration.json"
 python3 "$PROFILE_REPORT" "$OUT_DIR/profile" \
   --counter-calibration "$OUT_DIR/profile/counter-calibration.json" --json \

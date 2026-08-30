@@ -656,6 +656,7 @@ done
 log "running separate trace/counter passes (never timing evidence)"
 "$PROFILE_SCRIPT" --no-quiesce --image "$PROFILE_IMAGE" --binary "$BINARY" \
   --model "$MODEL" --mtp "$MTP" --mtp-depth "$MTP_DEPTH" --port "$PORT" \
+  --prefill-words 2048 --decode-tokens 256 --gap-secs 3 \
   "${W4A8_PROFILE_ARGS[@]}" --out-dir "$OUT_DIR/profile"
 cp "$COUNTER_CALIBRATION" "$OUT_DIR/profile/counter-calibration.json"
 python3 "$PROFILE_REPORT" "$OUT_DIR/profile" \

@@ -124,6 +124,8 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertLess(timing, profile)
         self.assertIn("never timing evidence", body)
         self.assertIn('--image "$PROFILE_IMAGE"', body)
+        self.assertIn(
+            "--prefill-words 2048 --decode-tokens 256 --gap-secs 3", body)
         self.assertIn('--counter-calibration "$OUT_DIR/profile/counter-calibration.json"', body)
         self.assertIn('"profile_report": {"path": "profile/report.json"', body)
         self.assertIn('"counter_calibration": {"path": "profile/counter-calibration.json"', body)

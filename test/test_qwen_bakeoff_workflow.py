@@ -222,6 +222,8 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn('row["stage"] in {"format", "mtp-depth", "final"}',
                       TARGET_GATE.read_text(encoding="utf-8"))
         gate = TARGET_GATE.read_text(encoding="utf-8")
+        self.assertIn(
+            "--prefill-words 2048 --decode-tokens 256 --gap-secs 3", gate)
         self.assertIn('gid="$(stat -c %g -- "$node")"', gate)
         self.assertNotIn("--group-add video", gate)
         self.assertNotIn("--group-add render", gate)
