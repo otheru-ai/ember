@@ -935,6 +935,100 @@ static void test_sum_rows_shape_invariance() {
     ggml_backend_free(backend);
 }
 
+// The external Q4_K checkpoint puts its expert matrices through MUL_MAT_ID.
+// Source support is not enough: this HIP-only case instantiates the production
+// dimensions, asks the selected device whether it supports the concrete node,
+// and computes it directly on that backend. Width 16 is above gfx1151's Q4_K
+// MMVQ ceiling, so DFLASH_MMID_TELEMETRY must report path=mmq.
+static void test_q4k_mul_mat_id_hip() {
+    const char * hip_value = std::getenv("DFLASH_QWEN_Q4K_MMID_TEST_HIP");
+    if (!hip_value || std::strcmp(hip_value, "1") != 0) return;
+
+    ggml_backend_t backend =
+        ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    if (!backend) {
+        backend = ggml_backend_init_by_type(
+            GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+    }
+    CHECK(backend != nullptr, "Q4_K MUL_MAT_ID HIP backend initializes");
+    if (!backend) return;
+
+    const enum ggml_backend_dev_type device_type =
+        ggml_backend_dev_type(ggml_backend_get_device(backend));
+    CHECK(device_type == GGML_BACKEND_DEVICE_TYPE_GPU ||
+              device_type == GGML_BACKEND_DEVICE_TYPE_IGPU,
+          "Q4_K MUL_MAT_ID runs on a GPU device, not CPU fallback");
+
+    constexpr int64_t embedding = 2560;
+    constexpr int64_t expert_ff = 640;
+    constexpr int64_t experts = 512;
+    constexpr int64_t experts_used = 10;
+    constexpr int64_t tokens = 16;
+    ggml_init_params params{};
+    params.mem_size = 1024U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    CHECK(ctx != nullptr, "Q4_K MUL_MAT_ID metadata context initializes");
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return;
+    }
+
+    ggml_tensor * weights = ggml_new_tensor_3d(
+        ctx, GGML_TYPE_Q4_K, embedding, expert_ff, experts);
+    ggml_tensor * input = ggml_new_tensor_3d(
+        ctx, GGML_TYPE_F32, embedding, 1, tokens);
+    ggml_tensor * ids = ggml_new_tensor_2d(
+        ctx, GGML_TYPE_I32, experts_used, tokens);
+    ggml_tensor * output = ggml_mul_mat_id(ctx, weights, input, ids);
+    ggml_set_name(output, "q4k_expert_gate_test");
+
+    ggml_backend_buffer_t buffer =
+        ggml_backend_alloc_ctx_tensors(ctx, backend);
+    CHECK(buffer != nullptr, "Q4_K expert-shape HIP tensors allocate");
+    if (!buffer) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return;
+    }
+    ggml_backend_buffer_set_usage(buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+    // Deliberately degenerate routing: the zeroed ids send every row to expert
+    // zero. This test proves support and dispatch, not expert distribution.
+    ggml_backend_buffer_clear(buffer, 0);
+
+    const bool supported = ggml_backend_supports_op(backend, output);
+    CHECK(supported, "HIP supports Q4_K MUL_MAT_ID at Qwen expert shapes");
+    ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, output);
+    const ggml_status status = supported
+        ? ggml_backend_graph_compute(backend, graph)
+        : GGML_STATUS_FAILED;
+    CHECK(status == GGML_STATUS_SUCCESS,
+          "Q4_K MUL_MAT_ID computes directly on the HIP backend");
+
+    std::array<float, 16> sample{};
+    if (status == GGML_STATUS_SUCCESS) {
+        ggml_backend_tensor_get(output, sample.data(), 0,
+                                sample.size() * sizeof(float));
+    }
+    // Zero Q4_K blocks make this only a finiteness/no-fault assertion. Numeric
+    // equivalence to a CPU reference is outside this dispatch test's claim.
+    CHECK(status == GGML_STATUS_SUCCESS &&
+              std::all_of(sample.begin(), sample.end(),
+                          [](float value) { return value == 0.0f; }),
+          "zero Q4_K expert blocks produce finite zero HIP output");
+    std::fprintf(stderr,
+                 "[q4k-mmid] backend=%s device_type=%d supports=%s "
+                 "status=%d weights_bytes=%zu width=%lld expected_path=mmq\n",
+                 ggml_backend_name(backend), static_cast<int>(device_type),
+                 supported ? "true" : "false", static_cast<int>(status),
+                 ggml_nbytes(weights), static_cast<long long>(tokens));
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 static void test_gdn_recurrent_accumulation_order() {
     using dflash::common::Qwen4ExpFrontierGdnSpec;
     const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 128, 4, 1.0e-6f};
@@ -1932,9 +2026,17 @@ static void test_bounded_cache_and_prefill_policy() {
 }
 
 int main() {
+    // MMID telemetry is latched by a function-local static on first dispatch.
+    // Arm it before any backend work so the opt-in Q4_K route check cannot be
+    // silently voided by an earlier test. The HIP case allocates a production-
+    // shape expert tensor (roughly half a GiB), so it remains explicitly gated.
+    const char * q4k_hip = std::getenv("DFLASH_QWEN_Q4K_MMID_TEST_HIP");
+    if (q4k_hip && std::strcmp(q4k_hip, "1") == 0)
+        setenv("DFLASH_MMID_TELEMETRY", "1", 1);
     test_persistent_hc_mixer();
     test_persistent_gdn_q1();
     test_sum_rows_shape_invariance();
+    test_q4k_mul_mat_id_hip();
     test_gdn_recurrent_accumulation_order();
     test_gdn_batch_at_hip_legal_conv_channels();
     test_persistent_qsa_q1();
