@@ -122,15 +122,26 @@ the logs to say so. This is why the F32 reference uses an explicit env
 
 ---
 
-## 3. `sync_fallback` in `ggml_cuda_mul_mat_id` — never taken
+## 3. `sync_fallback` in `ggml_cuda_mul_mat_id` — never taken by the shipped configuration
 
 **Scope:** configuration. Vendored code.
 
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2648-2762`. The path performs two
 `cudaStreamSynchronize` calls and a host-side expert loop.
 
-**Evidence.** Measured **0 of 4924** MoE dispatches took it. It was investigated
-as a suspected source of per-token hard syncs and refuted.
+**Evidence.** It was measured absent from shipped MoE dispatches while being
+investigated as a suspected source of per-token hard syncs. The measurement is
+recorded only in `docs/qwen3.8-performance-status.md`.
+
+The off-by-default `GGML_CUDA_FORCE_CUBLAS` correctness build intentionally
+revives this path so routed experts can serve as a dequantize-and-GEMM
+reference. That diagnostic does not make the path live in the shipped
+configuration, and its output is invalid unless the companion F32-reference
+route evidence proves the fallback actually ran.
+
+**Falsifier.** A default shipped run whose routed-expert dispatch evidence
+contains `path=sync_fallback` makes this entry live. A force-cuBLAS diagnostic
+run does not, because that configuration is outside the stated scope.
 
 **Recommendation: no action.** Vendored; upstream needs it for cases we do not
 hit. Recorded so the next person does not re-derive it as a lever. See

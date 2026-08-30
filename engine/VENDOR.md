@@ -60,6 +60,18 @@ performed. The tensor mix is provenance-pinned to
 recipe input. Ember's own intervention, quantization audit, quality, memory,
 PLE-latency, and gfx1151 gates remain authoritative.
 
+The off-by-default Qwen correctness diagnostic also extends
+`GGML_CUDA_FORCE_CUBLAS` to suppress quantized MMVQ in the fusion predicate,
+plain `mul_mat`, and `mul_mat_id`, so every quantized projection reaches the
+dequantize-and-GEMM family. `DFLASH_CUBLAS_F32_REFERENCE=1` then forces the
+existing cuBLAS fallback to dequantize quantized operands to F32 and emits
+positive route evidence; it fails closed unless the force-cuBLAS build and
+`GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1` are both present. This explicit env is
+necessary instead of `ggml_mul_mat_set_prec(GGML_PREC_F32)` because upstream's
+`mul_mat_id` synchronous fallback zero-initializes each per-expert destination
+and thereby silently drops the caller's precision request. Ordinary builds and
+force-cuBLAS builds without the env retain their prior operand precision.
+
 ## Pruned deployment scope
 
 Ember preserves the upstream provenance above, but intentionally does not carry

@@ -12,12 +12,14 @@ production stream of the ``GGML_CUDA_FORCE_CUBLAS`` +
 ``DFLASH_CUBLAS_F32_REFERENCE=1`` build.
 
 Width 2 gates the run.  ``sync_fallback`` is recorded in
-``docs/dead-code-candidates.md`` entry 3 as taken 0 of 4924 times in
-production, and the reference build routes every routed expert through it, so
-the reference is computed on code that production never exercises.  At width 2
-the default production stream is bit-identical to q1, so any distance measured
-there is the REFERENCE's own error and nothing else.  If that distance is not
-small, the finding is about ``sync_fallback`` and says nothing about MMQ.
+``docs/dead-code-candidates.md`` entry 3 as absent from measured production
+dispatches, and the reference build routes every routed expert through it, so
+the reference is computed on code that production never exercises.  At width
+2 the default production stream is bit-identical to q1, so any distance
+measured there is the REFERENCE's own error and nothing else.  If that distance
+is not small, the finding is about ``sync_fallback`` and says nothing about
+MMQ.  The measurements supporting those statements live only in
+``docs/qwen3.8-performance-status.md``.
 
 This script decides nothing on its own: it prints the numbers and the gate
 verdict.  Exit status is 0 when the comparison is well-formed, 1 when a

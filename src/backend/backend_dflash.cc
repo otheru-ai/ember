@@ -9,6 +9,7 @@
 // lib; it must be built in the ROCm/HIP container (the C server does not).
 #include "ember_backend.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -18,7 +19,9 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +34,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/backend_factory.h"
@@ -1310,6 +1314,148 @@ static void trace_validation_tokens(
     }
 }
 
+static bool validation_logits_directory(
+        std::string *directory, std::string *error) {
+    const char *value = std::getenv("EMBER_VALIDATION_LOGITS_DIR");
+    directory->clear();
+    if (!value || !value[0]) return true;
+    if (value[0] != '/') {
+        *error = "EMBER_VALIDATION_LOGITS_DIR must be absolute";
+        return false;
+    }
+    struct stat st {};
+    if (stat(value, &st) != 0) {
+        *error = std::string("cannot stat EMBER_VALIDATION_LOGITS_DIR: ") +
+                 std::strerror(errno);
+        return false;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        *error = "EMBER_VALIDATION_LOGITS_DIR is not a directory";
+        return false;
+    }
+    *directory = value;
+    return true;
+}
+
+static bool write_validation_logits_row(
+        const std::string &path, const std::vector<float> &row,
+        std::string *error) {
+    if (row.empty()) {
+        *error = "validation logits row is empty: " + path;
+        return false;
+    }
+    if (row.size() > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        *error = "validation logits row is too large: " + path;
+        return false;
+    }
+
+    // The evidence contract is explicitly little-endian F32, independent of
+    // host byte order. Validate finiteness before creating any output file.
+    std::vector<uint8_t> bytes(row.size() * sizeof(float));
+    for (size_t i = 0; i < row.size(); ++i) {
+        if (!std::isfinite(row[i])) {
+            *error = "validation logits row contains a non-finite value: " +
+                     path;
+            return false;
+        }
+        uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(row[i]),
+                      "validation logits require 32-bit float");
+        std::memcpy(&bits, &row[i], sizeof(bits));
+        bytes[4 * i + 0] = static_cast<uint8_t>(bits >> 0);
+        bytes[4 * i + 1] = static_cast<uint8_t>(bits >> 8);
+        bytes[4 * i + 2] = static_cast<uint8_t>(bits >> 16);
+        bytes[4 * i + 3] = static_cast<uint8_t>(bits >> 24);
+    }
+
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                        S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    if (fd < 0) {
+        *error = "cannot create validation logits row " + path + ": " +
+                 std::strerror(errno);
+        return false;
+    }
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t written =
+            write(fd, bytes.data() + offset, bytes.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            const int saved_errno = written < 0 ? errno : EIO;
+            (void)close(fd);
+            (void)unlink(path.c_str());
+            *error = "cannot write validation logits row " + path + ": " +
+                     std::strerror(saved_errno);
+            return false;
+        }
+        offset += static_cast<size_t>(written);
+    }
+    if (close(fd) != 0) {
+        const int saved_errno = errno;
+        (void)unlink(path.c_str());
+        *error = "cannot close validation logits row " + path + ": " +
+                 std::strerror(saved_errno);
+        return false;
+    }
+    return true;
+}
+
+static bool dump_validation_logits(
+        const std::string &directory,
+        const std::vector<std::vector<float>> &q1,
+        const std::vector<std::vector<float>> &production,
+        std::string *error) {
+    if (q1.empty() || q1.size() != production.size()) {
+        *error = "validation logits row counts are empty or unequal";
+        return false;
+    }
+    for (size_t row = 0; row < q1.size(); ++row) {
+        if (q1[row].size() != production[row].size()) {
+            *error = "validation logits row widths are unequal";
+            return false;
+        }
+    }
+
+    const std::string prefix =
+        directory.back() == '/' ? directory : directory + "/";
+    const std::array<std::pair<const char *,
+                               const std::vector<std::vector<float>> *>, 2>
+        streams = {{{"q1", &q1}, {"production", &production}}};
+    std::vector<std::string> written_paths;
+    const auto remove_written_rows = [&] {
+        bool removed = true;
+        for (const std::string &path : written_paths) {
+            if (unlink(path.c_str()) != 0 && errno != ENOENT) removed = false;
+        }
+        return removed;
+    };
+    for (const auto &stream : streams) {
+        for (size_t row = 0; row < stream.second->size(); ++row) {
+            char filename[64];
+            const int count = std::snprintf(
+                filename, sizeof(filename), "%s-row%03zu.f32",
+                stream.first, row);
+            if (count < 0 || static_cast<size_t>(count) >= sizeof(filename)) {
+                *error = "validation logits filename overflow";
+                if (!remove_written_rows()) {
+                    *error += "; failed to remove partial capture";
+                }
+                return false;
+            }
+            const std::string path = prefix + filename;
+            if (!write_validation_logits_row(
+                    path, (*stream.second)[row], error)) {
+                if (!remove_written_rows()) {
+                    *error += "; failed to remove partial capture";
+                }
+                return false;
+            }
+            written_paths.push_back(path);
+        }
+    }
+    return true;
+}
+
 static bool backend_validate_impl(
         ember_backend *b, const int32_t *prompt, int n_prompt, int n_gen,
         ember_validation_report *report) {
@@ -1322,6 +1468,16 @@ static bool backend_validate_impl(
     report->expected_token = -1;
     report->actual_token = -1;
 
+    std::string validation_logits_dir;
+    std::string validation_logits_error;
+    if (!validation_logits_directory(
+            &validation_logits_dir, &validation_logits_error)) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "validation logits capture rejected: %s",
+                      validation_logits_error.c_str());
+        return true;
+    }
+
     GenerateRequest ar;
     ar.prompt = vec(prompt, n_prompt);
     ar.n_gen = n_gen;
@@ -1331,6 +1487,11 @@ static bool backend_validate_impl(
     ar.force_exact_prefill = true;
     ar.capture_validation_logits =
         b->be->validation_compare_production_prefill();
+    if (!validation_logits_dir.empty() && !ar.capture_validation_logits) {
+        std::snprintf(report->detail, sizeof(report->detail),
+                      "validation logits capture is unsupported by backend");
+        return true;
+    }
     ar.snap_slot = 0;
     ar.snap_pos = n_prompt;
 
@@ -1366,6 +1527,17 @@ static bool backend_validate_impl(
         report->prefill_tokens =
             static_cast<int>(production_prefill.tokens.size());
         if (production_prefill.ok()) {
+            if (!validation_logits_dir.empty() && !dump_validation_logits(
+                    validation_logits_dir, baseline.validation_logits,
+                    production_prefill.validation_logits,
+                    &validation_logits_error)) {
+                report->prefill_exact = false;
+                report->prefill_accepted = false;
+                std::snprintf(report->detail, sizeof(report->detail),
+                              "validation logits capture failed: %s",
+                              validation_logits_error.c_str());
+                return true;
+            }
             const PrefillMarginDecision decision =
                 dflash::common::validate_prefill_margin(
                     baseline.tokens, production_prefill.tokens,

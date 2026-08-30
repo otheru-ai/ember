@@ -104,6 +104,42 @@ static bool ggml_cuda_rocmi4_dispatch_evidence_enabled() {
     return enabled;
 }
 
+// Ember diagnostic divergence: FORCE_CUBLAS by itself still lets quantized
+// weights use F16 operands in ggml_cuda_op_mul_mat_cublas.  The explicit
+// runtime gate below is what makes the correctness reference dequantize those
+// weights to F32 before SGEMM.  It must never silently run in a normal build.
+static bool ggml_cuda_cublas_f32_reference_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("DFLASH_CUBLAS_F32_REFERENCE");
+        const bool requested = value != nullptr && std::strcmp(value, "1") == 0;
+#ifndef GGML_CUDA_FORCE_CUBLAS
+        if (requested) {
+            GGML_ABORT(
+                "DFLASH_CUBLAS_F32_REFERENCE requires a "
+                "GGML_CUDA_FORCE_CUBLAS build");
+        }
+#endif
+        return requested;
+    }();
+    return enabled;
+}
+
+static void ggml_cuda_log_f32_reference_route(const ggml_tensor * weight,
+                                               const ggml_tensor * dst,
+                                               int64_t physical_q,
+                                               const char * op,
+                                               const char * path) {
+    if (!ggml_cuda_cublas_f32_reference_enabled() || !weight ||
+        !ggml_is_quantized(weight->type)) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[dflash-f32-reference] event=route op=%s physical_q=%lld "
+                 "type=%s path=%s weight=%s dst=%s\n",
+                 op, (long long) physical_q, ggml_type_name(weight->type),
+                 path, weight->name, dst ? dst->name : "");
+}
+
 static void ggml_cuda_log_rocmi4_route(const ggml_tensor * weight,
                                        const ggml_tensor * dst,
                                        int64_t physical_q,
@@ -1565,7 +1601,15 @@ static void ggml_cuda_op_mul_mat_cublas(
 
     const bool supports_bf16 = GGML_CUDA_CC_IS_NVIDIA(cc) || GGML_CUDA_CC_IS_AMD(cc);
 
+    const bool f32_reference = ggml_cuda_cublas_f32_reference_enabled();
+    if (f32_reference && !ggml_cuda_cublas_get_force_compute_type().fp32) {
+        GGML_ABORT(
+            "DFLASH_CUBLAS_F32_REFERENCE requires "
+            "GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1");
+    }
+
     const bool use_fp16 =
+        !f32_reference &&
         src0->type != GGML_TYPE_NVFP4 &&
         (src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) &&
         ggml_is_contiguous(src0) &&
@@ -2445,6 +2489,10 @@ static inline void ggml_cuda_set_fusion_glu_params(ggml_cuda_mm_fusion_args_host
 }
 
 static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+#ifdef GGML_CUDA_FORCE_CUBLAS
+    GGML_UNUSED(tensor);
+    return false;
+#else
     ggml_tensor *       src0 = tensor->src[0];
     ggml_tensor *       src1 = tensor->src[1];
     const ggml_tensor * dst  = tensor;
@@ -2482,6 +2530,7 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     }
 
     return use_mul_mat_vec_q;
+#endif
 }
 
 // Execute an unbiased gate/up GLU while retaining the caller's existing
@@ -2580,6 +2629,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
         && src1->ne[1] <= luce_mmvq_max_ncols;
+#ifdef GGML_CUDA_FORCE_CUBLAS
+    use_mul_mat_vec_q = false;
+#endif
     bool use_mul_mat_q     = ggml_is_quantized(src0->type) && !bad_padding_clear
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
 
@@ -2630,6 +2682,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         GGML_ASSERT(!split);
         GGML_ASSERT(use_mul_mat_q);
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
@@ -2639,9 +2692,11 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmvq");
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmvq");
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
@@ -2651,11 +2706,14 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_f, nullptr);
     } else if (use_mul_mat_vec_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmvq");
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmvq");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
     } else if (use_mul_mat_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
+        ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "cublas_f32");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
 }
@@ -2680,6 +2738,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         ? get_mmvq_mmid_max_batch(src0->type, cc) : 0;
     const auto log_dispatch = [&](const char * path) {
         ggml_cuda_log_rocmi4_route(src0, dst, ne2, "routed_expert", path);
+        ggml_cuda_log_f32_reference_route(src0, dst, ne2, "routed_expert", path);
         if (mmid_telemetry) {
             std::fprintf(stderr,
                 "[dflash-mmid] event=dispatch name=%s type=%s ne11=%lld width=%lld pairs=%lld "
@@ -2695,11 +2754,13 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_MOE_BATCH_SIZE) {
             if (ggml_is_quantized(src0->type)) {
+#ifndef GGML_CUDA_FORCE_CUBLAS
                 if (ne2 <= mmvq_mmid_max) {
                     log_dispatch("mmvq");
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
                     return;
                 }
+#endif
             } else {
                 if (ne2 <= MMVF_MAX_BATCH_SIZE && GGML_CUDA_CC_IS_AMD(cc)) {
                     log_dispatch("mmvf");
@@ -2722,7 +2783,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         }
     }
 
-    log_dispatch("sync_fallback");
+    log_dispatch(ggml_cuda_cublas_f32_reference_enabled() &&
+                         ggml_is_quantized(src0->type)
+                     ? "sync_fallback_f32"
+                     : "sync_fallback");
 
     // note: this path should not be reached when recording CUDA graphs, because it requires stream synchronization
     // TODO: add asserts to verify this. should work with CUDA, HIP, etc.
