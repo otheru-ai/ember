@@ -373,6 +373,35 @@ without the guard is exactly what a fixture that never reached either kernel
 would produce. Fixed in `4e9a6aa`: `head_dim = 128`, 1024 conv channels (still
 `% 128 == 0`), both properties asserted in the test.
 
+### The S_v=128 kernel passes on HIP at n=3 with non-zero state
+
+Codex 341, run `qwen-gdn-sv128-unit-3e2047c`, on the corrected fixture
+(`4e9a6aa`): the HIP graph matches the scalar reference at n=3 **with non-zero
+initial state** — the condition the zero-state argument says is necessary to
+observe the fault at all.
+
+So at 4 heads / 2 key heads / 1024 conv channels, the S_v=128 GDN kernel, its
+`ssm_conv` window, the q/k/v views and the state carry are all **correct on
+real hardware at the failing width**. Combined with grouped-cols being
+exonerated, that is the kernel largely cleared.
+
+What the control does *not* cover, and therefore what is left:
+
+- **Scale.** 4 heads against 48, 2 key heads against 16, 1024 conv channels
+  against 10240, `n_embd` 8 against 2560. Grid extent in the grouped kernel is
+  `(H, n_seqs, ...)`, so `H` is the one axis that changes with head count.
+- **Real data.** The fixture uses patterned weights. A data-dependent fault —
+  range, overflow, a denormal — would not show.
+- **Depth.** The real path runs 36 GDN layers. A per-layer-exact kernel can
+  still produce a wrong answer if something accumulates across layers, and
+  nothing so far distinguishes "one GDN call is wrong" from "GDN calls are
+  right and something between them is not".
+
+The per-layer comparator (codex 339, reviewed and approved) separates exactly
+those: it holds `attention_inputs` fixed and varies only batched-versus-serial,
+per layer, on the real model. Its first diverging layer is the answer; later
+layers are fed contaminated inputs and are not independent evidence.
+
 ### Where in GDN, from the pass/fail pattern
 
 A fresh GDN chunk starts from `S = 0`, and that alone explains why n=1 is
