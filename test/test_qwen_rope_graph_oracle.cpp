@@ -196,7 +196,7 @@ std::vector<float> reference_rope(const ember_qwen_yarn_config & cfg,
         for (int head = 0; head < kHeads; ++head) {
             float * slot =
                 out.data() +
-                (static_cast<size_t>(token) * kHeads + head) * kHeadDim;
+                (static_cast<size_t>(token) * kHeads + static_cast<size_t>(head)) * kHeadDim;
             ember_qwen_yarn_apply(slot, kHeadDim, &cfg, position);
         }
     }
@@ -221,7 +221,7 @@ std::vector<float> exact_rope(const ember_qwen_yarn_config & cfg,
         for (int head = 0; head < kHeads; ++head) {
             float * slot =
                 out.data() +
-                (static_cast<size_t>(token) * kHeads + head) * kHeadDim;
+                (static_cast<size_t>(token) * kHeads + static_cast<size_t>(head)) * kHeadDim;
             for (int k = 0; k < EMBER_QWEN_ROPE_FREQ_COUNT; ++k) {
                 const double angle =
                     std::fmod(pos * exact_inv_freq(cfg, k), 2.0 * 3.14159265358979323846);
@@ -308,7 +308,7 @@ void run_case(bool enable_yarn, int32_t max_context, Path path,
     for (int token = 0; token < kTokens; ++token) {
         for (int head = 0; head < kHeads; ++head) {
             const size_t base =
-                (static_cast<size_t>(token) * kHeads + head) * kHeadDim;
+                (static_cast<size_t>(token) * kHeads + static_cast<size_t>(head)) * kHeadDim;
             for (int i = EMBER_QWEN_ROPE_DIM; i < kHeadDim; ++i) {
                 tail_delta = std::fmax(
                     tail_delta,

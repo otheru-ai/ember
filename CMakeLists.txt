@@ -774,7 +774,13 @@ if(EMBER_ENGINE)
   target_include_directories(test_qwen_rope_graph_oracle PRIVATE
     engine/dflash/common engine/ggml/include)
   target_link_libraries(test_qwen_rope_graph_oracle PRIVATE ember_engine)
-  ember_strict(test_qwen_rope_graph_oracle)
+  # Deliberately not ember_strict, for the same reason test_qwen4exp_frontier
+  # is not: it includes ggml-backend.h, and EMBER_STRICT's -Wshadow fires
+  # inside that vendored header (ggml-backend.h:355, a function name hiding
+  # ggml_backend_graph_copy's constructor). Upstream keeps its own warning
+  # standard; holding an Ember target to ours turns a vendored header into our
+  # build error. test_qwen4exp_shards stays strict because it does not include
+  # that header.
   add_test(NAME qwen_rope_graph_oracle COMMAND test_qwen_rope_graph_oracle)
   set_tests_properties(qwen_rope_graph_oracle PROPERTIES TIMEOUT 60)
 
