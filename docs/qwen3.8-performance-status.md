@@ -1016,10 +1016,44 @@ than `d`, the flip cannot be explained by the observed numerical difference and
 is a real defect. If the margin was inside `d`, the argmax was tied at the
 precision available and either answer is as correct as the other.
 
-**It does not weaken the test.** At width 3 the divergence was 13.4118 against
-19.5071 — a six-logit margin against a first divergence of ~1e-7. That fails
-under this criterion, correctly. The `sum_rows` defect would still have been
-caught.
+**CORRECTION 2026-08-31: it does weaken the test, and the claim that it did
+not was mine and was wrong.**
+
+When this was put up for decision I wrote that width 3 would still fail under
+it. Checking the arithmetic against the evidence:
+
+    q1 top-2   830 @ 19.5070915, 1543 @ 15.118576   ->  margin ~= 4.389
+    batched    830 @ 13.4118                        ->  |delta[830]| ~= 6.095
+    accepted = margin < max_abs  ->  4.389 < 6.095  ->  ACCEPTED
+
+**The `sum_rows` defect would have passed this criterion.** (The fix changed
+q1's reduction too, so the pre-fix q1 margin may differ slightly from 4.389 —
+not by 1.7 logits.)
+
+The flaw is that the criterion asks whether a flip is *explicable* by the
+observed perturbation and accepts when it is. But a six-logit perturbation **is
+itself the defect**, whatever the margin. It conflates explicable with
+acceptable.
+
+The missing clause is that the perturbation must be small in absolute terms:
+
+    accepted = (max_abs_logit_delta < noise_bound)
+            && (q1_top2_margin < max_abs_logit_delta)
+
+`noise_bound` is not self-calibrating and needs a number — which is what the
+decision was framed to avoid. It is derivable rather than invented: measure
+`max_abs_logit_delta` on the widths that **pass**. Widths 2-5 are green, and
+whatever perturbation they carry is the real floor for this model on this
+hardware.
+
+**This is back with the user**, who decided the criterion partly on the
+assurance that it would still have caught `sum_rows`. That assurance was false.
+
+Separately, a rewrite I proposed — compare the margin against
+`|delta(expected)| + |delta(actual)|` — was refuted by codex and must not be
+used: for greedy decoding `production[A] > production[E]` makes
+`q1[E] - q1[A] < |delta[A]| + |delta[E]|` true by construction, so it accepts
+every flip. A rubber stamp with the appearance of rigour.
 
 ### What stays bit-exact
 
