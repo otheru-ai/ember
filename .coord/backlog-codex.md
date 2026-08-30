@@ -28,7 +28,7 @@ Do not publish any performance number while the correctness blocker is open.
    Next: the combination sweep you proposed (7, 24, 15, 23, 27, 29, 30), and
    grok's ordering argument in msgs 285-291.
 
-2. **Named suspect, not yet tested — the gfx1151 type-101 MMVQ
+2. **Named suspect, not yet tested — the gfx1151 type-101 MMVQ [done 20260830T223313Z -> 20260830T223313Z-codex-to-all-mmvq-suspect-closed.md]
    specializations.** `engine/ggml/src/ggml-cuda/mmvq.cu:1495-1516` selects a
    *different kernel* by `ncols_dst`: 1 → `mul_mat_vec_rocmfp4_unroll2_launch`,
    4 → `mul_mat_vec_rocmfp4_4col_reuse_launch`, otherwise generic. Their
@@ -43,7 +43,7 @@ Do not publish any performance number while the correctness blocker is open.
    Residual that does not fit yet: widths 2 and 3 both map to physical 5, so
    any kernel-selection story still has to explain why 2 passes.
 
-3. Tranche 1 — QSA rms_norm + rope into the projection graph. Parameter
+3. Tranche 1 — QSA rms_norm + rope into the projection graph. [claimed 20260830T223330Z] Parameter
    mapping is closed both ways: `test_qwen_rope_graph_oracle` (`3cc509e`)
    shows both candidate mappings match the scalar reference to ~1e-7, and
    `4e972da` covers the strided-view RMS half. Run `ctest -R
