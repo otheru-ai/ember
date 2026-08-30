@@ -1776,6 +1776,28 @@ bool qwen4exp_batch_layer(
                 weights, state.layers[static_cast<size_t>(layer_index)],
                 layer, layer_index, attention_inputs, positions,
                 state.mrope_positions, attention_outputs, error)) return false;
+    } else if (q1_mask & kBatchQ1Attention) {
+        // The diagnostic attention bit covers both attention families.  QSA
+        // already takes its q=1 path above; mirror that behavior for GDN so a
+        // mask-4 run does not silently leave three quarters of the layers on
+        // the batched recurrent kernel.
+        attention_outputs.resize(rows * static_cast<size_t>(kEmbedding));
+        for (size_t row = 0; row < rows; ++row) {
+            const auto begin = attention_inputs.begin() +
+                static_cast<std::ptrdiff_t>(
+                    row * static_cast<size_t>(kEmbedding));
+            const std::vector<float> row_input(
+                begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            std::vector<float> block;
+            if (!run_gdn(
+                    weights,
+                    state.layers[static_cast<size_t>(layer_index)], layer,
+                    layer_index, row_input, block, error)) return false;
+            std::copy(block.begin(), block.end(),
+                      attention_outputs.begin() +
+                          static_cast<std::ptrdiff_t>(
+                              row * static_cast<size_t>(kEmbedding)));
+        }
     } else {
         // GDN is causal internally and executes the exact q2-q16 recurrent
         // sequence in one persistent graph/state boundary.
