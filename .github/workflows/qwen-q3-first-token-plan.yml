@@ -85,7 +85,7 @@ jobs:
           # graph changes are intentionally outside this list.
           artifact_inputs=(
             CMakeLists.txt
-            scripts/qwen_candidate_builder.py scripts/qwen_quantize.py
+            scripts/qwen_quantize.py
             tools/gguf_quantize.cpp tools/gguf_quantize_common.cpp
             tools/gguf_quantize_common.h
             engine/ggml/include/ggml.h engine/ggml/include/gguf.h
@@ -98,7 +98,14 @@ jobs:
             share/release_profiles/qwen3.8-flash-next-rocmi4-strix-halo.json
             share/quant_eval/qwen3.8-flash-next-bakeoff.json
           )
-          if git diff --quiet "$ARTIFACT_BUILDER_SHA..$TARGET_SHA" -- "${artifact_inputs[@]}"; then
+          # Candidate-builder retention/reconstruction bookkeeping cannot
+          # change weight bytes.  Compare its AST with only an explicit set of
+          # retirement-only definitions omitted; every other edit rebuilds.
+          if git diff --quiet "$ARTIFACT_BUILDER_SHA..$TARGET_SHA" -- \
+                "${artifact_inputs[@]}" && \
+              python3 scripts/qwen_builder_change_scope.py \
+                --repository "$GITHUB_WORKSPACE" \
+                --base "$ARTIFACT_BUILDER_SHA" --target "$TARGET_SHA"; then
             test -f "$REUSABLE_CONSTRUCTION" && test ! -L "$REUSABLE_CONSTRUCTION"
             test "$(sha256sum "$REUSABLE_CONSTRUCTION" | awk '{print $1}')" = \
               "$REUSABLE_CONSTRUCTION_SHA256"

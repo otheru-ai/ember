@@ -21,6 +21,7 @@ DISPATCH = ROOT / "scripts/qwen_w4a8_dispatch_evidence.py"
 HEX = "1" * 64
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_quant_comparison as quant_comparison  # noqa: E402
+import qwen_builder_change_scope as builder_scope  # noqa: E402
 
 
 def timing_rows(prefill: tuple[float, float, float] = (411.0, 412.0, 413.0),
@@ -238,6 +239,55 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertLess(derive, profile)
         self.assertIn('"benchmark_contract": benchmark_contract', body)
         self.assertIn('"benchmark_contract": {"path": "benchmark-contract.json"', body)
+
+    def test_q3_reuse_classifier_ignores_only_retention_bookkeeping(self) -> None:
+        plan = (ROOT / ".github/workflows/qwen-q3-first-token-plan.yml").read_text(
+            encoding="utf-8")
+        self.assertIn("scripts/qwen_builder_change_scope.py", plan)
+        self.assertNotIn(
+            "scripts/qwen_candidate_builder.py scripts/qwen_quantize.py", plan)
+        baseline = '''
+RECONSTRUCTABLE_RETIREMENT_SCHEMA = "v1"
+RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA = "v1"
+BUILD_FORMAT = "Q3"
+def build_candidate():
+    return BUILD_FORMAT
+def _validate_reconstruction_intervention():
+    return None
+def _record_reconstruction_contract():
+    return None
+def retire_reconstructable():
+    return RECONSTRUCTABLE_RETIREMENT_SCHEMA
+def restore_reconstructable():
+    return RECONSTRUCTABLE_RETIREMENT_COMPLETE_SCHEMA
+'''
+        retention_only = baseline.replace('"v1"', '"v2"').replace(
+            "def retire_reconstructable():\n",
+            "def added_retention_helper():\n"
+            "    return None\n"
+            "def retire_reconstructable():\n")
+        # A new helper is conservative unless it is explicitly classified.
+        self.assertNotEqual(builder_scope.content_fingerprint(baseline),
+                            builder_scope.content_fingerprint(retention_only))
+        retention_only = baseline.replace('"v1"', '"v2"').replace(
+            "    return None\ndef _record_reconstruction_contract():",
+            "    return {'retained': True}\ndef _record_reconstruction_contract():")
+        self.assertEqual(builder_scope.content_fingerprint(baseline),
+                         builder_scope.content_fingerprint(retention_only))
+        build_change = baseline.replace('BUILD_FORMAT = "Q3"',
+                                        'BUILD_FORMAT = "IU4"')
+        self.assertNotEqual(builder_scope.content_fingerprint(baseline),
+                            builder_scope.content_fingerprint(build_change))
+        retention_used_by_build = baseline.replace(
+            "    return BUILD_FORMAT\ndef _validate_reconstruction_intervention():",
+            "    return RECONSTRUCTABLE_RETIREMENT_SCHEMA\n"
+            "def _validate_reconstruction_intervention():")
+        changed_retention_used_by_build = retention_used_by_build.replace(
+            'RECONSTRUCTABLE_RETIREMENT_SCHEMA = "v1"',
+            'RECONSTRUCTABLE_RETIREMENT_SCHEMA = "v2"')
+        self.assertNotEqual(
+            builder_scope.content_fingerprint(retention_used_by_build),
+            builder_scope.content_fingerprint(changed_retention_used_by_build))
 
     def test_benchmark_contract_binds_the_exact_workload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -359,7 +359,11 @@ the `rocmi4-q6k-main-rocmfp4-fast-mtp-d3` arm: using the same FAST MTP at depth
 3 isolates the main Q3-versus-ROCMI4 recipe instead of changing MTP format at
 the same time. Do not requantize the Q3 artifact when its content-affecting
 recipe inputs are unchanged; rebind its immutable construction descriptor to
-the same runtime used for IU4.
+the same runtime used for IU4. The first-token plan treats changes to the
+builder conservatively, except for an explicit AST-level allowlist of
+post-build retention/reconstruction definitions; this prevents retention-only
+hardening from forcing an 80+ GiB requant while any construction-path edit
+still requires one.
 
 ```sh
 python3 scripts/qwen_quant_comparison.py compare \
