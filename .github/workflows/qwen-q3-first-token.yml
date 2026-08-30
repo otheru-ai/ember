@@ -201,83 +201,17 @@ jobs:
       - name: Derive first-token evidence from the full differential
         run: |
           set -euo pipefail
-          python3 - "$QWEN_FIRST_TOKEN_OUTPUT" "$TARGET_SHA" "$CANDIDATE_ID" \
-              "$CONSTRUCTION_DESCRIPTOR" "$CONSTRUCTION_DESCRIPTOR_SHA256" \
-              "$MODEL" "$MODEL_SHA256" "$MODEL_TOTAL_BYTES" "$MTP" "$MTP_SHA256" \
-              "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_ENGINE_SHA256" <<'PY'
-          import datetime as dt, hashlib, json, pathlib, re, sys
-          (root_raw, revision, candidate_id, descriptor, descriptor_sha, model, model_sha,
-           model_bytes, mtp, mtp_sha, image, image_sha, engine_sha) = sys.argv[1:]
-          root = pathlib.Path(root_raw)
-          validation_path = root / "full-benchmark" / "differential.json"
-          log_path = root / "full-benchmark" / "differential-dispatch-server.log"
-          validation = json.loads(validation_path.read_text())
-          prefill = validation.get("prefill") or {}
-          spec = validation.get("spec") or {}
-          disk = validation.get("disk") or {}
-          n_tokens = validation.get("baseline_tokens")
-          if (validation.get("ok") is not True or validation.get("snapshot_ok") is not True
-                  or validation.get("requested_tokens") != 64
-                  or type(n_tokens) is not int or n_tokens != 64
-                  or prefill.get("checked") is not True or prefill.get("exact") is not True
-                  or prefill.get("tokens") != n_tokens
-                  or spec.get("checked") is not True or spec.get("exact") is not True
-                  or spec.get("tokens") != n_tokens or disk.get("checked") is not True
-                  or disk.get("exact") is not True or disk.get("tokens") != n_tokens):
-              raise SystemExit(f"64-token differential did not prove every serial path: {validation}")
-          traces = {}
-          pattern = re.compile(r"^\[ember-validate-token\] path=(\w+) index=(\d+) id=(-?\d+)$")
-          for line in log_path.read_text(errors="replace").splitlines():
-              match = pattern.fullmatch(line)
-              if not match:
-                  continue
-              path = match.group(1)
-              index = int(match.group(2))
-              path_tokens = traces.setdefault(path, {})
-              if index in path_tokens:
-                  raise SystemExit(f"duplicate token trace for {path} index {index}")
-              path_tokens[index] = int(match.group(3))
-          required = {"baseline", "prefill", "restored", "fresh", "disk"}
-          expected_indices = set(range(n_tokens))
-          if (set(traces) != required or
-                  any(set(traces[name]) != expected_indices for name in required)):
-              raise SystemExit(f"token trace paths or indices differ: {traces}")
-          baseline = [traces["baseline"][i] for i in range(n_tokens)]
-          if any([traces[name][i] for i in range(n_tokens)] != baseline
-                 for name in required):
-              raise SystemExit(f"token traces differ across exact paths: {traces}")
-          first = baseline[0]
-          if first < 0:
-              raise SystemExit(f"first token is invalid: {first}")
-          def sha(path): return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-          evidence = {
-              "schema": "ember.qwen3.8.q3-ple-first-token.v1",
-              "status": "complete", "publishes": False, "deletes": False,
-              "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-              "ember_revision": revision, "candidate_id": candidate_id,
-              "construction_descriptor": {"path": descriptor, "sha256": descriptor_sha},
-              "model": {"first_shard": model, "first_shard_sha256": model_sha,
-                        "total_bytes": int(model_bytes)},
-              "mtp": {"path": mtp, "sha256": mtp_sha, "depth": 3,
-                      "matrix_quant_contract": "Q4_0_ROCMFP4_FAST"},
-              "quantization_arm": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
-              "runtime": {"image": image, "image_digest": image_sha,
-                          "engine_sha256": engine_sha, "device": "gfx1151"},
-              "generation": {"requested_tokens": n_tokens, "first_token_id": first,
-                             "token_ids_by_path": {name: [traces[name][i]
-                                                           for i in range(n_tokens)]
-                                                   for name in sorted(required)},
-                             "snapshot_exact": True, "production_prefill_exact": True,
-                             "speculative_exact": True,
-                             "disk_restore_exact": True},
-              "evidence": {"validation_json_sha256": sha(validation_path),
-                           "engine_log_sha256": sha(log_path)},
-              "claim_scope": "first sampled token plus 64-token serial differential; no quality or performance claim",
-          }
-          output = root / "first-token-evidence.json"
-          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-          print(first)
-          PY
+          python3 scripts/qwen_first_token_evidence.py \
+            --root "$QWEN_FIRST_TOKEN_OUTPUT" \
+            --ember-revision "$TARGET_SHA" --candidate-id "$CANDIDATE_ID" \
+            --construction-descriptor "$CONSTRUCTION_DESCRIPTOR" \
+            --construction-descriptor-sha256 "$CONSTRUCTION_DESCRIPTOR_SHA256" \
+            --model "$MODEL" --model-sha256 "$MODEL_SHA256" \
+            --model-total-bytes "$MODEL_TOTAL_BYTES" \
+            --mtp "$MTP" --mtp-sha256 "$MTP_SHA256" --mtp-depth 3 \
+            --runtime-image "$RUNTIME_IMAGE" \
+            --runtime-image-digest "$RUNTIME_IMAGE_DIGEST" \
+            --runtime-engine-sha256 "$RUNTIME_ENGINE_SHA256"
           evidence="$QWEN_FIRST_TOKEN_OUTPUT/first-token-evidence.json"
           printf 'QWEN_FIRST_TOKEN_EVIDENCE=%s\nQWEN_FIRST_TOKEN_EVIDENCE_SHA256=%s\n' \
             "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"

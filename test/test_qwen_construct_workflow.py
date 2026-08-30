@@ -25,12 +25,58 @@ REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
 DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 Q3_FIRST_TOKEN_PLAN = ROOT / ".github/workflows/qwen-q3-first-token-plan.yml"
 Q3_FIRST_TOKEN = ROOT / ".github/workflows/qwen-q3-first-token.yml"
+Q3_FIRST_TOKEN_EVIDENCE = ROOT / "scripts/qwen_first_token_evidence.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
 import qwen_selection_corpus_stage as selection_stage  # noqa: E402
 import qwen_candidate_request as candidate_request  # noqa: E402
 import qwen_reuse_candidate as reuse_candidate  # noqa: E402
 import qwen_integrity_cache as integrity_cache  # noqa: E402
+
+
+def first_token_fixture(root: Path, mutation: str = "") -> list[str]:
+    full = root / "full-benchmark"
+    full.mkdir(parents=True)
+    n_tokens = 63 if mutation == "short" else 64
+    report = {
+        "ok": True, "snapshot_ok": True, "requested_tokens": 64,
+        "baseline_tokens": n_tokens,
+        "prefill": {"checked": True, "exact": True, "tokens": n_tokens},
+        "spec": {"checked": True, "exact": True, "tokens": n_tokens,
+                 "accept_rate": 0.5},
+        "disk": {"checked": True, "exact": True, "tokens": n_tokens},
+    }
+    (full / "differential.json").write_text(
+        json.dumps(report) + "\n", encoding="utf-8")
+    lines = ["unrelated retained engine diagnostic"]
+    for name in ("baseline", "prefill", "restored", "fresh", "disk"):
+        for index in range(n_tokens):
+            if mutation == "missing" and name == "disk" and index == 63:
+                continue
+            token = 32000 + index
+            if mutation == "divergent" and name == "fresh" and index == 10:
+                token += 1
+            lines.append(
+                f"[ember-validate-token] path={name} index={index} id={token}")
+    if mutation == "duplicate":
+        lines.append("[ember-validate-token] path=baseline index=0 id=32000")
+    (full / "differential-dispatch-server.log").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
+    image_digest = "b" * 64
+    return [
+        "--root", str(root), "--ember-revision", "1" * 40,
+        "--candidate-id", "fixture-q3-ple",
+        "--construction-descriptor", str(root / "construction.json"),
+        "--construction-descriptor-sha256", "2" * 64,
+        "--model", str(root / "model-00001-of-00008.gguf"),
+        "--model-sha256", "3" * 64,
+        "--model-total-bytes", "89807413152",
+        "--mtp", str(root / "mtp.gguf"), "--mtp-sha256", "4" * 64,
+        "--mtp-depth", "3",
+        "--runtime-image", f"ghcr.io/otheru-ai/ember@sha256:{image_digest}",
+        "--runtime-image-digest", f"sha256:{image_digest}",
+        "--runtime-engine-sha256", "5" * 64,
+    ]
 
 
 def workflow_run_blocks(text: str) -> list[str]:
@@ -106,19 +152,67 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
         gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
             encoding="utf-8")
+        derivation = Q3_FIRST_TOKEN_EVIDENCE.read_text(encoding="utf-8")
         self.assertEqual(proof.count("scripts/qwen_real_weight_gate.sh"), 1)
+        self.assertEqual(proof.count("scripts/qwen_first_token_evidence.py"), 1)
         self.assertNotIn('docker run --name "$container"', proof)
         self.assertNotIn("--validate-tokens 2", proof)
-        self.assertIn("full-benchmark/differential.json", proof)
-        self.assertIn("full-benchmark/differential-dispatch-server.log", proof)
-        self.assertIn('validation.get("requested_tokens") != 64', proof)
-        self.assertIn("expected_indices = set(range(n_tokens))", proof)
-        self.assertIn(
-            'required = {"baseline", "prefill", "restored", "fresh", "disk"}',
-            proof,
-        )
+        self.assertIn('root / "full-benchmark" / "differential.json"', derivation)
+        self.assertIn("EXPECTED_TOKENS = 64", derivation)
+        self.assertIn("expected_indices = set(range(n_tokens))", derivation)
+        self.assertIn('"baseline", "prefill", "restored", "fresh", "disk"',
+                      derivation)
         self.assertIn("--validate-tokens 64", gate)
         self.assertEqual(gate.count("-e EMBER_TRACE_TOKENS=1"), 1)
+
+    def test_q3_first_token_evidence_executes_all_five_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            args = first_token_fixture(root)
+            result = subprocess.run(
+                [sys.executable, str(Q3_FIRST_TOKEN_EVIDENCE), *args],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "32000")
+            output = root / "first-token-evidence.json"
+            evidence = json.loads(output.read_text(encoding="utf-8"))
+            validation = root / "full-benchmark" / "differential.json"
+            engine_log = root / "full-benchmark" / "differential-dispatch-server.log"
+            self.assertEqual(evidence["generation"]["requested_tokens"], 64)
+            self.assertEqual(evidence["generation"]["first_token_id"], 32000)
+            paths = evidence["generation"]["token_ids_by_path"]
+            self.assertEqual(set(paths),
+                             {"baseline", "prefill", "restored", "fresh", "disk"})
+            self.assertTrue(all(tokens == paths["baseline"]
+                                for tokens in paths.values()))
+            self.assertEqual(len(paths["baseline"]), 64)
+            self.assertEqual(
+                evidence["evidence"]["validation_json_sha256"],
+                hashlib.sha256(validation.read_bytes()).hexdigest())
+            self.assertEqual(
+                evidence["evidence"]["engine_log_sha256"],
+                hashlib.sha256(engine_log.read_bytes()).hexdigest())
+            again = subprocess.run(
+                [sys.executable, str(Q3_FIRST_TOKEN_EVIDENCE), *args],
+                text=True, capture_output=True)
+            self.assertEqual(again.returncode, 1)
+            self.assertIn("File exists", again.stderr)
+
+    def test_q3_first_token_evidence_rejects_incomplete_or_divergent_paths(self) -> None:
+        expected = {
+            "short": "64-token differential did not prove every serial path",
+            "missing": "token trace paths or indices differ",
+            "duplicate": "duplicate token trace",
+            "divergent": "token traces differ across exact paths",
+        }
+        for mutation, message in expected.items():
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
+                args = first_token_fixture(Path(raw), mutation)
+                result = subprocess.run(
+                    [sys.executable, str(Q3_FIRST_TOKEN_EVIDENCE), *args],
+                    text=True, capture_output=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
 
     def test_q3_gpu_proof_phases_have_cleanup_aware_timeouts(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
@@ -1011,17 +1105,16 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             encoding="utf-8"))
         gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
             encoding="utf-8")
+        derivation = Q3_FIRST_TOKEN_EVIDENCE.read_text(encoding="utf-8")
         self.assertIn("EMBER_TRACE_TOKENS=1", gate)
         self.assertIn("--validate-tokens 64", gate)
         self.assertNotIn("--validate-tokens 2", proof)
-        self.assertIn('prefill.get("checked") is not True', proof)
+        self.assertIn('prefill.get("checked") is not True', derivation)
         self.assertIn("--kv-cache-dir /gate/cache", gate)
-        self.assertIn(
-            'required = {"baseline", "prefill", "restored", "fresh", "disk"}',
-            proof,
-        )
-        self.assertIn('"first_token_id": first', proof)
-        self.assertIn('"production_prefill_exact": True', proof)
+        self.assertIn('"baseline", "prefill", "restored", "fresh", "disk"',
+                      derivation)
+        self.assertIn('"first_token_id": first', derivation)
+        self.assertIn('"production_prefill_exact": True', derivation)
         self.assertNotIn("ember-gpu-lock acquire", proof)
         self.assertNotIn("ember-cert-production stop", proof)
         self.assertNotIn("ember-cert-production mask", proof)
@@ -1041,7 +1134,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("hardware-measured.json", proof)
         self.assertIn("Measured peak UMA", proof)
         self.assertIn("Attest the complete Q3 benchmark evidence", proof)
-        self.assertIn("no quality or performance claim", proof)
+        self.assertIn("no quality or performance claim", derivation)
 
         self.assertIn("construction_mode:", plan)
         self.assertIn("ARTIFACT_BUILDER_SHA:", plan)
