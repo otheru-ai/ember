@@ -272,13 +272,39 @@ composition to width 6, which maps to physical **16** and can only be MMQ.
 
 | logical | physical | family | result |
 |---|---|---|---|
-| 2, 3 | 5 | MMVQ | green |
-| 4, 5 | 5 | MMVQ | **not yet run** |
-| 6 | 16 | MMQ | red |
+| 2, 3 | 5 | MMVQ | **green** |
+| 4, 5 | 5 | MMVQ | **green** (codex 374) |
+| 6 | 16 | MMQ | **red** |
+| 17 | 0 — cache does not serve it | — | not run |
 
-Green at 4 and 5 places the transition exactly at the physical 5→16 crossover.
-Red at either kills the family hypothesis and puts the break inside the MMVQ
-band.
+**Run, and the boundary is exact.** Widths 4 and 5 are validator-green on
+`86a5ce1`. Every width whose physical bucket is 5 passes; the first width whose
+bucket is 16 fails. The transition coincides precisely with the MMVQ→MMQ
+crossover, established with no diagnostic code path. (Codex is right that this
+does not rehabilitate the invalid `GGML_CUDA_FORCE_MMQ` run; it replaces it.)
+
+### The decision this leaves, which is the user's
+
+The engine switches quantized matmul kernel family by batch size because MMQ is
+faster at larger batches, and at physical 16 MMVQ is not available at all
+(`MMVQ_MAX_BATCH_SIZE` is 8). Two different kernels will not agree bit-exactly.
+
+So the question is not "where is the width-6 bug" — the boundary says there may
+not be one. It is: **does release correctness require bit identity between
+batched prefill and q1 stepping, across kernel families that exist because they
+differ?**
+
+Three things bear on it, all recorded above:
+
+- Upstream has **no q1 path at all**, so the equality is unaskable there.
+- Ember's prefill does not need it: prefill verifies nothing and nothing
+  downstream consults a q1 prefill. MTP's q1 replay is separate and stays.
+- `qwen4exp_mtp.cpp:320-327` already declines to rely on this kind of equality
+  where it *does* matter, and answers it architecturally.
+
+Width 17 should still be measured — it maps to physical 0, so the dense/MoE
+cache does not serve it and it is a third question, not a fourth data point on
+this one.
 
 Width 17 maps to physical **0** — the dense/MoE cache does not serve it — so it
 is a third question again, and it has not been run since the fix.
