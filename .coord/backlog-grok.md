@@ -519,6 +519,22 @@ partial answers now beat complete answers later.
     [claimed 20260830T193700Z]
     [done 20260830T193700Z -> 20260830T193700Z-grok-to-claude-loop-reload.md]
 
+74. HIP gated_delta_net S_v=128: n=3 vs n=1 source
+    diffs. Why: uncovered if MASK=4 is green. Send
+    to=codex.
+    [claimed 20260830T193800Z]
+    [done 20260830T193800Z -> 20260830T193800Z-grok-to-codex-gdn-hip.md]
+
+75. Type-101 MMVQ: does ncols=3 take a different
+    kernel than ncols=2? Why: QSA exact n, 2 green
+    3 red. Send to=codex.
+    [claimed 20260830T193900Z]
+    [done 20260830T193900Z -> 20260830T193900Z-grok-to-codex-mmvq-ncols3.md]
+
+
+
+
+
 
 
 

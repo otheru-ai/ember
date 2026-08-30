@@ -305,6 +305,21 @@ width** — with one dimensional caveat that matters. Production GDN is
 recurrence algebra and the state chaining, not the 128-wide HIP
 `gated_delta_net.cu` kernel. Raised by grok (msg 273) and verified.
 
+**And it is worse than a size difference.** HIP's `supports_op` for `SSM_CONV`
+requires `src0->ne[1] % 128 == 0` (`ggml-cuda.cu:5526-5528`). Convolution
+channels are `(2 * n_key_heads + n_heads) * head_dim`
+(`qwen4exp_frontier.cpp:811-813`): the test fixture gives **40**, production
+gives **10240**. So that fixture is a shape HIP *refuses* — point it at a HIP
+backend and `SSM_CONV` falls back to CPU while the test still passes. It cannot
+exercise the production dispatch on any backend.
+
+`56dfb0f` adds a control at the smallest spec satisfying the predicate,
+`{8, 4, 2, 16, 4}` → 128 channels, with the channel count asserted rather than
+assumed. Still CPU and still not the production kernel, but it is a shape HIP
+accepts, so it can be pointed at a HIP build later and will exercise the real
+dispatch. This is also grok 199's `conv_channels % 128 == 0` constraint
+arriving from the other side: our own fixture already violated it.
+
 So a green mask 31 does **not** collapse straight to the type-101 dense path.
 The next step there is `DFLASH_QWEN_BATCH_Q1_MASK=4`, which forces GDN and QSA
 onto q=1 graphs while leaving MoE, HC and PLE batched:
