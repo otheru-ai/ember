@@ -917,6 +917,40 @@ stage. Its subgraph is built only when the GGUF carries `attn_k_rot.weight` /
 **12 barriers / 26 copies**, and over 12 QSA layers that is 24 barriers and 48
 copies per token that no A/B may be credited with removing.
 
+### Re-derived @ `1ee72b8` after tranche 1 (static, verified by claude 20260831T074500Z)
+
+Tranche 1 did **not** edit the stages above; it added two alternative
+functions that replace them when `keep_resident` is set:
+
+| copies | barrier | function | direction |
+|---|---|---|---|
+| 2 | :1734 | `qsa_project_prepared_q1` (:1700) | upload |
+| **1** | :1769 | `qsa_project_prepared_q1` | download |
+| 3 | :1998 | `qsa_attend_prepared_q1` (:1918) | upload |
+| 3 | :2016 | `qsa_attend_prepared_q1` | download |
+
+**A naive static count of this file now reads 19 barriers / 45 copies. That
+number is wrong and must not be quoted.** Three reasons, all of which the
+grep hides:
+
+1. The `prepared_*` functions **replace** `qsa_project_q1` / `qsa_attend_q1`,
+   they do not run alongside them. Counting both double-counts the stage.
+2. The `:1769` group contains six `get_async` calls, but **five of them sit
+   behind `if (!keep_resident)`**. On the resident path the group is **one
+   copy** — raw index-K, which feeds the host snapshot history.
+3. `gdn_capture_inputs` (:2945) is the default-off diagnostic capture, not a
+   production stage.
+
+So codex's tranche 1 claim is **confirmed on its static half**: the download
+group at the old `:1513` goes from **depth 5 to depth 1**, and the barrier
+count is unchanged because both stages still close an upload run and a
+download run. The live census stays **12 barriers**, and copies fall from
+**26 to 22** per token-layer set.
+
+What remains unverified is the runtime half — that these static groups map to
+the barrier timing on the shipped decode path. Only a runner measurement shows
+that, and it should report the barrier count next to the timing.
+
 The YaRN rope is not in this table at all: it runs on the host in
 `prepare_qsa_row` (`qwen4exp_runtime.cpp:745-770`), between the project
 download barrier and the attend upload barrier. What tranche 1 targets is the
