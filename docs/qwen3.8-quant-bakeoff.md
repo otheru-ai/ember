@@ -153,12 +153,12 @@ OtherU DeepSeek result, where editing early layers broke coherence; it is not a
 proven Qwen policy. All four policies must pass Qwen's held-out quality gates.
 The sweep first
 selects an intervention configuration using only sweep-validation. That fixed
-configuration then runs a six-arm exact-runtime cross-pair: each of the
-ROCMI4+Q6_K, routed-expert ROCmFP4 FAST+Q6_K, and broad-matrix ROCmFP4
-FAST+Q6_K main artifacts is measured with both the homogeneous ROCMI4 and
-homogeneous ROCmFP4 FAST MTP companions at depth 3. Main format and MTP format
-are independent experiment variables; the release profile's per-arm MTP field
-is only the companion build default.
+configuration then runs an eight-arm exact-runtime cross-pair: each of the
+ROCMI4+Q6_K, routed-expert ROCmFP4 FAST+Q6_K, broad-matrix ROCmFP4
+FAST+Q6_K, and broad-matrix Q3 ROCmFPX PLE+Q6_K main artifacts is measured
+with both the homogeneous ROCMI4 and homogeneous ROCmFP4 FAST MTP companions
+at depth 3. Main format and MTP format are independent experiment variables;
+the release profile's per-arm MTP field is only the companion build default.
 
 After the winning main/MTP pair is externally attested, the same exact main
 and companion inventories are reused to sweep MTP depths 1, 2, 3, and 4. The
@@ -347,6 +347,42 @@ or warming the page cache before model load.
 The six confirmation slots are clean timing only; the screening gate's separate
 profile/counter evidence is retained, and no profiler runs concurrently with
 confirmation timing.
+
+The requested Q3-then-IU4 iteration also has a narrower descriptive comparison
+that is deliberately separate from release selection. Every new full hardware
+run writes `benchmark-contract.json` and embeds the same object plus its digest
+in `hardware-measured.json`. The contract binds the benchmark and gate driver
+bytes, exact 2074/256 protocol, calibrated prompt construction and prompt
+digests, three-sample statistics, native MTP requirement, and the separation of
+clean timing from profile/counter passes. After Q3 has completed, build and run
+the `rocmi4-q6k-main-rocmfp4-fast-mtp-d3` arm: using the same FAST MTP at depth
+3 isolates the main Q3-versus-ROCMI4 recipe instead of changing MTP format at
+the same time. Do not requantize the Q3 artifact when its content-affecting
+recipe inputs are unchanged; rebind its immutable construction descriptor to
+the same runtime used for IU4.
+
+```sh
+python3 scripts/qwen_quant_comparison.py compare \
+  --q3-construction /abs/q3-construction.json \
+  --q3-construction-sha256 '<SHA256>' \
+  --q3-hardware /abs/q3/full-benchmark/hardware-measured.json \
+  --q3-hardware-sha256 '<SHA256>' \
+  --iu4-construction /abs/iu4-construction.json \
+  --iu4-construction-sha256 '<SHA256>' \
+  --iu4-hardware /abs/iu4/full-benchmark/hardware-measured.json \
+  --iu4-hardware-sha256 '<SHA256>' \
+  --output /abs/q3-vs-iu4-hardware-comparison.json
+```
+
+The comparator fails closed unless both inputs share the exact BF16 cache,
+profile, capture, intervention configuration and manifest, selection plan,
+FAST MTP bytes and depth, runtime images/binary/format contract, and benchmark
+workload contract. It reports sample-level throughput, memory, artifact-size,
+and IU4-minus-Q3 deltas. Its output carries
+`selection_allowed:false`: sequential Q3-then-IU4 measurements are useful for
+understanding the format tradeoff, but only the fresh-process ABBAAB gate may
+select the release bundle.
+
 `unlock-final` accepts only the sealed MTP-depth ledger; it does not accept the
 intermediate format ledger. The checked recipe uses schema v3, result evidence
 v4, candidate assessments v2, and ledgers v3 so earlier records cannot be

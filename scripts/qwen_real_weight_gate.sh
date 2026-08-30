@@ -16,6 +16,7 @@ PROFILE_REPORT="$REPO/scripts/profile_report.py"
 COUNTER_CALIBRATION="$REPO/share/benchmark/gfx1151-rocm10-counter-calibration.json"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
 DISPATCH_EVIDENCE="$REPO/scripts/qwen_w4a8_dispatch_evidence.py"
+QUANT_COMPARISON="$REPO/scripts/qwen_quant_comparison.py"
 
 IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
 MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
@@ -147,6 +148,7 @@ command -v stat >/dev/null || die "stat is required for numeric GPU device group
 [[ -x "$PRODUCTION" ]] || die "missing production wrapper: $PRODUCTION"
 [[ -x "$PROFILE_SCRIPT" && -f "$PROFILE_REPORT" &&
    -f "$COUNTER_CALIBRATION" && -f "$BENCHMARK" &&
+   -f "$QUANT_COMPARISON" &&
    -f "$DISPATCH_EVIDENCE" ]] ||
   die "gate dependencies are missing"
 [[ -f "$MODEL" && -f "$MODEL_BUILD_RECORD" && -f "$MTP" ]] ||
@@ -646,6 +648,10 @@ with open(sys.argv[2], "x", encoding="utf-8") as stream:
               indent=2, sort_keys=True)
     stream.write("\n")
 PY
+python3 "$QUANT_COMPARISON" derive-contract \
+  --timing "$OUT_DIR/timing.jsonl" --benchmark-driver "$BENCHMARK" \
+  --gate-driver "$REPO/scripts/qwen_real_weight_gate.sh" \
+  --output "$OUT_DIR/benchmark-contract.json"
 remove_container
 
 for _ in $(seq 1 60); do
@@ -688,6 +694,7 @@ memory = json.load(open(os.path.join(out, "memory-evidence.json"), encoding="utf
 kernel_runtime = json.load(open(os.path.join(out, "kernel-runtime-evidence.json"), encoding="utf-8"))
 kernel_build = json.load(open(os.path.join(out, "w4a8-build-evidence.json"), encoding="utf-8"))
 timing_kernel_mode = json.load(open(os.path.join(out, "timing-kernel-mode.json"), encoding="utf-8"))
+benchmark_contract = json.load(open(os.path.join(out, "benchmark-contract.json"), encoding="utf-8"))
 passed = bool(memory["performance"].get("passed") and memory["hard_fit"].get("passed"))
 record = {
     "schema": "ember.qwen3.8.real-weight-gate.v2",
@@ -714,6 +721,7 @@ record = {
     "kernel_runtime": kernel_runtime,
     "kernel_build": kernel_build,
     "timing_kernel_mode": timing_kernel_mode,
+    "benchmark_contract": benchmark_contract,
     "evidence": {
         "differential": {"path": "differential.json",
                          "sha256": sha(os.path.join(out, "differential.json"))},
@@ -729,6 +737,8 @@ record = {
                    "sha256": sha(os.path.join(out, "w4a8-isa-gate.txt"))},
         "timing_kernel_mode": {"path": "timing-kernel-mode.json",
                    "sha256": sha(os.path.join(out, "timing-kernel-mode.json"))},
+        "benchmark_contract": {"path": "benchmark-contract.json",
+                   "sha256": sha(os.path.join(out, "benchmark-contract.json"))},
         "dispatch_server_log": {"path": "differential-dispatch-server.log",
                    "sha256": sha(os.path.join(out, "differential-dispatch-server.log"))},
         "timing_server_log": {"path": "timing-server.log",

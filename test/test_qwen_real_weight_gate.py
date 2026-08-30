@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +19,64 @@ GATE = ROOT / "scripts/qwen_real_weight_gate.sh"
 PROFILE = ROOT / "scripts/profile_gpu.sh"
 DISPATCH = ROOT / "scripts/qwen_w4a8_dispatch_evidence.py"
 HEX = "1" * 64
+sys.path.insert(0, str(ROOT / "scripts"))
+import qwen_quant_comparison as quant_comparison  # noqa: E402
+
+
+def timing_rows(prefill: tuple[float, float, float] = (411.0, 412.0, 413.0),
+                decode: tuple[float, float, float] = (39.5, 40.0, 40.5)) -> list[dict]:
+    requests = []
+    for repeat, rate in enumerate(prefill, 1):
+        milliseconds = 2074 * 1000.0 / rate
+        requests.append({
+            "kind": "request", "group": "prefill-2048", "repeat": repeat,
+            "ok": True, "evaluated_prefill_tokens": 2074,
+            "prefill_ms": milliseconds,
+            "declared_prefill_tokens_per_second": round(rate, 1),
+            "prefill_tokens_per_second": 2074 * 1000.0 / milliseconds,
+            "prefill_tps_rounding_consistent": True,
+        })
+    decode_rows = []
+    for repeat, rate in enumerate(decode, 1):
+        milliseconds = 256 * 1000.0 / rate
+        decode_rows.append({
+            "kind": "request", "group": "decode-256", "repeat": repeat,
+            "ok": True, "completion_tokens": 256, "decode_ms": milliseconds,
+            "declared_decode_tokens_per_second": round(rate, 2),
+            "decode_tokens_per_second": 256 * 1000.0 / milliseconds,
+            "decode_tps_rounding_consistent": True, "spec_ran": True,
+            "accept_rate": 0.75, "spec_cycles": 10,
+            "spec_provider_age_ms": 1.0, "spec_provider_block_ms": 2.0,
+            "spec_head_ms": 3.0, "spec_verify_ms": 4.0,
+        })
+    requests.extend(decode_rows)
+    speculation = {
+        "samples": 3, "timing_complete": True, "cycles": 30,
+        "accept_rate_mean": 0.75,
+        "spec_provider_age_ms_total": 3.0,
+        "spec_provider_age_ms_per_cycle": 0.1,
+        "spec_provider_block_ms_total": 6.0,
+        "spec_provider_block_ms_per_cycle": 0.2,
+        "spec_head_ms_total": 9.0, "spec_head_ms_per_cycle": 0.3,
+        "spec_verify_ms_total": 12.0, "spec_verify_ms_per_cycle": 0.4,
+    }
+    resources = {
+        "server_host_pid": 123, "measured_peak_rss_bytes": 70_000_000_000,
+        "measured_peak_gtt_bytes": 5_000_000_000,
+        "measured_peak_uma_bytes": 75_000_000_000,
+    }
+    return [{
+        "kind": "metadata", "server_pid_source": "explicit", "container_pid": 123,
+        "protocol": quant_comparison.bakeoff.BENCHMARK_MODULE.QWEN_HARD_GATE_PROTOCOL,
+    }, *requests, {
+        "kind": "summary", "resources": resources, "memory_gate": {"passed": True},
+        "hard_gate": {"passed": True}, "groups": {"decode-256": {
+            "speculation": speculation}},
+        "prefill_calibration": {"target_prompt_tokens": 2074,
+                                "selected_words": 2040, "attempts": []},
+        "decode_calibration": {"target_completion_tokens": 256,
+                               "selected_marker": "B", "attempts": []},
+    }]
 
 
 def dry_args(out: str = "/tmp/qwen-real-gate-never-created") -> list[str]:
@@ -170,6 +230,335 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4=OFF", dockerfile)
         self.assertIn("ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF", dockerfile)
         self.assertIn("ARG EMBER_HIP_EXPORT_METRICS=OFF", dockerfile)
+
+    def test_hardware_gate_seals_a_matched_comparison_contract(self) -> None:
+        body = GATE.read_text(encoding="utf-8")
+        derive = body.index('"$QUANT_COMPARISON" derive-contract')
+        profile = body.index('"$PROFILE_SCRIPT" --no-quiesce')
+        self.assertLess(derive, profile)
+        self.assertIn('"benchmark_contract": benchmark_contract', body)
+        self.assertIn('"benchmark_contract": {"path": "benchmark-contract.json"', body)
+
+    def test_benchmark_contract_binds_the_exact_workload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            timing = Path(temporary) / "timing.jsonl"
+            timing.write_text("".join(json.dumps(row) + "\n" for row in timing_rows()),
+                              encoding="utf-8")
+            contract = quant_comparison.derive_contract(
+                timing, ROOT / "scripts/bench/benchmark.py", GATE)
+            self.assertEqual(contract["schema"], quant_comparison.CONTRACT_SCHEMA)
+            identity = contract["identity"]
+            self.assertEqual(identity["evaluated_prefill_tokens"], [2074] * 3)
+            self.assertEqual(identity["completion_tokens"], [256] * 3)
+            self.assertEqual(identity["samples_per_group"], 3)
+            self.assertEqual(len(identity["prefill_prompt_sha256"]), 3)
+            expected_decode = quant_comparison.bakeoff.BENCHMARK_MODULE.make_decode_prompt("B")
+            self.assertEqual(
+                identity["decode_prompt_sha256"],
+                hashlib.sha256(expected_decode.encode("utf-8")).hexdigest())
+            self.assertEqual(contract["identity_sha256"],
+                             quant_comparison.canonical_sha256(identity))
+            with self.assertRaisesRegex(
+                    quant_comparison.ComparisonError, "must be absolute paths"):
+                quant_comparison.derive_contract(
+                    Path("timing.jsonl"), ROOT / "scripts/bench/benchmark.py", GATE)
+
+            broken = timing_rows()
+            broken[-1]["decode_calibration"]["selected_marker"] = "two"
+            timing.write_text("".join(json.dumps(row) + "\n" for row in broken),
+                              encoding="utf-8")
+            with self.assertRaisesRegex(
+                    quant_comparison.ComparisonError, "calibration is incomplete"):
+                quant_comparison.derive_contract(
+                    timing, ROOT / "scripts/bench/benchmark.py", GATE)
+
+    def test_q3_iu4_comparison_rejects_every_confounder(self) -> None:
+        contract = {"schema": quant_comparison.CONTRACT_SCHEMA,
+                    "status": "complete", "identity": {"workload": "exact"},
+                    "identity_sha256": "c" * 64, "publishes": False,
+                    "selection_allowed": False}
+        runtime = {"runtime_revision": "1" * 40,
+                   "release_image": "image@sha256:" + "2" * 64,
+                   "release_digest": "sha256:" + "2" * 64,
+                   "dev_image": "dev@sha256:" + "3" * 64,
+                   "dev_digest": "sha256:" + "3" * 64,
+                   "engine_binary_sha256": "4" * 64,
+                   "tensor_format_contract_sha256": "5" * 64}
+        source = {"cache_id": "6" * 64, "manifest": {
+            "sha256": "7" * 64}}
+        profile = {"sha256": "8" * 64}
+        mtp = {"sha256": "9" * 64, "size_bytes": 1024,
+               "matrix_quant_contract": quant_comparison.MATCHED_MTP_CONTRACT}
+
+        def arm(name: str, quant_arm: str, kernel: str, mode: str,
+                prefill: list[float], decode: list[float]) -> tuple[dict, dict]:
+            descriptor = {
+                "candidate_id": name, "quantization_arm": quant_arm,
+                "selection_plan": {"sha256": "a" * 64},
+                "capture": {"sha256": "b" * 64},
+                "intervention_configuration_id": "lambda-0.25-band-10-42",
+                "intervention_manifest": {"sha256": "d" * 64},
+            }
+            construction = {
+                "descriptor": descriptor, "descriptor_path": f"/{name}.json",
+                "descriptor_sha256": "e" * 64,
+                "build": {"bf16_cache": copy.deepcopy(source), "profile": profile},
+                "mtp": copy.deepcopy(mtp),
+            }
+            facts = {
+                "prefill_tps_samples": prefill, "decode_tps_samples": decode,
+                "resources": {"measured_peak_rss_bytes": 70_000_000_000,
+                              "measured_peak_gtt_bytes": 5_000_000_000,
+                              "measured_peak_uma_bytes": 75_000_000_000},
+            }
+            hardware = {
+                "value": {"hard_gates": {"performance": {"passed": True},
+                                           "memory": {"passed": True}},
+                          "kernel_runtime": {"candidate_kernel_capability": kernel},
+                          "timing_kernel_mode": {"configured_mmq_mode": mode}},
+                "path": f"/{name}-hardware.json", "sha256": "f" * 64,
+                "contract": copy.deepcopy(contract), "facts": facts,
+                "artifact_bytes": 80_000_000_000,
+                "runtime_identity": copy.deepcopy(runtime),
+            }
+            return construction, hardware
+
+        q3c, q3h = arm("q3", quant_comparison.Q3_ARM,
+                       "no_eligible_rocmi4_mmq",
+                       "not_applicable_no_eligible_rocmi4_mmq",
+                       [410.0, 412.0, 414.0], [39.0, 40.0, 41.0])
+        iu4c, iu4h = arm("iu4", quant_comparison.IU4_ARM,
+                         "rocmi4_dense_and_routed",
+                         "w4a8_iu4_prepack",
+                         [420.0, 422.0, 424.0], [41.0, 42.0, 43.0])
+        comparison = quant_comparison.make_comparison(q3c, q3h, iu4c, iu4h)
+        self.assertFalse(comparison["selection_allowed"])
+        self.assertEqual(comparison["deltas"]["iu4_minus_q3_decode_median_tps"], 2.0)
+        self.assertEqual(comparison["matched_identity"]["mtp"]["depth"], 3)
+
+        mutations = (
+            ("source", lambda c, h: c["build"]["bf16_cache"].update(
+                {"cache_id": "0" * 64}), "BF16/intervention"),
+            ("mtp", lambda c, h: c["mtp"].update({"sha256": "0" * 64}),
+             "MTP companion"),
+            ("runtime", lambda c, h: h["runtime_identity"].update(
+                {"engine_binary_sha256": "0" * 64}), "runtime engine"),
+            ("workload", lambda c, h: h["contract"].update(
+                {"identity_sha256": "0" * 64}), "workload contract"),
+        )
+        for label, mutate, message in mutations:
+            with self.subTest(label=label):
+                changed_c = copy.deepcopy(iu4c)
+                changed_h = copy.deepcopy(iu4h)
+                mutate(changed_c, changed_h)
+                with self.assertRaisesRegex(quant_comparison.ComparisonError, message):
+                    quant_comparison.make_comparison(q3c, q3h, changed_c, changed_h)
+
+    def test_q3_iu4_comparison_cli_revalidates_pinned_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def digest(path: Path) -> str:
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def write_json(path: Path, value: dict) -> Path:
+                path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8")
+                return path
+
+            def desc(path: Path) -> dict[str, str]:
+                return {"path": str(path.resolve()), "sha256": digest(path)}
+
+            intervention = write_json(root / "intervention.json", {"direction": "same"})
+            capture = write_json(root / "capture.json", {"capture": "same"})
+            selection = write_json(root / "selection.json", {"selection": "same"})
+            bf16 = write_json(root / "bf16.json", {"cache": "same"})
+            mtp = root / "mtp.gguf"
+            mtp.write_bytes(b"matching-fast-mtp")
+            companion = write_json(root / "companion.json", {
+                "schema": quant_comparison.COMPANION_SCHEMA,
+                "companions": [{"role": "mtp", "enabled": True,
+                                "path": str(mtp), "size_bytes": mtp.stat().st_size,
+                                "sha256": digest(mtp),
+                                "matrix_quant_contract":
+                                    quant_comparison.MATCHED_MTP_CONTRACT}],
+            })
+            runtime = {
+                "release_ref": "ghcr.io/otheru-ai/ember@sha256:" + "1" * 64,
+                "release_digest": "sha256:" + "1" * 64,
+                "dev_ref": "ghcr.io/otheru-ai/ember@sha256:" + "2" * 64,
+                "dev_digest": "sha256:" + "2" * 64,
+                "tensor_format_contract_sha256": "3" * 64,
+            }
+            revision = "4" * 40
+            binary_sha = "5" * 64
+
+            def make_arm(label: str, quant_arm: str, prefill: tuple[float, float, float],
+                         decode: tuple[float, float, float], kernel: str) -> tuple[Path, Path]:
+                directory = root / label
+                directory.mkdir()
+                timing = directory / "timing.jsonl"
+                timing.write_text("".join(json.dumps(row) + "\n"
+                                          for row in timing_rows(prefill, decode)),
+                                  encoding="utf-8")
+                contract = quant_comparison.derive_contract(
+                    timing, ROOT / "scripts/bench/benchmark.py", GATE)
+                contract_path = write_json(directory / "benchmark-contract.json", contract)
+                model = directory / "model.gguf"
+                model.write_bytes((label + "-main-model").encode("utf-8"))
+                shard = {"path": str(model), "size_bytes": model.stat().st_size,
+                         "sha256": digest(model)}
+                record = write_json(directory / "qwen-quant-build-record.json", {
+                    "status": "complete", "mode": "execute",
+                    "compute_mode": "exact_dequant", "w4a4_enabled": False,
+                    "tools": {"ember_revision": revision},
+                    "profile": {"sha256": "6" * 64},
+                    "bf16_cache": {"cache_id": "7" * 64,
+                                   "manifest": {"sha256": digest(bf16)}},
+                    "intervention": {"manifest_sha256": digest(intervention)},
+                    "quantization_recipe": {
+                        "id": quant_arm,
+                        "formats": (["Q3_0_ROCMFPX", "Q4_0_ROCMFP4_FAST", "Q6_K"]
+                                    if label == "q3" else ["Q4_0_ROCMI4", "Q6_K"]),
+                        "selected_mtp_matrix_quant_contract":
+                            quant_comparison.MATCHED_MTP_CONTRACT,
+                        "ple_override_preserved": True,
+                    },
+                    "output": {"shards": [shard]},
+                })
+                attestation = write_json(directory / "attestation.json", {
+                    "schema": "ember.qwen3.8.candidate-workset-attestation.v1",
+                    "candidate_id": f"{label}-candidate",
+                    "build_record_sha256": digest(record),
+                    "builder_identity": {"ember_revision": revision,
+                                         "tensor_format_contract_sha256": "3" * 64},
+                    "tensor_format_compatibility_sha256": "3" * 64,
+                })
+                construction = write_json(directory / "construction.json", {
+                    "schema": quant_comparison.CONSTRUCTION_SCHEMA,
+                    "status": "complete", "publishes": False, "deletes": False,
+                    "candidate_id": f"{label}-candidate", "kind": "intervention",
+                    "intended_stage": "format", "row_id": f"{label}-row",
+                    "intervention_configuration_id": "lambda-0.25-band-10-42",
+                    "quantization_arm": quant_arm,
+                    "mtp_matrix_quant_contract": quant_comparison.MATCHED_MTP_CONTRACT,
+                    "runtime_mode": "exact_dequant", "builder_revision": revision,
+                    "runtime_revision": revision,
+                    "images": {"builder": {"ref": runtime["dev_ref"],
+                                             "digest": runtime["dev_digest"]},
+                               "runtime": runtime},
+                    "capture": desc(capture), "stock_capture": None,
+                    "bf16_cache": desc(bf16),
+                    "shared_companions": {
+                        "Q4_0_ROCMI4": desc(companion),
+                        "Q4_0_ROCMFP4_FAST": desc(companion)},
+                    "selection_plan": desc(selection), "build_record": desc(record),
+                    "builder_attestation": desc(attestation),
+                    "intervention_manifest": desc(intervention),
+                    "artifacts": {"shards": [shard],
+                                  "total_bytes": model.stat().st_size},
+                    "v3_candidate_manifest": {"ready": False, "blocked_on": []},
+                })
+                facts = quant_comparison.bakeoff.timing_facts(timing, True)
+                mode = ("not_applicable_no_eligible_rocmi4_mmq"
+                        if label == "q3" else "w4a8_iu4_prepack")
+                kernel_runtime = write_json(directory / "kernel-runtime-evidence.json", {
+                    "schema": quant_comparison.KERNEL_RUNTIME_SCHEMA,
+                    "candidate_kernel_capability": kernel,
+                    "candidate_timing_kernel_mode": mode,
+                    "passed": True,
+                })
+                kernel_build = write_json(directory / "w4a8-build-evidence.json", {
+                    "schema": quant_comparison.KERNEL_BUILD_SCHEMA,
+                    "build_mode": "w4a8_iu4_prepack",
+                    "candidate_and_profiler_binary_sha256": binary_sha,
+                    "saved_isa_gate": {"passed": True},
+                })
+                timing_mode = write_json(directory / "timing-kernel-mode.json", {
+                    "configured_mmq_mode": mode,
+                    "confirmation": "clean_timing_startup_marker",
+                    "passed": True,
+                })
+                hardware = write_json(directory / "hardware-measured.json", {
+                    "schema": quant_comparison.HARDWARE_SCHEMA,
+                    "publish_approved": False,
+                    "methodology": "clean timing and profiler/counter passes are separate",
+                    "image": {"ref": runtime["release_ref"],
+                              "digest": runtime["release_digest"]},
+                    "profile_image": {"ref": runtime["dev_ref"],
+                                      "digest": runtime["dev_digest"],
+                                      "ember_revision": revision,
+                                      "candidate_binary_sha256": binary_sha,
+                                      "candidate_binary_byte_identical": True},
+                    "model": {"ordered_inventory": {
+                        "build_record": {"sha256": digest(record)},
+                        "shards": [shard]}},
+                    "mtp": {"path": str(mtp), "sha256": digest(mtp), "depth": 3},
+                    "hard_gates": {"performance": facts["hard_gate"],
+                                   "memory": facts["memory_gate"]},
+                    "resources": facts["resources"],
+                    "speculation": facts["mtp_speculation"],
+                    "kernel_runtime": json.loads(kernel_runtime.read_text()),
+                    "kernel_build": json.loads(kernel_build.read_text()),
+                    "timing_kernel_mode": json.loads(timing_mode.read_text()),
+                    "benchmark_contract": contract,
+                    "evidence": {"timing": {"path": timing.name,
+                                               "sha256": digest(timing)},
+                                 "benchmark_contract": {
+                                     "path": contract_path.name,
+                                     "sha256": digest(contract_path)},
+                                 "kernel_runtime": {
+                                     "path": kernel_runtime.name,
+                                     "sha256": digest(kernel_runtime)},
+                                 "kernel_build": {
+                                     "path": kernel_build.name,
+                                     "sha256": digest(kernel_build)},
+                                 "timing_kernel_mode": {
+                                     "path": timing_mode.name,
+                                     "sha256": digest(timing_mode)}},
+                })
+                return construction, hardware
+
+            q3_construction, q3_hardware = make_arm(
+                "q3", quant_comparison.Q3_ARM, (411.0, 412.0, 413.0),
+                (39.0, 40.0, 41.0), "no_eligible_rocmi4_mmq")
+            iu4_construction, iu4_hardware = make_arm(
+                "iu4", quant_comparison.IU4_ARM, (421.0, 422.0, 423.0),
+                (41.0, 42.0, 43.0), "rocmi4_dense_and_routed")
+            output = root / "comparison.json"
+            result = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"), "compare",
+                "--q3-construction", str(q3_construction),
+                "--q3-construction-sha256", digest(q3_construction),
+                "--q3-hardware", str(q3_hardware),
+                "--q3-hardware-sha256", digest(q3_hardware),
+                "--iu4-construction", str(iu4_construction),
+                "--iu4-construction-sha256", digest(iu4_construction),
+                "--iu4-hardware", str(iu4_hardware),
+                "--iu4-hardware-sha256", digest(iu4_hardware),
+                "--output", str(output),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(value["schema"], quant_comparison.COMPARISON_SCHEMA)
+            self.assertEqual(value["deltas"]["iu4_minus_q3_decode_median_tps"], 2.0)
+            self.assertEqual(value["interpretation"],
+                             "descriptive_sequential_comparison_not_counterbalanced_selection")
+
+            repeated = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"), "compare",
+                "--q3-construction", str(q3_construction),
+                "--q3-construction-sha256", digest(q3_construction),
+                "--q3-hardware", str(q3_hardware),
+                "--q3-hardware-sha256", digest(q3_hardware),
+                "--iu4-construction", str(iu4_construction),
+                "--iu4-construction-sha256", digest(iu4_construction),
+                "--iu4-hardware", str(iu4_hardware),
+                "--iu4-hardware-sha256", digest(iu4_hardware),
+                "--output", str(output),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertNotEqual(repeated.returncode, 0)
+            self.assertIn("output must be one new absolute path", repeated.stderr)
 
     def test_kernel_runtime_evidence_requires_actual_dispatch_controls(self) -> None:
         startup = (
