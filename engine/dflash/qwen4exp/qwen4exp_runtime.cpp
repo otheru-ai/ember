@@ -909,6 +909,56 @@ bool finish_qsa_row(
     return true;
 }
 
+bool finish_qsa_row_resident(
+        Qwen4ExpLayerState & state, Qwen4ExpFrontierQsaGraph * graph,
+        const std::vector<float> & index_key, std::vector<float> & output,
+        std::string & error) {
+    if (!graph || index_key.size() != static_cast<size_t>(kIndexerDim)) {
+        error = "invalid Qwen4Exp resident finalized QSA row";
+        return false;
+    }
+    const int prior_tokens = static_cast<int>(
+        state.index_key.size() / static_cast<size_t>(kIndexerDim));
+    const int tokens = prior_tokens + 1;
+    std::vector<int32_t> selected;
+    if (!qwen4exp_qsa_dense_selection(tokens, selected) ||
+        selected.size() != static_cast<size_t>(tokens)) {
+        error = "resident Qwen4Exp QSA requires dense selection";
+        return false;
+    }
+    const size_t selected_count = selected.size();
+    std::vector<float> selected_key(
+        static_cast<size_t>(kQsaKvHeads * kQsaDim) * selected_count, 0.0f);
+    std::vector<float> selected_value(selected_key.size(), 0.0f);
+    for (int head = 0; head < kQsaKvHeads; ++head) {
+        for (size_t slot = 0; slot < selected_count; ++slot) {
+            const int token = selected[slot];
+            if (token == prior_tokens) continue;
+            const size_t destination =
+                (static_cast<size_t>(head) * selected_count + slot) *
+                kQsaDim;
+            const size_t source =
+                (static_cast<size_t>(token) * kQsaKvHeads +
+                 static_cast<size_t>(head)) * kQsaDim;
+            for (int dimension = 0; dimension < kQsaDim; ++dimension) {
+                selected_key[destination + static_cast<size_t>(dimension)] =
+                    state.key.at(source + static_cast<size_t>(dimension));
+                selected_value[destination +
+                               static_cast<size_t>(dimension)] =
+                    state.value.at(source + static_cast<size_t>(dimension));
+            }
+        }
+    }
+    std::vector<float> current_key, current_value;
+    if (!qwen4exp_frontier_qsa_attend_prepared_q1(
+            graph, selected_key.data(), selected_value.data(), tokens,
+            current_key, current_value, output, error)) return false;
+    state.key.append(current_key.data(), current_key.size());
+    state.value.append(current_value.data(), current_value.size());
+    state.index_key.append(index_key.data(), index_key.size());
+    return true;
+}
+
 bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
              const Qwen4ExpLayer & layer, int layer_index,
              const std::vector<float> & input,
@@ -929,22 +979,22 @@ bool run_qsa(const Qwen4ExpWeights & weights, Qwen4ExpLayerState & state,
                               cache_override);
     }
 
-    std::vector<float> qfull, k, v, iq, ik;
-    if (!qwen4exp_frontier_qsa_project_q1(
-            graph, input.data(), input.size(), qfull, k, v, iq, ik,
-            error)) return false;
-
-    std::vector<float> qnorm, knorm, iqnorm;
-    if (!tensor_f32(cache, layer.attn_q_norm, qnorm, error) ||
-        !tensor_f32(cache, layer.attn_k_norm, knorm, error) ||
-        !tensor_f32(cache, layer.index_q_norm, iqnorm, error))
-        return false;
+    const int tokens = static_cast<int>(
+        state.index_key.size() / static_cast<size_t>(kIndexerDim)) + 1;
+    std::vector<int32_t> dense_selected;
+    const bool keep_resident =
+        qwen4exp_qsa_dense_selection(tokens, dense_selected) &&
+        qwen4exp_frontier_qsa_can_keep_prepared(graph);
     std::vector<float> q, gate, prepared_k, prepared_v, prepared_iq,
                        prepared_ik;
-    if (!prepare_qsa_row(weights, position, qnorm, knorm, iqnorm,
-                         qfull.data(), k.data(), v.data(), iq.data(),
-                         ik.data(), q, gate, prepared_k, prepared_v,
-                         prepared_iq, prepared_ik, error)) return false;
+    if (!qwen4exp_frontier_qsa_project_prepared_q1(
+            graph, input.data(), input.size(), position.data(), keep_resident,
+            q, gate, prepared_k, prepared_v, prepared_iq, prepared_ik,
+            error)) return false;
+    if (keep_resident) {
+        return finish_qsa_row_resident(state, graph, prepared_ik, output,
+                                       error);
+    }
     // #27774 rotations are executed as one persistent graph for all Q/K/V
     // heads. The rotated current K/V are not published until attention and
     // output projection have both completed successfully.

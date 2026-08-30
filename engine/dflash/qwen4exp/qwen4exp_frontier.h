@@ -13,6 +13,7 @@
 
 #include "ggml-backend.h"
 #include "ggml.h"
+#include "../common/qwen_yarn.h"
 
 #include <cstdint>
 #include <string>
@@ -87,6 +88,8 @@ struct Qwen4ExpFrontierQsaSpec {
     int head_dim = 0;
     int n_index_heads = 0;
     int index_dim = 0;
+    ember_qwen_yarn_config yarn{};
+    float epsilon = 1.0e-6f;
 };
 
 struct Qwen4ExpFrontierQsaWeights {
@@ -98,6 +101,9 @@ struct Qwen4ExpFrontierQsaWeights {
     ggml_tensor * output = nullptr;
     ggml_tensor * key_rotation = nullptr;
     ggml_tensor * value_rotation = nullptr;
+    ggml_tensor * query_norm = nullptr;
+    ggml_tensor * key_norm = nullptr;
+    ggml_tensor * index_query_norm = nullptr;
 };
 
 struct Qwen4ExpFrontierHcSpec {
@@ -214,12 +220,11 @@ uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_q1(
 uint64_t qwen4exp_frontier_gdn_state_transfer_bytes_batch(
     const Qwen4ExpFrontierGdnSpec & spec, int n_tokens);
 
-// QSA has an unavoidable data-dependent boundary: the current raw index-K
-// projection participates in host top-block selection before attention can be
-// built. The persistent implementation therefore uses one fused projection
-// graph, one optional fused K/Q/V rotation graph, and a lazily-created
-// width-bucketed flash-attention/output graph. Host code remains authoritative
-// for exact RMSNorm, M-RoPE, block selection, and snapshot publication.
+// QSA retains a data-dependent host boundary for raw index-K history and the
+// sparse top-block selector. RMSNorm and M-RoPE execute in the persistent
+// projection graph. At the shipped dense boundary, Q/gate/current K/V pass to
+// the width-bucketed attention graph through backend copies; only index-K is
+// downloaded before attention, while host snapshots remain authoritative.
 int qwen4exp_frontier_qsa_cached_width(int selected_tokens);
 Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
     ggml_backend_t backend, const Qwen4ExpFrontierQsaSpec & spec,
@@ -232,6 +237,19 @@ bool qwen4exp_frontier_qsa_project_q1(
     std::vector<float> & key, std::vector<float> & value,
     std::vector<float> & index_query, std::vector<float> & index_key,
     std::string & error);
+// Production q=1 preparation keeps Q/gate/K/V resident when requested.  The
+// only dense-path download is raw index-K, whose host-owned history remains
+// the boundary until the cache itself moves onto the backend.  Sparse or
+// rotation-bearing checkpoints request host values and retain the old seam.
+bool qwen4exp_frontier_qsa_project_prepared_q1(
+    Qwen4ExpFrontierQsaGraph * graph, const float * input,
+    size_t input_count, const int32_t position[3], bool keep_resident,
+    std::vector<float> & query, std::vector<float> & gate,
+    std::vector<float> & key, std::vector<float> & value,
+    std::vector<float> & index_query, std::vector<float> & index_key,
+    std::string & error);
+bool qwen4exp_frontier_qsa_can_keep_prepared(
+    const Qwen4ExpFrontierQsaGraph * graph);
 bool qwen4exp_frontier_qsa_rotate_q1(
     Qwen4ExpFrontierQsaGraph * graph, std::vector<float> & query,
     std::vector<float> & key, std::vector<float> & value,
@@ -242,6 +260,14 @@ bool qwen4exp_frontier_qsa_attend_q1(
     size_t query_count, const float * gate, size_t gate_count,
     const float * selected_key, const float * selected_value,
     int selected_tokens, std::vector<float> & output, std::string & error);
+// Dense selection is order-insensitive.  The host upload is right-aligned in
+// the fixed arena and SET_ROWS replaces its final K/V row from the resident
+// projection, so query, gate and current K/V never visit the host before FA.
+bool qwen4exp_frontier_qsa_attend_prepared_q1(
+    Qwen4ExpFrontierQsaGraph * graph, const float * selected_key,
+    const float * selected_value, int selected_tokens,
+    std::vector<float> & current_key, std::vector<float> & current_value,
+    std::vector<float> & output, std::string & error);
 size_t qwen4exp_frontier_qsa_arena_bytes(
     const Qwen4ExpFrontierQsaGraph * graph);
 uint64_t qwen4exp_frontier_qsa_transfer_bytes_q1(
@@ -311,6 +337,7 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
 // Its tensors remain in the companion's existing backend buffer; the graphs
 // never clone weight payloads and are destroyed before that buffer.
 bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
+                                  const ember_qwen_yarn_config & yarn,
                                   std::string & error);
 void qwen4exp_frontier_mtp_destroy(Qwen4ExpMtpWeights & weights);
 bool qwen4exp_frontier_mtp_moe_q1(const Qwen4ExpMtpWeights & weights,

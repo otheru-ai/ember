@@ -228,7 +228,8 @@ bool Qwen4ExpBackend::init() {
             return false;
         }
         state_budget_bytes_ -= mtp_weights_.resident_weight_bytes;
-        if (!qwen4exp_frontier_mtp_create(mtp_weights_, error)) {
+        if (!qwen4exp_frontier_mtp_create(
+                mtp_weights_, weights_.yarn, error)) {
             set_last_error("Qwen4Exp MTP frontier initialization failed: " +
                            (error.empty() ? std::string("no frontier diagnostic")
                                           : error));

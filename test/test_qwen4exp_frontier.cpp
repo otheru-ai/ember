@@ -1738,6 +1738,162 @@ static bool close_vectors(const std::vector<float> & actual,
     return true;
 }
 
+static void test_persistent_qsa_prepared_resident() {
+    using dflash::common::Qwen4ExpFrontierQsaGraph;
+    using dflash::common::Qwen4ExpFrontierQsaSpec;
+    using dflash::common::Qwen4ExpFrontierQsaWeights;
+    Qwen4ExpFrontierQsaSpec spec{64, 2, 1, 64, 1, 64};
+    char yarn_error[192];
+    CHECK(ember_qwen_yarn_configure(
+              false, EMBER_QWEN_NATIVE_CONTEXT, &spec.yarn, yarn_error,
+              sizeof(yarn_error)),
+          "resident QSA test configures native M-RoPE");
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    CHECK(backend != nullptr, "resident QSA CPU backend initializes");
+    if (!backend) return;
+    ggml_init_params params{};
+    params.mem_size = 2U * 1024U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    CHECK(ctx != nullptr, "resident QSA weight context initializes");
+    if (!ctx) {
+        ggml_backend_free(backend);
+        return;
+    }
+    Qwen4ExpFrontierQsaWeights weights;
+    weights.query = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 256);
+    weights.key = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
+    weights.value = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
+    weights.index_query = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
+    weights.index_key = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
+    weights.output = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 64);
+    weights.query_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
+    weights.key_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
+    weights.index_query_norm =
+        ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 64);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    CHECK(buffer != nullptr, "resident QSA weight buffer allocates");
+    if (!buffer) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return;
+    }
+    const std::vector<float> query_weight =
+        patterned_values(64U * 256U, 0.0017f, 29);
+    const std::vector<float> key_weight =
+        patterned_values(64U * 64U, 0.0021f, 23);
+    const std::vector<float> value_weight =
+        patterned_values(64U * 64U, 0.0019f, 31);
+    const std::vector<float> index_query_weight =
+        patterned_values(64U * 64U, 0.0013f, 19);
+    const std::vector<float> index_key_weight =
+        patterned_values(64U * 64U, 0.0011f, 17);
+    const std::vector<float> output_weight =
+        patterned_values(128U * 64U, 0.0015f, 27);
+    std::vector<float> norm(64U);
+    for (size_t index = 0; index < norm.size(); ++index)
+        norm[index] = 0.75f + 0.01f * static_cast<float>(index % 23U);
+    const std::array<std::pair<ggml_tensor *, const std::vector<float> *>, 9>
+        uploads{{
+            {weights.query, &query_weight},
+            {weights.key, &key_weight},
+            {weights.value, &value_weight},
+            {weights.index_query, &index_query_weight},
+            {weights.index_key, &index_key_weight},
+            {weights.output, &output_weight},
+            {weights.query_norm, &norm},
+            {weights.key_norm, &norm},
+            {weights.index_query_norm, &norm},
+        }};
+    for (const auto & upload : uploads) {
+        ggml_backend_tensor_set(upload.first, upload.second->data(), 0,
+                                upload.second->size() * sizeof(float));
+    }
+    std::string error;
+    Qwen4ExpFrontierQsaGraph * graph =
+        dflash::common::qwen4exp_frontier_qsa_create_q1(
+            backend, spec, weights, -1, error);
+    if (!graph)
+        std::fprintf(stderr, "resident QSA build error: %s\n", error.c_str());
+    CHECK(graph != nullptr &&
+              dflash::common::qwen4exp_frontier_qsa_can_keep_prepared(graph),
+          "resident QSA graph exposes prepared projection handoff");
+    if (graph) {
+        const std::vector<float> input = patterned_values(64U, 0.013f, 21);
+        const int32_t position[3] = {37, 37, 37};
+        std::vector<float> query, gate, key, value, index_query, index_key;
+        const bool host_ok =
+            dflash::common::qwen4exp_frontier_qsa_project_prepared_q1(
+                graph, input.data(), input.size(), position, false, query,
+                gate, key, value, index_query, index_key, error);
+        std::vector<float> host_output;
+        const bool host_attention_ok = host_ok &&
+            dflash::common::qwen4exp_frontier_qsa_attend_q1(
+                graph, query.data(), query.size(), gate.data(), gate.size(),
+                key.data(), value.data(), 1, host_output, error);
+
+        std::vector<float> resident_query, resident_gate, resident_key,
+                           resident_value, resident_index_query,
+                           resident_index_key;
+        const bool resident_ok =
+            dflash::common::qwen4exp_frontier_qsa_project_prepared_q1(
+                graph, input.data(), input.size(), position, true,
+                resident_query, resident_gate, resident_key, resident_value,
+                resident_index_query, resident_index_key, error);
+        std::vector<float> zero_key(key.size(), 0.0f);
+        std::vector<float> zero_value(value.size(), 0.0f);
+        std::vector<float> current_key, current_value, resident_output;
+        const bool resident_attention_ok = resident_ok &&
+            dflash::common::qwen4exp_frontier_qsa_attend_prepared_q1(
+                graph, zero_key.data(), zero_value.data(), 1, current_key,
+                current_value, resident_output, error);
+        CHECK(host_ok && resident_ok && resident_query.empty() &&
+                  resident_gate.empty() && resident_key.empty() &&
+                  resident_value.empty() && resident_index_query.empty() &&
+                  close_vectors(resident_index_key, index_key, 0.0f),
+              "dense prepared projection downloads only raw index-K");
+        CHECK(host_attention_ok && resident_attention_ok,
+              "host and resident QSA attention graphs execute");
+        CHECK(close_vectors(current_key, key, 0.0f) &&
+                  close_vectors(current_value, value, 0.0f),
+              "resident current K/V cache rows match prepared projections");
+        CHECK(close_vectors(resident_output, host_output, 2.0e-5f),
+              "resident Q/gate/current K/V handoff matches host staging");
+
+        std::vector<float> selected_key =
+            patterned_values(3U * 64U, 0.007f, 25);
+        std::vector<float> selected_value =
+            patterned_values(3U * 64U, 0.009f, 33);
+        std::copy(key.begin(), key.end(), selected_key.end() - 64);
+        std::copy(value.begin(), value.end(), selected_value.end() - 64);
+        std::vector<float> host_q3_output;
+        const bool host_q3_ok =
+            dflash::common::qwen4exp_frontier_qsa_attend_q1(
+                graph, query.data(), query.size(), gate.data(), gate.size(),
+                selected_key.data(), selected_value.data(), 3,
+                host_q3_output, error);
+        std::fill(selected_key.end() - 64, selected_key.end(), 0.0f);
+        std::fill(selected_value.end() - 64, selected_value.end(), 0.0f);
+        const bool resident_q3_projected =
+            dflash::common::qwen4exp_frontier_qsa_project_prepared_q1(
+                graph, input.data(), input.size(), position, true,
+                resident_query, resident_gate, resident_key, resident_value,
+                resident_index_query, resident_index_key, error);
+        std::vector<float> resident_q3_output;
+        const bool resident_q3_ok = resident_q3_projected &&
+            dflash::common::qwen4exp_frontier_qsa_attend_prepared_q1(
+                graph, selected_key.data(), selected_value.data(), 3,
+                current_key, current_value, resident_q3_output, error);
+        CHECK(host_q3_ok && resident_q3_ok &&
+                  close_vectors(resident_q3_output, host_q3_output, 2.0e-5f),
+              "right-aligned resident current row matches q3 host staging");
+    }
+    dflash::common::qwen4exp_frontier_qsa_destroy(graph);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 static void test_causal_attention_stateless_ffn_batching() {
     constexpr size_t kRows = 7;
     constexpr size_t kLayers = 6;
@@ -2040,6 +2196,7 @@ int main() {
     test_gdn_recurrent_accumulation_order();
     test_gdn_batch_at_hip_legal_conv_channels();
     test_persistent_qsa_q1();
+    test_persistent_qsa_prepared_resident();
     test_causal_attention_stateless_ffn_batching();
     test_causal_ple_projection_batching();
     test_bounded_cache_and_prefill_policy();

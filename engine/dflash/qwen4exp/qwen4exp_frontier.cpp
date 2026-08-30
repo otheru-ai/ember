@@ -211,9 +211,13 @@ struct Qwen4ExpFrontierQsaAttentionGraph : Qwen4ExpFrontierQsaSubgraph {
     ggml_tensor * gate = nullptr;
     ggml_tensor * key = nullptr;
     ggml_tensor * value = nullptr;
+    ggml_tensor * current_key = nullptr;
+    ggml_tensor * current_value = nullptr;
     ggml_tensor * mask = nullptr;
     ggml_tensor * output = nullptr;
+    ggml_tensor * current_rows = nullptr;
     int width = 0;
+    bool resident_projection = false;
     std::vector<float> padded_key;
     std::vector<float> padded_value;
     std::vector<ggml_fp16_t> padded_mask;
@@ -232,6 +236,12 @@ struct Qwen4ExpFrontierQsaGraph {
     ggml_tensor * projected_value = nullptr;
     ggml_tensor * projected_index_query = nullptr;
     ggml_tensor * projected_index_key = nullptr;
+    ggml_tensor * projection_position = nullptr;
+    ggml_tensor * prepared_query = nullptr;
+    ggml_tensor * prepared_gate = nullptr;
+    ggml_tensor * prepared_key = nullptr;
+    ggml_tensor * prepared_value = nullptr;
+    ggml_tensor * prepared_index_query = nullptr;
     Qwen4ExpFrontierQsaSubgraph rotation;
     ggml_tensor * rotation_query_key = nullptr;
     ggml_tensor * rotation_value = nullptr;
@@ -1229,9 +1239,24 @@ bool qsa_spec_valid(const Qwen4ExpFrontierQsaSpec & spec) {
            spec.n_index_heads > 0 && spec.index_dim > 0;
 }
 
+bool qsa_prepare_spec_valid(const Qwen4ExpFrontierQsaSpec & spec) {
+    const ember_qwen_yarn_config & yarn = spec.yarn;
+    return qsa_spec_valid(spec) && spec.head_dim >= EMBER_QWEN_ROPE_DIM &&
+           spec.index_dim >= EMBER_QWEN_ROPE_DIM && spec.epsilon > 0.0f &&
+           yarn.original_context > 0 && yarn.factor > 0.0f &&
+           yarn.theta > 0.0f && yarn.beta_fast > 0.0f &&
+           yarn.beta_slow > 0.0f && yarn.mrope_sections[0] == 11 &&
+           yarn.mrope_sections[1] == 11 && yarn.mrope_sections[2] == 10;
+}
+
 bool qsa_matrix(const ggml_tensor * tensor, int64_t input, int64_t output) {
     return tensor && tensor->buffer && ggml_n_dims(tensor) == 2 &&
            tensor->ne[0] == input && tensor->ne[1] == output;
+}
+
+bool qsa_vector(const ggml_tensor * tensor, int64_t count) {
+    return tensor && tensor->buffer && tensor->ne[0] == count &&
+           ggml_nelements(tensor) == count;
 }
 
 void qsa_subgraph_destroy(Qwen4ExpFrontierQsaSubgraph & graph) {
@@ -1275,11 +1300,13 @@ void set_qsa_name(ggml_tensor * tensor, int layer, const char * suffix) {
 }
 
 Qwen4ExpFrontierQsaAttentionGraph * qsa_attention_create(
-        Qwen4ExpFrontierQsaGraph * owner, int width, std::string & error) {
+        Qwen4ExpFrontierQsaGraph * owner, int width,
+        bool resident_projection, std::string & error) {
     const Qwen4ExpFrontierQsaSpec & spec = owner->spec;
     std::unique_ptr<Qwen4ExpFrontierQsaAttentionGraph> result(
         new Qwen4ExpFrontierQsaAttentionGraph());
     result->width = width;
+    result->resident_projection = resident_projection;
     const size_t cache_values = static_cast<size_t>(spec.head_dim) *
                                 static_cast<size_t>(width) *
                                 static_cast<size_t>(spec.n_kv_heads);
@@ -1303,27 +1330,63 @@ Qwen4ExpFrontierQsaAttentionGraph * qsa_attention_create(
         ctx, GGML_TYPE_F32, spec.head_dim, spec.n_heads);
     result->gate = ggml_new_tensor_2d(
         ctx, GGML_TYPE_F32, spec.head_dim, spec.n_heads);
+    ggml_set_input(result->query);
+    ggml_set_input(result->gate);
     result->key = ggml_new_tensor_3d(
         ctx, GGML_TYPE_F32, spec.head_dim, width, spec.n_kv_heads);
     result->value = ggml_new_tensor_3d(
         ctx, GGML_TYPE_F32, spec.head_dim, width, spec.n_kv_heads);
     result->mask = ggml_new_tensor_3d(
         ctx, GGML_TYPE_F16, width, 1, 1);
-    ggml_set_input(result->query);
-    ggml_set_input(result->gate);
     ggml_set_input(result->key);
     ggml_set_input(result->value);
     ggml_set_input(result->mask);
+    if (resident_projection) {
+        // SET_ROWS writes through views of these inputs before flash attention
+        // consumes them. OUTPUT ownership prevents gallocr from recycling the
+        // view sources when the in-place nodes release their last reference.
+        ggml_set_output(result->key);
+        ggml_set_output(result->value);
+    }
     set_qsa_name(result->query, owner->layer, "query");
     set_qsa_name(result->key, owner->layer, "selected_key");
     set_qsa_name(result->value, owner->layer, "selected_value");
 
+    ggml_tensor * query_source = result->query;
+    ggml_tensor * gate_source = result->gate;
+    ggml_tensor * key_source = result->key;
+    ggml_tensor * value_source = result->value;
+    if (resident_projection) {
+        result->current_rows = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_I32, spec.n_kv_heads);
+        result->current_key = ggml_new_tensor_2d(
+            ctx, GGML_TYPE_F32, spec.head_dim, spec.n_kv_heads);
+        result->current_value = ggml_new_tensor_2d(
+            ctx, GGML_TYPE_F32, spec.head_dim, spec.n_kv_heads);
+        ggml_set_input(result->current_rows);
+        ggml_set_input(result->current_key);
+        ggml_set_input(result->current_value);
+        // The host publishes these exact rows after attention completes, so
+        // their device-copy destinations must outlive graph execution too.
+        ggml_set_output(result->current_key);
+        ggml_set_output(result->current_value);
+        key_source = ggml_set_rows(
+            ctx,
+            ggml_reshape_2d(ctx, result->key, spec.head_dim,
+                            static_cast<int64_t>(width) * spec.n_kv_heads),
+            result->current_key, result->current_rows);
+        value_source = ggml_set_rows(
+            ctx,
+            ggml_reshape_2d(ctx, result->value, spec.head_dim,
+                            static_cast<int64_t>(width) * spec.n_kv_heads),
+            result->current_value, result->current_rows);
+    }
     ggml_tensor * query = ggml_reshape_4d(
-        ctx, result->query, spec.head_dim, 1, spec.n_heads, 1);
+        ctx, query_source, spec.head_dim, 1, spec.n_heads, 1);
     ggml_tensor * key = ggml_reshape_4d(
-        ctx, result->key, spec.head_dim, width, spec.n_kv_heads, 1);
+        ctx, key_source, spec.head_dim, width, spec.n_kv_heads, 1);
     ggml_tensor * value = ggml_reshape_4d(
-        ctx, result->value, spec.head_dim, width, spec.n_kv_heads, 1);
+        ctx, value_source, spec.head_dim, width, spec.n_kv_heads, 1);
     ggml_tensor * attended = ggml_flash_attn_ext(
         ctx, query, key, value, result->mask,
         1.0f / std::sqrt(static_cast<float>(spec.head_dim)), 0.0f, 0.0f);
@@ -1337,7 +1400,7 @@ Qwen4ExpFrontierQsaAttentionGraph * qsa_attention_create(
         attended = ggml_mul_mat(
             ctx, owner->weights.value_rotation, attended);
     }
-    attended = ggml_mul(ctx, attended, ggml_sigmoid(ctx, result->gate));
+    attended = ggml_mul(ctx, attended, ggml_sigmoid(ctx, gate_source));
     attended = ggml_reshape_1d(
         ctx, attended,
         static_cast<int64_t>(spec.n_heads) * spec.head_dim);
@@ -1350,6 +1413,17 @@ Qwen4ExpFrontierQsaAttentionGraph * qsa_attention_create(
                       "Qwen4Exp QSA attention graph allocation failed")) {
         qsa_attention_destroy(result.release());
         return nullptr;
+    }
+    if (resident_projection) {
+        std::vector<int32_t> current_rows(
+            static_cast<size_t>(spec.n_kv_heads));
+        for (int head = 0; head < spec.n_kv_heads; ++head) {
+            current_rows[static_cast<size_t>(head)] =
+                head * width + (width - 1);
+        }
+        ggml_backend_tensor_set(
+            result->current_rows, current_rows.data(), 0,
+            current_rows.size() * sizeof(int32_t));
     }
     return result.release();
 }
@@ -1371,6 +1445,11 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
         qsa_matrix(weights.key_rotation, spec.head_dim, spec.head_dim);
     const bool value_rotation_valid = !weights.value_rotation ||
         qsa_matrix(weights.value_rotation, spec.head_dim, spec.head_dim);
+    const bool prepare = qsa_prepare_spec_valid(spec);
+    const bool preparation_weights_valid = !prepare ||
+        (qsa_vector(weights.query_norm, spec.head_dim) &&
+         qsa_vector(weights.key_norm, spec.head_dim) &&
+         qsa_vector(weights.index_query_norm, spec.index_dim));
     if (!backend || !qsa_spec_valid(spec) ||
         !qsa_matrix(weights.query, spec.n_embd, 2 * q_values) ||
         !qsa_matrix(weights.key, spec.n_embd, kv_values) ||
@@ -1378,7 +1457,8 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
         !qsa_matrix(weights.index_query, spec.n_embd, iq_values) ||
         !qsa_matrix(weights.index_key, spec.n_embd, spec.index_dim) ||
         !qsa_matrix(weights.output, q_values, spec.n_embd) ||
-        !key_rotation_valid || !value_rotation_valid) {
+        !key_rotation_valid || !value_rotation_valid ||
+        !preparation_weights_valid) {
         error = "invalid Qwen4Exp persistent QSA tensor contract";
         return nullptr;
     }
@@ -1396,7 +1476,7 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
                   "qwen4exp/qsa/layer_%02d/rotation_q1", layer);
 
     ggml_init_params params{};
-    params.mem_size = 256U * 1024U;
+    params.mem_size = 1024U * 1024U;
     params.no_alloc = true;
     result->projection.ctx = ggml_init(params);
     if (!result->projection.ctx) {
@@ -1422,7 +1502,68 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
     ggml_set_output(result->projected_value);
     ggml_set_output(result->projected_index_query);
     ggml_set_output(result->projected_index_key);
-    result->projection.graph = ggml_new_graph_custom(ctx, 64, false);
+    if (prepare) {
+        result->projection_position = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_I32, GGML_MROPE_SECTIONS);
+        ggml_set_input(result->projection_position);
+        int sections[GGML_MROPE_SECTIONS] = {
+            spec.yarn.mrope_sections[0], spec.yarn.mrope_sections[1],
+            spec.yarn.mrope_sections[2], 0};
+        const float freq_scale = 1.0f / spec.yarn.factor;
+        const float ext_factor = spec.yarn.enabled ? 1.0f : 0.0f;
+        // Path 2 passes c=nullptr, so ggml derives YaRN attention scaling from
+        // freq_scale/ext_factor. Passing yarn.attention_factor here as well
+        // would silently apply that magnitude correction twice.
+
+        ggml_tensor * query = ggml_view_2d(
+            ctx, result->projected_query_gate, spec.head_dim, spec.n_heads,
+            static_cast<size_t>(2 * spec.head_dim) * sizeof(float), 0);
+        result->prepared_gate = ggml_cont_2d(
+            ctx,
+            ggml_view_2d(
+                ctx, result->projected_query_gate, spec.head_dim,
+                spec.n_heads,
+                static_cast<size_t>(2 * spec.head_dim) * sizeof(float),
+                static_cast<size_t>(spec.head_dim) * sizeof(float)),
+            spec.head_dim, spec.n_heads);
+        query = ggml_mul(
+            ctx, ggml_rms_norm(ctx, query, spec.epsilon), weights.query_norm);
+        result->prepared_query = ggml_rope_multi(
+            ctx, query, result->projection_position, nullptr,
+            EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
+            spec.yarn.original_context, spec.yarn.theta, freq_scale,
+            ext_factor, 1.0f, spec.yarn.beta_fast, spec.yarn.beta_slow);
+
+        ggml_tensor * key = ggml_reshape_2d(
+            ctx, result->projected_key, spec.head_dim, spec.n_kv_heads);
+        key = ggml_mul(
+            ctx, ggml_rms_norm(ctx, key, spec.epsilon), weights.key_norm);
+        result->prepared_key = ggml_rope_multi(
+            ctx, key, result->projection_position, nullptr,
+            EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
+            spec.yarn.original_context, spec.yarn.theta, freq_scale,
+            ext_factor, 1.0f, spec.yarn.beta_fast, spec.yarn.beta_slow);
+        result->prepared_value = ggml_reshape_2d(
+            ctx, result->projected_value, spec.head_dim, spec.n_kv_heads);
+
+        ggml_tensor * index_query = ggml_reshape_2d(
+            ctx, result->projected_index_query, spec.index_dim,
+            spec.n_index_heads);
+        index_query = ggml_mul(
+            ctx, ggml_rms_norm(ctx, index_query, spec.epsilon),
+            weights.index_query_norm);
+        result->prepared_index_query = ggml_rope_multi(
+            ctx, index_query, result->projection_position, nullptr,
+            EMBER_QWEN_ROPE_DIM, sections, GGML_ROPE_TYPE_IMROPE,
+            spec.yarn.original_context, spec.yarn.theta, freq_scale,
+            ext_factor, 1.0f, spec.yarn.beta_fast, spec.yarn.beta_slow);
+        ggml_set_output(result->prepared_query);
+        ggml_set_output(result->prepared_gate);
+        ggml_set_output(result->prepared_key);
+        ggml_set_output(result->prepared_value);
+        ggml_set_output(result->prepared_index_query);
+    }
+    result->projection.graph = ggml_new_graph_custom(ctx, 160, false);
     ggml_build_forward_expand(result->projection.graph,
                               result->projected_query_gate);
     ggml_build_forward_expand(result->projection.graph,
@@ -1433,6 +1574,18 @@ Qwen4ExpFrontierQsaGraph * qwen4exp_frontier_qsa_create_q1(
                               result->projected_index_query);
     ggml_build_forward_expand(result->projection.graph,
                               result->projected_index_key);
+    if (prepare) {
+        ggml_build_forward_expand(result->projection.graph,
+                                  result->prepared_query);
+        ggml_build_forward_expand(result->projection.graph,
+                                  result->prepared_gate);
+        ggml_build_forward_expand(result->projection.graph,
+                                  result->prepared_key);
+        ggml_build_forward_expand(result->projection.graph,
+                                  result->prepared_value);
+        ggml_build_forward_expand(result->projection.graph,
+                                  result->prepared_index_query);
+    }
     if (!qsa_allocate(result->projection, backend, error,
                       "Qwen4Exp QSA projection graph allocation failed")) {
         qwen4exp_frontier_qsa_destroy(result.release());
@@ -1537,6 +1690,86 @@ bool qwen4exp_frontier_qsa_project_q1(
     return true;
 }
 
+bool qwen4exp_frontier_qsa_can_keep_prepared(
+        const Qwen4ExpFrontierQsaGraph * graph) {
+    return graph && graph->prepared_query && graph->prepared_gate &&
+           graph->prepared_key && graph->prepared_value &&
+           graph->prepared_index_query && !graph->rotation.ctx;
+}
+
+bool qwen4exp_frontier_qsa_project_prepared_q1(
+        Qwen4ExpFrontierQsaGraph * graph, const float * input,
+        size_t input_count, const int32_t position[3], bool keep_resident,
+        std::vector<float> & query, std::vector<float> & gate,
+        std::vector<float> & key, std::vector<float> & value,
+        std::vector<float> & index_query, std::vector<float> & index_key,
+        std::string & error) {
+    if (!graph || !graph->backend || !input || !position ||
+        input_count != static_cast<size_t>(graph->spec.n_embd) ||
+        !graph->projection_position || !graph->prepared_query ||
+        !graph->prepared_gate || !graph->prepared_key ||
+        !graph->prepared_value || !graph->prepared_index_query ||
+        (keep_resident && !qwen4exp_frontier_qsa_can_keep_prepared(graph))) {
+        error = "invalid Qwen4Exp prepared QSA projection evaluation";
+        return false;
+    }
+    query.clear();
+    gate.clear();
+    key.clear();
+    value.clear();
+    index_query.clear();
+    index_key.clear();
+    const int32_t axis_major_position[GGML_MROPE_SECTIONS] = {
+        position[0], position[1], position[2], 0};
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->projection_input, input, 0,
+        input_count * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, graph->projection_position, axis_major_position, 0,
+        sizeof(axis_major_position));
+    const ProfileRange range(graph->projection_profile_label);
+    if (ggml_backend_graph_compute_async(
+            graph->backend, graph->projection.graph) !=
+        GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
+        error = "Qwen4Exp prepared QSA projection graph execution failed";
+        return false;
+    }
+    const Qwen4ExpFrontierQsaSpec & spec = graph->spec;
+    index_key.resize(static_cast<size_t>(spec.index_dim));
+    ggml_backend_tensor_get_async(
+        graph->backend, graph->projected_index_key, index_key.data(), 0,
+        index_key.size() * sizeof(float));
+    if (!keep_resident) {
+        query.resize(static_cast<size_t>(spec.n_heads * spec.head_dim));
+        gate.resize(query.size());
+        key.resize(static_cast<size_t>(spec.n_kv_heads * spec.head_dim));
+        value.resize(key.size());
+        index_query.resize(
+            static_cast<size_t>(spec.n_index_heads * spec.index_dim));
+        ggml_backend_tensor_get_async(
+            graph->backend, graph->prepared_query, query.data(), 0,
+            query.size() * sizeof(float));
+        ggml_backend_tensor_get_async(
+            graph->backend, graph->prepared_gate, gate.data(), 0,
+            gate.size() * sizeof(float));
+        ggml_backend_tensor_get_async(
+            graph->backend, graph->prepared_key, key.data(), 0,
+            key.size() * sizeof(float));
+        ggml_backend_tensor_get_async(
+            graph->backend, graph->prepared_value, value.data(), 0,
+            value.size() * sizeof(float));
+        ggml_backend_tensor_get_async(
+            graph->backend, graph->prepared_index_query,
+            index_query.data(), 0, index_query.size() * sizeof(float));
+    }
+    // Raw index-K is the one live projection download below the sparse
+    // indexer boundary. It feeds the host snapshot history and closes this
+    // barrier; Q/gate/K/V remain resident for the attention graph.
+    ggml_backend_synchronize(graph->backend);
+    return true;
+}
+
 bool qwen4exp_frontier_qsa_rotate_q1(
         Qwen4ExpFrontierQsaGraph * graph, std::vector<float> & query,
         std::vector<float> & key, std::vector<float> & value,
@@ -1605,12 +1838,13 @@ bool qwen4exp_frontier_qsa_attend_q1(
         error = "invalid Qwen4Exp QSA attention shape";
         return false;
     }
+    const int cache_key = 2 * width;
     Qwen4ExpFrontierQsaAttentionGraph *& attention =
-        graph->attention[width];
+        graph->attention[cache_key];
     if (!attention) {
-        attention = qsa_attention_create(graph, width, error);
+        attention = qsa_attention_create(graph, width, false, error);
         if (!attention) {
-            graph->attention.erase(width);
+            graph->attention.erase(cache_key);
             return false;
         }
         std::fprintf(
@@ -1677,6 +1911,108 @@ bool qwen4exp_frontier_qsa_attend_q1(
         graph->backend, attention->output, output.data(), 0,
         output.size() * sizeof(float));
     // Host code must not read downloaded buffers above this barrier.
+    ggml_backend_synchronize(graph->backend);
+    return true;
+}
+
+bool qwen4exp_frontier_qsa_attend_prepared_q1(
+        Qwen4ExpFrontierQsaGraph * graph, const float * selected_key,
+        const float * selected_value, int selected_tokens,
+        std::vector<float> & current_key, std::vector<float> & current_value,
+        std::vector<float> & output, std::string & error) {
+    if (!graph || !selected_key || !selected_value || selected_tokens <= 0 ||
+        !qwen4exp_frontier_qsa_can_keep_prepared(graph)) {
+        error = "invalid Qwen4Exp resident QSA attention evaluation";
+        return false;
+    }
+    const Qwen4ExpFrontierQsaSpec & spec = graph->spec;
+    const int width = qwen4exp_frontier_qsa_cached_width(selected_tokens);
+    if (width == 0) {
+        error = "invalid Qwen4Exp resident QSA attention shape";
+        return false;
+    }
+    const int cache_key = 2 * width + 1;
+    Qwen4ExpFrontierQsaAttentionGraph *& attention =
+        graph->attention[cache_key];
+    if (!attention) {
+        attention = qsa_attention_create(graph, width, true, error);
+        if (!attention) {
+            graph->attention.erase(cache_key);
+            return false;
+        }
+        std::fprintf(
+            stderr,
+            "[qwen-frontier] event=graph_ready component=qsa layer=%d "
+            "selected_tokens=%d arena_width=%d arena_bytes=%zu "
+            "projection_handoff=resident state_owner=host_snapshot "
+            "graph_replay=off\n",
+            graph->layer, selected_tokens, width, attention->arena_bytes);
+    }
+    const size_t head_dim = static_cast<size_t>(spec.head_dim);
+    const size_t real_head_values =
+        static_cast<size_t>(selected_tokens) * head_dim;
+    const size_t padded_head_values = static_cast<size_t>(width) * head_dim;
+    const size_t leading_values =
+        static_cast<size_t>(width - selected_tokens) * head_dim;
+    for (int head = 0; head < spec.n_kv_heads; ++head) {
+        const size_t source = static_cast<size_t>(head) * real_head_values;
+        const size_t target = static_cast<size_t>(head) * padded_head_values;
+        std::fill_n(attention->padded_key.data() + target, leading_values,
+                    0.0f);
+        std::fill_n(attention->padded_value.data() + target, leading_values,
+                    0.0f);
+        std::copy_n(selected_key + source, real_head_values,
+                    attention->padded_key.data() + target + leading_values);
+        std::copy_n(selected_value + source, real_head_values,
+                    attention->padded_value.data() + target + leading_values);
+    }
+    std::fill_n(attention->padded_mask.data(),
+                static_cast<size_t>(width - selected_tokens),
+                ggml_fp32_to_fp16(-INFINITY));
+    std::fill(attention->padded_mask.begin() + (width - selected_tokens),
+              attention->padded_mask.end(), ggml_fp32_to_fp16(0.0f));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->key, attention->padded_key.data(), 0,
+        attention->padded_key.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->value, attention->padded_value.data(), 0,
+        attention->padded_value.size() * sizeof(float));
+    ggml_backend_tensor_set_async(
+        graph->backend, attention->mask, attention->padded_mask.data(), 0,
+        attention->padded_mask.size() * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_copy_async(
+        graph->backend, graph->backend, graph->prepared_query,
+        attention->query);
+    ggml_backend_tensor_copy_async(
+        graph->backend, graph->backend, graph->prepared_gate,
+        attention->gate);
+    ggml_backend_tensor_copy_async(
+        graph->backend, graph->backend, graph->prepared_key,
+        attention->current_key);
+    ggml_backend_tensor_copy_async(
+        graph->backend, graph->backend, graph->prepared_value,
+        attention->current_value);
+    const ProfileRange range(attention->profile_label);
+    if (ggml_backend_graph_compute_async(
+            graph->backend, attention->graph) != GGML_STATUS_SUCCESS) {
+        ggml_backend_synchronize(graph->backend);
+        error = "Qwen4Exp resident QSA attention graph execution failed";
+        return false;
+    }
+    output.resize(static_cast<size_t>(spec.n_embd));
+    current_key.resize(
+        static_cast<size_t>(spec.n_kv_heads * spec.head_dim));
+    current_value.resize(current_key.size());
+    ggml_backend_tensor_get_async(
+        graph->backend, attention->output, output.data(), 0,
+        output.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, attention->current_key, current_key.data(), 0,
+        current_key.size() * sizeof(float));
+    ggml_backend_tensor_get_async(
+        graph->backend, attention->current_value, current_value.data(), 0,
+        current_value.size() * sizeof(float));
+    // Cache publication and the layer output consume these three downloads.
     ggml_backend_synchronize(graph->backend);
     return true;
 }
@@ -1944,7 +2280,8 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
     const Qwen4ExpFrontierMoeSpec moe_spec{2560, 512, 10, 640};
     const Qwen4ExpFrontierGdnSpec gdn_spec{
         2560, 48, 16, 128, 4, 1.0e-6f};
-    const Qwen4ExpFrontierQsaSpec qsa_spec{2560, 24, 2, 256, 4, 128};
+    Qwen4ExpFrontierQsaSpec qsa_spec{2560, 24, 2, 256, 4, 128};
+    qsa_spec.yarn = weights.yarn;
     for (size_t index = 0; index < weights.layers.size(); ++index) {
         const Qwen4ExpLayer & layer = weights.layers[index];
         if (moe_enabled) {
@@ -2002,7 +2339,8 @@ bool qwen4exp_frontier_create(Qwen4ExpWeights & weights, std::string & error) {
             const Qwen4ExpFrontierQsaWeights graph_weights{
                 layer.attn_q, layer.attn_k, layer.attn_v, layer.index_q,
                 layer.index_k, layer.attn_output, layer.self_k_rot,
-                layer.self_v_rot};
+                layer.self_v_rot, layer.attn_q_norm, layer.attn_k_norm,
+                layer.index_q_norm};
             runtime->qsa[index] = qwen4exp_frontier_qsa_create_q1(
                 weights.backend, qsa_spec, graph_weights,
                 static_cast<int>(index), error);
@@ -2669,6 +3007,7 @@ bool qwen4exp_frontier_moe_batch(const Qwen4ExpWeights & weights, int layer,
 }
 
 bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
+                                  const ember_qwen_yarn_config & yarn,
                                   std::string & error) {
     qwen4exp_frontier_mtp_destroy(weights);
     if (!env_enabled("EMBER_QWEN_FRONTIER_MOE", true)) {
@@ -2695,12 +3034,14 @@ bool qwen4exp_frontier_mtp_create(Qwen4ExpMtpWeights & weights,
         return false;
     }
     const bool qsa_enabled = env_enabled("EMBER_QWEN_FRONTIER_QSA", true);
-    const Qwen4ExpFrontierQsaSpec qsa_spec{2560, 24, 2, 256, 4, 128};
+    Qwen4ExpFrontierQsaSpec qsa_spec{2560, 24, 2, 256, 4, 128};
+    qsa_spec.yarn = yarn;
     if (qsa_enabled) {
         const Qwen4ExpFrontierQsaWeights qsa_weights{
             layer.attn_q, layer.attn_k, layer.attn_v, layer.index_q,
             layer.index_k, layer.attn_output, layer.self_k_rot,
-            layer.self_v_rot};
+            layer.self_v_rot, layer.attn_q_norm, layer.attn_k_norm,
+            layer.index_q_norm};
         weights.frontier_qsa = qwen4exp_frontier_qsa_create_q1(
             weights.backend, qsa_spec, qsa_weights, 48, error);
         if (!weights.frontier_qsa) {
