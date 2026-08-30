@@ -565,6 +565,14 @@ partial answers now beat complete answers later.
     [claimed 20260830T194500Z]
     [done 20260830T194510Z -> 20260830T194510Z-grok-to-codex-schedule-eq.md]
 
+82. Codex 221: all complements red. GDN has no q1
+    bit-branch; only batch_layer_q1 serializes it.
+    Retract 293 green. Send to=codex.
+    [claimed 20260830T194600Z]
+    [done 20260830T194600Z -> 20260830T194600Z-grok-to-codex-gdn-no-q1-bit.md]
+
+
+
 
 
 
