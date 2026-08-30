@@ -762,6 +762,22 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
   set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
 
+  # GPU-free oracle for the graph RoPE path. Tranche 1 moves QSA rotary
+  # embedding off the host scalar `ember_qwen_yarn_apply` and into an in-graph
+  # `ggml_rope_multi`; that swap has five parameters (n_dims, the interleaved
+  # sections, attn_factor, the axis-major position layout, and the `c`
+  # freq-factor table, which ggml *divides* by) that are silent when wrong.
+  # Running the op on the CPU backend against the scalar reference catches all
+  # of them without hardware. CPU and HIP share the op, so agreement here is
+  # necessary but not sufficient — the hardware differential remains the gate.
+  add_executable(test_qwen_rope_graph_oracle test/test_qwen_rope_graph_oracle.cpp)
+  target_include_directories(test_qwen_rope_graph_oracle PRIVATE
+    engine/dflash/common engine/ggml/include)
+  target_link_libraries(test_qwen_rope_graph_oracle PRIVATE ember_engine)
+  ember_strict(test_qwen_rope_graph_oracle)
+  add_test(NAME qwen_rope_graph_oracle COMMAND test_qwen_rope_graph_oracle)
+  set_tests_properties(qwen_rope_graph_oracle PROPERTIES TIMEOUT 60)
+
   # Narrow placement diagnostic: loads only the trained DSpark main and three
   # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
   # context widths. It avoids a second resident target-model allocation.
