@@ -266,12 +266,50 @@ unchanged, so this is bit-identical to the uncapped launch" — true, and about
 the *grid cap*. It says nothing about the block-width branch two lines below,
 which is where the shape-dependence lives. Correct it with the fix.
 
+**The same defect exists twice.** `mean.cu:70-83` carries it byte-for-byte —
+same `(nrows / nsm) < 2` branch, same `reduce_rows_f32`, differing only in
+`norm=true`, dispatched from `ggml-cuda.cu:3141`. There is no current
+`ggml_mean` call in `engine/dflash/` or `src/`, so it is latent; fix it while
+the reason is understood. The rest of the HIP tree is clean: `norm.cu` selects
+on `ncols`, `gated_delta_net.cu` on `S_v`, and everything else conditional on
+`nrows`/`nsm` sets grid dimensions, which changes block-to-row assignment and
+not the per-row tree.
+
+**Guard**: `test_sum_rows_shape_invariance` (`f021309`) sums the same rows in a
+16-row and a 48-row tensor — `n_key_heads * n_tokens` at q1 and q3 — and
+requires the shared rows bit-identical. Trivial on CPU, meaningful under
+`DFLASH_QWEN_GDN_TEST_HIP=1`, where it fails on any pre-fix build. It states
+the invariant generally: *a reduction's arithmetic must not depend on how many
+independent reductions are launched alongside it.*
+
 **Fix**: make the block width a function of `ncols` only. One line, and q1 and
 batched then take the same tree. Narrowing it to the `exact_l2_norm` call sites
 would leave the hazard live for every other `sum_rows` whose row count crosses
 the threshold — a general q1-versus-batched hazard, not a GDN one. Changing the
 release criterion is now clearly wrong: the shape-dependence is gratuitous,
 nothing forces a reduction tree to depend on row count.
+
+**DeepSeek regression safety A/B, diagnostic only.** `sumrows.cu` is shared by
+the production DeepSeek graph, including its routing reductions, so the
+reviewed diff was screened before landing.  The unprofiled ABBA sequence was
+baseline/candidate/candidate/baseline, with a fresh server and KV directory per
+arm, the production DSpark environment, and three exact 256-token decode
+samples per arm.  Baseline binary SHA-256 was
+`e8e4dd620ec2ca8160d3b1e1849af96fc7750aba2405b2b04c23b8f6c3b0eabc`;
+candidate binary SHA-256 was
+`e5f3a8eca4e1faaf39df68600e50d15537b2a93de3c16ad6f4ecc2fd66c93d2e`,
+from reviewed diff SHA-256
+`a03c5da4a1cae62b129a07bcbac48553c730f4552abe7f93ebe940676f685926`.
+All twelve samples completed 256 tokens with speculation active and matching
+acceptance.  Across all six samples per side, baseline decode was p50 39.972,
+p90 40.421, p99 40.434, max 40.435 tok/s; candidate was p50 40.394, p90
+40.443, p99 40.446, max 40.446 tok/s.  Restricting each arm to repeats 2-3 to
+exclude its first long-decode sample gives medians 40.391 and 40.419 tok/s,
+respectively.  This is flat and clears the shared-kernel regression concern;
+it is **not a publishable Qwen performance result** while the correctness
+blocker remains open.  Raw evidence:
+`sumrows-ds4-ab-20260830T210633Z/`.  Production restored healthy and the GPU
+lock was free after the run.
 
 ## Open correctness blocker
 
@@ -879,3 +917,28 @@ S_v=128 kernel, so there is no model load and no production quiesce, and:
 - `serial_q1_vs_exact < batched_vs_exact` → q=1 is the better reference, the
   batched path is genuinely drifting, and the question becomes how much drift a
   prefill may carry.
+
+## What the first publishable number requires
+
+Recorded now so the moment the blocker closes is not fumbled.
+
+1. **The width-3 differential green**, with the `sum_rows` fix landed and the
+   prediction confirmed: normalized Q and K exact, recurrent state exact. If Q
+   and K go exact and the validator stays red, there is a second seam — the
+   per-layer comparator names it the same way it named this one.
+2. **A DS4 non-regression result.** `sumrows.cu` is shared with the production
+   DeepSeek path (`deepseek4_graph.cpp:447`, `:458`, `:869`, `:1272`, `:2655`;
+   `moe_hybrid_ffn_eval.cpp:81`). The removed branch fired at `nrows < 40`,
+   the routing shape. A Qwen correctness fix must not silently cost DeepSeek
+   throughput.
+3. **A hard gate on an exact binary**, unprofiled, with prefill evaluating
+   exactly 2074 tokens and decode exactly 256, rounding checks true, and the
+   memory gate passed — the protocol codex 215 already followed.
+
+Only then is a number publishable, and it should be published against the
+right comparison: the measured cluster on this silicon is 22.6-28.1 decode and
+345-385 prefill (see the reference implementation section). Our gates of 39.49
+and 412 sit above that cluster, so the first green number will very likely be
+a real result *and* short of the gate. Both things being true at once is the
+expected outcome, not a contradiction, and the ledger should say so before
+anyone has to interpret it under pressure.
