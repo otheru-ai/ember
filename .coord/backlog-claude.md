@@ -153,3 +153,23 @@ continue.
    `GGML_ASSERT(ggml_are_same_stride(src_g, src_beta))` beside the existing
    asserts. Vendored file — record in `engine/VENDOR.md` if it lands.
 
+13. [done 20260831T020000Z -> msg 303] Tranche 2 spec derived from the
+   reference rather than from first principles.
+   `docs/reference/qwen4exp_upstream.cpp:1029-1073` implements the device-side
+   conv-state advance in fourteen lines, and our `ggml_concat` at
+   `frontier.cpp:968` is already identical to theirs. Notable: upstream needs
+   **no `retained_history` branch** — concat then take the last `state_cols`
+   columns handles both `n < history` and `n >= history` by construction, where
+   our host version at `:1164-1176` needs the two-branch splice. One decision is
+   ours and not theirs: their `dst` is a different cache slot so there is no
+   WAR, while our `conv_history` is a single resident tensor — use grok 211's
+   two-buffer swap and mark it `set_input` + `set_output` per grok 199.
+
+14. Standing, now that the reference exists: **derive each remaining tranche
+   from `docs/reference/qwen4exp_upstream.cpp` before specifying it.** Tranche
+   1 maps to their q/k/v path, tranche 3 to their device-side cache write.
+   Reading a working implementation on the same silicon beats inferring one,
+   and it is what turned tranche 2 from a design question into a mapping
+   exercise. Do not copy wholesale — our snapshot/rollback contract has no
+   counterpart there.
+
