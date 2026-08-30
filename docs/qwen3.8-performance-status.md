@@ -195,6 +195,20 @@ Grouping each run of `ggml_backend_tensor_get_async` / `_set_async` by the
 **14 barriers, 30 copies, 7 stages, every stage a barrier pair** — one closing
 the upload run, one closing the download run.
 
+**Two of those rows never execute.** `:1550` and `:1561` belong to
+`qsa_rotate_q1`, which is the #27774 Hadamard KV-cache rotation, not the YaRN
+stage. Its subgraph is built only when the GGUF carries `attn_k_rot.weight` /
+`attn_v_rot.weight`, and the published checkpoint carries neither — see
+[`dead-code-candidates.md`](dead-code-candidates.md). So the **live** census is
+**12 barriers / 26 copies**, and over 12 QSA layers that is 24 barriers and 48
+copies per token that no A/B may be credited with removing.
+
+The YaRN rope is not in this table at all: it runs on the host in
+`prepare_qsa_row` (`qwen4exp_runtime.cpp:745-770`), between the project
+download barrier and the attend upload barrier. What tranche 1 removes is the
+**5-get at `:1513`**, which exists only so the host can run `rms_norm` + `rope`
+on those tensors, plus the head-wise host arithmetic itself.
+
 Consequence for `faa5307`, which converted those 30 copies to async: it removes
 **zero** barriers. It only lets copies overlap *within* a group, and seven of
 the fourteen groups hold exactly one copy, where a `get_async` immediately

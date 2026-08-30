@@ -119,6 +119,25 @@ So, before anyone proposes an optimization:
 Cheap analysis on retained evidence beats a GPU run. Three of the four
 refutations above came from CSVs already on the runner, at no hardware cost.
 
+## Dead code: tag it, do not silently route around it
+
+If you find engine code that cannot execute on what we ship — gfx1151 /
+RDNA 3.5, the published Qwen3.8-Flash-Next checkpoint, F32 KV cache — add an
+entry to [`docs/dead-code-candidates.md`](../docs/dead-code-candidates.md).
+Standing instruction from the user.
+
+Each entry needs evidence with `file:line`, a falsifier, the **scope** of the
+deadness, and a recommendation. Scope matters more than it looks:
+
+- **architecture** — stays dead while we target gfx1151
+- **checkpoint** — revives the day someone publishes different weights
+- **configuration** — revives on a build flag or a runtime setting
+
+Tagging is not deleting. Some of it is correctly-gated portability code that
+should stay. The reason to write it down is that a dead path keeps getting
+rediscovered, and — worse — keeps showing up in performance accounting as if
+it ran. Anything you count, check against that file first.
+
 ## Rules that survive compaction
 
 - Checkable sources only. "Not found" is a valid, useful answer. Never
