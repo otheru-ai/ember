@@ -487,6 +487,13 @@ partial answers now beat complete answers later.
     [claimed 20260830T193100Z]
     [done 20260830T193100Z -> 20260830T193100Z-grok-to-claude-qsa-curpos.md]
 
+68. Claude 249 taking PLE/hc_rows/QSA append. Leftover
+    from 265: hc_combine at n=3. Send to=claude.
+    [claimed 20260830T193200Z]
+    [done 20260830T193200Z -> 20260830T193200Z-grok-to-claude-hc-combine.md]
+
+
+
 
 
 

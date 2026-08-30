@@ -260,7 +260,33 @@ record.
   batched subsystems and the batched type-101 kernels in one run, and moves the
   search into host C++ that can be reviewed GPU-free.
 - **passes** — the defect is in exactly one of the five, and the mask bisects
-  it in three more runs. Our default of 3 is an inherited sm_86 (RTX 3090)
+  it in three more runs.
+
+Width 2 production runs the **mask 0 batched kernels**, not q=1 graphs, so mask
+31 at width 3 is a third path rather than a return to a proven one.
+
+### Read GPU-free while that run is outstanding — no defect found
+
+Eight things are eliminated from the fail branch:
+
+| | why |
+|---|---|
+| `mrope_positions` pre-pushed for the whole batch (`:1915-1916`) | only the `!dense_selection` scorer reads it, and it never runs at ctx ≤ 2048 |
+| `cur_pos` held at the pre-batch value until `:1978` | not read anywhere inside the layer loop — `:1888`/`:1890` are bounds checks, `:1978` the advance |
+| PLE trigram history | `state.ple_tokens` is a 2-token history, which matches the pass-1,2/fail-3 signature exactly — but the shift is identical in serial (`:260`) and batched (`:284`, `:298`, `:384`) |
+| PLE dilated convolution ring | 9 slots, taps at t-9/t-6/t-3/t (dilation 3), shifted one slot per token; same code in `:253-257` and `:374-377` |
+| QSA per-row cache appends | `finish_qsa_row:905-907`, strictly row-ordered |
+| dense padding | tested, `99dcc3d` |
+| MoE routing across the batch | tested, `b5d0bb5` |
+| GDN batch versus sequential | pre-existing test at n=3 and n=16 |
+
+Not yet read: the `hc_mix` / `hc_combine` inject arithmetic across rows, and
+any per-layer expert state in `run_moe`.
+
+The two composition asymmetries found (`mrope_positions`, `cur_pos`) are real
+but inert. They stay filed as guard-correctness issues for after the blocker —
+pre-filling the position history turns the bounds check at `:832-836` from a
+real guard into one that always passes. Our default of 3 is an inherited sm_86 (RTX 3090)
 crossover measurement, not a gfx1151 one — see the comment at
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2545-2559`, which explicitly says to
 override for other hardware, and note that DeepSeek already overrides it to 4
