@@ -479,3 +479,25 @@ jobs:
             echo "Benchmark attestation SHA-256: \`$QWEN_Q3_BENCHMARK_BUNDLE_SHA256\`"
             echo 'Scope: exact differential, unprofiled timing, peak runner memory, and separate trace/PMC passes; no publication.'
           } >>"$GITHUB_STEP_SUMMARY"
+
+      # Preserve completed measurement work even if a later Sigstore handoff
+      # fails.  The disk snapshot is intentionally excluded: it is large,
+      # reconstructable, and not part of the evidence contract.
+      - name: Upload bounded Q3 hardware evidence
+        if: ${{ always() && env.QWEN_FIRST_TOKEN_OUTPUT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qwen-q3-hardware-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/prompt.txt
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/validation.json
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/engine.log
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/first-token-evidence.json
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/first-token-evidence.sigstore.json
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/*.json
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/*.jsonl
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/*.log
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/*.txt
+            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/profile/**
+          if-no-files-found: warn
+          retention-days: 30

@@ -134,6 +134,16 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             proof,
         )
 
+    def test_q3_upload_retains_measurements_after_handoff_failure(self) -> None:
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        upload = proof.split("      - name: Upload bounded Q3 hardware evidence\n", 1)[1]
+        self.assertIn("if: ${{ always() && env.QWEN_FIRST_TOKEN_OUTPUT != '' }}", upload)
+        self.assertIn("actions/upload-artifact@", upload)
+        self.assertIn("/first-token-evidence.json", upload)
+        self.assertIn("/full-benchmark/*.jsonl", upload)
+        self.assertIn("/full-benchmark/profile/**", upload)
+        self.assertNotIn("validation-kv-cache", upload)
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {
