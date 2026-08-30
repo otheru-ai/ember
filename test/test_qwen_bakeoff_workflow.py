@@ -225,6 +225,11 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn('gid="$(stat -c %g -- "$node")"', gate)
         self.assertNotIn("--group-add video", gate)
         self.assertNotIn("--group-add render", gate)
+        self.assertIn(
+            '--counter-calibration "$OUT_DIR/profile/counter-calibration.json"',
+            gate,
+        )
+        self.assertIn('"profile_report": {"path": "profile/report.json"', gate)
 
     def test_workflow_yaml_shell_and_python_heredocs_parse(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")

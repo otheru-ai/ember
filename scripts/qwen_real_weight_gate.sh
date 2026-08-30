@@ -12,6 +12,8 @@ GPU_LOCK=/usr/local/sbin/ember-gpu-lock
 PRODUCTION=/usr/local/sbin/ember-cert-production
 PRODUCTION_HEALTH=http://127.0.0.1:8000/health
 PROFILE_SCRIPT="$REPO/scripts/profile_gpu.sh"
+PROFILE_REPORT="$REPO/scripts/profile_report.py"
+COUNTER_CALIBRATION="$REPO/share/benchmark/gfx1151-rocm10-counter-calibration.json"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
 DISPATCH_EVIDENCE="$REPO/scripts/qwen_w4a8_dispatch_evidence.py"
 
@@ -143,7 +145,9 @@ command -v dd >/dev/null || die "dd is required for O_DIRECT integrity reads"
 command -v stat >/dev/null || die "stat is required for numeric GPU device groups"
 [[ -x "$GPU_LOCK" ]] || die "missing fixed-purpose GPU lock wrapper: $GPU_LOCK"
 [[ -x "$PRODUCTION" ]] || die "missing production wrapper: $PRODUCTION"
-[[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" && -f "$DISPATCH_EVIDENCE" ]] ||
+[[ -x "$PROFILE_SCRIPT" && -f "$PROFILE_REPORT" &&
+   -f "$COUNTER_CALIBRATION" && -f "$BENCHMARK" &&
+   -f "$DISPATCH_EVIDENCE" ]] ||
   die "gate dependencies are missing"
 [[ -f "$MODEL" && -f "$MODEL_BUILD_RECORD" && -f "$MTP" ]] ||
   die "model, quant build record, or MTP companion does not exist"
@@ -623,6 +627,10 @@ log "running separate trace/counter passes (never timing evidence)"
 "$PROFILE_SCRIPT" --no-quiesce --image "$PROFILE_IMAGE" --binary "$BINARY" \
   --model "$MODEL" --mtp "$MTP" --mtp-depth "$MTP_DEPTH" --port "$PORT" \
   "${W4A8_PROFILE_ARGS[@]}" --out-dir "$OUT_DIR/profile"
+cp "$COUNTER_CALIBRATION" "$OUT_DIR/profile/counter-calibration.json"
+python3 "$PROFILE_REPORT" "$OUT_DIR/profile" \
+  --counter-calibration "$OUT_DIR/profile/counter-calibration.json" --json \
+  >"$OUT_DIR/profile/report.json"
 
 # Restore production and release the ownership lock before granting approval.
 # A failed restore is a failed gate and therefore cannot leave a publish marker.
@@ -696,6 +704,10 @@ record = {
                    "sha256": sha(os.path.join(out, "qwen-quant-build-record.json"))},
         "profile": {"path": "profile/manifest.json",
                     "sha256": sha(os.path.join(out, "profile/manifest.json"))},
+        "profile_report": {"path": "profile/report.json",
+                    "sha256": sha(os.path.join(out, "profile/report.json"))},
+        "counter_calibration": {"path": "profile/counter-calibration.json",
+                    "sha256": sha(os.path.join(out, "profile/counter-calibration.json"))},
     },
     "methodology": "clean timing and profiler/counter passes are separate",
 }

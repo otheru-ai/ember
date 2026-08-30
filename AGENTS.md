@@ -193,9 +193,11 @@ confident wrong number:
   drives warmup, sleeps past `--gap-secs`, then issues one shaped request;
   the analyzer segments the dispatch stream and takes the last segment. Every
   segment found is printed, so a bad split is visible rather than load-bearing.
-- **`FETCH_SIZE`/`WRITE_SIZE` are reported in kilobytes.** That factor is the
-  difference between "at the roofline" and "3% of it"; override with
-  `--counter-unit` if a ROCm release changes it.
+- **Counter units are release-specific.** The current ROCm 10 gfx1151
+  calibration measures `FETCH_SIZE` as 64-byte transactions and `WRITE_SIZE`
+  as 128-byte transactions; pass the checked-in calibration JSON to the
+  analyzer. Legacy ROCm 7.14 bundles used KiB. Treating either assumption as
+  universal produces a confident wrong roofline result.
 
 Before writing any kernel, check the fragment layout against
 `tools/bench_wmma_decode.hip`, which carries verified gfx1151 facts with ISA

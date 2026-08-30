@@ -1,0 +1,28 @@
+{
+  "_provenance": {
+    "calibration_image": "ghcr.io/otheru-ai/ember@sha256:7b20cbe1e445ca6d6050e50d3b4e763205503622f6c5f090e40368c2b34c16a6",
+    "commit": "4f8efac5cad012efb5917414be9326af5310dcb7",
+    "device": "gfx1151",
+    "github_actions_run": 33288846711,
+    "method": "three known-traffic sizes above MALL, four repetitions, no-memory baseline",
+    "rocm_release": "10.0"
+  },
+  "FETCH_SIZE": {
+    "bytes_per_counter": 65.13705058938868,
+    "candidate_error": 0.017766415459198104,
+    "candidate_unit": "64b",
+    "certified": true,
+    "counter": "FETCH_SIZE",
+    "points": 3,
+    "relative_rmse": 0.0012593546609416483
+  },
+  "WRITE_SIZE": {
+    "bytes_per_counter": 129.4900412132868,
+    "candidate_error": 0.011640946978803024,
+    "candidate_unit": "128b",
+    "certified": true,
+    "counter": "WRITE_SIZE",
+    "points": 3,
+    "relative_rmse": 0.0011903949644201312
+  }
+}

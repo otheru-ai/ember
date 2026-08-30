@@ -24,9 +24,9 @@ Methodology notes that matter for reading the output:
     and dispatch count, so a bad split is obvious instead of load-bearing.
 
   * FETCH_SIZE/WRITE_SIZE were measured in KiB with Ember's ROCm 7.14 setup.
-    ROCm 10 does not document those derived-counter units, so a new bundle's
-    manifest can withhold the roofline verdict until a known-traffic gfx1151
-    calibration is supplied explicitly with --counter-unit.
+    ROCm 10 uses different transaction sizes for the two counters on gfx1151,
+    so a new bundle's manifest withholds the roofline verdict until a
+    known-traffic calibration is supplied with --counter-calibration.
 
 Stdlib only, matching every other script in this repo.
 """
@@ -46,7 +46,8 @@ from collections import defaultdict
 # drawn at the paper number would flatter every result by ~20%.
 DEFAULT_PEAK_GBPS = 212.0
 
-UNIT_SCALE = {"b": 1, "kb": 1024, "mb": 1024 * 1024}
+UNIT_SCALE = {"b": 1, "64b": 64, "128b": 128,
+              "kb": 1024, "mb": 1024 * 1024}
 
 
 def load_manifest(outdir):
@@ -61,6 +62,25 @@ def load_manifest(outdir):
     if not isinstance(value, dict):
         raise SystemExit(f"{path}: profiling manifest must be a JSON object")
     return value
+
+
+def load_counter_calibration(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"{path}: invalid counter calibration: {exc}") from exc
+    scales, units = {}, {}
+    for counter in ("FETCH_SIZE", "WRITE_SIZE"):
+        row = value.get(counter) if isinstance(value, dict) else None
+        if not isinstance(row, dict) or row.get("certified") is not True:
+            raise SystemExit(f"{path}: {counter} is absent or not certified")
+        unit = row.get("candidate_unit")
+        if unit not in UNIT_SCALE:
+            raise SystemExit(f"{path}: {counter} has unsupported unit {unit!r}")
+        scales[counter] = UNIT_SCALE[unit]
+        units[counter] = unit
+    return scales, units
 
 
 def _find(header, *candidates):
@@ -194,7 +214,7 @@ def find_all(outdir, *patterns):
     return []
 
 
-def analyse_phase(outdir, phase, gap_ns, top, unit_scale):
+def analyse_phase(outdir, phase, gap_ns, top, counter_scales):
     trace = find_one(outdir, f"*trace-{phase}*kernel_trace.csv", f"*trace-{phase}*.csv")
     if not trace:
         return {"phase": phase, "error": f"no trace CSV for {phase}"}
@@ -240,8 +260,10 @@ def analyse_phase(outdir, phase, gap_ns, top, unit_scale):
         result["counter_files"] = [os.path.basename(f) for f in pmc_files]
         result["counters_raw"] = counters
         result["pmc_dispatches"] = pmc_dispatches
-        moved = sum(
-            v for k, v in counters.items() if k in ("FETCH_SIZE", "WRITE_SIZE")
+        moved_bytes = sum(
+            v * counter_scales[k]
+            for k, v in counters.items()
+            if k in ("FETCH_SIZE", "WRITE_SIZE")
         )
         present = [k for k in ("FETCH_SIZE", "WRITE_SIZE") if k in counters]
         if len(present) == 1:
@@ -249,8 +271,8 @@ def analyse_phase(outdir, phase, gap_ns, top, unit_scale):
                 f"only {present[0]} was collected; the bandwidth figure counts "
                 "traffic in one direction only and is a LOWER BOUND"
             )
-        if moved and result["busy_ms"] > 0:
-            gb = moved * unit_scale / 1e9
+        if moved_bytes and result["busy_ms"] > 0:
+            gb = moved_bytes / 1e9
             result["bytes_moved_gb"] = gb
             result["achieved_gbps"] = gb / (result["busy_ms"] / 1e3)
     return result
@@ -351,9 +373,15 @@ def main(argv=None):
     ap.add_argument("--top", type=int, default=12, help="hotspots to list (default 12)")
     ap.add_argument("--peak-gbps", type=float, default=DEFAULT_PEAK_GBPS,
                     help=f"measured memory roofline (default {DEFAULT_PEAK_GBPS})")
-    ap.add_argument("--counter-unit", choices=sorted(UNIT_SCALE), default=None,
-                    help=("calibrated unit of FETCH_SIZE/WRITE_SIZE; required to "
-                          "certify a bundle whose manifest marks units uncertified"))
+    counter_source = ap.add_mutually_exclusive_group()
+    counter_source.add_argument(
+        "--counter-unit", choices=sorted(UNIT_SCALE), default=None,
+        help=("shared calibrated unit of FETCH_SIZE/WRITE_SIZE; intended for "
+              "legacy releases where both counters use the same unit"))
+    counter_source.add_argument(
+        "--counter-calibration", default=None,
+        help=("calibration.json from calibrate_counter_units.py; supports a "
+              "different transaction size for each counter"))
     ap.add_argument("--json", action="store_true", help="emit JSON instead of text")
     args = ap.parse_args(argv)
 
@@ -365,23 +393,41 @@ def main(argv=None):
     manifest_unit = unit_metadata.get("assumed", "kb")
     if manifest_unit not in UNIT_SCALE:
         raise SystemExit(f"manifest has unsupported counter unit: {manifest_unit!r}")
-    counter_unit = args.counter_unit or manifest_unit
-    explicit_counter_unit = args.counter_unit is not None
-    unit_certified = bool(
-        unit_metadata.get("release_bandwidth_verdict_certified", True)
-    ) or explicit_counter_unit
-    scale = UNIT_SCALE[counter_unit]
+    if args.counter_calibration:
+        counter_scales, counter_units = load_counter_calibration(
+            args.counter_calibration
+        )
+        counter_unit = "per_counter"
+        counter_unit_source = "calibration"
+        unit_certified = True
+    else:
+        counter_unit = args.counter_unit or manifest_unit
+        explicit_counter_unit = args.counter_unit is not None
+        unit_certified = bool(
+            unit_metadata.get("release_bandwidth_verdict_certified", True)
+        ) or explicit_counter_unit
+        counter_scales = {
+            counter: UNIT_SCALE[counter_unit]
+            for counter in ("FETCH_SIZE", "WRITE_SIZE")
+        }
+        counter_units = {
+            counter: counter_unit for counter in ("FETCH_SIZE", "WRITE_SIZE")
+        }
+        counter_unit_source = "explicit" if explicit_counter_unit else (
+            "manifest" if manifest else "legacy_default"
+        )
     gap_ns = int(args.gap_ms * 1e6)
     report = {
         "outdir": args.outdir,
         "peak_gbps": args.peak_gbps,
         "counter_unit": counter_unit,
-        "counter_unit_source": "explicit" if explicit_counter_unit else (
-            "manifest" if manifest else "legacy_default"
-        ),
+        "counter_units": counter_units,
+        "counter_unit_source": counter_unit_source,
         "counter_unit_certified": unit_certified,
         "phases": {
-            phase: analyse_phase(args.outdir, phase, gap_ns, args.top, scale)
+            phase: analyse_phase(
+                args.outdir, phase, gap_ns, args.top, counter_scales
+            )
             for phase in ("prefill", "decode")
         },
     }
@@ -393,7 +439,7 @@ def main(argv=None):
         report["verdict"] = (
             "INCONCLUSIVE: this bundle marks FETCH_SIZE/WRITE_SIZE units "
             "uncertified for ROCm 10 on gfx1151. Calibrate with known traffic "
-            "and pass the verified unit explicitly via --counter-unit before "
+            "and pass its JSON via --counter-calibration before "
             "publishing a bandwidth or roofline verdict."
         )
 

@@ -32,11 +32,11 @@ For legacy bundles, `profile_report.py` interprets `FETCH_SIZE` and
 AMD's ROCm 10 documentation defines `Counter_Value` as numeric but does not
 state the unit for these two derived counters. Consequently, ROCm 10 bundles
 carry `counter_unit.status: uncertified_rocm10_gfx1151` and
-`release_bandwidth_verdict_certified: false`. Their raw profiles and exploratory
-reports are useful, but the analyzer withholds its roofline verdict until a
-known-traffic gfx1151 microbenchmark confirms the unit and the operator passes
-that calibrated value explicitly with `--counter-unit`. Preserve the raw
-`rocprofv3-counter-info.txt` in that calibration record.
+`release_bandwidth_verdict_certified: false`. Their raw profiles remain useful,
+but the analyzer withholds its roofline verdict until a known-traffic gfx1151
+microbenchmark confirms both counters and the operator passes its JSON with
+`--counter-calibration`. Preserve the raw `rocprofv3-counter-info.txt` in that
+calibration record.
 
 The reproducible calibration workload is `tools/bench_counter_traffic.hip`.
 Run its collector on the exclusively held target:
@@ -49,10 +49,14 @@ scripts/calibrate_counter_units.sh --image ember-rocm:10.0-dev \
 The collector profiles `FETCH_SIZE` against read-only 64-byte cache-line
 streams and `WRITE_SIZE` against write-only streams, with a no-memory baseline,
 three buffer sizes larger than MALL, and one PMC pass per counter. It writes
-raw CSVs, `samples.jsonl`, and a regression result. A unit is accepted only if
-the inferred bytes-per-counter value is within 2% of bytes, KiB, or MiB and the
-fit residual is also below 2%. Do not infer the unit from the model's nominal
-weight size or from a PMC-pass duration; those are different quantities.
+raw CSVs, `samples.jsonl`, and a regression result. Run 33288846711 on gfx1151
+with ROCm 10.0 certified `FETCH_SIZE` as 64-byte transactions (65.137 fitted,
+1.78% error) and `WRITE_SIZE` as 128-byte transactions (129.490 fitted, 1.16%
+error); both regression residuals were below 0.13%. The bounded record used by
+the analyzer is `share/benchmark/gfx1151-rocm10-counter-calibration.json`.
+Do not replace those distinct scales with one shared unit, or infer a unit from
+the model's nominal weight size or a PMC-pass duration; those are different
+quantities.
 
 ROCm Compute Profiler's roofline is a complementary machine-ceiling
 measurement:

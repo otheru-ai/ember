@@ -784,16 +784,20 @@ jobs:
             "$profile_image" /usr/local/bin/ember-dflash | awk '{print $1}')"
           test "$current_engine_sha" = "${retained[2]}"
           script_root="$RUNNER_TEMP/qwen-profile-resume-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          install -d -m 700 "$script_root/scripts"
+          install -d -m 700 "$script_root/scripts" "$script_root/share/benchmark"
           extract_container="$(docker create "$profile_image")"
           cleanup_extract() { docker rm -f "$extract_container" >/dev/null 2>&1 || true; }
           trap cleanup_extract EXIT
           docker cp "$extract_container:/ember/scripts/profile_gpu.sh" "$script_root/scripts/"
           docker cp "$extract_container:/ember/scripts/profile_report.py" "$script_root/scripts/"
+          docker cp \
+            "$extract_container:/ember/share/benchmark/gfx1151-rocm10-counter-calibration.json" \
+            "$script_root/share/benchmark/"
           cleanup_extract
           trap - EXIT
           test -x "$script_root/scripts/profile_gpu.sh"
           test -s "$script_root/scripts/profile_report.py"
+          test -s "$script_root/share/benchmark/gfx1151-rocm10-counter-calibration.json"
           profile_resume_arg=
           if [[ -n "$prior_profile_sha" ]]; then
             profile_output="${retained[3]}/profile-resume-${prior_profile_sha:0:12}-${prior_profile_run_id}-${prior_profile_run_attempt}"
@@ -832,7 +836,10 @@ jobs:
             --image "$PROFILE_IMAGE" --binary /usr/local/bin/ember-dflash \
             --model "$PROFILE_MODEL" --mtp "$PROFILE_MTP" --mtp-depth 3 \
             --port "$PROFILE_PORT" --out-dir "$PROFILE_OUTPUT" "${resume_args[@]}"
-          python3 "$PROFILE_SCRIPT_ROOT/scripts/profile_report.py" "$PROFILE_OUTPUT" --json \
+          python3 "$PROFILE_SCRIPT_ROOT/scripts/profile_report.py" "$PROFILE_OUTPUT" \
+            --counter-calibration \
+            "$PROFILE_SCRIPT_ROOT/share/benchmark/gfx1151-rocm10-counter-calibration.json" \
+            --json \
             >"$PROFILE_OUTPUT/report.json"
           test -s "$PROFILE_OUTPUT/manifest.json"
           test -s "$PROFILE_OUTPUT/report.json"

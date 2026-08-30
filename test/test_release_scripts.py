@@ -362,6 +362,11 @@ class ReleaseScriptTests(unittest.TestCase):
             '            --no-quiesce --image "$CALIBRATION_IMAGE"',
             calibration,
         )
+        self.assertIn(
+            "/ember/share/benchmark/gfx1151-rocm10-counter-calibration.json",
+            certify,
+        )
+        self.assertIn("--counter-calibration", certify)
 
     def test_qwen_control_conversion_is_exact_bounded_and_recoverable(self) -> None:
         container = GITHUB_CONTAINER.read_text()

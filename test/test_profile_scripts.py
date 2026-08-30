@@ -416,6 +416,50 @@ class ReportTests(unittest.TestCase):
             as_bytes = self.analyse(tmp, "--counter-unit", "b")
         self.assertLess(as_bytes["phases"]["decode"]["achieved_gbps"], 1.0)
 
+    def test_per_counter_calibration_applies_distinct_transaction_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_outdir(
+                tmp, decode_kb=0, decode_busy_ms=100.0,
+                decode_pmc_rows=[
+                    ("read_kernel", "FETCH_SIZE", 10_000_000),
+                    ("write_kernel", "WRITE_SIZE", 5_000_000),
+                ],
+            )
+            calibration = pathlib.Path(tmp, "calibration.json")
+            calibration.write_text(json.dumps({
+                "FETCH_SIZE": {"candidate_unit": "64b", "certified": True},
+                "WRITE_SIZE": {"candidate_unit": "128b", "certified": True},
+            }))
+            report = self.analyse(
+                tmp, "--counter-calibration", str(calibration)
+            )
+        self.assertEqual(report["counter_unit"], "per_counter")
+        self.assertEqual(report["counter_unit_source"], "calibration")
+        self.assertEqual(
+            report["counter_units"],
+            {"FETCH_SIZE": "64b", "WRITE_SIZE": "128b"},
+        )
+        self.assertAlmostEqual(
+            report["phases"]["decode"]["achieved_gbps"], 12.8, delta=0.1
+        )
+        self.assertIn("COMPUTE HEADROOM", report["verdict"])
+
+    def test_uncertified_counter_calibration_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.make_outdir(tmp, decode_kb=1)
+            calibration = pathlib.Path(tmp, "calibration.json")
+            calibration.write_text(json.dumps({
+                "FETCH_SIZE": {"candidate_unit": "64b", "certified": True},
+                "WRITE_SIZE": {"candidate_unit": "128b", "certified": False},
+            }))
+            result = subprocess.run(
+                [sys.executable, str(PROFILE_PY), tmp,
+                 "--counter-calibration", str(calibration)],
+                text=True, capture_output=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("WRITE_SIZE is absent or not certified", result.stderr)
+
     def test_rocm10_uncertified_unit_withholds_verdict_until_explicit(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.make_outdir(tmp, decode_kb=21_200_000, decode_busy_ms=100.0)

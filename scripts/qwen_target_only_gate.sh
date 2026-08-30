@@ -13,6 +13,8 @@ GPU_LOCK=/usr/local/sbin/ember-gpu-lock
 PRODUCTION=/usr/local/sbin/ember-cert-production
 PRODUCTION_HEALTH=http://127.0.0.1:8000/health
 PROFILE_SCRIPT="$REPO/scripts/profile_gpu.sh"
+PROFILE_REPORT="$REPO/scripts/profile_report.py"
+COUNTER_CALIBRATION="$REPO/share/benchmark/gfx1151-rocm10-counter-calibration.json"
 BENCHMARK="$REPO/scripts/bench/benchmark.py"
 
 IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
@@ -117,7 +119,9 @@ fi
 
 for command in docker curl python3 dd; do command -v "$command" >/dev/null || die "$command is required"; done
 [[ -x "$GPU_LOCK" && -x "$PRODUCTION" ]] || die "fixed-purpose host wrappers are missing"
-[[ -x "$PROFILE_SCRIPT" && -f "$BENCHMARK" ]] || die "measurement dependencies are missing"
+[[ -x "$PROFILE_SCRIPT" && -f "$PROFILE_REPORT" &&
+   -f "$COUNTER_CALIBRATION" && -f "$BENCHMARK" ]] ||
+  die "measurement dependencies are missing"
 [[ -f "$MODEL" && -f "$MODEL_BUILD_RECORD" && -f "$BAKEOFF_MANIFEST" ]] ||
   die "model, build record, or bakeoff manifest is missing"
 [[ -r /dev/kfd && -d /dev/dri ]] || die "this gate must run on the gfx1151 host"
@@ -553,6 +557,10 @@ done
 log "running profiler passes separately from timing"
 "$PROFILE_SCRIPT" --no-quiesce --image "$PROFILE_IMAGE" --binary "$BINARY" \
   --model "$MODEL" --port "$PORT" --out-dir "$OUT_DIR/profile"
+cp "$COUNTER_CALIBRATION" "$OUT_DIR/profile/counter-calibration.json"
+python3 "$PROFILE_REPORT" "$OUT_DIR/profile" \
+  --counter-calibration "$OUT_DIR/profile/counter-calibration.json" --json \
+  >"$OUT_DIR/profile/report.json"
 
 restore_exclusive || die "failed to restore production or release the GPU lock"
 python3 - "$OUT_DIR" "$IMAGE" "$IMAGE_DIGEST" "$PROFILE_IMAGE" \
@@ -595,6 +603,10 @@ record = {
                               "sha256": digest("candidate-binding.json")},
         "profile": {"path": "profile/manifest.json",
                     "sha256": digest("profile/manifest.json")},
+        "profile_report": {"path": "profile/report.json",
+                    "sha256": digest("profile/report.json")},
+        "counter_calibration": {"path": "profile/counter-calibration.json",
+                    "sha256": digest("profile/counter-calibration.json")},
     },
 }
 with open(os.path.join(out, "complete.json"), "x", encoding="utf-8") as stream:
