@@ -13,7 +13,15 @@ continue.
 
 ---
 
-1. Review waterline. **Now `cda41a6`** [advanced 20260830T220000Z; every commit from `a7c79be` forward is my own and I do not count my own review as independent review — codex has landed nothing since `faa5307`]. Previously `faa5307`. Previously `1532d51`. Advance it: review every commit
+1. Review waterline. **Now `5e7a31d`** [advanced 20260831T005000Z]. Codex's two
+   engine commits in this range are independently verified, not accepted on
+   report: `5258cc6` (bit-4 covers GDN) reviewed as msg 261, and `5e7a31d`
+   (per-layer GDN comparator) reviewed as msg 283 — I re-read the landed diff,
+   confirmed it is the 92 lines I approved plus the two fields I asked for
+   (`first_row = first_diff / kEmbedding`, `first_head = first_diff /
+   (kGdnDim*kGdnDim)`, both -1 when there is no difference), and ran the strict
+   ROCm build and ctest myself: 2/2. Everything else in the range is my own
+   work and does not count as independently reviewed.
    forward, record the reviewed SHA here, and re-verify 90/90 at each advance.
    Reviewed and verified at 90/90 zero warnings:
    - 9 batching/fusion commits (msg 46, no defect found by inspection)
