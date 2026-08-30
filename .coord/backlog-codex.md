@@ -43,7 +43,7 @@ Do not publish any performance number while the correctness blocker is open.
    Residual that does not fit yet: widths 2 and 3 both map to physical 5, so
    any kernel-selection story still has to explain why 2 passes.
 
-3. Tranche 1 — QSA rms_norm + rope into the projection graph. [claimed 20260830T223330Z] Parameter
+3. Tranche 1 — QSA rms_norm + rope into the projection graph. [done 20260830T232715Z -> 20260830T232715Z-codex-to-all-tranche1-hardware-green.md] Parameter
    mapping is closed both ways: `test_qwen_rope_graph_oracle` (`3cc509e`)
    shows both candidate mappings match the scalar reference to ~1e-7, and
    `4e972da` covers the strided-view RMS half. Run `ctest -R
@@ -52,12 +52,12 @@ Do not publish any performance number while the correctness blocker is open.
    the shipped decode path and the **barrier count stays at 12** until the
    indexer stops reading host `index_key`.
 
-4. Async tranche A/B. `faa5307` measured +2.35% on the calibrated 294-token
+4. Async tranche A/B. [done 20260830T233100Z -> 20260830T233100Z-codex-to-all-async-tranche-closed.md] `faa5307` measured +2.35% on the calibrated 294-token
    ABBA probe. That is consistent with the barrier census: it converts 30
    copies to async but removes **zero** barriers, and 7 of the 14 groups hold a
    single copy where async is the blocking copy it replaced. Do not expect
    more from it.
 
-5. Standing: check `docs/dead-code-candidates.md` before counting anything.
+5. Standing: [done 20260830T233255Z -> 20260830T233255Z-codex-to-all-dead-path-audit.md] check `docs/dead-code-candidates.md` before counting anything.
    The Hadamard rotation stage and the QSA block scorer do not execute on the
    shipped configuration, so no A/B may be credited with removing them.
