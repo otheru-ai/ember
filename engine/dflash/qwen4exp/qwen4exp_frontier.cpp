@@ -2162,6 +2162,109 @@ bool qwen4exp_frontier_run_rocmi4_dispatch_controls(
     return true;
 }
 
+bool qwen4exp_frontier_run_projection_numerics_control(
+        const Qwen4ExpWeights & weights, std::string & error) {
+    if (!weights.backend || !weights.dense_cache || !weights.frontier) {
+        error = "Qwen4Exp projection numerics control requires initialized frontiers";
+        return false;
+    }
+    ggml_tensor * weight = nullptr;
+    for (const Qwen4ExpLayer & layer : weights.layers) {
+        if (layer.attn_qkv &&
+            layer.attn_qkv->type == GGML_TYPE_Q4_0_ROCMFP4_FAST) {
+            weight = layer.attn_qkv;
+            break;
+        }
+    }
+    if (!weight || ggml_n_dims(weight) != 2 || weight->ne[0] <= 0 ||
+        weight->ne[0] > std::numeric_limits<int>::max() ||
+        weight->ne[1] <= 1) {
+        error = "Qwen4Exp projection numerics control found no eligible type-101 weight";
+        return false;
+    }
+
+    constexpr int kRows = 16;
+    const int input_count = static_cast<int>(weight->ne[0]);
+    const size_t row_values = static_cast<size_t>(weight->ne[1]);
+    std::vector<float> input(static_cast<size_t>(kRows) *
+                             static_cast<size_t>(input_count));
+    for (int row = 0; row < kRows; ++row) {
+        for (int column = 0; column < input_count; ++column) {
+            const float x = static_cast<float>((row + 1) * (column + 3));
+            input[static_cast<size_t>(row) *
+                      static_cast<size_t>(input_count) +
+                  static_cast<size_t>(column)] =
+                0.25f * std::sin(x * 0.013f) +
+                0.05f * std::cos(x * 0.037f);
+        }
+    }
+
+    std::vector<float> reference;
+    reference.reserve(static_cast<size_t>(kRows) * row_values);
+    for (int row = 0; row < kRows; ++row) {
+        std::vector<float> q1;
+        if (!qwen4exp_frontier_dense_eval(
+                weights.dense_cache, weights.backend, weight,
+                input.data() + static_cast<size_t>(row) *
+                                   static_cast<size_t>(input_count),
+                input_count, 1, q1, error)) {
+            error = "Qwen4Exp projection numerics q1 failed: " + error;
+            return false;
+        }
+        if (q1.size() != row_values) {
+            error = "Qwen4Exp projection numerics q1 returned the wrong shape";
+            return false;
+        }
+        reference.insert(reference.end(), q1.begin(), q1.end());
+    }
+
+    for (const int logical_q : {5, 16}) {
+        std::vector<float> batch;
+        if (!qwen4exp_frontier_dense_eval(
+                weights.dense_cache, weights.backend, weight, input.data(),
+                input_count, logical_q, batch, error)) {
+            error = "Qwen4Exp projection numerics q=" +
+                    std::to_string(logical_q) + " failed: " + error;
+            return false;
+        }
+        const size_t values = static_cast<size_t>(logical_q) * row_values;
+        if (batch.size() != values || reference.size() < values) {
+            error = "Qwen4Exp projection numerics batch returned the wrong shape";
+            return false;
+        }
+        double squared_error = 0.0;
+        double squared_reference = 0.0;
+        double signed_error = 0.0;
+        float max_abs = 0.0f;
+        for (size_t index = 0; index < values; ++index) {
+            const float delta = batch[index] - reference[index];
+            const float absolute = std::fabs(delta);
+            max_abs = std::max(max_abs, absolute);
+            squared_error += static_cast<double>(delta) * delta;
+            squared_reference +=
+                static_cast<double>(reference[index]) * reference[index];
+            signed_error += delta;
+        }
+        const double rms = std::sqrt(squared_error /
+                                     static_cast<double>(values));
+        const double reference_rms = std::sqrt(
+            squared_reference / static_cast<double>(values));
+        const double normalized_rms = reference_rms > 0.0
+            ? rms / reference_rms : 0.0;
+        std::fprintf(stderr,
+                     "[qwen-numerics] event=projection_compare weight=%s "
+                     "type=%s logical_q=%d physical_q=%d values=%zu "
+                     "max_abs=%.9g rms=%.9g reference_rms=%.9g "
+                     "normalized_rms=%.9g mean_error=%.9g\n",
+                     weight->name, ggml_type_name(weight->type), logical_q,
+                     qwen4exp_frontier_dense_cached_width(logical_q), values,
+                     static_cast<double>(max_abs), rms, reference_rms,
+                     normalized_rms,
+                     signed_error / static_cast<double>(values));
+    }
+    return true;
+}
+
 bool qwen4exp_frontier_gdn_q1(
         const Qwen4ExpWeights & weights, int layer, const float * input,
         size_t input_count, const float * conv_state, size_t conv_state_count,

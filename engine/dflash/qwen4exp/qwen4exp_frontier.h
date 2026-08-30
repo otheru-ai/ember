@@ -264,6 +264,11 @@ bool qwen4exp_frontier_moe_q1(const Qwen4ExpWeights & weights, int layer,
 // evidence cannot depend on speculative acceptance or a selected MTP depth.
 bool qwen4exp_frontier_run_rocmi4_dispatch_controls(
     const Qwen4ExpWeights & weights, std::string & error);
+// Opt-in real-weight numerical control for the two production projection
+// families. It compares physical q=1 MMVQ rows against q=5/q=16 MMQ rows on
+// the same deterministic inputs and emits machine-readable error statistics.
+bool qwen4exp_frontier_run_projection_numerics_control(
+    const Qwen4ExpWeights & weights, std::string & error);
 bool qwen4exp_frontier_gdn_q1(
     const Qwen4ExpWeights & weights, int layer, const float * input,
     size_t input_count, const float * conv_state, size_t conv_state_count,

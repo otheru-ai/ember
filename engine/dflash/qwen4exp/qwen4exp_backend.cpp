@@ -40,6 +40,38 @@ int32_t argmax_logits(const std::vector<float> & logits) {
         logits.begin(), std::max_element(logits.begin(), logits.end())));
 }
 
+bool numerics_evidence_enabled() {
+    const char * value = std::getenv("DFLASH_QWEN_NUMERICS_EVIDENCE");
+    return value && std::strcmp(value, "1") == 0;
+}
+
+void log_prefill_top2(const std::vector<float> & logits,
+                      const GenerateRequest & request,
+                      const GenerateResult & result) {
+    if (!numerics_evidence_enabled() || logits.size() < 2) return;
+    size_t first = 0;
+    size_t second = 1;
+    if (logits[second] > logits[first]) std::swap(first, second);
+    for (size_t index = 2; index < logits.size(); ++index) {
+        if (logits[index] > logits[first]) {
+            second = first;
+            first = index;
+        } else if (logits[index] > logits[second]) {
+            second = index;
+        }
+    }
+    std::fprintf(stderr,
+                 "[qwen-numerics] event=prefill_top2 mode=%s "
+                 "force_exact=%s prompt_tokens=%zu top1_id=%zu "
+                 "top1=%.9g top2_id=%zu top2=%.9g margin=%.9g\n",
+                 result.prefill_mode.c_str(),
+                 request.force_exact_prefill ? "true" : "false",
+                 request.prompt.size(), first,
+                 static_cast<double>(logits[first]), second,
+                 static_cast<double>(logits[second]),
+                 static_cast<double>(logits[first] - logits[second]));
+}
+
 bool parse_mtp_depth(const char * text, int & depth) {
     if (!text || !text[0]) { depth = 3; return true; }
     char * end = nullptr;
@@ -208,6 +240,11 @@ bool Qwen4ExpBackend::init() {
     if (dispatch_evidence && std::strcmp(dispatch_evidence, "1") == 0 &&
         !qwen4exp_frontier_run_rocmi4_dispatch_controls(weights_, error)) {
         set_last_error("Qwen4Exp ROCMI4 dispatch controls failed: " + error);
+        return false;
+    }
+    if (numerics_evidence_enabled() &&
+        !qwen4exp_frontier_run_projection_numerics_control(weights_, error)) {
+        set_last_error("Qwen4Exp projection numerics control failed: " + error);
         return false;
     }
     std::fprintf(stderr,
@@ -550,6 +587,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         ++i;
     }
     result.prefill_s = seconds_since(prefill_start);
+    log_prefill_top2(logits_, request, result);
     if (logits_.empty() && request.n_gen > 0) {
         result.fail(GenerateErrorCode::DecodeSeedMissing,
                     "Qwen4Exp restore has no seed logits");
