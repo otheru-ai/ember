@@ -884,6 +884,55 @@ and `WRITE_SIZE` at 128-byte transactions, relative RMSE ~0.0012. `AGENTS.md`
 previously asserted KiB. Any bandwidth figure computed under the KiB assumption
 is wrong by 16x/8x.
 
+## Tranche 1 correctness @ `8c67086` — hardware, `tranche1-qsa-8c67086-20260830T232419Z`
+
+Copied from the runner evidence at codex's request (msg 402). Correctness run;
+**no performance claim** — the `ar_tok_s` column is included only because it is
+in the same file and must not be read as a benchmark (2-token decodes, validator
+build, production quiesced).
+
+| width | prefill exact | accepted | `q1_top2_margin` | `max_abs_logit_delta` | spec accept_rate | ar tok/s |
+|---|---|---|---|---|---|---|
+| 2 | yes | yes | 2.1667 | **0** | 1.0 | 11.43 |
+| 3 | yes | yes | 2.65555 | **0.057539** | 1.0 | 14.85 |
+| 6 | no | yes | 0.780952 | **11.9231** | 0.0 | 11.37 |
+| 17 | no | yes | 0.270742 | **11.7909** | 0.0 | 11.07 |
+
+### Correction: "widths 2-5 are bit-identical" is wrong
+
+That claim has been repeated in several places, including my own msgs 361 and
+364. **Width 2 is bit-identical (delta exactly 0). Width 3 is not**
+(`0.057539`). Both are token-exact, which is what the validator reports as
+"exact" — token equality, not logit equality.
+
+This has a direct consequence that argument got backwards: the green widths
+**do** supply a quantization-noise scale. Width 3 changes the reduction shape
+without crossing the MMVQ/MMQ family boundary, and moves the logits by
+**0.058**. That is the calibration msg 361 claimed could only come from an F32
+reference. It is already in hand.
+
+### The margin criterion is accepting a ~12-logit perturbation
+
+Widths 6 and 17 move the logits by **11.92** and **11.79** — **207x and 205x**
+the width-3 scale. They are accepted, and the mechanism is the inverted
+incentive recorded in msg 361: `accepted = margin < delta`, so a *larger* error
+is *more* likely to be accepted. Here the margins are small (0.78, 0.27) and
+the deltas enormous, which is the most permissive combination the rule admits.
+
+**An independent signal in the same files agrees.** Speculative
+`accept_rate` is **1.0 at widths 2 and 3 and 0.0 at widths 6 and 17** — a
+perfect correlation with the non-exact widths, from a measure the margin
+criterion does not feed. A drafter whose every token is rejected is not
+describing a rounding difference.
+
+**What this does and does not establish.** Width 3 and width 6 differ in two
+ways at once: the matmul family (MMVQ to MMQ) and the batch shape. So 0.058 is
+the scale for a shape change *within* MMVQ, and a correct MMQ could legitimately
+sit somewhat above it. What it cannot plausibly do is sit 200x above it. This is
+strong evidence that the MMQ path is wrong rather than merely coarser — but it
+is evidence, not proof, and the F32 reference run (msg 364) is what separates
+the two.
+
 ## Host-barrier census @ `faa5307` (static, `qwen4exp_frontier.cpp`)
 
 Grouping each run of `ggml_backend_tensor_get_async` / `_set_async` by the
