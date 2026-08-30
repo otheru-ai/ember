@@ -1640,6 +1640,72 @@ int batch_q1_numerics_mask() {
     return mask;
 }
 
+bool batch_gdn_compare_enabled() {
+    static const bool enabled = []() {
+        const char * value = std::getenv("DFLASH_QWEN_GDN_BATCH_COMPARE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+void report_gdn_batch_compare(
+        int layer_index, const char * component,
+        const std::vector<float> & reference,
+        const std::vector<float> & actual) {
+    if (reference.size() != actual.size()) {
+        std::fprintf(
+            stderr,
+            "[qwen-numerics] event=gdn_batch_compare layer=%d "
+            "component=%s shape_match=false reference_values=%zu "
+            "actual_values=%zu\n",
+            layer_index, component, reference.size(), actual.size());
+        return;
+    }
+    size_t first_diff = reference.size();
+    float max_abs = 0.0f;
+    double squared_error = 0.0;
+    double squared_reference = 0.0;
+    for (size_t index = 0; index < reference.size(); ++index) {
+        const float delta = actual[index] - reference[index];
+        if (delta != 0.0f && first_diff == reference.size())
+            first_diff = index;
+        max_abs = std::max(max_abs, std::fabs(delta));
+        squared_error += static_cast<double>(delta) * delta;
+        squared_reference +=
+            static_cast<double>(reference[index]) * reference[index];
+    }
+    const double rms = reference.empty()
+        ? 0.0
+        : std::sqrt(squared_error / static_cast<double>(reference.size()));
+    const double reference_rms = reference.empty()
+        ? 0.0
+        : std::sqrt(
+              squared_reference / static_cast<double>(reference.size()));
+    const long long first_row =
+        first_diff != reference.size() &&
+            std::strcmp(component, "output") == 0
+        ? static_cast<long long>(
+              first_diff / static_cast<size_t>(kEmbedding))
+        : -1LL;
+    const long long first_head =
+        first_diff != reference.size() &&
+            std::strcmp(component, "recurrent_state") == 0
+        ? static_cast<long long>(
+              first_diff / static_cast<size_t>(kGdnDim * kGdnDim))
+        : -1LL;
+    std::fprintf(
+        stderr,
+        "[qwen-numerics] event=gdn_batch_compare layer=%d component=%s "
+        "shape_match=true exact=%s values=%zu first_diff=%zu "
+        "first_row=%lld first_head=%lld "
+        "max_abs=%.9g rms=%.9g normalized_rms=%.9g\n",
+        layer_index, component,
+        first_diff == reference.size() ? "true" : "false",
+        reference.size(), first_diff, first_row, first_head,
+        static_cast<double>(max_abs), rms,
+        reference_rms > 0.0 ? rms / reference_rms : 0.0);
+}
+
 bool qwen4exp_batch_layer_q1(
         const Qwen4ExpWeights & weights, Qwen4ExpState & state,
         const std::vector<int32_t> & tokens,
@@ -1801,11 +1867,51 @@ bool qwen4exp_batch_layer(
     } else {
         // GDN is causal internally and executes the exact q2-q16 recurrent
         // sequence in one persistent graph/state boundary.
+        const bool compare_gdn = batch_gdn_compare_enabled();
+        Qwen4ExpLayerState reference_state;
+        if (compare_gdn)
+            reference_state =
+                state.layers[static_cast<size_t>(layer_index)];
         if (!run_gdn_batch(
                 weights, state.layers[static_cast<size_t>(layer_index)],
                 layer, layer_index, attention_inputs,
                 static_cast<int>(rows), attention_outputs, error))
             return false;
+        if (compare_gdn) {
+            std::vector<float> reference_outputs(
+                rows * static_cast<size_t>(kEmbedding));
+            for (size_t row = 0; row < rows; ++row) {
+                const auto begin = attention_inputs.begin() +
+                    static_cast<std::ptrdiff_t>(
+                        row * static_cast<size_t>(kEmbedding));
+                const std::vector<float> row_input(
+                    begin, begin + static_cast<std::ptrdiff_t>(kEmbedding));
+                std::vector<float> block;
+                if (!run_gdn(weights, reference_state, layer, layer_index,
+                             row_input, block, error)) return false;
+                if (block.size() != static_cast<size_t>(kEmbedding)) {
+                    error = "Qwen4Exp diagnostic q1 GDN returned the wrong shape";
+                    return false;
+                }
+                std::copy(
+                    block.begin(), block.end(),
+                    reference_outputs.begin() + static_cast<std::ptrdiff_t>(
+                        row * static_cast<size_t>(kEmbedding)));
+            }
+            report_gdn_batch_compare(
+                layer_index, "output", reference_outputs,
+                attention_outputs);
+            const Qwen4ExpLayerState & actual_state =
+                state.layers[static_cast<size_t>(layer_index)];
+            if (reference_state.conv && actual_state.conv)
+                report_gdn_batch_compare(
+                    layer_index, "conv_state", *reference_state.conv,
+                    *actual_state.conv);
+            if (reference_state.recurrent && actual_state.recurrent)
+                report_gdn_batch_compare(
+                    layer_index, "recurrent_state",
+                    *reference_state.recurrent, *actual_state.recurrent);
+        }
     }
     if (attention_outputs.size() !=
         rows * static_cast<size_t>(kEmbedding)) {
