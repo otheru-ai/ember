@@ -1178,10 +1178,32 @@ class BakeoffTest(unittest.TestCase):
                                    "declared_decode_tokens_per_second": round(value, 2),
                                    "decode_tps_rounding_consistent": True,
                                    "spec_ran": spec_ran,
-                                   "accept_rate": 0.5 if spec_ran else None})
+                                   "accept_rate": 0.5 if spec_ran else None,
+                                   "spec_cycles": 64 if spec_ran else None,
+                                   "spec_provider_age_ms": 0.0 if spec_ran else None,
+                                   "spec_provider_block_ms": 0.0 if spec_ran else None,
+                                   "spec_head_ms": 96.0 if spec_ran else None,
+                                   "spec_verify_ms": 3200.0 if spec_ran else None})
+                groups = {}
+                if spec_ran:
+                    groups["decode-256"] = {"speculation": speculation}
                 values.append({"kind": "summary", "resources": resources,
-                               "hard_gate": hard_gate, "memory_gate": memory_gate})
+                               "hard_gate": hard_gate, "memory_gate": memory_gate,
+                               "groups": groups})
                 return values
+
+            speculation = {
+                "samples": 3, "timing_complete": True, "cycles": 192,
+                "accept_rate_mean": 0.5,
+                "spec_provider_age_ms_total": 0.0,
+                "spec_provider_age_ms_per_cycle": 0.0,
+                "spec_provider_block_ms_total": 0.0,
+                "spec_provider_block_ms_per_cycle": 0.0,
+                "spec_head_ms_total": 288.0,
+                "spec_head_ms_per_cycle": 1.5,
+                "spec_verify_ms_total": 9600.0,
+                "spec_verify_ms_per_cycle": 50.0,
+            }
 
             target_timing = put_jsonl("target-timing.jsonl", timing_rows(False))
             target_summary = put("target-summary.json", {
@@ -1201,7 +1223,8 @@ class BakeoffTest(unittest.TestCase):
             })
             memory = put("memory.json", {"resources": resources,
                                           "performance": hard_gate,
-                                          "hard_fit": memory_gate})
+                                          "hard_fit": memory_gate,
+                                          "speculation": speculation})
             hardware = put("hardware.json", {
                 "schema": "ember.qwen3.8.real-weight-gate.v2", "publish_approved": False,
                 "certification_scope": "measurement_only_not_certified",
@@ -1209,6 +1232,7 @@ class BakeoffTest(unittest.TestCase):
                 "mtp": {"path": str(mtp_path), "sha256": "7" * 64,
                         "depth": row["mtp_depth"]},
                 "resources": resources,
+                "speculation": speculation,
                 "hard_gates": {"performance": hard_gate, "memory": memory_gate},
                 "evidence": {"quant_build_record": {
                     "path": "build.json", "sha256": row["build_record_sha256"]},
@@ -1260,6 +1284,20 @@ class BakeoffTest(unittest.TestCase):
             row["evidence_manifest"] = {**manifest_desc, "schema": manifest["schema"]}
             actual = qb.validate_measurement_evidence(row)
             self.assertEqual(actual["manifest_sha256"], manifest_desc["sha256"])
+            timing_path = Path(hardware_timing["path"])
+            timing_raw = timing_path.read_bytes()
+            timing_values = [json.loads(line) for line in
+                             timing_raw.decode().splitlines()]
+            decode_row = next(item for item in timing_values
+                              if item.get("group") == "decode-256")
+            del decode_row["spec_verify_ms"]
+            timing_path.write_text("".join(
+                json.dumps(item, sort_keys=True) + "\n"
+                for item in timing_values), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    qb.BakeoffError, "complete speculative timing"):
+                qb.timing_facts(timing_path, True)
+            timing_path.write_bytes(timing_raw)
             row["mtp_depth"] = 4
             with self.assertRaisesRegex(qb.BakeoffError, "provenance differs|different MTP"):
                 qb.validate_measurement_evidence(row)

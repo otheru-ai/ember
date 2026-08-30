@@ -577,6 +577,35 @@ def timing_facts(path: Path, expected_spec: bool) -> dict[str, Any]:
             isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not 0.0 < float(rate) < 1.0 for rate in accept_rates):
         raise BakeoffError("every matching-MTP sample must prove 0 < accept_rate < 1")
+    speculation = None
+    if expected_spec:
+        timing_keys = ("spec_provider_age_ms", "spec_provider_block_ms",
+                       "spec_head_ms", "spec_verify_ms")
+        if any(not isinstance(item.get("spec_cycles"), int)
+               or isinstance(item.get("spec_cycles"), bool)
+               or item["spec_cycles"] <= 0
+               or any(isinstance(item.get(key), bool)
+                      or not isinstance(item.get(key), (int, float))
+                      or not math.isfinite(float(item[key]))
+                      or float(item[key]) < 0.0 for key in timing_keys)
+               for item in decode):
+            raise BakeoffError(
+                "matching-MTP samples lack complete speculative timing evidence")
+        cycles = sum(item["spec_cycles"] for item in decode)
+        speculation = {
+            "samples": len(decode), "timing_complete": True,
+            "cycles": cycles,
+            "accept_rate_mean": statistics.fmean(
+                float(rate) for rate in accept_rates),
+        }
+        for key in timing_keys:
+            total = sum(float(item[key]) for item in decode)
+            speculation[f"{key}_total"] = total
+            speculation[f"{key}_per_cycle"] = total / cycles
+        if (((summaries[0].get("groups") or {}).get("decode-256") or {}).get(
+                "speculation") != speculation):
+            raise BakeoffError(
+                "matching-MTP timing summary differs from its request rows")
     prefill_rates = []
     for item in prefill:
         rate, consistent = BENCHMARK_MODULE.derived_tps(
@@ -608,6 +637,7 @@ def timing_facts(path: Path, expected_spec: bool) -> dict[str, Any]:
         "completion_tokens": completed,
         "mtp_spec_ran": spec_ran,
         "mtp_accept_rates": accept_rates,
+        "mtp_speculation": speculation,
         "resources": resources,
         "hard_gate": summaries[0].get("hard_gate"),
         "memory_gate": summaries[0].get("memory_gate"),
@@ -704,7 +734,9 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
     if (memory.get("resources") != facts["resources"]
             or memory.get("performance") != facts["hard_gate"]
             or memory.get("hard_fit") != facts["memory_gate"]
+            or memory.get("speculation") != facts["mtp_speculation"]
             or hardware.get("resources") != facts["resources"]
+            or hardware.get("speculation") != facts["mtp_speculation"]
             or (hardware.get("hard_gates") or {}).get("performance") != facts["hard_gate"]
             or (hardware.get("hard_gates") or {}).get("memory") != facts["memory_gate"]):
         raise BakeoffError("hardware/memory summaries differ from pinned timing evidence")

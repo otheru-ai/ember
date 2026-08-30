@@ -583,17 +583,46 @@ with open(sys.argv[3], "x", encoding="utf-8") as stream:
 PY
 python3 - "$OUT_DIR/timing.jsonl" "$OUT_DIR/memory-evidence.json" \
   "$MEASUREMENT_ONLY" <<'PY'
-import json, sys
+import json, math, statistics, sys
 measurement_only = sys.argv[3] == "1"
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 decode = [row for row in rows if row.get("kind") == "request" and
           row.get("group") == "decode-256" and row.get("ok")]
 if len(decode) != 3 or not all(row.get("spec_ran") is True for row in decode):
     raise SystemExit("hard-gate decode samples did not all run native MTP")
+timing_keys = ("spec_provider_age_ms", "spec_provider_block_ms",
+               "spec_head_ms", "spec_verify_ms")
+if any(not isinstance(row.get("spec_cycles"), int)
+       or isinstance(row.get("spec_cycles"), bool)
+       or row["spec_cycles"] <= 0
+       or any(not isinstance(row.get(key), (int, float))
+              or isinstance(row.get(key), bool)
+              or not math.isfinite(float(row[key])) or float(row[key]) < 0.0
+              for key in timing_keys)
+       or isinstance(row.get("accept_rate"), bool)
+       or not isinstance(row.get("accept_rate"), (int, float))
+       or not 0.0 < float(row["accept_rate"]) < 1.0
+       for row in decode):
+    raise SystemExit("hard-gate decode samples lack complete native-MTP timing evidence")
 summaries = [row for row in rows if row.get("kind") == "summary"]
 if len(summaries) != 1 or not isinstance(summaries[0].get("hard_gate"), dict):
     raise SystemExit("machine-readable hard gate is absent")
 summary = summaries[0]
+cycles = sum(row["spec_cycles"] for row in decode)
+speculation = {
+    "samples": len(decode),
+    "timing_complete": True,
+    "cycles": cycles,
+    "accept_rate_mean": statistics.fmean(
+        float(row["accept_rate"]) for row in decode),
+}
+for key in timing_keys:
+    total = sum(float(row[key]) for row in decode)
+    speculation[f"{key}_total"] = total
+    speculation[f"{key}_per_cycle"] = total / cycles
+if ((summary.get("groups") or {}).get("decode-256") or {}).get(
+        "speculation") != speculation:
+    raise SystemExit("native-MTP summary differs from its request timing rows")
 memory = summary.get("memory_gate") or {}
 resources = summary.get("resources") or {}
 metadata = [row for row in rows if row.get("kind") == "metadata"]
@@ -609,7 +638,8 @@ if (resources.get("peak_memory_measurement_method") !=
     raise SystemExit("timing run lacks runner_rss_gtt_sampler_v1 evidence")
 with open(sys.argv[2], "x", encoding="utf-8") as stream:
     json.dump({"resources": resources, "hard_fit": memory,
-               "performance": summary["hard_gate"]}, stream,
+               "performance": summary["hard_gate"],
+               "speculation": speculation}, stream,
               indent=2, sort_keys=True)
     stream.write("\n")
 PY
@@ -676,6 +706,7 @@ record = {
                    "performance": memory["performance"],
                    "memory": memory["hard_fit"]},
     "resources": memory["resources"],
+    "speculation": memory["speculation"],
     "kernel_runtime": kernel_runtime,
     "kernel_build": kernel_build,
     "timing_kernel_mode": timing_kernel_mode,
