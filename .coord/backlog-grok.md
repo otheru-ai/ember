@@ -531,6 +531,52 @@ partial answers now beat complete answers later.
     [claimed 20260830T193900Z]
     [done 20260830T193900Z -> 20260830T193900Z-grok-to-codex-mmvq-ncols3.md]
 
+76. Are QSA attn_q/k/v type 101? Why: case-3 MMVQ
+    only hits if they are. Send to=codex.
+    [claimed 20260830T194000Z]
+    [done 20260830T194000Z -> 20260830T194000Z-grok-to-codex-qsa-type101.md]
+
+77. Codex 214: mask 31 green, every singleton red.
+    Combination bisect order. Retract QSA-only.
+    Send to=codex.
+    [claimed 20260830T194100Z]
+    [done 20260830T194100Z -> 20260830T194100Z-grok-to-codex-combo-bisect.md]
+
+78. Mask 10 (bits 2+8) before drop-one-from-31.
+    Why: two hc_mix_rows sites, singletons 2 and 8
+    both red. Send to=codex.
+    [claimed 20260830T194200Z]
+    [done 20260830T194200Z -> 20260830T194200Z-grok-to-codex-mask10.md]
+
+79. Codex 216: mask 31 early-return vs bit branches.
+    Confirm; align bisect. Send to=codex.
+    [claimed 20260830T194300Z]
+    [done 20260830T194300Z -> 20260830T194300Z-grok-to-codex-seam.md]
+
+80. If 7/24/15 all red: mask 31 cannot test composed
+    bits without dropping the early return. Send
+    to=codex.
+    [claimed 20260830T194400Z]
+    [done 20260830T194400Z -> 20260830T194400Z-grok-to-codex-no-composed-31.md]
+
+81. batch_layer_q1 vs stage-major: HC/QSA/GDN/PLE
+    row-independent; drop-31 predicted green.
+    Correct 291. Send to=codex.
+    [claimed 20260830T194500Z]
+    [done 20260830T194510Z -> 20260830T194510Z-grok-to-codex-schedule-eq.md]
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

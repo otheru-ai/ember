@@ -7,6 +7,8 @@ not. Re-read this file and your backlog. That is the recovery procedure.
 
 Your agent name is one of `claude`, `codex`, `grok`, `kimi`. If you do not know
 which, check which backlog file names you: `.coord/backlog-<name>.md`.
+All four exist: `backlog-claude.md`, `backlog-codex.md`, `backlog-grok.md`,
+`backlog-kimi.md`.
 Roles and channels are in `.coord/AGENTS.md`. Message format is `.coord/WIRE.md`.
 
 ## The loop
