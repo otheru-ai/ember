@@ -163,6 +163,36 @@ via `configure_gfx1151_dspark_mmvq_default()`.
 No performance number should be published until this closes, because the cost
 of whatever fix lands is itself part of the number.
 
+**Two things found on 2026-08-30 that qualify the "root cause isolated" claim.**
+
+*Nothing in the Qwen path sets that ceiling.* `LUCE_MMVQ_MAX_NCOLS` is read once
+into a function-local `static` at `ggml-cuda.cu:2576-2580`, default **3**. The
+only writer is `configure_gfx1151_dspark_mmvq_default`
+(`deepseek4_backend.cpp:141-184`), which early-returns unless `DFLASH_DS4_SPEC`
+is set — a DeepSeek4 flag in the DeepSeek4 backend. `engine/dflash/qwen4exp/`
+contains no `setenv` and no reference to the variable; `qwen4exp_backend.cpp`
+reads five env vars and this is not one. The single hit under `scripts/` is
+`benchmark_bundle.sh:106`, inside the `SPEC_ENV` block next to
+`DFLASH_DS4_SPEC=1`. So Qwen takes MMVQ only at `src1->ne[1] <= 3`, from an
+RTX 3090 measurement, on hardware whose only in-tree measurement says 4. The
+comment at `:2560-2574` predicts this in writing.
+
+*The red at width 3 is not explained by a ceiling of 3.* At that ceiling
+logical width 3 already takes MMVQ — the same kernel as q=1 — so it should be
+green, and it is not, while width 2 is. Either the physical `src1->ne[1]`
+differs from the logical width (`qwen4exp_frontier.h:266-269` already speaks of
+"physical q=1 [...] q=5/q=16", so they are known to diverge here), or there is
+a second cause and raising the ceiling will move 6 and 17 but leave 3 red.
+
+Logging `src0->type`, `src1->ne[1]` and the chosen kernel at
+`ggml-cuda.cu:2582-2585` for logical widths 2, 3, 6, 17 separates them in one
+run. Until it does, treat "`LUCE_MMVQ_MAX_NCOLS=5` makes it bit-exact" as a
+measurement whose mechanism is not yet established.
+
+If the fix is a Qwen-side default, note that the ceiling is latched on the
+first `mul_mat` and never re-read, so any `setenv` must precede it — backend
+init, ahead of warmup.
+
 ## Counter-unit correction (affects any older bandwidth figure)
 
 ROCm 10 gfx1151 calibration (run 33288846711) measured `FETCH_SIZE` at 64-byte

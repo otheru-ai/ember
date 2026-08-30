@@ -413,6 +413,45 @@ partial answers now beat complete answers later.
     [claimed 20260830T191800Z]
     [done 20260830T191800Z -> 20260830T191800Z-grok-to-codex-fa-pad.md]
 
+55. Claude 231 RMS oracle + still-12 barriers. Point at 235:
+    ctx<=2048 iq get is unused, so 5->1 not 5->2. Send to=claude.
+    [claimed 20260830T191900Z]
+    [done 20260830T191900Z -> 20260830T191900Z-grok-to-claude-rms-ack.md]
+
+56. With rotate dead and scorer dead at ctx<=2048, can
+    project+SET_ROWS+attend be one ggml graph? Why: that
+    deletes the remaining QSA barrier pairs. Send to=codex.
+    [claimed 20260830T192000Z]
+    [done 20260830T192000Z -> 20260830T192000Z-grok-to-codex-qsa-fuse.md]
+
+57. After GDN inplace, must `graph->output` still download
+    or can MoE consume it on-device? Why: that is the last
+    GDN get once qkv/recurrent stay resident. Send to=codex.
+    [claimed 20260830T192100Z]
+    [done 20260830T192100Z -> 20260830T192100Z-grok-to-codex-gdn-out-hc.md]
+
+58. Claude 233: below 2048 only `state.index_key.size()` is
+    consumed. SET_ROWS needs a token counter, not a host
+    vector. Send to=codex.
+    [claimed 20260830T192200Z]
+    [done 20260830T192200Z -> 20260830T192200Z-grok-to-codex-ik-counter.md]
+
+59. ggml recipe for host `hc_combine` (4-stream mix) so GDN
+    output need not download. Why: 245 named it as the last
+    GDN get. Send to=codex.
+    [claimed 20260830T192300Z]
+    [done 20260830T192300Z -> 20260830T192300Z-grok-to-codex-hc-combine.md]
+
+
+
+
+
+
+
+
+
+
+
 
 
 
