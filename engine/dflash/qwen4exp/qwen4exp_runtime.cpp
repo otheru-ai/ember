@@ -1277,17 +1277,17 @@ bool prepare_mtp_hc(const Qwen4ExpWeights & target,
     // from the stream-local normalization used by ordinary HC mixers.
     std::vector<float> normalized_hc(target_hc, target_hc + kHcDim);
     rms_norm(normalized_hc.data(), kHcDim, hc_norm.data());
+    std::vector<float> projected_hidden;
+    if (!matmul_rows(mtp.dense_cache, target.backend, mtp.fc_hc,
+                     normalized_hc.data(), kEmbedding, kHc,
+                     projected_hidden, error) ||
+        projected_hidden.size() != static_cast<size_t>(kHcDim)) return false;
     hc.resize(kHcDim);
     for (int stream = 0; stream < kHc; ++stream) {
-        std::vector<float> projected_hidden;
-        if (!matvec(mtp.dense_cache, target.backend, mtp.fc_hc,
-                    normalized_hc.data() + stream * kEmbedding, kEmbedding,
-                    projected_hidden, error) ||
-            projected_hidden.size() != static_cast<size_t>(kEmbedding))
-            return false;
         for (int channel = 0; channel < kEmbedding; ++channel) {
             hc[static_cast<size_t>(stream * kEmbedding + channel)] =
-                projected_hidden[static_cast<size_t>(channel)] +
+                projected_hidden[static_cast<size_t>(
+                    stream * kEmbedding + channel)] +
                 projected_embedding[static_cast<size_t>(channel)];
         }
     }
