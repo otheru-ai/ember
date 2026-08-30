@@ -45,9 +45,10 @@ bool numerics_evidence_enabled() {
     return value && std::strcmp(value, "1") == 0;
 }
 
-void log_prefill_top2(const std::vector<float> & logits,
-                      const GenerateRequest & request,
-                      const GenerateResult & result) {
+void log_numerics_top2(const std::vector<float> & logits,
+                       const GenerateRequest & request,
+                       const GenerateResult & result,
+                       const char * phase, int emitted) {
     if (!numerics_evidence_enabled() || logits.size() < 2) return;
     size_t first = 0;
     size_t second = 1;
@@ -61,10 +62,10 @@ void log_prefill_top2(const std::vector<float> & logits,
         }
     }
     std::fprintf(stderr,
-                 "[qwen-numerics] event=prefill_top2 mode=%s "
+                 "[qwen-numerics] event=top2 phase=%s emitted=%d mode=%s "
                  "force_exact=%s prompt_tokens=%zu top1_id=%zu "
                  "top1=%.9g top2_id=%zu top2=%.9g margin=%.9g\n",
-                 result.prefill_mode.c_str(),
+                 phase, emitted, result.prefill_mode.c_str(),
                  request.force_exact_prefill ? "true" : "false",
                  request.prompt.size(), first,
                  static_cast<double>(logits[first]), second,
@@ -587,7 +588,7 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
         ++i;
     }
     result.prefill_s = seconds_since(prefill_start);
-    log_prefill_top2(logits_, request, result);
+    log_numerics_top2(logits_, request, result, "prefill_seed", 0);
     if (logits_.empty() && request.n_gen > 0) {
         result.fail(GenerateErrorCode::DecodeSeedMissing,
                     "Qwen4Exp restore has no seed logits");
@@ -640,6 +641,8 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 result.decode_s = seconds_since(decode_start);
                 return result;
             }
+            log_numerics_top2(
+                logits_, request, result, "ar_frontier", emitted);
             continue;
         }
         if (mtp_target_hc_.size() != 10240) {
