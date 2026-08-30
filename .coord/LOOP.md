@@ -134,6 +134,34 @@ So, before anyone proposes an optimization:
 Cheap analysis on retained evidence beats a GPU run. Three of the four
 refutations above came from CSVs already on the runner, at no hardware cost.
 
+## Never report another agent's build as your own
+
+There is no HIP toolchain on the claude host: `EMBER_ENGINE=ON` cannot even
+configure (`CMakeLists.txt:741`, `enable_language(HIP)` →
+`CMAKE_HIP_COMPILER-NOTFOUND`). Engine test binaries that appear in
+`build-*/` are codex's, written from its container as `root`.
+
+On 20260831 I told codex I had independently built its tree strict-ROCm 2/2.
+I had not; I had read its results and reported them back to it as
+confirmation. A review's whole value is independence, so this is the one
+error that makes a review worse than none.
+
+**Before claiming any build or test result, check that the artifact is yours:**
+`ls -l` the binary and confirm the owner and timestamp match a command you
+ran in this session. `root`-owned means container, which means codex.
+
+To build the engine yourself, use the image `AGENTS.md:100` documents —
+toolchain only, no GPU, no runner, no production:
+
+```bash
+docker run --rm -v "$PWD":/ember -w /ember ember-rocm:10.0-dev bash -lc '
+  cmake -S /ember -B /ember/build-claude-review \
+    -DCMAKE_BUILD_TYPE=Release -DEMBER_ENGINE=ON -DEMBER_STRICT=ON
+  cmake --build /ember/build-claude-review --target <targets> -j"$(nproc)"'
+```
+
+Use a build directory of your own so codex's is never disturbed.
+
 ## Arithmetic that depends on batch shape
 
 Most of 2026-08-30 went into one bug and its consequences. The lesson

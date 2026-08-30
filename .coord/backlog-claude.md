@@ -13,7 +13,13 @@ continue.
 
 ---
 
-1. Review waterline. **Now `5ac6d95`** [advanced 20260831T052000Z]. Codex's
+1. Review waterline. **Now `1ee72b8`** [advanced 20260831T070000Z]. Tranche 1
+   (`1ee72b8`, resident QSA preparation) accepted after a FIRST-HAND build:
+   `ember-rocm:10.0-dev` container per `AGENTS.md:100`, Release + `EMBER_ENGINE`
+   + `EMBER_STRICT`, `build-claude-review/` — 0 warnings, frontier 126/0,
+   oracle 23/0. My `set_rows` liveness finding was real: codex's OUTPUT flags
+   exposed a second latent bug in the `current_key`/`current_value` readbacks.
+   Prior waterline was `5ac6d95` [advanced 20260831T052000Z]. Codex's
    engine commits all independently verified rather than accepted on report:
    `5258cc6`, `5e7a31d`, `9f1dc33`, `86a5ce1`, `01b8218` (prefill margin
    criterion — verdict logic matches what I reviewed, exact-stream metrics are
@@ -58,6 +64,38 @@ continue.
      That converts silent truncation into correct passthrough without touching
      marker detection. **Before writing it**, read what `main.c` does with the
      `false` return, since that is the half I have not verified.
+
+     **[done 20260831T071500Z -> `4926b93`]** Verified that half, and it
+     CONFIRMS silent truncation while explaining why it is silent:
+     `parse_executable_tool_calls` (`main.c:1282`) switches on
+     `prompt_profile`, so on a DSML profile a Qwen marker gives
+     `report.found == false` and it returns `true` at `:1316` — "ordinary
+     assistant text". `stream_tools_valid` true makes the `invalid_tool_call`
+     branch, the `dump_rejected_block` call and `ember_sse_discard_tool_block`
+     ALL unreachable, so the turn ends "stop" with no error and no log. The
+     defect is the asymmetry: `main.c`'s validator is profile-aware, `sse.c`'s
+     marker detection is not.
+
+     The narrow fix landed as sketched, and the `discard_tool_block` security
+     rationale does NOT collide with it — that comment covers a block which
+     PARSED and failed validation; here nothing parsed in any syntax family and
+     the caller already classified the bytes as text. Delivering markup as
+     visible content is additionally an outcome the server already accepts and
+     counts (`note_tool_markup_leak`, `main.c:1698-1718`).
+
+     Found a SECOND asymmetry in the same area while testing:
+     `slice_has_tool_markup` (streaming, `:129`) recognises DSML only, while
+     `ember_text_has_tool_markup` (buffered, `:142-145`) also checks
+     `"<tool_call>"`. Deliberately did NOT extend the shared helper — that would
+     make the `EMBER_SSE_TEXT` branch count the marker as a leak on requests
+     carrying no tools at all, which is the false-firing `main.c:1704-1707`
+     documents. Flagged at the new emit site only, where markup is present by
+     construction.
+
+     Also established: the buffered path never had this defect
+     (`main.c:3155`, `tc.len == 0` + valid skips the trim), which gives the
+     invariant the new test pins — streaming and buffered must agree.
+     Host 90/90, `test_sse` 200/200.
 
      Still deferred while the correctness blocker is open: this is off the
      performance goal and sits in the most invariant-sensitive file in the
