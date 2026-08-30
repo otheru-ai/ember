@@ -2293,19 +2293,23 @@ bool qwen4exp_frontier_run_projection_numerics_control(
             squared_error / static_cast<double>(expected.size()));
         const double reference_rms = std::sqrt(
             squared_reference / static_cast<double>(expected.size()));
-        const double norm_ratio = squared_reference > 0.0
-            ? std::sqrt(squared_actual / squared_reference) : 0.0;
+        const double actual_rms = std::sqrt(
+            squared_actual / static_cast<double>(expected.size()));
+        const double ratio = reference_rms > 0.0
+            ? actual_rms / reference_rms : 0.0;
         const double cosine_denominator =
             std::sqrt(squared_reference * squared_actual);
         std::fprintf(stderr,
                      "[qwen-numerics] event=subsystem_compare component=%s "
                      "target=%s logical_q=2 values=%zu max_abs=%.9g "
-                     "rms=%.9g reference_rms=%.9g normalized_rms=%.9g "
-                     "norm_ratio=%.9g cosine=%.9g mean_error=%.9g\n",
+                     "rms=%.9g reference_rms=%.9g actual_rms=%.9g "
+                     "normalized_rms=%.9g ratio=%.9g cosine=%.9g "
+                     "mean_error=%.9g\n",
                      component, target, expected.size(),
                      static_cast<double>(max_abs), rms, reference_rms,
+                     actual_rms,
                      reference_rms > 0.0 ? rms / reference_rms : 0.0,
-                     norm_ratio,
+                     ratio,
                      cosine_denominator > 0.0 ? dot / cosine_denominator
                                               : 0.0,
                      signed_error / static_cast<double>(expected.size()));
