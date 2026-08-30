@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -1615,6 +1616,54 @@ bool qwen4exp_mtp_sync_cache_batch(
 }
 
 namespace {
+bool force_batch_q1_numerics() {
+    const char * value = std::getenv("DFLASH_QWEN_BATCH_FORCE_Q1_NUMERICS");
+    return value && std::strcmp(value, "1") == 0;
+}
+
+bool qwen4exp_batch_layer_q1(
+        const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+        const std::vector<int32_t> & tokens,
+        const std::vector<std::array<int32_t, 3>> & positions,
+        std::vector<std::vector<float>> & hc_rows, int layer_index,
+        std::string & error) {
+    const Qwen4ExpLayer & layer =
+        weights.layers[static_cast<size_t>(layer_index)];
+    for (size_t row = 0; row < tokens.size(); ++row) {
+        state.hc = std::move(hc_rows[row]);
+        if (layer_index == 1 &&
+            !run_ple(weights, state, layer, tokens[row], error)) return false;
+        std::vector<float> mixed, block;
+        std::array<float, kHc> inject{};
+        if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
+                    layer.hc_attn_down, layer.hc_attn_up,
+                    layer.hc_attn_inject, mixed, &inject, error)) return false;
+        const bool qsa = (layer_index + 1) % 4 == 0;
+        if (qsa) {
+            if (!run_qsa(
+                    weights,
+                    state.layers[static_cast<size_t>(layer_index)], layer,
+                    layer_index, mixed, positions[row], state.mrope_positions,
+                    block, error)) return false;
+        } else if (!run_gdn(
+                       weights,
+                       state.layers[static_cast<size_t>(layer_index)], layer,
+                       layer_index, mixed, block, error)) {
+            return false;
+        }
+        hc_combine(state.hc, block, inject);
+        if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
+                    layer.hc_ffn_down, layer.hc_ffn_up,
+                    layer.hc_ffn_inject, mixed, &inject, error) ||
+            !run_moe(weights, layer_index, layer, mixed, block, error)) {
+            return false;
+        }
+        hc_combine(state.hc, block, inject);
+        hc_rows[row] = std::move(state.hc);
+    }
+    return true;
+}
+
 bool qwen4exp_batch_layer(
         const Qwen4ExpWeights & weights, Qwen4ExpState & state,
         const std::vector<int32_t> & tokens,
@@ -1624,6 +1673,14 @@ bool qwen4exp_batch_layer(
     const size_t rows = tokens.size();
     const Qwen4ExpLayer & layer =
         weights.layers[static_cast<size_t>(layer_index)];
+    // Diagnostic-only: retain the layer-major schedule and causal state order
+    // while forcing every normally batched subsystem through its q=1 graph.
+    // This separates a scheduling/composition defect from MMQ-vs-MMVQ
+    // arithmetic without changing the production path.
+    if (force_batch_q1_numerics()) {
+        return qwen4exp_batch_layer_q1(
+            weights, state, tokens, positions, hc_rows, layer_index, error);
+    }
     if (layer_index == 1 &&
         !run_ple_batch(weights, state, layer, tokens, hc_rows, error))
         return false;
