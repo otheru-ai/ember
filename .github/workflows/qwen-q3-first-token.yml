@@ -178,180 +178,6 @@ jobs:
           printf 'RUNTIME_ENGINE_SHA256=%s\nQWEN_FIRST_TOKEN_OUTPUT=%s\n' \
             "$engine_sha" "$run_output" >>"$GITHUB_ENV"
 
-      - name: Record production recovery intent
-        id: safety
-        run: |
-          set -euo pipefail
-          echo 'armed=no' >>"$GITHUB_OUTPUT"
-          test -r /dev/kfd && test -d /dev/dri
-          test -x /usr/local/sbin/ember-gpu-lock
-          test -x /usr/local/sbin/ember-cert-production
-          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null
-          curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null
-          echo 'restore=yes' >>"$GITHUB_OUTPUT"
-          echo 'armed=yes' >>"$GITHUB_OUTPUT"
-
-      - name: Acquire exclusive UMA ownership and generate the first tokens
-        run: |
-          set -euo pipefail
-          sudo -n /usr/local/sbin/ember-gpu-lock acquire
-          touch "$QWEN_FIRST_TOKEN_OUTPUT/.gpu-lock-held"
-          sudo -n /usr/local/sbin/ember-cert-production stop
-          sudo -n /usr/local/sbin/ember-cert-production mask
-          touch "$QWEN_FIRST_TOKEN_OUTPUT/.production-masked"
-          PYTHONPATH="$GITHUB_WORKSPACE/scripts" python3 - "$BUILD_RECORD" \
-              "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json" \
-              "$MTP" "$MTP_SHA256" <<'PY'
-          import json, pathlib, sys
-          from qwen_integrity_cache import IntegrityCache
-          record = json.load(open(sys.argv[1], encoding="utf-8"))
-          with IntegrityCache(pathlib.Path(sys.argv[2])) as cache:
-              for row in record["output"]["shards"]:
-                  cache.verify(pathlib.Path(row["path"]), row["sha256"])
-              cache.verify(pathlib.Path(sys.argv[3]), sys.argv[4])
-          PY
-          available_kib=0
-          for _ in $(seq 1 60); do
-            available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
-            (( available_kib >= 100 * 1024 * 1024 )) && break
-            sleep 5
-          done
-          (( available_kib >= 100 * 1024 * 1024 ))
-          python3 - "$QWEN_FIRST_TOKEN_OUTPUT/prompt.txt" <<'PY'
-          from pathlib import Path
-          import sys
-          # The disk validator requires >=512 prompt tokens. Forty rows yield
-          # roughly 650 Qwen tokens and cross many q16 chunks, while avoiding
-          # the old 2,940-token four-path prefill immediately before the full
-          # real-weight gate repeats its longer differential.
-          text = "\n".join(
-              f"Constraint {i}: retain marker {i * 17 % 101} while reasoning deterministically."
-              for i in range(40))
-          Path(sys.argv[1]).write_text(
-              text + "\nState the invariant in one short sentence.\n", encoding="utf-8")
-          PY
-          validation_cache="$QWEN_FIRST_TOKEN_OUTPUT/kv-validation-cache"
-          mkdir -m 700 "$validation_cache"
-          gpu_args=(--device /dev/kfd --device /dev/dri --ipc host \
-                    --security-opt seccomp=unconfined --ulimit memlock=-1:-1)
-          declare -A gpu_gids=()
-          for node in /dev/kfd /dev/dri/*; do
-            [[ -c "$node" ]] || continue
-            gid="$(stat -c %g -- "$node")"
-            [[ "$gid" =~ ^[0-9]+$ ]]
-            gpu_gids["$gid"]=1
-          done
-          ((${#gpu_gids[@]} > 0))
-          for gid in "${!gpu_gids[@]}"; do gpu_args+=(--group-add "$gid"); done
-          container="qwen-q3-first-token-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          printf 'QWEN_FIRST_TOKEN_CONTAINER=%s\n' "$container" >>"$GITHUB_ENV"
-          timeout --signal=TERM --kill-after=5m 30m \
-            docker run --name "$container" "${gpu_args[@]}" \
-            -v "$(dirname "$MODEL"):/first-token/model:ro" \
-            -v "$MTP:/first-token/mtp.gguf:ro" \
-            -v "$QWEN_FIRST_TOKEN_OUTPUT/prompt.txt:/first-token/prompt.txt:ro" \
-            -v "$validation_cache:/first-token/cache" \
-            -e DFLASH_QWEN_MTP=/first-token/mtp.gguf \
-            -e DFLASH_QWEN_MTP_DEPTH=3 -e EMBER_TRACE_TOKENS=1 \
-            --entrypoint /usr/local/bin/ember-dflash "$RUNTIME_IMAGE" \
-            -m "/first-token/model/$(basename "$MODEL")" --max-ctx 8192 \
-            --kv-cache-dir /first-token/cache \
-            --validate-prompt /first-token/prompt.txt --validate-tokens 2 \
-            >"$QWEN_FIRST_TOKEN_OUTPUT/validation.json" \
-            2>"$QWEN_FIRST_TOKEN_OUTPUT/engine.log"
-          docker rm "$container" >/dev/null
-          printf 'QWEN_FIRST_TOKEN_CONTAINER=\n' >>"$GITHUB_ENV"
-          python3 - "$QWEN_FIRST_TOKEN_OUTPUT" "$TARGET_SHA" "$CANDIDATE_ID" \
-              "$CONSTRUCTION_DESCRIPTOR" "$CONSTRUCTION_DESCRIPTOR_SHA256" \
-              "$MODEL" "$MODEL_SHA256" "$MODEL_TOTAL_BYTES" "$MTP" "$MTP_SHA256" \
-              "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_ENGINE_SHA256" <<'PY'
-          import datetime as dt, hashlib, json, pathlib, re, sys
-          (root_raw, revision, candidate_id, descriptor, descriptor_sha, model, model_sha,
-           model_bytes, mtp, mtp_sha, image, image_sha, engine_sha) = sys.argv[1:]
-          root = pathlib.Path(root_raw); validation_path = root / "validation.json"
-          log_path = root / "engine.log"
-          validation = json.loads(validation_path.read_text())
-          prefill = validation.get("prefill") or {}
-          spec = validation.get("spec") or {}; disk = validation.get("disk") or {}
-          if (validation.get("ok") is not True or validation.get("snapshot_ok") is not True
-                  or validation.get("baseline_tokens") != 2
-                  or prefill.get("checked") is not True or prefill.get("exact") is not True
-                  or prefill.get("tokens") != 2
-                  or spec.get("checked") is not True or spec.get("exact") is not True
-                  or spec.get("tokens") != 2 or disk.get("checked") is not True
-                  or disk.get("exact") is not True or disk.get("tokens") != 2):
-              raise SystemExit(f"two-token differential did not prove every serial path: {validation}")
-          traces = {}
-          pattern = re.compile(r"^\[ember-validate-token\] path=(\w+) index=(\d+) id=(-?\d+)$")
-          for line in log_path.read_text(errors="replace").splitlines():
-              match = pattern.fullmatch(line)
-              if match: traces.setdefault(match.group(1), {})[int(match.group(2))] = int(match.group(3))
-          required = {"baseline", "prefill", "restored", "fresh", "disk"}
-          if set(traces) != required or any(set(traces[name]) != {0, 1} for name in required):
-              raise SystemExit(f"token trace paths or indices differ: {traces}")
-          first = traces["baseline"][0]
-          if first < 0 or any(traces[name][0] != first for name in required):
-              raise SystemExit(f"first token differs across exact paths: {traces}")
-          def sha(path): return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-          evidence = {
-              "schema": "ember.qwen3.8.q3-ple-first-token.v1",
-              "status": "complete", "publishes": False, "deletes": False,
-              "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-              "ember_revision": revision, "candidate_id": candidate_id,
-              "construction_descriptor": {"path": descriptor, "sha256": descriptor_sha},
-              "model": {"first_shard": model, "first_shard_sha256": model_sha,
-                        "total_bytes": int(model_bytes)},
-              "mtp": {"path": mtp, "sha256": mtp_sha, "depth": 3,
-                      "matrix_quant_contract": "Q4_0_ROCMFP4_FAST"},
-              "quantization_arm": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
-              "runtime": {"image": image, "image_digest": image_sha,
-                          "engine_sha256": engine_sha, "device": "gfx1151"},
-              "generation": {"requested_tokens": 2, "first_token_id": first,
-                             "token_ids_by_path": {name: [traces[name][i] for i in (0, 1)]
-                                                   for name in sorted(required)},
-                             "snapshot_exact": True, "production_prefill_exact": True,
-                             "speculative_exact": True,
-                             "disk_restore_exact": True},
-              "evidence": {"validation_json_sha256": sha(validation_path),
-                           "engine_log_sha256": sha(log_path)},
-              "claim_scope": "first sampled token plus two-token serial differential; no quality or performance claim",
-          }
-          output = root / "first-token-evidence.json"
-          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-          print(first)
-          PY
-          evidence="$QWEN_FIRST_TOKEN_OUTPUT/first-token-evidence.json"
-          printf 'QWEN_FIRST_TOKEN_EVIDENCE=%s\nQWEN_FIRST_TOKEN_EVIDENCE_SHA256=%s\n' \
-            "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"
-
-      - name: Recover production and release the GPU lock
-        if: ${{ always() && steps.safety.outputs.armed == 'yes' }}
-        run: |
-          set +e
-          cleanup_failed=0
-          if [[ -n "${QWEN_FIRST_TOKEN_CONTAINER:-}" ]]; then
-            docker rm -f "$QWEN_FIRST_TOKEN_CONTAINER" >/dev/null 2>&1 || true
-          fi
-          if [[ -e "$QWEN_FIRST_TOKEN_OUTPUT/.production-masked" ]]; then
-            sudo -n /usr/local/sbin/ember-cert-production unmask || cleanup_failed=1
-          fi
-          if [[ "${{ steps.safety.outputs.restore }}" = yes ]]; then
-            sudo -n /usr/local/sbin/ember-cert-production start || cleanup_failed=1
-          fi
-          if [[ -e "$QWEN_FIRST_TOKEN_OUTPUT/.gpu-lock-held" ]]; then
-            sudo -n /usr/local/sbin/ember-gpu-lock release || cleanup_failed=1
-          fi
-          sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null || cleanup_failed=1
-          healthy=0
-          for _ in $(seq 1 120); do
-            if curl --fail --silent --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
-              healthy=1; break
-            fi
-            sleep 2
-          done
-          (( healthy == 1 )) || cleanup_failed=1
-          exit "$cleanup_failed"
-
       - name: Run the complete Q3 real-weight benchmark
         run: |
           set -euo pipefail
@@ -372,12 +198,95 @@ jobs:
           printf 'QWEN_Q3_BENCHMARK_EVIDENCE=%s\nQWEN_Q3_BENCHMARK_EVIDENCE_SHA256=%s\n' \
             "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"
 
-      - name: Surface retained first-token diagnostics
-        if: ${{ failure() && steps.safety.outputs.armed == 'yes' }}
+      - name: Derive first-token evidence from the full differential
         run: |
           set -euo pipefail
-          for name in validation.json engine.log \
-                      full-benchmark/differential.json \
+          python3 - "$QWEN_FIRST_TOKEN_OUTPUT" "$TARGET_SHA" "$CANDIDATE_ID" \
+              "$CONSTRUCTION_DESCRIPTOR" "$CONSTRUCTION_DESCRIPTOR_SHA256" \
+              "$MODEL" "$MODEL_SHA256" "$MODEL_TOTAL_BYTES" "$MTP" "$MTP_SHA256" \
+              "$RUNTIME_IMAGE" "$RUNTIME_IMAGE_DIGEST" "$RUNTIME_ENGINE_SHA256" <<'PY'
+          import datetime as dt, hashlib, json, pathlib, re, sys
+          (root_raw, revision, candidate_id, descriptor, descriptor_sha, model, model_sha,
+           model_bytes, mtp, mtp_sha, image, image_sha, engine_sha) = sys.argv[1:]
+          root = pathlib.Path(root_raw)
+          validation_path = root / "full-benchmark" / "differential.json"
+          log_path = root / "full-benchmark" / "differential-dispatch-server.log"
+          validation = json.loads(validation_path.read_text())
+          prefill = validation.get("prefill") or {}
+          spec = validation.get("spec") or {}
+          disk = validation.get("disk") or {}
+          n_tokens = validation.get("baseline_tokens")
+          if (validation.get("ok") is not True or validation.get("snapshot_ok") is not True
+                  or validation.get("requested_tokens") != 64
+                  or type(n_tokens) is not int or n_tokens != 64
+                  or prefill.get("checked") is not True or prefill.get("exact") is not True
+                  or prefill.get("tokens") != n_tokens
+                  or spec.get("checked") is not True or spec.get("exact") is not True
+                  or spec.get("tokens") != n_tokens or disk.get("checked") is not True
+                  or disk.get("exact") is not True or disk.get("tokens") != n_tokens):
+              raise SystemExit(f"64-token differential did not prove every serial path: {validation}")
+          traces = {}
+          pattern = re.compile(r"^\[ember-validate-token\] path=(\w+) index=(\d+) id=(-?\d+)$")
+          for line in log_path.read_text(errors="replace").splitlines():
+              match = pattern.fullmatch(line)
+              if not match:
+                  continue
+              path = match.group(1)
+              index = int(match.group(2))
+              path_tokens = traces.setdefault(path, {})
+              if index in path_tokens:
+                  raise SystemExit(f"duplicate token trace for {path} index {index}")
+              path_tokens[index] = int(match.group(3))
+          required = {"baseline", "prefill", "restored", "fresh", "disk"}
+          expected_indices = set(range(n_tokens))
+          if (set(traces) != required or
+                  any(set(traces[name]) != expected_indices for name in required)):
+              raise SystemExit(f"token trace paths or indices differ: {traces}")
+          baseline = [traces["baseline"][i] for i in range(n_tokens)]
+          if any([traces[name][i] for i in range(n_tokens)] != baseline
+                 for name in required):
+              raise SystemExit(f"token traces differ across exact paths: {traces}")
+          first = baseline[0]
+          if first < 0:
+              raise SystemExit(f"first token is invalid: {first}")
+          def sha(path): return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+          evidence = {
+              "schema": "ember.qwen3.8.q3-ple-first-token.v1",
+              "status": "complete", "publishes": False, "deletes": False,
+              "created_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "ember_revision": revision, "candidate_id": candidate_id,
+              "construction_descriptor": {"path": descriptor, "sha256": descriptor_sha},
+              "model": {"first_shard": model, "first_shard_sha256": model_sha,
+                        "total_bytes": int(model_bytes)},
+              "mtp": {"path": mtp, "sha256": mtp_sha, "depth": 3,
+                      "matrix_quant_contract": "Q4_0_ROCMFP4_FAST"},
+              "quantization_arm": "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head",
+              "runtime": {"image": image, "image_digest": image_sha,
+                          "engine_sha256": engine_sha, "device": "gfx1151"},
+              "generation": {"requested_tokens": n_tokens, "first_token_id": first,
+                             "token_ids_by_path": {name: [traces[name][i]
+                                                           for i in range(n_tokens)]
+                                                   for name in sorted(required)},
+                             "snapshot_exact": True, "production_prefill_exact": True,
+                             "speculative_exact": True,
+                             "disk_restore_exact": True},
+              "evidence": {"validation_json_sha256": sha(validation_path),
+                           "engine_log_sha256": sha(log_path)},
+              "claim_scope": "first sampled token plus 64-token serial differential; no quality or performance claim",
+          }
+          output = root / "first-token-evidence.json"
+          output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+          print(first)
+          PY
+          evidence="$QWEN_FIRST_TOKEN_OUTPUT/first-token-evidence.json"
+          printf 'QWEN_FIRST_TOKEN_EVIDENCE=%s\nQWEN_FIRST_TOKEN_EVIDENCE_SHA256=%s\n' \
+            "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"
+
+      - name: Surface retained first-token diagnostics
+        if: ${{ failure() && env.QWEN_FIRST_TOKEN_OUTPUT != '' }}
+        run: |
+          set -euo pipefail
+          for name in full-benchmark/differential.json \
                       full-benchmark/differential-dispatch-server.log \
                       full-benchmark/timing.jsonl \
                       full-benchmark/timing-server.log \
@@ -489,9 +398,6 @@ jobs:
         with:
           name: qwen-q3-hardware-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/prompt.txt
-            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/validation.json
-            ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/engine.log
             ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/first-token-evidence.json
             ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/first-token-evidence.sigstore.json
             ${{ env.QWEN_FIRST_TOKEN_OUTPUT }}/full-benchmark/*.json

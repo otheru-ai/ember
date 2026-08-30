@@ -93,31 +93,41 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             encoding="utf-8")
         self.assertIn('raise ReuseError("existing rebound descriptor differs")', reuse)
 
-    def test_q3_proof_and_benchmark_share_one_integrity_cache(self) -> None:
+    def test_q3_benchmark_uses_one_shared_integrity_cache(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
-        self.assertGreaterEqual(proof.count(".artifact-integrity-v1.json"), 2)
-        self.assertIn("from qwen_integrity_cache import IntegrityCache", proof)
+        self.assertEqual(proof.count(".artifact-integrity-v1.json"), 1)
+        self.assertNotIn("from qwen_integrity_cache import IntegrityCache", proof)
         gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
             encoding="utf-8")
         self.assertIn("--integrity-cache", gate)
         self.assertIn("from qwen_integrity_cache import IntegrityCache", gate)
 
-    def test_q3_first_token_uses_bounded_disk_eligible_prompt(self) -> None:
+    def test_q3_first_token_reuses_the_full_differential(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
-        self.assertIn("for i in range(40)", proof)
-        self.assertIn("disk validator requires >=512 prompt tokens", proof)
-        self.assertNotIn("for i in range(180)", proof)
+        gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
+            encoding="utf-8")
+        self.assertEqual(proof.count("scripts/qwen_real_weight_gate.sh"), 1)
+        self.assertNotIn('docker run --name "$container"', proof)
+        self.assertNotIn("--validate-tokens 2", proof)
+        self.assertIn("full-benchmark/differential.json", proof)
+        self.assertIn("full-benchmark/differential-dispatch-server.log", proof)
+        self.assertIn('validation.get("requested_tokens") != 64', proof)
+        self.assertIn("expected_indices = set(range(n_tokens))", proof)
+        self.assertIn(
+            'required = {"baseline", "prefill", "restored", "fresh", "disk"}',
+            proof,
+        )
+        self.assertIn("--validate-tokens 64", gate)
+        self.assertEqual(gate.count("-e EMBER_TRACE_TOKENS=1"), 1)
 
     def test_q3_gpu_proof_phases_have_cleanup_aware_timeouts(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
         self.assertIn(
-            "timeout --signal=TERM --kill-after=5m 30m \\\n"
-            "            docker run --name", proof)
-        self.assertIn(
             "timeout --signal=TERM --kill-after=15m 120m \\\n"
             "            scripts/qwen_real_weight_gate.sh", proof)
         self.assertIn(
-            "if: ${{ always() && steps.safety.outputs.armed == 'yes' }}", proof)
+            "if: ${{ failure() && env.QWEN_FIRST_TOKEN_OUTPUT != '' }}", proof)
+        self.assertNotIn("steps.safety", proof)
 
     def test_q3_attestations_verify_the_fully_qualified_exact_revision(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
@@ -997,25 +1007,33 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertNotIn("ember-cert-production stop", plan)
 
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
-        self.assertIn("qwen_integrity_cache", proof)
         self.assertIn("iflag=direct", (ROOT / "scripts/qwen_integrity_cache.py").read_text(
             encoding="utf-8"))
-        self.assertIn("EMBER_TRACE_TOKENS=1", proof)
-        self.assertIn("--validate-tokens 2", proof)
+        gate = (ROOT / "scripts/qwen_real_weight_gate.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("EMBER_TRACE_TOKENS=1", gate)
+        self.assertIn("--validate-tokens 64", gate)
+        self.assertNotIn("--validate-tokens 2", proof)
         self.assertIn('prefill.get("checked") is not True', proof)
-        self.assertIn("--kv-cache-dir /first-token/cache", proof)
+        self.assertIn("--kv-cache-dir /gate/cache", gate)
         self.assertIn(
             'required = {"baseline", "prefill", "restored", "fresh", "disk"}',
             proof,
         )
         self.assertIn('"first_token_id": first', proof)
         self.assertIn('"production_prefill_exact": True', proof)
-        self.assertIn("ember-gpu-lock acquire", proof)
-        self.assertIn("ember-cert-production stop", proof)
-        self.assertIn("ember-cert-production mask", proof)
-        self.assertIn("if: ${{ always() && steps.safety.outputs.armed == 'yes' }}", proof)
-        self.assertIn("ember-cert-production unmask", proof)
-        self.assertIn("ember-gpu-lock release", proof)
+        self.assertNotIn("ember-gpu-lock acquire", proof)
+        self.assertNotIn("ember-cert-production stop", proof)
+        self.assertNotIn("ember-cert-production mask", proof)
+        self.assertNotIn("ember-cert-production unmask", proof)
+        self.assertNotIn("ember-gpu-lock release", proof)
+        self.assertIn('sudo -n "$GPU_LOCK" acquire', gate)
+        self.assertIn('sudo -n "$PRODUCTION" stop', gate)
+        self.assertIn('sudo -n "$PRODUCTION" mask', gate)
+        self.assertIn('sudo -n "$PRODUCTION" unmask', gate)
+        self.assertIn('sudo -n "$GPU_LOCK" release', gate)
+        self.assertIn(
+            "if: ${{ failure() && env.QWEN_FIRST_TOKEN_OUTPUT != '' }}", proof)
         self.assertIn("actions/attest@", proof)
         self.assertIn("scripts/qwen_real_weight_gate.sh", proof)
         self.assertIn("--measurement-only --out-dir", proof)

@@ -463,6 +463,7 @@ docker run --name "$CONTAINER" "${GPU_ARGS[@]}" \
   -v "$OUT_DIR/validation-kv-cache:/gate/cache" \
   -e DFLASH_QWEN_MTP=/gate/mtp.gguf \
   -e "DFLASH_QWEN_MTP_DEPTH=$MTP_DEPTH" \
+  -e EMBER_TRACE_TOKENS=1 \
   --entrypoint "$BINARY" "$IMAGE" \
   -m "/gate/model/$(basename "$MODEL")" --max-ctx 8192 \
   --kv-cache-dir /gate/cache \
