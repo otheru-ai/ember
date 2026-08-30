@@ -43,8 +43,20 @@ well as the fused one (`qwen4exp_loader.cpp:417-435`).
 
 The 96 Q4_K tensors are exactly `blk.N.ffn_gate_exps.weight` and
 `blk.N.ffn_up_exps.weight` — 48 layers times two. **This is Ember's allow-list,
-not a backend limitation**: the vendored HIP backend has Q4_K MMQ
-(`mmq.cu:99-100`, `:443`, `:501`).
+not a backend limitation**, and that is verified rather than assumed:
+
+- `supports_op` for `MUL_MAT_ID` has **no type whitelist**. The grouped-src
+  branch gates on `ggml_is_quantized(a->type)` plus shape and buffer conditions
+  (`ggml-cuda.cu:5252-5271`); the rest is generic acceptance with specific
+  exclusions (MUSA Q2_K at `:5297`, split buffers, F16-b-with-non-F16-a). Q4_K
+  trips none.
+- MMQ implements Q4_K: `ggml_cuda_should_use_mmq` lists it (`mmq.cu:443`),
+  with a dispatch case (`:99-100`), DP4A tile sizes (`mmq.cuh:258`), an MMA
+  tile layout (`:315`), and a Q4_K/Q5_K `ne11 <= 256` case (`mmq.cu:501`).
+
+A Q4_K expert tensor therefore reaches MMQ by the same path Q6_K already does,
+and Ember's ROCmFPX-specific MoE routes select among supported paths rather
+than narrowing the type set.
 
 ### agentionai root (`-ple16`) — additionally incompatible
 
