@@ -134,6 +134,42 @@ So, before anyone proposes an optimization:
 Cheap analysis on retained evidence beats a GPU run. Three of the four
 refutations above came from CSVs already on the runner, at no hardware cost.
 
+## Arithmetic that depends on batch shape
+
+Most of 2026-08-30 went into one bug and its consequences. The lesson
+generalises, so it lives here rather than only in the ledger.
+
+**A kernel's arithmetic must not depend on how much work is launched
+alongside it.** `ggml_cuda_op_sum_rows` chose its block width from the row
+count, and `reduce_rows_f32` strides by that width, so the same 128 values
+summed through a 512-lane tree at q=1 and a 32-lane tree at q=3. Both correct;
+neither equal. That is what made batched prefill disagree with q=1 and it took
+a day to find, because the comment above it said "Heuristic for block size
+selection to optimize occupancy" and nothing suggested occupancy tuning was
+choosing an arithmetic tree.
+
+`test_sum_rows_shape_invariance` guards it now. When you add or tune a
+launch heuristic, ask whether it changes a reduction order, and if it does,
+key it on row **width**, never on row **count**.
+
+**But some shape-dependence is legitimate, and telling them apart is the
+whole skill.** MMVQ versus MMQ is selected by batch width *because* MMQ is
+faster at larger batches, and MMVQ is not available above batch 8 at all. Two
+different quantized matmul kernels cannot agree bit-exactly, and making them
+agree means giving up the crossover. That one is not a defect.
+
+The test: **is the shape-dependence gratuitous?** Nothing forces a reduction's
+accumulation order to depend on row count — that was free to fix, and the
+DeepSeek A/B came back flat. Everything forces MMQ to exist. Fix the first
+kind; for the second, the question is what the release criterion should assert,
+and that is the user's call, not ours.
+
+**Corollary for tests.** Do not assert bit-equality between two paths unless
+both take the same kernels. Ember asserts it for MTP verification, where a q=1
+replay is a real authority boundary; the reference implementation has no q=1
+path at all and therefore cannot pose the question. Know which you are in
+before you write the assertion.
+
 ## Dead code: tag it, do not silently route around it
 
 If you find engine code that cannot execute on what we ship — gfx1151 /
