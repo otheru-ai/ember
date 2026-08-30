@@ -184,6 +184,135 @@ static TinyGdnResult reference_gdn_q1(
     return result;
 }
 
+// Double-precision reference for the GDN recurrent state alone.
+//
+// The batched path keeps the recurrent state in registers across the token
+// loop; three sequential q1 steps round-trip it through memory between tokens.
+// Those are different accumulation orders, so they cannot be bit-identical,
+// and codex measured their first divergence at 1.1920929e-07 -- exactly 2^-23,
+// one ULP of float32 near 1.0, which is the *floor* for two valid roundings
+// rather than evidence of a defect.
+//
+// Which of them is right is not decidable by comparing them to each other.
+// This computes the same recurrence in double so both can be measured against
+// it, the way the rope oracle settled the same question for M-RoPE -- where
+// the graph path turned out closer to exact than the host scalar it was being
+// compared against.
+//
+// Only the recurrent state is reproduced here; that is where the divergence
+// starts, and the output path adds arithmetic without adding evidence.
+static std::vector<double> reference_gdn_recurrent_double(
+        const dflash::common::Qwen4ExpFrontierGdnSpec & spec,
+        const std::vector<float> & qkv_weight,
+        const std::vector<float> & alpha_weight,
+        const std::vector<float> & beta_weight,
+        const std::vector<float> & conv_weight,
+        const std::vector<float> & a,
+        const std::vector<float> & dt,
+        const std::vector<float> & input,
+        const std::vector<double> & conv_state,
+        const std::vector<double> & recurrent_state,
+        std::vector<double> & next_conv_state) {
+    const int channels =
+        (2 * spec.n_key_heads + spec.n_heads) * spec.head_dim;
+    auto matvec_d = [&](const std::vector<float> & weight, int rows,
+                        int columns) {
+        std::vector<double> out(static_cast<size_t>(rows), 0.0);
+        for (int row = 0; row < rows; ++row) {
+            double sum = 0.0;
+            for (int column = 0; column < columns; ++column) {
+                sum += static_cast<double>(
+                           weight[static_cast<size_t>(row * columns + column)]) *
+                       static_cast<double>(input[static_cast<size_t>(column)]);
+            }
+            out[static_cast<size_t>(row)] = sum;
+        }
+        return out;
+    };
+    const std::vector<double> qkv = matvec_d(qkv_weight, channels, spec.n_embd);
+    const std::vector<double> alpha =
+        matvec_d(alpha_weight, spec.n_heads, spec.n_embd);
+    const std::vector<double> beta =
+        matvec_d(beta_weight, spec.n_heads, spec.n_embd);
+
+    std::vector<double> convolved(static_cast<size_t>(channels));
+    for (int channel = 0; channel < channels; ++channel) {
+        double value = static_cast<double>(
+                conv_weight[static_cast<size_t>(
+                    channel * spec.conv_width + spec.conv_width - 1)]) *
+            qkv[static_cast<size_t>(channel)];
+        for (int tap = 0; tap < spec.conv_width - 1; ++tap) {
+            value += static_cast<double>(
+                         conv_weight[static_cast<size_t>(
+                             channel * spec.conv_width + tap)]) *
+                     conv_state[static_cast<size_t>(tap * channels + channel)];
+        }
+        convolved[static_cast<size_t>(channel)] = value / (1.0 + std::exp(-value));
+    }
+
+    const size_t channels_size = static_cast<size_t>(channels);
+    next_conv_state.assign(conv_state.size(), 0.0);
+    if (spec.conv_width > 2) {
+        std::copy_n(conv_state.data() + channels_size,
+                    static_cast<size_t>(spec.conv_width - 2) * channels_size,
+                    next_conv_state.data());
+    }
+    std::copy(qkv.begin(), qkv.end(),
+              next_conv_state.data() +
+                  static_cast<size_t>(spec.conv_width - 2) * channels_size);
+
+    std::vector<double> recurrent = recurrent_state;
+    const int repeats = spec.n_heads / spec.n_key_heads;
+    for (int head = 0; head < spec.n_heads; ++head) {
+        const int key_head = head / repeats;
+        std::vector<double> q(
+            convolved.begin() + key_head * spec.head_dim,
+            convolved.begin() + (key_head + 1) * spec.head_dim);
+        std::vector<double> k(
+            convolved.begin() + spec.n_key_heads * spec.head_dim +
+                key_head * spec.head_dim,
+            convolved.begin() + spec.n_key_heads * spec.head_dim +
+                (key_head + 1) * spec.head_dim);
+        double q_sum = 0.0;
+        double k_sum = 0.0;
+        for (int i = 0; i < spec.head_dim; ++i) {
+            q_sum += q[static_cast<size_t>(i)] * q[static_cast<size_t>(i)];
+            k_sum += k[static_cast<size_t>(i)] * k[static_cast<size_t>(i)];
+        }
+        const double q_scale = 1.0 / std::sqrt(q_sum + spec.epsilon);
+        const double k_scale = 1.0 / std::sqrt(k_sum + spec.epsilon);
+        for (int i = 0; i < spec.head_dim; ++i) {
+            q[static_cast<size_t>(i)] *= q_scale;
+            k[static_cast<size_t>(i)] *= k_scale;
+        }
+        const double sp = alpha[static_cast<size_t>(head)] +
+                          static_cast<double>(dt[static_cast<size_t>(head)]);
+        const double softplus_d = sp > 20.0 ? sp : std::log1p(std::exp(sp));
+        const double decay = std::exp(
+            softplus_d * static_cast<double>(a[static_cast<size_t>(head)]));
+        const double bv = beta[static_cast<size_t>(head)];
+        const double mix = 1.0 / (1.0 + std::exp(-bv));
+        double * rec = recurrent.data() +
+            static_cast<size_t>(head * spec.head_dim * spec.head_dim);
+        const double * value = convolved.data() +
+            2 * spec.n_key_heads * spec.head_dim + head * spec.head_dim;
+        for (int column = 0; column < spec.head_dim; ++column) {
+            double dot = 0.0;
+            for (int row = 0; row < spec.head_dim; ++row) {
+                rec[column * spec.head_dim + row] *= decay;
+                dot += rec[column * spec.head_dim + row] *
+                       k[static_cast<size_t>(row)];
+            }
+            const double delta = (value[column] - dot) * mix;
+            for (int row = 0; row < spec.head_dim; ++row) {
+                rec[column * spec.head_dim + row] +=
+                    delta * k[static_cast<size_t>(row)];
+            }
+        }
+    }
+    return recurrent;
+}
+
 static std::vector<float> patterned_values(size_t count, float scale,
                                            int modulus) {
     std::vector<float> values(count);
@@ -791,6 +920,77 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
               "HIP-legal GDN batch advances convolution state exactly");
         CHECK(ok && close_vectors(next_recurrent, expected_recurrent, 2.0e-5f),
               "HIP-legal GDN batch final recurrent state matches scalar rows");
+
+        // Which side is right? The batched path keeps the recurrent state in
+        // registers across the token loop; three sequential q1 steps round-trip
+        // it through memory. Different accumulation orders cannot be
+        // bit-identical, and on hardware their first divergence measures
+        // 1.1920929e-07 -- exactly one float32 ULP near 1.0, the floor for two
+        // valid roundings.
+        //
+        // Comparing them to each other cannot say which is correct. Comparing
+        // both to a double-precision chain can, and that is the question the
+        // release criterion turns on.
+        Qwen4ExpFrontierGdnGraph * q1_graph =
+            dflash::common::qwen4exp_frontier_gdn_create_batch(
+                backend, spec, weights, -1, 1, error);
+        CHECK(q1_graph != nullptr, "q1 GDN graph builds for the precision control");
+        if (ok && q1_graph) {
+            std::vector<float> serial_conv = initial_conv;
+            std::vector<float> serial_recurrent = initial_recurrent;
+            for (int row = 0; row < 3; ++row) {
+                std::vector<float> row_out, next_c, next_r;
+                if (!dflash::common::qwen4exp_frontier_gdn_eval_batch(
+                        q1_graph,
+                        batch_input.data() +
+                            static_cast<size_t>(row) * spec.n_embd,
+                        static_cast<size_t>(spec.n_embd),
+                        serial_conv.data(), serial_conv.size(),
+                        serial_recurrent.data(), serial_recurrent.size(),
+                        row_out, next_c, next_r, error)) {
+                    CHECK(false, "q1 GDN step succeeds in the precision control");
+                    break;
+                }
+                serial_conv = next_c;
+                serial_recurrent = next_r;
+            }
+
+            std::vector<double> exact_conv(initial_conv.begin(),
+                                           initial_conv.end());
+            std::vector<double> exact_recurrent(initial_recurrent.begin(),
+                                                initial_recurrent.end());
+            for (int row = 0; row < 3; ++row) {
+                const std::vector<float> row_input =
+                    patterned_values(spec.n_embd, 0.037f, row + 2);
+                std::vector<double> next_c;
+                exact_recurrent = reference_gdn_recurrent_double(
+                    spec, qkv_weight, alpha_weight, beta_weight, conv_weight,
+                    a, dt, row_input, exact_conv, exact_recurrent, next_c);
+                exact_conv = next_c;
+            }
+
+            auto worst = [&](const std::vector<float> & candidate) {
+                double m = 0.0;
+                const size_t n = std::min(candidate.size(),
+                                          exact_recurrent.size());
+                for (size_t i = 0; i < n; ++i) {
+                    m = std::max(m, std::fabs(static_cast<double>(candidate[i]) -
+                                              exact_recurrent[i]));
+                }
+                return m;
+            };
+            const double batched_error = worst(next_recurrent);
+            const double serial_error = worst(serial_recurrent);
+            std::fprintf(stderr,
+                         "[gdn-precision] batched_vs_exact=%.9g "
+                         "serial_q1_vs_exact=%.9g batched_closer=%s\n",
+                         batched_error, serial_error,
+                         batched_error <= serial_error ? "true" : "false");
+            CHECK(batched_error > 0.0 && serial_error > 0.0,
+                  "both float paths differ from the double reference, as "
+                  "different accumulation orders must");
+        }
+        dflash::common::qwen4exp_frontier_gdn_destroy(q1_graph);
         dflash::common::qwen4exp_frontier_gdn_destroy(batch_graph);
     }
     ggml_backend_buffer_free(buffer);
