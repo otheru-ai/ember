@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -355,11 +356,154 @@ void test_correction_dims_agree_with_ggml() {
           "ggml high correction dim matches the host policy");
 }
 
+// ── The RMS half of tranche 1 ────────────────────────────────────────────────
+//
+// The projection graph produces `projected_query_gate` as [head_dim, 2, heads]:
+// each head's 256 query values followed by its 256 gate values. The host splits
+// it, RMS-normalises the query half per head, and ropes it. Moving that into
+// the graph means running `ggml_rms_norm` on a *strided view* -- rows of 256
+// packed floats, 512 floats apart.
+//
+// That is the trap. HIP's `supports_op` for RMS_NORM requires
+// `ggml_is_contiguous_rows(src0)` (ggml-cuda.cu:5487-5492, with a comment that
+// a permuted row asserts inside norm.cu rather than falling back). A view that
+// is strided *between* rows but packed *within* them satisfies it; one that is
+// permuted does not. Nothing in the host suite distinguishes those.
+//
+// The host reference also accumulates the sum of squares in double
+// (qwen4exp_runtime.cpp:48-53) where the kernels use float, so this measures
+// that gap too rather than assuming it away.
+
+constexpr float kRmsEpsilon = 1.0e-6f;  // qwen4exp_runtime.cpp:32
+
+// qwen4exp_runtime.cpp:48-53, verbatim.
+void host_rms_norm(float * values, int count, const float * weight) {
+    double sum = 0.0;
+    for (int i = 0; i < count; ++i) sum += values[i] * values[i];
+    const float scale =
+        1.0f / std::sqrt(static_cast<float>(sum / count) + kRmsEpsilon);
+    for (int i = 0; i < count; ++i) {
+        values[i] *= scale * (weight ? weight[i] : 1.0f);
+    }
+}
+
+void test_graph_rms_norm_on_the_query_gate_view() {
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    if (!backend) {
+        CHECK(false, "cpu backend init failed");
+        return;
+    }
+    ggml_init_params params{};
+    params.mem_size = 4U * 1024U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        ggml_backend_free(backend);
+        CHECK(false, "ggml_init failed");
+        return;
+    }
+
+    ggml_tensor * qg =
+        ggml_new_tensor_3d(ctx, GGML_TYPE_F32, kHeadDim, 2, kHeads);
+    ggml_tensor * weight = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, kHeadDim);
+
+    // The query half: [head_dim, heads], one row per head, rows nb[2] apart.
+    ggml_tensor * query =
+        ggml_view_2d(ctx, qg, kHeadDim, kHeads, qg->nb[2], 0);
+    CHECK(ggml_is_contiguous_rows(query),
+          "the query-half view has contiguous rows, so HIP accepts RMS_NORM");
+
+    ggml_tensor * normalised =
+        ggml_mul(ctx, ggml_rms_norm(ctx, query, kRmsEpsilon), weight);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buffer) {
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        CHECK(false, "buffer alloc failed");
+        return;
+    }
+
+    std::vector<float> packed;
+    packed.reserve(static_cast<size_t>(kHeadDim) * 2 * kHeads);
+    for (int head = 0; head < kHeads; ++head) {
+        const std::vector<float> q = patterned_head(head);
+        const std::vector<float> g = patterned_head(head + 17);  // gate half
+        packed.insert(packed.end(), q.begin(), q.end());
+        packed.insert(packed.end(), g.begin(), g.end());
+    }
+    std::vector<float> norm_weight(static_cast<size_t>(kHeadDim));
+    for (int i = 0; i < kHeadDim; ++i) {
+        norm_weight[static_cast<size_t>(i)] =
+            0.8f + 0.4f * std::sin(static_cast<float>(i) * 0.05f);
+    }
+
+    ggml_backend_tensor_set(qg, packed.data(), 0,
+                            packed.size() * sizeof(float));
+    ggml_backend_tensor_set(weight, norm_weight.data(), 0,
+                            norm_weight.size() * sizeof(float));
+
+    ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, normalised);
+    const bool ok =
+        ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS;
+    CHECK(ok, "rms_norm over the strided query view executes");
+
+    if (ok) {
+        std::vector<float> got(static_cast<size_t>(kHeadDim) * kHeads);
+        ggml_backend_tensor_get(normalised, got.data(), 0,
+                                got.size() * sizeof(float));
+
+        std::vector<float> expected(got.size());
+        for (int head = 0; head < kHeads; ++head) {
+            float * row = expected.data() + static_cast<size_t>(head) * kHeadDim;
+            std::copy_n(packed.data() + static_cast<size_t>(head) * 2 * kHeadDim,
+                        kHeadDim, row);
+            host_rms_norm(row, kHeadDim, norm_weight.data());
+        }
+
+        const float delta = max_abs_delta(got, expected);
+        std::fprintf(stderr,
+                     "[rms-oracle]  query-half view          max_abs_delta=%.6g\n",
+                     static_cast<double>(delta));
+        CHECK(delta < 1.0e-5f,
+              "graph rms_norm+mul matches the host rms_norm per head");
+
+        // The gate half must be untouched: the host normalises only the query.
+        // Reading it back through its own view proves the split addressed the
+        // right stride rather than normalising interleaved data.
+        std::vector<float> gate_back(static_cast<size_t>(kHeadDim) * kHeads);
+        for (int head = 0; head < kHeads; ++head) {
+            ggml_backend_tensor_get(
+                qg, gate_back.data() + static_cast<size_t>(head) * kHeadDim,
+                (static_cast<size_t>(head) * 2 + 1) * kHeadDim * sizeof(float),
+                static_cast<size_t>(kHeadDim) * sizeof(float));
+        }
+        float gate_delta = 0.0f;
+        for (int head = 0; head < kHeads; ++head) {
+            const std::vector<float> g = patterned_head(head + 17);
+            for (int i = 0; i < kHeadDim; ++i) {
+                gate_delta = std::fmax(
+                    gate_delta,
+                    std::fabs(gate_back[static_cast<size_t>(head) * kHeadDim +
+                                        static_cast<size_t>(i)] -
+                              g[static_cast<size_t>(i)]));
+            }
+        }
+        CHECK(gate_delta == 0.0f, "the gate half is left untouched");
+    }
+
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 }  // namespace
 
 int main() {
     test_freq_factor_ratio_is_identity_without_yarn();
     test_correction_dims_agree_with_ggml();
+    test_graph_rms_norm_on_the_query_gate_view();
     // Native: YaRN off, so the freq-factor table is the identity and the
     // ext-factor path does not apply (ggml skips the ramp when ext_factor is
     // 0, which is what freq_scale = 1 with factor 1 already gives).
