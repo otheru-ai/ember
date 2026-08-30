@@ -652,6 +652,145 @@ static std::vector<float> reference_qsa_attention(
                   spec.n_heads * spec.head_dim, attended);
 }
 
+// The GDN batch-versus-sequential coverage above runs spec {4, 6, 2, 4, 4},
+// whose convolution channel count is (2*2 + 6) * 4 = 40. HIP's `supports_op`
+// for SSM_CONV requires `src0->ne[1] % 128 == 0` (ggml-cuda.cu:5526-5528,
+// "assumes d_inner % threads == 0"), so 40 is a shape HIP *refuses*: run that
+// fixture on a HIP backend and SSM_CONV silently falls back to CPU. It can
+// therefore never exercise the production dispatch, whatever backend it is
+// pointed at.
+//
+// Production is n_heads 48, n_key_heads 16, head_dim 128
+// (qwen4exp_runtime.cpp:21-23), giving (2*16 + 48) * 128 = 10240, which passes.
+//
+// This runs the same batch-versus-sequential comparison at the smallest spec
+// that satisfies the HIP predicate: (2*2 + 4) * 16 = 128. It is still the CPU
+// backend and still not the 128-wide production kernel, but unlike the fixture
+// above it is a shape HIP would accept, so pointing it at a HIP build later
+// exercises the real dispatch instead of a fallback.
+static void test_gdn_batch_at_hip_legal_conv_channels() {
+    using dflash::common::Qwen4ExpFrontierGdnGraph;
+    using dflash::common::Qwen4ExpFrontierGdnSpec;
+    using dflash::common::Qwen4ExpFrontierGdnWeights;
+    const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 16, 4, 1.0e-6f};
+    const int channels = (2 * spec.n_key_heads + spec.n_heads) * spec.head_dim;
+    const int core_values = spec.n_heads * spec.head_dim;
+    CHECK(channels % 128 == 0,
+          "GDN control spec satisfies the HIP SSM_CONV channel predicate");
+
+    ggml_backend_t backend = ggml_backend_cpu_init();
+    if (!backend) {
+        CHECK(false, "GDN control backend initializes");
+        return;
+    }
+    ggml_init_params params{};
+    params.mem_size = 512U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        CHECK(false, "GDN control context initializes");
+        ggml_backend_free(backend);
+        return;
+    }
+    Qwen4ExpFrontierGdnWeights weights;
+    weights.qkv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, spec.n_embd, channels);
+    weights.gate =
+        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, spec.n_embd, core_values);
+    weights.alpha =
+        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, spec.n_embd, spec.n_heads);
+    weights.beta =
+        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, spec.n_embd, spec.n_heads);
+    weights.conv =
+        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, spec.conv_width, channels);
+    weights.a = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, spec.n_heads);
+    weights.dt = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, spec.n_heads);
+    weights.norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, spec.head_dim);
+    weights.output =
+        ggml_new_tensor_2d(ctx, GGML_TYPE_F32, core_values, spec.n_embd);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buffer) {
+        CHECK(false, "GDN control weight buffer allocates");
+        ggml_free(ctx);
+        ggml_backend_free(backend);
+        return;
+    }
+
+    const std::vector<float> qkv_weight =
+        patterned_values(spec.n_embd * channels, 0.017f, 11);
+    const std::vector<float> gate_weight =
+        patterned_values(spec.n_embd * core_values, 0.013f, 9);
+    const std::vector<float> alpha_weight =
+        patterned_values(spec.n_embd * spec.n_heads, 0.019f, 7);
+    const std::vector<float> beta_weight =
+        patterned_values(spec.n_embd * spec.n_heads, 0.023f, 5);
+    const std::vector<float> conv_weight =
+        patterned_values(spec.conv_width * channels, 0.021f, 13);
+    const std::vector<float> a = patterned_values(spec.n_heads, -0.031f, 5);
+    const std::vector<float> dt = patterned_values(spec.n_heads, 0.007f, 3);
+    const std::vector<float> norm = patterned_values(spec.head_dim, 0.011f, 7);
+    const std::vector<float> output_weight =
+        patterned_values(core_values * spec.n_embd, 0.015f, 9);
+    const std::array<std::pair<ggml_tensor *, const std::vector<float> *>, 9>
+        uploads{{
+            {weights.qkv, &qkv_weight},     {weights.gate, &gate_weight},
+            {weights.alpha, &alpha_weight}, {weights.beta, &beta_weight},
+            {weights.conv, &conv_weight},   {weights.a, &a},
+            {weights.dt, &dt},              {weights.norm, &norm},
+            {weights.output, &output_weight},
+        }};
+    for (const auto & upload : uploads) {
+        ggml_backend_tensor_set(upload.first, upload.second->data(), 0,
+                                upload.second->size() * sizeof(float));
+    }
+
+    std::string error;
+    Qwen4ExpFrontierGdnGraph * batch_graph =
+        dflash::common::qwen4exp_frontier_gdn_create_batch(
+            backend, spec, weights, -1, 3, error);
+    if (!batch_graph) {
+        std::fprintf(stderr, "GDN control build error: %s\n", error.c_str());
+        CHECK(false, "HIP-legal GDN batch graph builds");
+    } else {
+        const std::vector<float> initial_conv = patterned_values(
+            (spec.conv_width - 1) * channels, 0.009f, 7);
+        const std::vector<float> initial_recurrent = patterned_values(
+            spec.n_heads * spec.head_dim * spec.head_dim, 0.004f, 9);
+        std::vector<float> batch_input, expected_output;
+        std::vector<float> expected_conv = initial_conv;
+        std::vector<float> expected_recurrent = initial_recurrent;
+        for (int row = 0; row < 3; ++row) {
+            const std::vector<float> input_row =
+                patterned_values(spec.n_embd, 0.037f, row + 2);
+            batch_input.insert(batch_input.end(), input_row.begin(),
+                               input_row.end());
+            const TinyGdnResult step = reference_gdn_q1(
+                spec, qkv_weight, gate_weight, alpha_weight, beta_weight,
+                conv_weight, a, dt, norm, output_weight, input_row,
+                expected_conv, expected_recurrent);
+            expected_output.insert(expected_output.end(), step.output.begin(),
+                                   step.output.end());
+            expected_conv = step.conv;
+            expected_recurrent = step.recurrent;
+        }
+        std::vector<float> output, next_conv, next_recurrent;
+        const bool ok = dflash::common::qwen4exp_frontier_gdn_eval_batch(
+            batch_graph, batch_input.data(), batch_input.size(),
+            initial_conv.data(), initial_conv.size(),
+            initial_recurrent.data(), initial_recurrent.size(), output,
+            next_conv, next_recurrent, error);
+        CHECK(ok && close_vectors(output, expected_output, 2.0e-5f),
+              "HIP-legal GDN batch outputs match three sequential scalar rows");
+        CHECK(ok && close_vectors(next_conv, expected_conv, 2.0e-5f),
+              "HIP-legal GDN batch advances convolution state exactly");
+        CHECK(ok && close_vectors(next_recurrent, expected_recurrent, 2.0e-5f),
+              "HIP-legal GDN batch final recurrent state matches scalar rows");
+        dflash::common::qwen4exp_frontier_gdn_destroy(batch_graph);
+    }
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    ggml_backend_free(backend);
+}
+
 static void test_persistent_qsa_q1() {
     using dflash::common::Qwen4ExpFrontierQsaGraph;
     using dflash::common::Qwen4ExpFrontierQsaSpec;
@@ -1333,6 +1472,7 @@ static void test_bounded_cache_and_prefill_policy() {
 int main() {
     test_persistent_hc_mixer();
     test_persistent_gdn_q1();
+    test_gdn_batch_at_hip_legal_conv_channels();
     test_persistent_qsa_q1();
     test_causal_attention_stateless_ffn_batching();
     test_causal_ple_projection_batching();
