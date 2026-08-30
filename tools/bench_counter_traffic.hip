@@ -31,43 +31,38 @@ constexpr int kThreads = 256;
     } \
   } while (0)
 
-__global__ void read_lines(const std::uint4 *source, std::size_t lines) {
+__global__ void read_lines(const std::uint32_t *source, std::size_t lines) {
   const std::size_t line = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
                            threadIdx.x;
   if (line >= lines) return;
-  const volatile std::uint4 *p = source + line * 4;
-  const std::uint4 a = p[0];
-  const std::uint4 b = p[1];
-  const std::uint4 c = p[2];
-  const std::uint4 d = p[3];
+  const volatile std::uint32_t *p = source + line * 16;
+  std::uint32_t observed = 0;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) observed ^= p[i];
   // Keep the loads observable without adding a material output stream.
-  asm volatile("" : : "r"(a.x), "r"(b.y), "r"(c.z), "r"(d.w));
+  asm volatile("" : : "r"(observed));
 }
 
-__global__ void write_lines(std::uint4 *destination, std::size_t lines) {
+__global__ void write_lines(std::uint32_t *destination, std::size_t lines) {
   const std::size_t line = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
                            threadIdx.x;
   if (line >= lines) return;
-  volatile std::uint4 *p = destination + line * 4;
-  const std::uint4 value = make_uint4(0x13579bdfU, 0x2468ace0U,
-                                      0x0f1e2d3cU, 0x4b5a6978U);
-  p[0] = value;
-  p[1] = value;
-  p[2] = value;
-  p[3] = value;
+  volatile std::uint32_t *p = destination + line * 16;
+#pragma unroll
+  for (int i = 0; i < 16; ++i)
+    p[i] = 0x13579bdfU ^ static_cast<std::uint32_t>(i);
 }
 
-__global__ void copy_lines(const std::uint4 *source, std::uint4 *destination,
+__global__ void copy_lines(const std::uint32_t *source,
+                           std::uint32_t *destination,
                            std::size_t lines) {
   const std::size_t line = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
                            threadIdx.x;
   if (line >= lines) return;
-  const volatile std::uint4 *s = source + line * 4;
-  volatile std::uint4 *d = destination + line * 4;
-  d[0] = s[0];
-  d[1] = s[1];
-  d[2] = s[2];
-  d[3] = s[3];
+  const volatile std::uint32_t *s = source + line * 16;
+  volatile std::uint32_t *d = destination + line * 16;
+#pragma unroll
+  for (int i = 0; i < 16; ++i) d[i] = s[i];
 }
 
 void usage(const char *program) {
@@ -101,9 +96,9 @@ int main(int argc, char **argv) {
   }
 
   const std::size_t lines = bytes / kLineBytes;
-  const std::size_t allocation = lines * 4 * sizeof(std::uint4);
-  std::uint4 *source = nullptr;
-  std::uint4 *destination = nullptr;
+  const std::size_t allocation = lines * 16 * sizeof(std::uint32_t);
+  std::uint32_t *source = nullptr;
+  std::uint32_t *destination = nullptr;
   HIP_CHECK(hipMalloc(&source, allocation));
   if (std::strcmp(mode, "write") != 0 && std::strcmp(mode, "noop") != 0)
     HIP_CHECK(hipMalloc(&destination, allocation));

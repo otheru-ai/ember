@@ -28,6 +28,7 @@ PROFILE_SH = ROOT / "scripts" / "profile_gpu.sh"
 PROFILE_PY = ROOT / "scripts" / "profile_report.py"
 CALIBRATE_SH = ROOT / "scripts" / "calibrate_counter_units.sh"
 CALIBRATE_PY = ROOT / "scripts" / "calibrate_counter_units.py"
+COUNTER_TRAFFIC_HIP = ROOT / "tools" / "bench_counter_traffic.hip"
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import profile_report  # noqa: E402
@@ -74,6 +75,11 @@ class HarnessContractTests(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0)
         self.assertIn("dry run: no GPU touched", result.stdout)
+
+    def test_counter_traffic_avoids_nonstandard_vector_namespace(self):
+        body = COUNTER_TRAFFIC_HIP.read_text()
+        self.assertIn("volatile std::uint32_t", body)
+        self.assertNotIn("std::uint4", body)
 
     def test_counter_calibration_fit_accepts_known_kib_samples(self):
         rows = []
