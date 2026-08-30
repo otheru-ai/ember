@@ -107,6 +107,13 @@ jobs:
       candidate_intent_payload_base64: ${{ steps.envelope.outputs.candidate_intent_payload_base64 }}
       candidate_intent_payload_sha256: ${{ steps.envelope.outputs.candidate_intent_payload_sha256 }}
       candidate_intent_output: ${{ steps.envelope.outputs.candidate_intent_output }}
+      q3_construction: ${{ steps.envelope.outputs.q3_construction }}
+      q3_construction_sha256: ${{ steps.envelope.outputs.q3_construction_sha256 }}
+      q3_hardware: ${{ steps.envelope.outputs.q3_hardware }}
+      q3_hardware_sha256: ${{ steps.envelope.outputs.q3_hardware_sha256 }}
+      iu4_construction: ${{ steps.envelope.outputs.iu4_construction }}
+      iu4_construction_sha256: ${{ steps.envelope.outputs.iu4_construction_sha256 }}
+      comparison_output: ${{ steps.envelope.outputs.comparison_output }}
     steps:
       - name: Decode and validate exact branch-workflow dispatch envelope
         id: envelope
@@ -169,6 +176,10 @@ jobs:
                                "request_output"},
               "candidate-plan": {"intent_payload_base64", "intent_payload_sha256",
                                  "intent_output"},
+              "quant-compare": {"q3_construction", "q3_construction_sha256",
+                                "q3_hardware", "q3_hardware_sha256",
+                                "iu4_construction", "iu4_construction_sha256",
+                                "output"},
               "bakeoff": {"candidate_manifest", "candidate_manifest_sha256", "phase",
                            "phase_request", "phase_request_sha256"},
           }
@@ -296,6 +307,16 @@ jobs:
                   "candidate_intent_payload_base64": nested,
                   "candidate_intent_payload_sha256": nested_sha,
                   "candidate_intent_output": absolute("intent_output"),
+              })
+          elif operation == "quant-compare":
+              result.update({
+                  "q3_construction": absolute("q3_construction"),
+                  "q3_construction_sha256": digest("q3_construction_sha256"),
+                  "q3_hardware": absolute("q3_hardware"),
+                  "q3_hardware_sha256": digest("q3_hardware_sha256"),
+                  "iu4_construction": absolute("iu4_construction"),
+                  "iu4_construction_sha256": digest("iu4_construction_sha256"),
+                  "comparison_output": absolute("output"),
               })
           else:
               phase = scalar("phase")
@@ -468,6 +489,27 @@ jobs:
       mode: build-candidate
       operation_request: ${{ needs.qwen-call-candidate-plan.outputs.operation_request }}
       operation_request_sha256: ${{ needs.qwen-call-candidate-plan.outputs.operation_request_sha256 }}
+    secrets: inherit
+
+  qwen-call-quant-compare:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'quant-compare'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/qwen-q3-iu4-compare.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      q3_construction: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction }}
+      q3_construction_sha256: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction_sha256 }}
+      q3_hardware: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware }}
+      q3_hardware_sha256: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware_sha256 }}
+      iu4_construction: ${{ needs.qwen-dispatch-envelope.outputs.iu4_construction }}
+      iu4_construction_sha256: ${{ needs.qwen-dispatch-envelope.outputs.iu4_construction_sha256 }}
+      output: ${{ needs.qwen-dispatch-envelope.outputs.comparison_output }}
     secrets: inherit
 
   qwen-plan-q3-first-token:

@@ -25,6 +25,7 @@ REQUEST_BRIDGE = ROOT / ".github/workflows/qwen-gfx1151-request-bridge.yml"
 DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 Q3_FIRST_TOKEN_PLAN = ROOT / ".github/workflows/qwen-q3-first-token-plan.yml"
 Q3_FIRST_TOKEN = ROOT / ".github/workflows/qwen-q3-first-token.yml"
+Q3_IU4_COMPARE = ROOT / ".github/workflows/qwen-q3-iu4-compare.yml"
 Q3_FIRST_TOKEN_EVIDENCE = ROOT / "scripts/qwen_first_token_evidence.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
@@ -857,7 +858,8 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                      (ROOT / ".github/workflows/qwen-quality-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-candidate-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6),
-                                     (Q3_FIRST_TOKEN_PLAN, 1), (Q3_FIRST_TOKEN, 4)):
+                                     (Q3_FIRST_TOKEN_PLAN, 1), (Q3_FIRST_TOKEN, 4),
+                                     (Q3_IU4_COMPARE, 8)):
             called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:|\npermissions:)",
                                path.read_text(encoding="utf-8"), re.S)
             self.assertIsNotNone(called)
@@ -879,6 +881,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-gfx1151-bakeoff.yml",
             "qwen-q3-first-token-plan.yml",
             "qwen-q3-first-token.yml",
+            "qwen-q3-iu4-compare.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
@@ -1065,6 +1068,31 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             self.assertIn("candidate_intent_output=/var/tmp/ember-", emitted)
 
             output.unlink()
+            comparison = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "quant-compare",
+                "inputs": {
+                    "q3_construction": "/var/tmp/ember-qwen3.8-flash-next/q3.json",
+                    "q3_construction_sha256": "c" * 64,
+                    "q3_hardware": "/var/tmp/ember-qwen3.8-flash-next/q3-hardware.json",
+                    "q3_hardware_sha256": "d" * 64,
+                    "iu4_construction": "/var/tmp/ember-qwen3.8-flash-next/iu4.json",
+                    "iu4_construction_sha256": "e" * 64,
+                    "output": ("/var/tmp/ember-qwen3.8-flash-next/artifacts/"
+                               "qwen-workset/evidence/comparisons/q3-iu4-test"),
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_comparison = invoke(comparison)
+            self.assertEqual(accepted_comparison.returncode, 0,
+                             accepted_comparison.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=quant-compare\n", emitted)
+            self.assertIn("q3_hardware_sha256=" + "d" * 64 + "\n", emitted)
+            self.assertIn("comparison_output=/var/tmp/ember-", emitted)
+
+            output.unlink()
             invalid = dict(valid)
             invalid["deletes"] = True
             rejected = invoke(invalid)
@@ -1150,6 +1178,39 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("construction_descriptor:", construct)
         self.assertIn("steps.construction_descriptor.outputs.path", construct)
         self.assertIn("steps.construction_descriptor.outputs.sha256", construct)
+
+    def test_matched_quant_comparison_lane_is_nonpublishing_and_bounded(self) -> None:
+        body = Q3_IU4_COMPARE.read_text(encoding="utf-8")
+        ruby = shutil.which("ruby")
+        if ruby:
+            subprocess.run(
+                [ruby, "-e", "require 'yaml'; YAML.parse_file(ARGV[0])",
+                 str(Q3_IU4_COMPARE)], check=True,
+            )
+        for index, block in enumerate(workflow_run_blocks(body)):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            shell = subprocess.run(
+                ["bash", "-n"], input=neutral, text=True, capture_output=True,
+            )
+            self.assertEqual(shell.returncode, 0,
+                             f"comparison run block {index}: {shell.stderr}")
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, f"comparison-{index}-heredoc.py", "exec")
+        self.assertIn("scripts/qwen_quant_comparison.py validate-arm --arm q3", body)
+        self.assertIn("scripts/qwen_quant_comparison.py validate-pair", body)
+        self.assertLess(body.index("validate-arm --arm q3"),
+                        body.index("scripts/qwen_real_weight_gate.sh"))
+        self.assertEqual(body.count("scripts/qwen_real_weight_gate.sh"), 1)
+        self.assertIn("--measurement-only --out-dir", body)
+        self.assertIn("--mtp-depth 3", body)
+        self.assertIn("q3-vs-iu4-hardware-comparison.json", body)
+        self.assertIn("Selection allowed: `false`", body)
+        self.assertIn("actions/attest@", body)
+        self.assertIn("actions/upload-artifact@", body)
+        self.assertNotIn("ember-gpu-lock acquire", body)
+        self.assertNotIn("ember-cert-production stop", body)
+        self.assertNotIn("calibrate_gpu_counters", body)
+        self.assertIn("qwen-call-quant-compare:", DISPATCHER.read_text(encoding="utf-8"))
 
     def test_candidate_reuse_rebinds_runtime_without_changing_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -32,6 +32,9 @@ import qwen_bakeoff as bakeoff  # noqa: E402
 
 CONTRACT_SCHEMA = "ember.qwen3.8.hardware-benchmark-contract.v1"
 COMPARISON_SCHEMA = "ember.qwen3.8.q3-iu4-hardware-comparison.v1"
+BINDING_SCHEMA = "ember.qwen3.8.quant-benchmark-binding.v1"
+ARM_EVIDENCE_SCHEMA = "ember.qwen3.8.quant-arm-evidence-binding.v1"
+PAIR_BINDING_SCHEMA = "ember.qwen3.8.q3-iu4-construction-pair.v1"
 HARDWARE_SCHEMA = "ember.qwen3.8.real-weight-gate.v2"
 KERNEL_RUNTIME_SCHEMA = "ember.qwen3.8.w4a8-dispatch-evidence.v1"
 KERNEL_BUILD_SCHEMA = "ember.qwen3.8.w4a8-build-evidence.v1"
@@ -348,6 +351,52 @@ def _construction(path: Path, digest: str, expected_arm: str,
     }
 
 
+def make_binding(construction: dict[str, Any]) -> dict[str, Any]:
+    descriptor = construction["descriptor"]
+    build = construction["build"]
+    rows = (descriptor.get("artifacts") or {}).get("shards")
+    runtime = (descriptor.get("images") or {}).get("runtime") or {}
+    if not isinstance(rows, list) or not rows:
+        raise ComparisonError("construction has no ordered model inventory")
+    live = [*rows, construction["mtp"]]
+    for index, row in enumerate(live):
+        path = Path(str(row.get("path", "")))
+        if (not path.is_absolute() or path.is_symlink() or not path.is_file()
+                or path.stat().st_size != row.get("size_bytes")):
+            raise ComparisonError(f"live benchmark artifact {index} differs")
+    return {
+        "schema": BINDING_SCHEMA,
+        "status": "complete",
+        "candidate_id": descriptor["candidate_id"],
+        "quantization_arm": descriptor["quantization_arm"],
+        "construction": {
+            "path": construction["descriptor_path"],
+            "sha256": construction["descriptor_sha256"],
+        },
+        "model": {
+            "path": rows[0]["path"],
+            "sha256": rows[0]["sha256"],
+            "ordered_shards": rows,
+            "total_bytes": sum(row["size_bytes"] for row in rows),
+        },
+        "build_record": {
+            "path": construction["build_path"],
+            "sha256": descriptor["build_record"]["sha256"],
+        },
+        "mtp": {
+            "path": construction["mtp"]["path"],
+            "sha256": construction["mtp"]["sha256"],
+            "size_bytes": construction["mtp"]["size_bytes"],
+            "matrix_quant_contract": MATCHED_MTP_CONTRACT,
+            "depth": 3,
+        },
+        "runtime": runtime,
+        "compute_mode": build["compute_mode"],
+        "w4a4_enabled": build["w4a4_enabled"],
+        "publishes": False,
+    }
+
+
 def _exact_path_descriptor(value: Any, base: Path, label: str) -> Path:
     if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
         raise ComparisonError(f"{label} descriptor is malformed")
@@ -514,8 +563,43 @@ def _finite(value: Any, label: str) -> float:
     return float(value)
 
 
-def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any],
-                    iu4_construction: dict[str, Any], iu4_hardware: dict[str, Any]) -> dict[str, Any]:
+def validate_arm_mode(expected_arm: str, hardware: dict[str, Any]) -> None:
+    kernel = (hardware["value"].get("kernel_runtime") or {}).get(
+        "candidate_kernel_capability")
+    mode = (hardware["value"].get("timing_kernel_mode") or {}).get(
+        "configured_mmq_mode")
+    if expected_arm == Q3_ARM:
+        if (kernel != "no_eligible_rocmi4_mmq"
+                or mode != "not_applicable_no_eligible_rocmi4_mmq"):
+            raise ComparisonError("Q3 arm did not use its exact no-ROCMI4 runtime mode")
+    elif (kernel != "rocmi4_dense_and_routed"
+          or mode not in {"w4a8_iu4_register_pack", "w4a8_iu4_prepack"}):
+        raise ComparisonError("IU4 arm did not use one exact W4A8 IU4 runtime mode")
+
+
+def make_arm_evidence_binding(construction: dict[str, Any],
+                              hardware: dict[str, Any]) -> dict[str, Any]:
+    expected_arm = construction["descriptor"]["quantization_arm"]
+    validate_arm_mode(expected_arm, hardware)
+    facts = hardware["facts"]
+    return {
+        "schema": ARM_EVIDENCE_SCHEMA,
+        "status": "complete",
+        "construction": make_binding(construction),
+        "hardware": {"path": hardware["path"], "sha256": hardware["sha256"]},
+        "benchmark_contract_sha256": hardware["contract"]["identity_sha256"],
+        "runtime_identity": hardware["runtime_identity"],
+        "observations": {
+            "prefill_tps_samples": facts["prefill_tps_samples"],
+            "decode_tps_samples": facts["decode_tps_samples"],
+            "resources": facts["resources"],
+        },
+        "publishes": False,
+    }
+
+
+def matched_construction_identity(q3_construction: dict[str, Any],
+                                  iu4_construction: dict[str, Any]) -> dict[str, Any]:
     q3_desc = q3_construction["descriptor"]
     iu4_desc = iu4_construction["descriptor"]
     q3_build = q3_construction["build"]
@@ -537,30 +621,52 @@ def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any]
         "sha256", "size_bytes", "matrix_quant_contract")}
     iu4_mtp = {key: iu4_construction["mtp"].get(key) for key in (
         "sha256", "size_bytes", "matrix_quant_contract")}
+    q3_runtime = {
+        "runtime_revision": q3_desc.get("runtime_revision"),
+        "images": (q3_desc.get("images") or {}).get("runtime"),
+    }
+    iu4_runtime = {
+        "runtime_revision": iu4_desc.get("runtime_revision"),
+        "images": (iu4_desc.get("images") or {}).get("runtime"),
+    }
     if q3_source != iu4_source:
         raise ComparisonError("Q3 and IU4 do not share one BF16/intervention source identity")
     if q3_mtp != iu4_mtp:
         raise ComparisonError("Q3 and IU4 do not use one exact FAST MTP companion")
+    if q3_runtime != iu4_runtime:
+        raise ComparisonError("Q3 and IU4 constructions do not use one exact runtime")
+    if q3_desc.get("candidate_id") == iu4_desc.get("candidate_id"):
+        raise ComparisonError("Q3 and IU4 candidate identities must be distinct")
+    return {"source": q3_source, "mtp": {**q3_mtp, "depth": 3},
+            "runtime": q3_runtime}
+
+
+def make_pair_binding(q3_construction: dict[str, Any],
+                      iu4_construction: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": PAIR_BINDING_SCHEMA,
+        "status": "complete",
+        "matched_identity": matched_construction_identity(
+            q3_construction, iu4_construction),
+        "q3": make_binding(q3_construction),
+        "iu4": make_binding(iu4_construction),
+        "publishes": False,
+        "selection_allowed": False,
+    }
+
+
+def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any],
+                    iu4_construction: dict[str, Any], iu4_hardware: dict[str, Any]) -> dict[str, Any]:
+    q3_desc = q3_construction["descriptor"]
+    iu4_desc = iu4_construction["descriptor"]
+    construction_identity = matched_construction_identity(
+        q3_construction, iu4_construction)
     if q3_hardware["runtime_identity"] != iu4_hardware["runtime_identity"]:
         raise ComparisonError("Q3 and IU4 do not use one exact runtime engine/image")
     if q3_hardware["contract"] != iu4_hardware["contract"]:
         raise ComparisonError("Q3 and IU4 do not use one exact benchmark workload contract")
-    if q3_desc.get("candidate_id") == iu4_desc.get("candidate_id"):
-        raise ComparisonError("Q3 and IU4 candidate identities must be distinct")
-    q3_kernel = (q3_hardware["value"].get("kernel_runtime") or {}).get(
-        "candidate_kernel_capability")
-    q3_mode = (q3_hardware["value"].get("timing_kernel_mode") or {}).get(
-        "configured_mmq_mode")
-    iu4_kernel = (iu4_hardware["value"].get("kernel_runtime") or {}).get(
-        "candidate_kernel_capability")
-    iu4_mode = (iu4_hardware["value"].get("timing_kernel_mode") or {}).get(
-        "configured_mmq_mode")
-    if (q3_kernel != "no_eligible_rocmi4_mmq"
-            or q3_mode != "not_applicable_no_eligible_rocmi4_mmq"):
-        raise ComparisonError("Q3 arm did not use its exact no-ROCMI4 runtime mode")
-    if (iu4_kernel != "rocmi4_dense_and_routed"
-            or iu4_mode not in {"w4a8_iu4_register_pack", "w4a8_iu4_prepack"}):
-        raise ComparisonError("IU4 arm did not use one exact W4A8 IU4 runtime mode")
+    validate_arm_mode(Q3_ARM, q3_hardware)
+    validate_arm_mode(IU4_ARM, iu4_hardware)
     q3_facts = q3_hardware["facts"]
     iu4_facts = iu4_hardware["facts"]
 
@@ -608,8 +714,8 @@ def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any]
         deltas[f"iu4_vs_q3_{field}_percent"] = (
             delta * 100.0 / left if left != 0 else None)
     matched = {
-        "source": q3_source,
-        "mtp": {**q3_mtp, "depth": 3},
+        "source": construction_identity["source"],
+        "mtp": construction_identity["mtp"],
         "runtime": q3_hardware["runtime_identity"],
         "benchmark_contract_sha256": q3_hardware["contract"]["identity_sha256"],
     }
@@ -657,6 +763,23 @@ def parser() -> argparse.ArgumentParser:
     derive.add_argument("--benchmark-driver", type=Path, required=True)
     derive.add_argument("--gate-driver", type=Path, required=True)
     derive.add_argument("--output", type=Path, required=True)
+    inspect = commands.add_parser("inspect-construction")
+    inspect.add_argument("--arm", choices=("q3", "iu4"), required=True)
+    inspect.add_argument("--construction", type=Path, required=True)
+    inspect.add_argument("--construction-sha256", required=True)
+    inspect.add_argument("--output", type=Path, required=True)
+    validate = commands.add_parser("validate-arm")
+    validate.add_argument("--arm", choices=("q3", "iu4"), required=True)
+    validate.add_argument("--construction", type=Path, required=True)
+    validate.add_argument("--construction-sha256", required=True)
+    validate.add_argument("--hardware", type=Path, required=True)
+    validate.add_argument("--hardware-sha256", required=True)
+    validate.add_argument("--output", type=Path, required=True)
+    pair = commands.add_parser("validate-pair")
+    for arm in ("q3", "iu4"):
+        pair.add_argument(f"--{arm}-construction", type=Path, required=True)
+        pair.add_argument(f"--{arm}-construction-sha256", required=True)
+    pair.add_argument("--output", type=Path, required=True)
     compare = commands.add_parser("compare")
     for arm in ("q3", "iu4"):
         compare.add_argument(f"--{arm}-construction", type=Path, required=True)
@@ -673,6 +796,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "derive-contract":
             output = derive_contract(
                 args.timing, args.benchmark_driver, args.gate_driver)
+        elif args.command == "inspect-construction":
+            expected = Q3_ARM if args.arm == "q3" else IU4_ARM
+            output = make_binding(_construction(
+                args.construction, args.construction_sha256,
+                expected, args.arm.upper()))
+        elif args.command == "validate-arm":
+            expected = Q3_ARM if args.arm == "q3" else IU4_ARM
+            construction = _construction(
+                args.construction, args.construction_sha256,
+                expected, args.arm.upper())
+            output = make_arm_evidence_binding(
+                construction, validate_hardware(
+                    args.hardware, args.hardware_sha256,
+                    construction, args.arm.upper()))
+        elif args.command == "validate-pair":
+            output = make_pair_binding(
+                _construction(args.q3_construction,
+                              args.q3_construction_sha256, Q3_ARM, "Q3"),
+                _construction(args.iu4_construction,
+                              args.iu4_construction_sha256, IU4_ARM, "IU4"))
         else:
             q3_construction = _construction(
                 args.q3_construction, args.q3_construction_sha256, Q3_ARM, "Q3")

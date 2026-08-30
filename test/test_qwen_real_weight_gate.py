@@ -575,6 +575,50 @@ def restore_reconstructable():
             iu4_construction, iu4_hardware = make_arm(
                 "iu4", quant_comparison.IU4_ARM, (421.0, 422.0, 423.0),
                 (41.0, 42.0, 43.0), "rocmi4_dense_and_routed")
+            q3_evidence_path = root / "q3-arm-evidence.json"
+            validated = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"),
+                "validate-arm", "--arm", "q3",
+                "--construction", str(q3_construction),
+                "--construction-sha256", digest(q3_construction),
+                "--hardware", str(q3_hardware),
+                "--hardware-sha256", digest(q3_hardware),
+                "--output", str(q3_evidence_path),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(validated.returncode, 0, validated.stderr)
+            q3_evidence = json.loads(q3_evidence_path.read_text(encoding="utf-8"))
+            self.assertEqual(q3_evidence["schema"],
+                             quant_comparison.ARM_EVIDENCE_SCHEMA)
+            self.assertEqual(q3_evidence["construction"]["quantization_arm"],
+                             quant_comparison.Q3_ARM)
+            binding_path = root / "iu4-binding.json"
+            inspected = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"),
+                "inspect-construction", "--arm", "iu4",
+                "--construction", str(iu4_construction),
+                "--construction-sha256", digest(iu4_construction),
+                "--output", str(binding_path),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            self.assertEqual(binding["schema"], quant_comparison.BINDING_SCHEMA)
+            self.assertEqual(binding["quantization_arm"], quant_comparison.IU4_ARM)
+            self.assertEqual(binding["mtp"]["depth"], 3)
+            self.assertFalse(binding["w4a4_enabled"])
+            pair_path = root / "construction-pair.json"
+            paired = subprocess.run([
+                sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"),
+                "validate-pair",
+                "--q3-construction", str(q3_construction),
+                "--q3-construction-sha256", digest(q3_construction),
+                "--iu4-construction", str(iu4_construction),
+                "--iu4-construction-sha256", digest(iu4_construction),
+                "--output", str(pair_path),
+            ], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual(paired.returncode, 0, paired.stderr)
+            pair = json.loads(pair_path.read_text(encoding="utf-8"))
+            self.assertEqual(pair["schema"], quant_comparison.PAIR_BINDING_SCHEMA)
+            self.assertFalse(pair["selection_allowed"])
             output = root / "comparison.json"
             result = subprocess.run([
                 sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"), "compare",

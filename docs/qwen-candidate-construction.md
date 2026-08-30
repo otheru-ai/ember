@@ -200,9 +200,11 @@ through the default-branch `gfx1151-certify.yml` entrypoint at the exact target
 ref with `release_version=qwen-dispatch`. Its two additional inputs carry one
 strict-base64 `ember.qwen3.8.branch-dispatch-envelope.v1` object and the
 SHA-256 of its decoded bytes. The envelope binds the same full Ember revision,
-one of `request`, `construct`, or `retire`, exact operation inputs, and explicit
-non-publication/deletion lifecycle. Three static local reusable-workflow calls
-then select the operation. GitHub resolves a `./.github/workflows/...` reusable
+one declared Qwen operation, exact operation inputs, and explicit
+non-publication/deletion lifecycle. Static local reusable-workflow calls then
+select request persistence, construction, retirement, vision, quality,
+candidate planning, bakeoff, or matched quant comparison. GitHub resolves a
+`./.github/workflows/...` reusable
 workflow from the caller's same commit, so branch logic cannot drift from the
 `commit_sha` supplied to the dispatcher. Retirement keeps its literal
 `RETIRE_CAPTURED_STOCK_SHARDS` acknowledgement inside the digest-bound
@@ -242,6 +244,14 @@ directly to the reusable constructor. No operator has to copy an intervention
 pathname or digest out of the protected runner, and a format build cannot
 choose a different intervention than the attested sweep winner. Planning
 acquires no GPU and neither publishes nor deletes anything.
+
+After a complete Q3 hardware run and construction of the matched IU4 format
+arm, the `quant-compare` operation accepts exact path/SHA-256 pairs for both
+construction descriptors and the retained Q3 hardware record plus a new fixed-
+root output directory. The reusable comparison workflow validates all Q3
+evidence before taking the GPU, runs the ordinary full real-weight gate once
+for IU4, and emits and attests a descriptive comparison. It cannot select or
+publish a release bundle.
 
 Activation capture run `33122633860` predates the sealed-vision recipe's
 addition of the `vision_vocab` companion requirement. Candidate planning

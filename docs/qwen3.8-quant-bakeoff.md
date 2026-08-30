@@ -387,6 +387,14 @@ and IU4-minus-Q3 deltas. Its output carries
 understanding the format tradeoff, but only the fresh-process ABBAAB gate may
 select the release bundle.
 
+The supported hardware entrypoint is the `quant-compare` branch-dispatch
+operation routed to `qwen-q3-iu4-compare.yml`. Its digest-bound envelope names
+the retained Q3 construction and hardware evidence, the newly constructed IU4
+descriptor, and one new directory beneath the fixed comparison root. The lane
+validates the complete Q3 prerequisite before acquiring the GPU, runs exactly
+one IU4 full gate, attests both the IU4 hardware record and comparison, and
+uploads bounded evidence. It does not rerun Q3 or calibration.
+
 `unlock-final` accepts only the sealed MTP-depth ledger; it does not accept the
 intermediate format ledger. The checked recipe uses schema v3, result evidence
 v4, candidate assessments v2, and ledgers v3 so earlier records cannot be
