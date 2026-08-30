@@ -1908,6 +1908,15 @@ static void ggml_cuda_op_mul_mat(
             const bool src1_on_device = id == src1_ctx->device;
             const bool  dst_on_device = id == dst_ctx->device;
             const int64_t row_diff = dev[id].row_high - dev[id].row_low;
+            // Quantizers already accept a row stride.  A view that is packed
+            // within each row but has non-canonical outer strides therefore
+            // does not need to be materialized into src1_ddf first.  Qwen's
+            // frontier graphs create exactly these dim-2/dim-3 slices; copying
+            // every slice immediately before quantizing it dominated the HIP
+            // dispatch stream.  Keep the general copy path for inner-strided
+            // views and for peer-device input.
+            const bool quantize_src1_direct = quantize_src1 && src1_on_device &&
+                !src1_is_contiguous && src1->nb[0] == sizeof(float);
 
             ggml_cuda_set_device(id);
             cudaStream_t stream = ctx.stream(id, is);
@@ -1931,7 +1940,9 @@ static void ggml_cuda_op_mul_mat(
                 // for split tensors the data begins at i0 == i0_offset_low
                 const size_t nbytes_src0_matrix = ne01*ne00*src0_ts / src0_bs;
                 char  *  src0_dd_i =  dev[id].src0_dd + ((i03/i03_divisor)*ne02 + (i02/i02_divisor)) * nbytes_src0_matrix;
-                float * src1_ddf_i = dev[id].src1_ddf + (i0*ne11 + src1_col_0) * ne10;
+                float * src1_ddf_i = quantize_src1_direct
+                    ? (float *) ((char *) src1->data + i03*nb13 + i02*nb12 + src1_col_0*nb11)
+                    : dev[id].src1_ddf + (i0*ne11 + src1_col_0) * ne10;
                 char  * src1_ddq_i = dev[id].src1_ddq +  src1_ddq_i_offset;
                 float *   dst_dd_i =   dev[id].dst_dd + (i0*ne1  + src1_col_0) * (dst_on_device ? ne0 : row_diff);
 
@@ -1962,7 +1973,7 @@ static void ggml_cuda_op_mul_mat(
                                                             src1_ncols*ne10*sizeof(float), stream));
                         }
                     }
-                } else if (src1_on_device && !src1_is_contiguous) {
+                } else if (src1_on_device && !src1_is_contiguous && !quantize_src1_direct) {
                     CUDA_CHECK(ggml_cuda_cpy_tensor_2d(
                                 src1_ddf_i, src1, i03, i02, src1_col_0, src1_col_0+src1_ncols, stream));
                 } else {
@@ -1970,8 +1981,12 @@ static void ggml_cuda_op_mul_mat(
                 }
 
                 if (quantize_src1 && !src1_is_contiguous) {
+                    const int64_t src1_row_stride = quantize_src1_direct
+                        ? nb11/(int64_t) sizeof(float) : ne10;
                     quantize_src1(
-                        src1_ddf_i, nullptr, src1_ddq_i, src0->type, ne10, ne10, ne11*ne10, ne12*ne11*ne10,
+                        src1_ddf_i, nullptr, src1_ddq_i, src0->type, ne10,
+                        src1_row_stride, src1_ncols*src1_row_stride,
+                        src1_ncols*src1_row_stride,
                         src1_padded_col_size, src1_ncols, 1, 1, stream);
                     CUDA_CHECK(cudaGetLastError());
                 }
