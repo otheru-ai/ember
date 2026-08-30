@@ -100,6 +100,25 @@ class HarnessContractTests(unittest.TestCase):
         self.assertTrue(report["FETCH_SIZE"]["certified"])
         self.assertTrue(report["WRITE_SIZE"]["certified"])
 
+    def test_counter_calibration_accepts_cache_line_transaction_units(self):
+        rows = []
+        for counter, scale in (("FETCH_SIZE", 64), ("WRITE_SIZE", 128)):
+            for value in (1_000_000, 2_000_000, 4_000_000):
+                rows.append({"counter": counter, "expected_bytes": value * scale,
+                             "traffic": value + 17, "baseline": 17})
+        with tempfile.TemporaryDirectory() as tmp:
+            samples = pathlib.Path(tmp) / "samples.jsonl"
+            samples.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            result = subprocess.run(
+                [sys.executable, str(CALIBRATE_PY), str(samples)],
+                text=True, capture_output=True, check=True,
+            )
+        report = json.loads(result.stdout)
+        self.assertEqual(report["FETCH_SIZE"]["candidate_unit"], "64b")
+        self.assertEqual(report["WRITE_SIZE"]["candidate_unit"], "128b")
+        self.assertTrue(report["FETCH_SIZE"]["certified"])
+        self.assertTrue(report["WRITE_SIZE"]["certified"])
+
     def test_counter_calibration_requires_both_counters(self):
         with tempfile.TemporaryDirectory() as tmp:
             samples = pathlib.Path(tmp) / "samples.jsonl"

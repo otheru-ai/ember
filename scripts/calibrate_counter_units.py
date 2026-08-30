@@ -17,7 +17,12 @@ import statistics
 import sys
 
 
-SCALES = {"b": 1, "kb": 1024, "mb": 1024 * 1024}
+# ROCm counters may report bytes, fixed-size memory transactions, or aggregate
+# KiB/MiB values depending on the counter definition and release.  gfx1151's
+# ROCm 10 FETCH_SIZE/WRITE_SIZE measurements use 64-byte and 128-byte
+# transactions respectively; keep the legacy aggregate candidates so the same
+# harness remains useful across releases.
+SCALES = {"b": 1, "64b": 64, "128b": 128, "kb": 1024, "mb": 1024 * 1024}
 
 
 def fit(rows: list[dict[str, float]], counter: str) -> dict[str, object]:
