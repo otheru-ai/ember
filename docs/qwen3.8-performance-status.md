@@ -280,8 +280,33 @@ Eight things are eliminated from the fail branch:
 | MoE routing across the batch | tested, `b5d0bb5` |
 | GDN batch versus sequential | pre-existing test at n=3 and n=16 |
 
-Not yet read: the `hc_mix` / `hc_combine` inject arithmetic across rows, and
-any per-layer expert state in `run_moe`.
+HC turned out to be covered by an existing test:
+`test_qwen4exp_frontier.cpp:297-312` runs `hc_eval` at n=3 against the scalar
+reference including injection values, then at n=1 against the first row of the
+same reference. `hc_mix` and `hc_mix_rows` differ only in the `n_tokens`
+argument and the row-major slice of `raw_injection` (`:1418-1422`);
+`hc_combine` (`:151-158`) is per-row scalar arithmetic, identical in both.
+
+### Coverage is now complete at width 3
+
+| subsystem | test | comparison |
+|---|---|---|
+| HC mixer | `:297-312` | n=3 and n=1 vs scalar reference, incl. injections |
+| GDN | `:478-545`, `:547+` | n=3 and n=16 vs sequential scalar, incl. conv and recurrent state |
+| MoE | `b5d0bb5` | widths 2, 3, 5, 6, 16 vs q1 |
+| dense projections | `99dcc3d` | widths 1-6, 16, 17 vs q1 |
+| PLE | — | code-identical chain, read and verified |
+| QSA | — | `run_qsa_batch` is row-serial; it differs from `run_qsa` only in taking the five projections through `matmul_rows`, which is `dense_eval_rows` |
+
+**Every batched subsystem agrees with serial on the CPU backend at the failing
+width.** So a green mask 31 puts the defect in the batched HIP kernels at type
+101 specifically — and note that `dense_eval_rows(3)` versus `dense_eval(1)` is
+exactly the q5-graph-versus-q1-graph comparison, which passes on CPU/F32 and
+which at ceiling 5 is MMVQ on both sides. A green result therefore means two
+MMVQ paths disagreeing by six logits, which is not a rounding story either.
+
+A red mask 31 puts it outside `qwen4exp_batch_layer` entirely — prefill
+chunking, the embedding path, or state carried across the batch boundary.
 
 The two composition asymmetries found (`mrope_positions`, `cur_pos`) are real
 but inert. They stay filed as guard-correctness issues for after the blocker —
