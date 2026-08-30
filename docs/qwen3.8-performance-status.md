@@ -292,18 +292,33 @@ argument and the row-major slice of `raw_injection` (`:1418-1422`);
 | subsystem | test | comparison |
 |---|---|---|
 | HC mixer | `:297-312` | n=3 and n=1 vs scalar reference, incl. injections |
-| GDN | `:478-545`, `:547+` | n=3 and n=16 vs sequential scalar, incl. conv and recurrent state |
+| GDN | `:478-545`, `:547+` | n=3 and n=16 vs sequential scalar, incl. conv and recurrent state — but at spec `{4, 6, 2, 4, 4}`, **head_dim 4** |
 | MoE | `b5d0bb5` | widths 2, 3, 5, 6, 16 vs q1 |
 | dense projections | `99dcc3d` | widths 1-6, 16, 17 vs q1 |
 | PLE | — | code-identical chain, read and verified |
 | QSA | — | `run_qsa_batch` is row-serial; it differs from `run_qsa` only in taking the five projections through `matmul_rows`, which is `dense_eval_rows` |
 
 **Every batched subsystem agrees with serial on the CPU backend at the failing
-width.** So a green mask 31 puts the defect in the batched HIP kernels at type
-101 specifically — and note that `dense_eval_rows(3)` versus `dense_eval(1)` is
-exactly the q5-graph-versus-q1-graph comparison, which passes on CPU/F32 and
-which at ceiling 5 is MMVQ on both sides. A green result therefore means two
-MMVQ paths disagreeing by six logits, which is not a rounding story either.
+width** — with one dimensional caveat that matters. Production GDN is
+`n_heads = 48`, `n_key_heads = 16`, `head_dim = 128`
+(`qwen4exp_runtime.cpp:21-23`); the CPU test runs `head_dim = 4`. It covers the
+recurrence algebra and the state chaining, not the 128-wide HIP
+`gated_delta_net.cu` kernel. Raised by grok (msg 273) and verified.
+
+So a green mask 31 does **not** collapse straight to the type-101 dense path.
+The next step there is `DFLASH_QWEN_BATCH_Q1_MASK=4`, which forces GDN and QSA
+onto q=1 graphs while leaving MoE, HC and PLE batched:
+
+- green → the defect is in the Attention bit, and it splits again between GDN's
+  128-wide HIP kernel and QSA's projections (which *are* the dense path)
+- red → not Attention, and the type-101 dense MoE/HC path is implicated despite
+  the CPU tests
+
+Worth knowing in advance either way: `dense_eval_rows(3)` versus
+`dense_eval(1)` is exactly the q5-graph-versus-q1-graph comparison, it passes
+on CPU/F32, and at ceiling 5 both sides are MMVQ on HIP. So if the trail does
+end at the dense path, it means two MMVQ paths disagreeing by six logits, which
+is not a rounding story either.
 
 A red mask 31 puts it outside `qwen4exp_batch_layer` entirely — prefill
 chunking, the embedding path, or state carried across the batch boundary.
