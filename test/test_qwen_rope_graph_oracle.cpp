@@ -58,6 +58,23 @@ std::vector<float> patterned_head(int seed) {
     return v;
 }
 
+// The YaRN inverse frequency for pair k, computed in double. Mirrors
+// qwen_yarn.c:66-84, which does the same arithmetic in float.
+double exact_inv_freq(const ember_qwen_yarn_config & cfg, int k) {
+    const double base =
+        1.0 / std::pow(static_cast<double>(cfg.theta),
+                       static_cast<double>(2 * k) / EMBER_QWEN_ROPE_DIM);
+    if (!cfg.enabled) return base;
+    const double den =
+        static_cast<double>(cfg.correction_high - cfg.correction_low);
+    double ramp = den == 0.0
+        ? 1.0
+        : (static_cast<double>(k) - cfg.correction_low) / den;
+    ramp = std::fmin(1.0, std::fmax(0.0, ramp));
+    const double extrapolation = 1.0 - ramp;
+    return (base / cfg.factor) * (1.0 - extrapolation) + base * extrapolation;
+}
+
 // c[k] = theta_scale^k / inv_freq[k]. ggml divides its own angle by c, so this
 // ratio is what reproduces our table. Identity (all 1.0) when YaRN is off.
 std::vector<float> freq_factor_ratio(const ember_qwen_yarn_config & cfg) {
@@ -185,6 +202,41 @@ std::vector<float> reference_rope(const ember_qwen_yarn_config & cfg,
     return out;
 }
 
+// Exact reference: inverse frequencies rebuilt in double with no recurrence,
+// and the angle reduced modulo 2pi before cos/sin. Both the host scalar and
+// ggml's CPU kernel are f32; this is what they are approximating.
+//
+// The HIP kernel computes theta in double (`rope_theta_fp64`, rope.cu:15-29,
+// added because freq_base = 1e7 is past the f32 precision wall) and defers the
+// reduction to just before cosf/sinf, so it tracks *this* curve, not the two
+// f32 ones. That is why the oracle's tight tolerance is claimed only at short
+// positions -- see the long-pos cases in main().
+std::vector<float> exact_rope(const ember_qwen_yarn_config & cfg,
+                              const std::vector<float> & input,
+                              const std::vector<int32_t> & pos_t) {
+    std::vector<float> out = input;
+    for (int token = 0; token < kTokens; ++token) {
+        const double pos = static_cast<double>(pos_t[static_cast<size_t>(token)]);
+        for (int head = 0; head < kHeads; ++head) {
+            float * slot =
+                out.data() +
+                (static_cast<size_t>(token) * kHeads + head) * kHeadDim;
+            for (int k = 0; k < EMBER_QWEN_ROPE_FREQ_COUNT; ++k) {
+                const double angle =
+                    std::fmod(pos * exact_inv_freq(cfg, k), 2.0 * 3.14159265358979323846);
+                const double c = std::cos(angle) * cfg.attention_factor;
+                const double sn = std::sin(angle) * cfg.attention_factor;
+                const double x = slot[k];
+                const double y = slot[k + EMBER_QWEN_ROPE_FREQ_COUNT];
+                slot[k] = static_cast<float>(x * c - y * sn);
+                slot[k + EMBER_QWEN_ROPE_FREQ_COUNT] =
+                    static_cast<float>(x * sn + y * c);
+            }
+        }
+    }
+    return out;
+}
+
 float max_abs_delta(const std::vector<float> & a,
                     const std::vector<float> & b) {
     float worst = 0.0f;
@@ -195,8 +247,11 @@ float max_abs_delta(const std::vector<float> & a,
     return worst;
 }
 
+// `tolerance` is per-case because the agreement is position-dependent: both
+// the host scalar and ggml's CPU kernel are f32, and their errors grow with
+// position. See the long-pos cases in main().
 void run_case(bool enable_yarn, int32_t max_context, Path path,
-              const char * label) {
+              int32_t base_position, float tolerance, const char * label) {
     ember_qwen_yarn_config cfg;
     char err[192];
     if (!ember_qwen_yarn_configure(enable_yarn, max_context, &cfg, err,
@@ -216,7 +271,8 @@ void run_case(bool enable_yarn, int32_t max_context, Path path,
 
     // Text M-RoPE: the three axes carry the same scalar; lane 3 is zero, as
     // llama.cpp writes for text tokens.
-    const std::vector<int32_t> pos_t{5, 6, 7};
+    const std::vector<int32_t> pos_t{base_position, base_position + 1,
+                                     base_position + 2};
     std::vector<int32_t> pos(4U * kTokens, 0);
     for (int axis = 0; axis < 3; ++axis) {
         for (int token = 0; token < kTokens; ++token) {
@@ -233,10 +289,15 @@ void run_case(bool enable_yarn, int32_t max_context, Path path,
     const std::vector<float> expected =
         reference_rope(cfg, input, pos_t, pos_t, pos_t);
 
+    const std::vector<float> exact = exact_rope(cfg, input, pos_t);
     const float delta = max_abs_delta(graph_out, expected);
-    std::fprintf(stderr, "[rope-oracle] case=%s max_abs_delta=%.9g\n", label,
-                 static_cast<double>(delta));
-    CHECK(delta < 1.0e-5f,
+    std::fprintf(stderr,
+                 "[rope-oracle] case=%-22s pos=%-7d graph_vs_host=%.6g "
+                 "graph_vs_exact=%.6g host_vs_exact=%.6g\n",
+                 label, base_position, static_cast<double>(delta),
+                 static_cast<double>(max_abs_delta(graph_out, exact)),
+                 static_cast<double>(max_abs_delta(expected, exact)));
+    CHECK(delta < tolerance,
           "graph rope_multi matches ember_qwen_yarn_apply");
 
     // Elements [64, 256) must be untouched: partial rotary width is 64. This
@@ -302,9 +363,24 @@ int main() {
     // Native: YaRN off, so the freq-factor table is the identity and the
     // ext-factor path does not apply (ggml skips the ramp when ext_factor is
     // 0, which is what freq_scale = 1 with factor 1 already gives).
-    run_case(false, 262144, Path::FreqFactors, "native/freq-factors");
-    run_case(true, 1000000, Path::FreqFactors, "yarn4/freq-factors");
-    run_case(true, 1000000, Path::ExtFactor, "yarn4/ext-factor");
+    run_case(false, 262144, Path::FreqFactors, 5, 1.0e-5f,
+             "native/freq-factors");
+    run_case(true, 1000000, Path::FreqFactors, 5, 1.0e-5f,
+             "yarn4/freq-factors");
+    run_case(true, 1000000, Path::ExtFactor, 5, 1.0e-5f,
+             "yarn4/ext-factor");
+
+    // Long positions. The mapping is unchanged, but both sides are f32 and
+    // ggml's CPU kernel additionally iterates `theta *= theta_scale` across
+    // the 32 pairs (ops.cpp:5721-5729) where the host calls powf directly, so
+    // their f32 errors are differently distributed and the tight tolerance no
+    // longer holds. The printed graph_vs_exact / host_vs_exact columns are the
+    // point of these cases: they say which f32 path is closer to truth, and
+    // how far from the fp64 curve the HIP kernel will be tracking.
+    run_case(false, 262144, Path::FreqFactors, 262141, 5.0e-2f,
+             "native/long-pos");
+    run_case(true, 1000000, Path::ExtFactor, 262141, 5.0e-2f,
+             "yarn4/long-pos");
 
     std::fprintf(stderr, "%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
