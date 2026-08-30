@@ -672,11 +672,18 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
     using dflash::common::Qwen4ExpFrontierGdnGraph;
     using dflash::common::Qwen4ExpFrontierGdnSpec;
     using dflash::common::Qwen4ExpFrontierGdnWeights;
-    const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 16, 4, 1.0e-6f};
+    // head_dim MUST be 128. `launch_gated_delta_net` switches on S_v
+    // (gated_delta_net.cu:397-440) and head_dim 16 lands in
+    // `gated_delta_net_cuda<16, ...>`, a different template instantiation that
+    // shares no code with the S_v=128 path production runs. A control at any
+    // other head_dim proves nothing about the kernel we ship.
+    const Qwen4ExpFrontierGdnSpec spec{8, 4, 2, 128, 4, 1.0e-6f};
     const int channels = (2 * spec.n_key_heads + spec.n_heads) * spec.head_dim;
     const int core_values = spec.n_heads * spec.head_dim;
     CHECK(channels % 128 == 0,
           "GDN control spec satisfies the HIP SSM_CONV channel predicate");
+    CHECK(spec.head_dim == 128,
+          "GDN control runs the S_v=128 kernel production dispatches to");
 
     ggml_backend_t backend = ggml_backend_cpu_init();
     if (!backend) {
@@ -684,7 +691,7 @@ static void test_gdn_batch_at_hip_legal_conv_channels() {
         return;
     }
     ggml_init_params params{};
-    params.mem_size = 512U * 1024U;
+    params.mem_size = 4U * 1024U * 1024U;
     params.no_alloc = true;
     ggml_context * ctx = ggml_init(params);
     if (!ctx) {
