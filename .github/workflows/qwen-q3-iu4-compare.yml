@@ -191,6 +191,25 @@ jobs:
           printf 'IU4_HARDWARE=%s\nIU4_HARDWARE_SHA256=%s\n' \
             "$evidence" "$(sha256sum "$evidence" | awk '{print $1}')" >>"$GITHUB_ENV"
 
+      - name: Surface retained IU4 benchmark diagnostics
+        if: ${{ failure() && env.COMPARISON_OUTPUT != '' }}
+        run: |
+          set -euo pipefail
+          for name in differential.json \
+                      differential-decode-comparison.json \
+                      differential-dispatch-server.log \
+                      timing.jsonl \
+                      timing-server.log \
+                      timing-server-failure.log; do
+            path="$COMPARISON_OUTPUT/iu4-full-benchmark/$name"
+            if [[ -f "$path" && ! -L "$path" ]]; then
+              printf '===== %s (%s bytes) =====\n' "$name" "$(stat -c %s -- "$path")"
+              tail -n 1024 -- "$path"
+            else
+              printf '===== %s was not created =====\n' "$name"
+            fi
+          done
+
       - name: Compare matched Q3 and IU4 evidence
         run: |
           set -euo pipefail
@@ -255,9 +274,22 @@ jobs:
           import json, pathlib, sys
           value=json.loads(pathlib.Path(sys.argv[1]).read_text())
           q3=value["arms"]["q3"]["metrics"]; iu4=value["arms"]["iu4"]["metrics"]
+          delta=value["deltas"]
           print("## Qwen matched Q3 versus IU4 benchmark completed\n")
           print(f"Q3 prefill peak / decode median: `{q3['prefill_peak_tps']} / {q3['decode_median_tps']} tok/s`")
           print(f"IU4 prefill peak / decode median: `{iu4['prefill_peak_tps']} / {iu4['decode_median_tps']} tok/s`")
+          for label, metrics in (("Q3", q3), ("IU4", iu4)):
+              print(f"{label} clean MTP acceptance: `{metrics['clean_mtp_accept_rate']}`")
+              print(f"{label} same-process AR / warm MTP: "
+                    f"`{metrics['differential_ar_tps']} / "
+                    f"{metrics['differential_warm_mtp_tps']} tok/s`")
+              print(f"{label} differential MTP acceptance / speedup: "
+                    f"`{metrics['differential_mtp_accept_rate']} / "
+                    f"{metrics['differential_warm_mtp_speedup_vs_ar']}x`")
+          print("IU4−Q3 decode median / AR / warm-MTP deltas: "
+                f"`{delta['iu4_minus_q3_decode_median_tps']} / "
+                f"{delta['iu4_minus_q3_differential_ar_tps']} / "
+                f"{delta['iu4_minus_q3_differential_warm_mtp_tps']} tok/s`")
           print(f"Comparison evidence: `{sys.argv[1]}`")
           print("Selection allowed: `false` — the counterbalanced bakeoff remains authoritative.")
           PY
