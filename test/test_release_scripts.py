@@ -13,6 +13,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BUILD_SH = ROOT / "scripts" / "build.sh"
 ENTRYPOINT = ROOT / "docker" / "entrypoint.sh"
 COLLECT_RUNTIME = ROOT / "docker" / "collect-runtime.sh"
 DOCKERFILE = ROOT / "docker" / "Dockerfile"
@@ -112,12 +113,21 @@ class ReleaseScriptTests(unittest.TestCase):
 
     def test_shell_syntax(self) -> None:
         for script in (
+            BUILD_SH,
             ENTRYPOINT,
             COLLECT_RUNTIME,
             PREFLIGHT,
             SMOKE,
         ):
             subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_rocm_build_binds_revision_before_entering_container(self) -> None:
+        script = BUILD_SH.read_text()
+        self.assertIn('REVISION="$(git -C "$REPO" rev-parse HEAD)"', script)
+        self.assertIn('[[ "$REVISION" =~ ^[0-9a-f]{40}$ ]]', script)
+        self.assertIn('-DEMBER_CONFIGURED_GIT_HEAD="${REVISION}"', script)
+        self.assertIn(
+            "--target ember-dflash ember-gguf-quantize -j ${JOBS}", script)
 
     def test_local_compose_builds_use_host_network(self) -> None:
         # The supported WSL host intentionally disables Docker's unusable

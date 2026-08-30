@@ -19,8 +19,13 @@ set -euo pipefail
 IMAGE="${EMBER_IMAGE:-ember-rocm:10.0-dev}"
 JOBS="${JOBS:-$(nproc)}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REVISION="$(git -C "$REPO" rev-parse HEAD)"
+[[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "[build] could not resolve one exact Ember revision" >&2
+  exit 1
+}
 
-echo "[build] repo=$REPO image=$IMAGE jobs=$JOBS"
+echo "[build] repo=$REPO revision=$REVISION image=$IMAGE jobs=$JOBS"
 
 docker run --rm \
   -v "$REPO":/ember -w /ember \
@@ -29,8 +34,10 @@ docker run --rm \
     set -euo pipefail
     cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
-      -DEMBER_ENGINE=ON
-    cmake --build /ember/build-rocm -j ${JOBS}
+      -DEMBER_ENGINE=ON \
+      -DEMBER_CONFIGURED_GIT_HEAD="${REVISION}"
+    cmake --build /ember/build-rocm \
+      --target ember-dflash ember-gguf-quantize -j ${JOBS}
   "
 
 echo "[build] done -> $REPO/build-rocm/ember-dflash"
