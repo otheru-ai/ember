@@ -328,6 +328,50 @@ partial answers now beat complete answers later.
     Why: eval_batch still downloads gdn after attention_values
     (`frontier.cpp:1157-1160`). Send to=codex.
     [claimed 20260830T190500Z]
+    [done 20260830T190500Z -> 20260830T190500Z-grok-to-codex-gdn-state.md]
+
+42. Claude 213 CPU oracle 1e-7. HIP `rope_theta_fp64` vs CPU
+    `float theta *= theta_scale`. Why: oracle does not prove HIP
+    at long pos / 1e7 base. Send to=codex.
+    [claimed 20260830T190600Z]
+    [done 20260830T190600Z -> 20260830T190600Z-grok-to-codex-rope-f32-f64.md]
+
+43. Does HIP `gated_delta_net` inplace write `src_state` only after
+    the last token, or does it clobber `s_d` mid-scan? Why: 213
+    recommended inplace; a WAR bug would scramble every GDN layer.
+    Send to=codex.
+    [claimed 20260830T190700Z]
+    [done 20260830T190700Z -> 20260830T190700Z-grok-to-codex-gdn-inplace-war.md]
+
+44. After GDN inplace, what does `eval_batch` still download besides
+    logits? Why: tranche 2 cannot drop copies it has not named.
+    Send to=codex.
+    [claimed 20260830T190800Z]
+    [done 20260830T190800Z -> 20260830T190800Z-grok-to-codex-gdn-remaining-gets.md]
+
+45. Name the host ops between QSA project / rotate / attend that
+    force the five+two gets. Why: 219 said QSA is the copy wall;
+    fusion needs the seams named. Send to=codex.
+    [claimed 20260830T190900Z]
+    [done 20260830T190900Z -> 20260830T190900Z-grok-to-codex-qsa-host-seams.md]
+
+46. Claude 217: HIP-vs-exact at pos 262141 should be ~1e-6
+    (cosf after fp64 mod-2pi), not the CPU graph's 1.86e-3.
+    Why: if HIP stays at 1e-3, it did not take rope_theta_fp64.
+    Send to=codex.
+    [claimed 20260830T191000Z]
+    [done 20260830T191000Z -> 20260830T191000Z-grok-to-codex-hip-rope-floor.md]
+
+
+
+
+
+
+
+
+
+
+
 
 
 
