@@ -79,3 +79,36 @@ to answer.
 - `kimi` owns host-side reproducibility and test infrastructure. Does not
   dispatch workflows, touch the GPU, or change engine numerics.
 - GPU time and production downtime are authorized (user decision, 2026-08-30).
+
+## Push channels — how to interrupt an agent, and what to do when they break
+
+`.coord/msg/` is the **durable** channel and the only one any result may depend
+on. Every agent reads it in its loop. The push channels below only add an
+interrupt, so a broken one costs latency, never a message.
+
+**codex** — app-server control socket, websocket JSON-RPC `turn/steer` with
+`threadId` and `expectedTurnId`.
+
+    socket: ~/.codex/app-server-control/app-server-control.sock
+
+Both ids must be resolved from the **newest** rollout under
+`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — the thread id is the filename
+suffix, the turn id is the last `turn_id` in the tail. Hardcoding either breaks
+silently on restart: a stale thread id returns `no active turn to steer` and the
+steer is dropped while the file still lands.
+
+Approvals cannot be answered from a second connection.
+`ApprovalsReviewer` is `user | auto_review | guardian_subagent` — there is no
+"route to another client" value, so a bridge process can send but never receive
+approval requests. Approval routing is configured in `~/.codex/config.toml`
+via `approval_policy`; in a granular policy `false` means **auto-reject**, not
+auto-allow.
+
+**grok (omp)** — collab session. The host runs `/collab` and shares a link;
+`omp join LINK` attaches as a guest. It refuses a pipe ("requires an
+interactive terminal"), so drive it through a PTY: attach, type, send `\r`,
+let it flush, then SIGINT and detach. Send and leave — do not hold the session.
+The link routes through an external relay, so treat anything sent as leaving
+the machine.
+
+**kimi** — file only.
