@@ -1553,6 +1553,75 @@ int main() {
               "one immutable tensor owns one decoded host cache entry");
         ggml_backend_tensor_set(weights.router, router.data(), 0,
                                 router.size() * sizeof(float));
+
+        // Pad independence, at the widths the HIP differential fails on.
+        //
+        // qwen4exp_frontier.h:104-107 asserts that q2-q5 reuse the q5 graph and
+        // q6-q16 the q16 graph with "zero-padded independent rows", so padding
+        // "cannot change a real row". That is the load-bearing assumption
+        // behind the bounded cache and it has been a comment, not a test.
+        //
+        // This compares each row evaluated inside a padded batch against the
+        // same row evaluated alone at q=1 -- the same comparison the failing
+        // differential makes. It runs on the CPU backend with F32 weights, so
+        // a pass here does not clear the HIP quantized path; it narrows the
+        // search to what differs from this one.
+        const int pad_widths[] = {1, 2, 3, 4, 5, 6, 16, 17};
+        bool pad_independent = true;
+        int first_bad_width = 0;
+        for (int width : pad_widths) {
+            std::vector<float> batched_input;
+            batched_input.reserve(static_cast<size_t>(width) * 4);
+            for (int row = 0; row < width; ++row) {
+                const std::vector<float> row_input{
+                    0.5f + 0.125f * static_cast<float>(row),
+                    -1.25f * static_cast<float>(row % 3 + 1),
+                    0.75f - 0.0625f * static_cast<float>(row),
+                    2.0f * static_cast<float>(row % 5 - 2),
+                };
+                batched_input.insert(batched_input.end(), row_input.begin(),
+                                     row_input.end());
+            }
+
+            std::vector<float> batched;
+            if (!dflash::common::qwen4exp_frontier_dense_eval_rows(
+                    dense_cache, backend, weights.router, batched_input.data(),
+                    4, width, batched, error)) {
+                pad_independent = false;
+                first_bad_width = width;
+                break;
+            }
+
+            for (int row = 0; row < width && pad_independent; ++row) {
+                std::vector<float> alone;
+                if (!dflash::common::qwen4exp_frontier_dense_eval(
+                        dense_cache, backend, weights.router,
+                        batched_input.data() + static_cast<size_t>(row) * 4, 4,
+                        1, alone, error)) {
+                    pad_independent = false;
+                    first_bad_width = width;
+                    break;
+                }
+                const std::vector<float> from_batch(
+                    batched.begin() + static_cast<std::ptrdiff_t>(row) * 5,
+                    batched.begin() + static_cast<std::ptrdiff_t>(row + 1) * 5);
+                if (!close_vectors(from_batch, alone)) {
+                    pad_independent = false;
+                    first_bad_width = width;
+                    std::fprintf(stderr,
+                                 "[pad-independence] width %d row %d differs "
+                                 "from its q1 evaluation\n",
+                                 width, row);
+                }
+            }
+        }
+        if (!pad_independent) {
+            std::fprintf(stderr,
+                         "[pad-independence] first failing width %d\n",
+                         first_bad_width);
+        }
+        CHECK(pad_independent,
+              "every real row in a zero-padded batch equals its q1 evaluation");
     }
     dflash::common::qwen4exp_frontier_dense_cache_destroy(dense_cache);
     dense_cache = nullptr;
