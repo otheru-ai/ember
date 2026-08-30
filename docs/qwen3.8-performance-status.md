@@ -227,6 +227,52 @@ The `copyBuffer` row was annotated as an undercount, on the theory that
 trace. Every copy takes the 1D packed branch of `ggml_cuda_cpy_tensor_2d`
 (`engine/ggml/src/ggml-cuda/ggml-cuda.cu:1478-1510`). The row is complete.
 
+## Open correctness blocker — ROOT CAUSE FOUND
+
+**`sum_rows` selects its reduction tree from the row count, so q1 and batched
+cannot agree by construction.**
+
+`sumrows.cu`, `ggml_cuda_op_sum_rows`:
+
+    if ((nrows / nsm) < 2) { block_dims(512) }               // A
+    else { ...; block_dims(ncols < 1024 ? 32 : 128) }        // B
+
+and `reduce_rows_f32` (`reduce_rows.cuh:109-144`) strides by exactly that
+width: `for (int i = col; i < ncols; ) { ... i += blockDim.x; }`.
+
+`exact_l2_norm`'s `ggml_sum_rows` sees `ncols = head_dim = 128` and
+`nrows = n_key_heads * n_tokens = 16 * n_tokens`. On gfx1151's 20 CUs:
+
+| | nrows | branch | blockDim | per thread | tree |
+|---|---|---|---|---|---|
+| q1 | 16 | A | 512 | one element, lanes 128-511 add zero | butterfly over 512 |
+| q3 | 48 | B | 32 | four elements accumulated serially, then summed | butterfly over 32 |
+
+Two different accumulation trees over the same 128 values. Neither is wrong;
+they simply cannot round the same.
+
+This accounts for the whole measured signature (codex 354): convolved, decay
+and beta exact — none of them touch `sum_rows`; normalized **Q and K both**
+non-exact — both go through `exact_l2_norm`, at `1.1920929e-07` and
+`5.96046448e-08`; recurrent state non-exact afterward, since K is a direct
+recurrence input; and nothing visible at q1, where there is no second shape to
+disagree with.
+
+It also explains why the double-precision control tied on HIP at
+`6.24756508e-09` for both orders: the recurrence was never the seam.
+
+**A comment helped hide this.** `sumrows.cu` says "The per-row reduction is
+unchanged, so this is bit-identical to the uncapped launch" — true, and about
+the *grid cap*. It says nothing about the block-width branch two lines below,
+which is where the shape-dependence lives. Correct it with the fix.
+
+**Fix**: make the block width a function of `ncols` only. One line, and q1 and
+batched then take the same tree. Narrowing it to the `exact_l2_norm` call sites
+would leave the hazard live for every other `sum_rows` whose row count crosses
+the threshold — a general q1-versus-batched hazard, not a GDN one. Changing the
+release criterion is now clearly wrong: the shape-dependence is gratuitous,
+nothing forces a reduction tree to depend on row count.
+
 ## Open correctness blocker
 
 > **A release-criteria question is now attached to this section and belongs to
