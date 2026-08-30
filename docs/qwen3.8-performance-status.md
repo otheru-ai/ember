@@ -346,6 +346,39 @@ the generic MMVQ path in the green run. If the generic-versus-`unroll2` kernel
 difference were the cause, that run could not have been exact. It was the
 strongest-looking lead available and it was wrong.
 
+Codex 325 then ran the corrected combination sweep: **every bit-4 superset is
+exact and every bit-4-absent mask is red.** The isolation holds across the
+whole sweep, not just the single mask-4 run.
+
+### Where in GDN, from source
+
+The suspect kernel is `gated_delta_net_cuda_grouped_cols`
+(`engine/ggml/src/ggml-cuda/gated_delta_net.cu:190`), a hardware specialization
+`static_assert`ed to `S_v == 128`, 16-lane subgroups and 4 columns per
+subgroup. Selection conditions, read at `:388-440`:
+
+    use_grouped_cols = FORCE || (!DISABLE && !ampere_nvidia)
+    taken when:  S_v == 128  &&  !KDA  &&  (AMD || NVIDIA >= Ampere)
+
+Qwen is `S_v = 128` with `KDA` false on an AMD device, so **the grouped kernel
+is always selected on gfx1151, at every width** — it is not the discriminator
+between n=2 and n=3, and a story about kernel *selection* will not explain the
+failure. What it does mean is that the generic `gated_delta_net_cuda` path is
+never exercised in production here, so its equivalence to the grouped kernel is
+untested at every width.
+
+`DFLASH_GDN_NO_GROUPED_COLS` already exists as a runtime guard, so that A/B
+costs no code change.
+
+Structural comparison of the two, since it bounds what the difference can be:
+both carry state in registers across the token loop and write back once at the
+end, both advance `attn_data` by `S_v * H` per token, and neither uses
+`__syncthreads` — they are warp-level with `__shfl_sync`. The visible
+divergence is the decay term: the generic kernel applies `expf(g_t[i])`
+per row, supporting a KDA vector, while the grouped kernel broadcasts a single
+scalar `g_val` from lane 0. That is consistent with grouped being gated on
+`!KDA`, and it is not width-dependent.
+
 It also resolves the 2-versus-3 residual that broke every other hypothesis.
 GDN is the one **recurrent** subsystem: a chunked recurrent kernel failing at
 n=3 while passing at n=2 needs no width-keyed story at all, only a tile or
