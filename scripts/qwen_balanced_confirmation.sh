@@ -15,6 +15,7 @@ PLAN=""; PLAN_SHA256=""; ACCUMULATOR=""; ACCUMULATOR_SHA256=""
 EVIDENCE_ROOT=""; IMAGE=""; IMAGE_DIGEST=""; RUNTIME_REVISION=""
 ENGINE_BINARY_SHA256=""; FORMAT_SHA256=""; OUT_DIR=""
 BINARY=/usr/local/bin/ember-dflash; PORT=18087; DRY_RUN=0
+INTEGRITY_CACHE=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json
 CONTAINER=""; LOCK_HELD=0; MASKED=0; RESTORE_SERVICE=0
 PRODUCTION_STATE_CAPTURED=0; PRODUCTION_WAS_ACTIVE=0
 
@@ -37,6 +38,7 @@ required:
 options:
   --binary ABS_PATH             default /usr/local/bin/ember-dflash
   --port N                      default 18087
+  --integrity-cache ABS_PATH    persistent identity-bound verification cache
   --dry-run                     print a side-effect-free plan
 EOF
 }
@@ -54,6 +56,7 @@ while (( $# )); do
     --engine-binary-sha256) ENGINE_BINARY_SHA256="${2:?--engine-binary-sha256 needs a value}"; shift 2 ;;
     --tensor-format-contract-sha256) FORMAT_SHA256="${2:?--tensor-format-contract-sha256 needs a value}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a path}"; shift 2 ;;
+    --integrity-cache) INTEGRITY_CACHE="${2:?--integrity-cache needs a path}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --port) PORT="${2:?--port needs a value}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -68,7 +71,8 @@ done
    -n "$ENGINE_BINARY_SHA256" && -n "$FORMAT_SHA256" && -n "$OUT_DIR" ]] ||
   die "all plan/accumulator/runtime/evidence arguments are required"
 [[ "$PLAN" = /* && "$ACCUMULATOR" = /* && "$EVIDENCE_ROOT" = /* &&
-   "$OUT_DIR" = /* && "$BINARY" = /* ]] || die "all paths must be absolute"
+   "$OUT_DIR" = /* && "$BINARY" = /* && "$INTEGRITY_CACHE" = /* ]] ||
+  die "all paths must be absolute"
 [[ "$PLAN_SHA256" =~ ^[0-9a-f]{64}$ && "$ACCUMULATOR_SHA256" =~ ^[0-9a-f]{64}$ &&
    "$ENGINE_BINARY_SHA256" =~ ^[0-9a-f]{64}$ && "$FORMAT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
   die "file/runtime SHA-256 values must be lowercase hexadecimal"
@@ -84,6 +88,7 @@ plan:
   server lifecycle    six fresh processes (one per slot)
   workload per slot   one exact 2074-token prefill + one 256-token decode
   samples per arm     exactly 3
+  integrity cache     $INTEGRITY_CACHE
   timing              clean; profiling/counters forbidden during confirmation
   production          fixed GPU lock plus stop/mask and unconditional restore
   publication         forbidden
@@ -218,31 +223,22 @@ fi
 PRODUCTION_STATE_CAPTURED=1
 sudo -n "$PRODUCTION" mask; MASKED=1
 
-log "verifying both finalist shard inventories with O_DIRECT after quiescing production"
-for inventory in "$OUT_DIR"/inventory-*.json; do
-  python3 - "$inventory" <<'PY'
-import hashlib,json,subprocess,sys
-for row in json.load(open(sys.argv[1],encoding="utf-8"))["shards"]:
-    digest=hashlib.sha256()
-    process=subprocess.Popen(["dd",f"if={row['path']}","iflag=direct","bs=8M","status=none"],stdout=subprocess.PIPE)
-    assert process.stdout is not None
-    while chunk:=process.stdout.read(8*1024*1024): digest.update(chunk)
-    if process.wait()!=0 or digest.hexdigest()!=row["sha256"]:
-        raise SystemExit(f"O_DIRECT finalist shard integrity failed: {row['path']}")
-PY
-done
-python3 - "$RUNNER_PLAN" <<'PY'
-import hashlib,json,subprocess,sys
+log "verifying both finalists through the shared identity-bound cache"
+PYTHONPATH="$REPO/scripts" python3 - "$OUT_DIR" "$RUNNER_PLAN" \
+    "$INTEGRITY_CACHE" <<'PY'
+import json,pathlib,sys
+from qwen_integrity_cache import IntegrityCache
+root=pathlib.Path(sys.argv[1]); plan=json.load(open(sys.argv[2],encoding="utf-8"))
+rows=[]
+for inventory in sorted(root.glob("inventory-*.json")):
+    rows.extend((row["path"],row["sha256"])
+                for row in json.load(open(inventory,encoding="utf-8"))["shards"])
+rows.extend((row["mtp"],row["mtp_sha256"]) for row in plan["bindings"])
 seen=set()
-for row in json.load(open(sys.argv[1],encoding="utf-8"))["bindings"]:
-    path=row["mtp"]
-    if path in seen: continue
-    seen.add(path); digest=hashlib.sha256()
-    process=subprocess.Popen(["dd",f"if={path}","iflag=direct","bs=8M","status=none"],stdout=subprocess.PIPE)
-    assert process.stdout is not None
-    while chunk:=process.stdout.read(8*1024*1024): digest.update(chunk)
-    if process.wait()!=0 or digest.hexdigest()!=row["mtp_sha256"]:
-        raise SystemExit(f"O_DIRECT finalist MTP integrity failed: {path}")
+with IntegrityCache(pathlib.Path(sys.argv[3])) as cache:
+    for path,digest in rows:
+        if path in seen: continue
+        seen.add(path); cache.verify(pathlib.Path(path),digest)
 PY
 
 mapfile -t ORDER < <(python3 - "$RUNNER_PLAN" <<'PY'

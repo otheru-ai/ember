@@ -261,12 +261,16 @@ class QwenVisionHardwareGateTest(unittest.TestCase):
         for required in ('trap cleanup EXIT INT TERM', 'sudo -n "$GPU_LOCK" acquire',
                          'sudo -n "$PRODUCTION" stop', 'sudo -n "$PRODUCTION" mask',
                          'sudo -n "$PRODUCTION" unmask', 'sudo -n "$PRODUCTION" start',
-                         '--user "$runner_uid:$runner_gid"', 'iflag=direct',
+                         '--user "$runner_uid:$runner_gid"',
+                         'from qwen_integrity_cache import IntegrityCache',
+                         '--integrity-cache',
                          'DFLASH_QWEN_VISION_CAPTURE_PREFIX', 'printf idle',
                          'DFLASH_QWEN_VISION_TEXT_MODEL=/gate/vision-vocab.gguf',
                          'printf settled', 'restore_exclusive || die'):
             self.assertIn(required, body)
         self.assertIn('-v "$(dirname "$MODEL"):/gate/model:ro"', body)
+        self.assertLess(body.index('sudo -n "$GPU_LOCK" acquire'),
+                        body.index("from qwen_integrity_cache import IntegrityCache"))
         self.assertIn('/gate/vision-vocab.gguf /gate/mmproj.gguf', body)
         self.assertNotIn("hf upload", body)
         subprocess.run(["bash", "-n", str(GATE)], check=True)

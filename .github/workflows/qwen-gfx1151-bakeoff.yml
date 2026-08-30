@@ -584,6 +584,7 @@ jobs:
             --model "${candidate[0]}" --model-sha256 "${candidate[1]}" \
             --model-build-record "$BUILD_RECORD" --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
             --bakeoff-manifest "$legacy_manifest" --bakeoff-manifest-sha256 "$legacy_sha" \
+            --integrity-cache "$QWEN_WORKSET_ROOT/evidence/.artifact-integrity-v1.json" \
             --candidate-id "$CANDIDATE_ROW_ID" --out-dir "$target_dir"
           scripts/qwen_real_weight_gate.sh \
             --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
@@ -591,6 +592,7 @@ jobs:
             --model "${candidate[0]}" --model-sha256 "${candidate[1]}" \
             --model-build-record "$BUILD_RECORD" --model-build-record-sha256 "$BUILD_RECORD_SHA256" \
             --mtp "${candidate[2]}" --mtp-sha256 "${candidate[3]}" --mtp-depth "${candidate[4]}" \
+            --integrity-cache "$QWEN_WORKSET_ROOT/evidence/.artifact-integrity-v1.json" \
             --measurement-only --out-dir "$mtp_dir"
 
           measurement="$QWEN_BAKEOFF_EVIDENCE_ROOT/$QWEN_BAKEOFF_PHASE-$CANDIDATE_ROW_ID-measurement-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
@@ -825,6 +827,7 @@ jobs:
                 --accumulator "$QWEN_CURRENT_ACCUMULATOR" \
                 --accumulator-sha256 "$(sha256sum "$QWEN_CURRENT_ACCUMULATOR" | awk '{print $1}')" \
                 --evidence-root "$QWEN_BAKEOFF_EVIDENCE_ROOT" \
+                --integrity-cache "$QWEN_WORKSET_ROOT/evidence/.artifact-integrity-v1.json" \
                 --image "$RUNTIME_IMAGE" --image-digest "$RUNTIME_IMAGE_DIGEST" \
                 --runtime-revision "$TARGET_SHA" \
                 --engine-binary-sha256 "$RUNTIME_ENGINE_SHA256" \

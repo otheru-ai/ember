@@ -21,6 +21,7 @@ IMAGE=""; IMAGE_DIGEST=""; PROFILE_IMAGE=""; PROFILE_IMAGE_DIGEST=""
 MODEL=""; MODEL_SHA256=""; MODEL_BUILD_RECORD=""; MODEL_BUILD_RECORD_SHA256=""
 BAKEOFF_MANIFEST=""; BAKEOFF_MANIFEST_SHA256=""; CANDIDATE_ID=""
 OUT_DIR=""; BINARY=/usr/local/bin/ember-dflash; PORT=18085; DRY_RUN=0
+INTEGRITY_CACHE=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json
 CONTAINER=""; LOCK_HELD=0; MASKED=0; RESTORE_SERVICE=0
 PRODUCTION_STATE_CAPTURED=0; PRODUCTION_WAS_ACTIVE=0
 
@@ -48,6 +49,7 @@ required:
 options:
   --binary ABS_PATH
   --port N                    default 18085
+  --integrity-cache ABS_PATH  persistent identity-bound verification cache
   --dry-run                   validate syntax and print a side-effect-free plan
 EOF
 }
@@ -65,6 +67,7 @@ while (( $# )); do
     --bakeoff-manifest) BAKEOFF_MANIFEST="${2:?--bakeoff-manifest needs a path}"; shift 2 ;;
     --bakeoff-manifest-sha256) BAKEOFF_MANIFEST_SHA256="${2:?--bakeoff-manifest-sha256 needs a value}"; shift 2 ;;
     --candidate-id) CANDIDATE_ID="${2:?--candidate-id needs a value}"; shift 2 ;;
+    --integrity-cache) INTEGRITY_CACHE="${2:?--integrity-cache needs a path}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a path}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --port) PORT="${2:?--port needs a value}"; shift 2 ;;
@@ -87,8 +90,9 @@ done
 [[ "$BAKEOFF_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "invalid --bakeoff-manifest-sha256"
 [[ "$CANDIDATE_ID" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] || die "invalid --candidate-id"
 [[ "$MODEL" = /* && "$MODEL_BUILD_RECORD" = /* && "$BAKEOFF_MANIFEST" = /* &&
+   "$INTEGRITY_CACHE" = /* &&
    "$OUT_DIR" = /* && "$BINARY" = /* ]] ||
-  die "model, build record, bakeoff manifest, output, and in-image binary paths must be absolute"
+  die "model, build record, bakeoff manifest, integrity cache, output, and in-image binary paths must be absolute"
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )) ||
   die "--port must be 1024..65535"
 
@@ -106,6 +110,7 @@ plan:
   bakeoff manifest    $BAKEOFF_MANIFEST
   bakeoff manifest sha $BAKEOFF_MANIFEST_SHA256
   candidate id        $CANDIDATE_ID
+  integrity cache     $INTEGRITY_CACHE
   evidence            $OUT_DIR
   timing              unprofiled 3x exact-2074 prefill and 3x decode-256
   thresholds reported prefill peak 412.0 tok/s; decode median 39.49 tok/s (not approval)
@@ -147,11 +152,19 @@ HEX = re.compile(r"[0-9a-f]{64}")
 def fail(message):
     raise SystemExit(message)
 
-def exact_file(path_value, expected_sha, expected_bytes=None, label="file"):
+def exact_file(path_value, expected_sha, expected_bytes=None, label="file",
+               defer_content=False):
     path = Path(path_value)
     if not path.is_absolute(): fail(f"{label} path must be absolute")
     before = path.lstat()
     if path.is_symlink() or not path.is_file(): fail(f"{label} must be a regular non-symlink file")
+    if not isinstance(expected_sha, str) or HEX.fullmatch(expected_sha) is None:
+        fail(f"{label} SHA-256 is malformed")
+    if expected_bytes is not None and (expected_bytes != before.st_size
+                                       or isinstance(expected_bytes, bool)):
+        fail(f"{label} byte count mismatch")
+    if defer_content:
+        return {"path": str(path), "bytes": before.st_size, "sha256": expected_sha}
     digest = hashlib.sha256()
     count = 0
     if before.st_size >= 512 * 1024 * 1024:
@@ -171,10 +184,8 @@ def exact_file(path_value, expected_sha, expected_bytes=None, label="file"):
             (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
             (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
         fail(f"{label} changed while hashed")
-    if not isinstance(expected_sha, str) or HEX.fullmatch(expected_sha) is None or digest.hexdigest() != expected_sha:
+    if digest.hexdigest() != expected_sha:
         fail(f"{label} SHA-256 mismatch")
-    if expected_bytes is not None and (expected_bytes != before.st_size or isinstance(expected_bytes, bool)):
-        fail(f"{label} byte count mismatch")
     return {"path": str(path), "bytes": before.st_size, "sha256": expected_sha}
 
 manifest_file = exact_file(manifest_path, manifest_sha, label="bakeoff manifest")
@@ -321,10 +332,15 @@ role_map = {item.get("role"): item for item in companions.get("roles") or []}
 if set(role_map) != {"mtp", "vision_mmproj"}: fail("build-record companion roles are not exact")
 mtp = role_map["mtp"]
 mmproj = role_map["vision_mmproj"]
-mtp_file = exact_file(row["mtp"], row["mtp_sha256"], row["mtp_bytes"], "MTP companion")
+mtp_file = exact_file(row["mtp"], row["mtp_sha256"], row["mtp_bytes"],
+                      "MTP companion", defer_content=True)
 mtp_manifest_file = exact_file(row["mtp_export_manifest"], row["mtp_export_manifest_sha256"], label="MTP export manifest")
-mmproj_file = exact_file(row["vision_mmproj"], row["vision_mmproj_sha256"], row["vision_mmproj_bytes"], "vision mmproj")
-vocab_file = exact_file(row["vision_vocab"], row["vision_vocab_sha256"], row["vision_vocab_bytes"], "vision vocab")
+mmproj_file = exact_file(row["vision_mmproj"], row["vision_mmproj_sha256"],
+                         row["vision_mmproj_bytes"], "vision mmproj",
+                         defer_content=True)
+vocab_file = exact_file(row["vision_vocab"], row["vision_vocab_sha256"],
+                        row["vision_vocab_bytes"], "vision vocab",
+                        defer_content=True)
 if (mtp.get("path") != row["mtp"] or mtp.get("sha256") != row["mtp_sha256"] or
         mtp.get("size_bytes") != row["mtp_bytes"] or
         mtp.get("matrix_quant_contract") != row["mtp_matrix_quant_contract"] or
@@ -478,16 +494,19 @@ fi
 PRODUCTION_STATE_CAPTURED=1
 sudo -n "$PRODUCTION" mask; MASKED=1
 
-log "verifying every ordered target shard through O_DIRECT"
-python3 - "$OUT_DIR/model-inventory.json" <<'PY'
-import hashlib, json, subprocess, sys
-for row in json.load(open(sys.argv[1], encoding="utf-8"))["shards"]:
-    digest = hashlib.sha256()
-    process = subprocess.Popen(["dd", f"if={row['path']}", "iflag=direct", "bs=8M", "status=none"], stdout=subprocess.PIPE)
-    assert process.stdout is not None
-    while chunk := process.stdout.read(8 * 1024 * 1024): digest.update(chunk)
-    if process.wait() != 0 or digest.hexdigest() != row["sha256"]:
-        raise SystemExit(f"O_DIRECT shard integrity failed: {row['path']}")
+log "verifying target and companion bytes through the shared identity-bound cache"
+PYTHONPATH="$REPO/scripts" python3 - "$OUT_DIR/model-inventory.json" \
+    "$OUT_DIR/candidate-binding.json" "$INTEGRITY_CACHE" <<'PY'
+import json, pathlib, sys
+from qwen_integrity_cache import IntegrityCache
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+binding = json.load(open(sys.argv[2], encoding="utf-8"))
+rows = [(row["path"], row["sha256"]) for row in inventory["shards"]]
+rows.extend((binding[name]["path"], binding[name]["sha256"])
+            for name in ("mtp", "vision_mmproj", "vision_vocab"))
+with IntegrityCache(pathlib.Path(sys.argv[3])) as cache:
+    for path, digest in rows:
+        cache.verify(pathlib.Path(path), digest)
 PY
 
 for _ in $(seq 1 60); do

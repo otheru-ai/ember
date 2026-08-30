@@ -13,6 +13,7 @@ IMAGE=""; DEV_IMAGE=""; MODEL=""; MODEL_SHA256=""
 BUILD_RECORD=""; BUILD_RECORD_SHA256=""; MTP=""; MTP_SHA256=""
 MMPROJ=""; MMPROJ_SHA256=""; VISION_VOCAB=""; VISION_VOCAB_SHA256=""
 OUT_DIR=""; MTP_DEPTH=4; PORT=18089; DRY_RUN=0
+INTEGRITY_CACHE=/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json
 CONTAINER=""; LOCK_HELD=0; MASKED=0; RESTORE_SERVICE=0
 PRODUCTION_STATE_CAPTURED=0; PRODUCTION_WAS_ACTIVE=0; SAMPLER_PID=""
 
@@ -28,6 +29,7 @@ usage: scripts/qwen_vision_real_weight_gate.sh [options]
   --mmproj ABS_PATH --mmproj-sha256 HEX
   --vision-vocab ABS_PATH --vision-vocab-sha256 HEX
   --out-dir ABS_NEW_PATH [--port N] [--dry-run]
+  --integrity-cache ABS_PATH          persistent identity-bound verification cache
 EOF
 }
 while (( $# )); do
@@ -42,6 +44,7 @@ while (( $# )); do
     --vision-vocab) VISION_VOCAB="$2"; shift 2;;
     --vision-vocab-sha256) VISION_VOCAB_SHA256="$2"; shift 2;;
     --out-dir) OUT_DIR="$2"; shift 2;; --port) PORT="$2"; shift 2;;
+    --integrity-cache) INTEGRITY_CACHE="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;; -h|--help) usage; exit 0;; *) die "unknown option $1";;
   esac
 done
@@ -51,7 +54,8 @@ done
 for digest in "$MODEL_SHA256" "$BUILD_RECORD_SHA256" "$MTP_SHA256" "$MMPROJ_SHA256" "$VISION_VOCAB_SHA256"; do
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die "all artifact digests must be lowercase SHA-256"
 done
-for path in "$MODEL" "$BUILD_RECORD" "$MTP" "$MMPROJ" "$VISION_VOCAB" "$OUT_DIR"; do
+for path in "$MODEL" "$BUILD_RECORD" "$MTP" "$MMPROJ" "$VISION_VOCAB" \
+            "$OUT_DIR" "$INTEGRITY_CACHE"; do
   [[ "$path" = /* ]] || die "all artifact/evidence paths must be absolute"
 done
 [[ "$MTP_DEPTH" =~ ^[1-4]$ ]] || die "MTP depth must be 1..4"
@@ -67,6 +71,7 @@ plan:
   MTP              $MTP (depth $MTP_DEPTH)
   BF16 mmproj      $MMPROJ
   vocab-only GGUF  $VISION_VOCAB
+  integrity cache  $INTEGRITY_CACHE
   corpus           $CORPUS ($corpus_sha)
   differential     two images, cold/warm float32 atol=1e-5 rtol=1e-5, image-grounded answers
   residency        phase-separated host RSS, amdgpu GTT, and UMA
@@ -172,16 +177,15 @@ actual_gpu_arch="$(docker run --rm "${GPU_ARGS[@]}" --entrypoint /opt/rocm/bin/r
   "$IMAGE" | awk '$1 == "Name:" && $2 ~ /^gfx/ {print $2}' | sort -u)"
 [[ "$actual_gpu_arch" = gfx1151 ]] || die "runtime rocminfo did not measure exactly gfx1151"
 
-python3 - "$OUT_DIR/model-inventory.json" "$MTP" "$MTP_SHA256" "$MMPROJ" "$MMPROJ_SHA256" \
- "$VISION_VOCAB" "$VISION_VOCAB_SHA256" <<'PY'
-import hashlib,json,subprocess,sys
+PYTHONPATH="$REPO/scripts" python3 - "$OUT_DIR/model-inventory.json" \
+ "$MTP" "$MTP_SHA256" "$MMPROJ" "$MMPROJ_SHA256" \
+ "$VISION_VOCAB" "$VISION_VOCAB_SHA256" "$INTEGRITY_CACHE" <<'PY'
+import json,pathlib,sys
+from qwen_integrity_cache import IntegrityCache
 inventory=json.load(open(sys.argv[1]))
 rows=[(r["path"],r["sha256"]) for r in inventory["shards"]]+[(sys.argv[2],sys.argv[3]),(sys.argv[4],sys.argv[5]),(sys.argv[6],sys.argv[7])]
-for path,wanted in rows:
- p=subprocess.Popen(["dd",f"if={path}","iflag=direct","bs=8M","status=none"],stdout=subprocess.PIPE)
- h=hashlib.sha256()
- while block:=p.stdout.read(8*1024*1024): h.update(block)
- if p.wait()!=0 or h.hexdigest()!=wanted: raise SystemExit(f"O_DIRECT identity failed: {path}")
+with IntegrityCache(pathlib.Path(sys.argv[8])) as cache:
+ for path,wanted in rows: cache.verify(pathlib.Path(path),wanted)
 PY
 vision_vocab_metadata_sha="$(python3 - "$VISION_VOCAB" "$REPO/scripts/qwen_quantize.py" <<'PY'
 import importlib.util,sys

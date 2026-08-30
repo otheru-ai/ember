@@ -171,6 +171,17 @@ class QwenQualityWorkflowTest(unittest.TestCase):
         self.assertIn("one or more capture containers could not be removed", body)
         self.assertIn('exit "$restore_failed"', body)
 
+    def test_large_artifacts_share_identity_cache_after_quiesce(self) -> None:
+        body = self.body
+        lock = body.index("ember-gpu-lock acquire")
+        cached = body.index("from qwen_integrity_cache import IntegrityCache")
+        capture = body.index("start_runtime stock")
+        self.assertLess(lock, cached)
+        self.assertLess(cached, capture)
+        self.assertIn("defer_content=True", body)
+        self.assertIn(".artifact-integrity-v1.json", body)
+        self.assertIn('cache.verify(pathlib.Path(path),digest)', body)
+
     def test_exact_attestation_is_retained_and_verified_before_handoff(self) -> None:
         body = self.body
         action = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2"

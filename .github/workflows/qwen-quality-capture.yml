@@ -49,6 +49,7 @@ jobs:
       TARGET_SHA: ${{ inputs.commit_sha }}
       PHASE_DESCRIPTOR: ${{ inputs.phase_descriptor }}
       PHASE_DESCRIPTOR_SHA256: ${{ inputs.phase_descriptor_sha256 }}
+      INTEGRITY_CACHE: /var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/evidence/.artifact-integrity-v1.json
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -78,6 +79,8 @@ jobs:
           command -v dd >/dev/null
           command -v gh >/dev/null
           [[ -r /dev/kfd && -d /dev/dri ]]
+          [[ "$INTEGRITY_CACHE" = /* && -d "$(dirname "$INTEGRITY_CACHE")" &&
+             ! -L "$(dirname "$INTEGRITY_CACHE")" ]]
 
           docker_config="$RUNNER_TEMP/qwen-quality-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -m 700 "$docker_config"
@@ -108,7 +111,8 @@ jobs:
               return (json.dumps(value, ensure_ascii=False, sort_keys=True,
                                   separators=(",", ":")) + "\n").encode()
 
-          def exact_file(value, expected, label, expected_bytes=None):
+          def exact_file(value, expected, label, expected_bytes=None,
+                         defer_content=False):
               if not isinstance(value, str) or not value.startswith("/") or "\0" in value or "\n" in value:
                   fail(f"{label} path must be absolute and single-line")
               if not isinstance(expected, str) or HEX64.fullmatch(expected) is None:
@@ -117,6 +121,11 @@ jobs:
               before = path.lstat()
               if path.is_symlink() or not path.is_file():
                   fail(f"{label} must be a regular non-symlink file")
+              if expected_bytes is not None and (isinstance(expected_bytes, bool)
+                      or expected_bytes != before.st_size):
+                  fail(f"{label} byte count mismatch")
+              if defer_content:
+                  return path
               digest = hashlib.sha256(); count = 0
               if before.st_size >= 512 * 1024 * 1024:
                   process = subprocess.Popen(
@@ -140,9 +149,6 @@ jobs:
                   fail(f"{label} changed while hashed")
               if digest.hexdigest() != expected:
                   fail(f"{label} SHA-256 mismatch")
-              if expected_bytes is not None and (isinstance(expected_bytes, bool)
-                      or expected_bytes != count):
-                  fail(f"{label} byte count mismatch")
               return path
 
           raw = descriptor_path.read_bytes()
@@ -245,7 +251,8 @@ jobs:
                   if not isinstance(item, dict) or set(item) != {"path", "sha256", "bytes"}:
                       fail(f"{variant} shard descriptor differs")
                   path = exact_file(item["path"], item["sha256"],
-                                    f"{variant} shard {index}", item["bytes"])
+                                    f"{variant} shard {index}", item["bytes"],
+                                    defer_content=True)
                   if path in seen: fail(f"{variant} repeats a shard")
                   seen.add(path); identity.append({"index": index, "sha256": item["sha256"],
                                                    "bytes": item["bytes"]})
@@ -263,7 +270,8 @@ jobs:
           if not isinstance(artifact, dict) or set(artifact) != {"path", "sha256", "bytes"}:
               fail("judge artifact descriptor is malformed")
           judge_path = exact_file(artifact["path"], artifact["sha256"],
-                                  "judge artifact", artifact["bytes"])
+                                  "judge artifact", artifact["bytes"],
+                                  defer_content=True)
           if judge.get("settings") != {"temperature": 0, "seed": 7301, "batch_size": 1,
                   "target_only": True, "speculative_decode": False,
                   "required_tool": "submit_verdict"}:
@@ -414,6 +422,23 @@ jobs:
           }
           cleanup_capture() { local rc=$?; trap - EXIT INT TERM; remove_current; exit "$rc"; }
           trap cleanup_capture EXIT INT TERM
+
+          echo 'verifying stock, candidate, and judge bytes through the shared identity-bound cache'
+          PYTHONPATH="$GITHUB_WORKSPACE/scripts" python3 - "$CAPTURE_PLAN" \
+              "$INTEGRITY_CACHE" <<'PY'
+          import json,pathlib,sys
+          from qwen_integrity_cache import IntegrityCache
+          plan=json.load(open(sys.argv[1],encoding="utf-8")); rows=[]
+          for model in plan["models"].values():
+              rows.extend((row["path"],row["sha256"]) for row in model["shards"])
+          judge=plan["judge"]["artifact"]
+          rows.append((judge["path"],judge["sha256"]))
+          seen=set()
+          with IntegrityCache(pathlib.Path(sys.argv[2])) as cache:
+              for path,digest in rows:
+                  if path in seen: continue
+                  seen.add(path); cache.verify(pathlib.Path(path),digest)
+          PY
 
           start_runtime() {
             local role="$1"

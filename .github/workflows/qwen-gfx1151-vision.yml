@@ -214,6 +214,7 @@ jobs:
             --mtp "$MTP" --mtp-sha256 "$MTP_SHA256" --mtp-depth "$MTP_DEPTH" \
             --mmproj "$MMPROJ" --mmproj-sha256 "$MMPROJ_SHA256" \
             --vision-vocab "$VISION_VOCAB" --vision-vocab-sha256 "$VISION_VOCAB_SHA256" \
+            --integrity-cache "$WORKSET_ROOT/evidence/.artifact-integrity-v1.json" \
             --out-dir "$OUTPUT"
           evidence="$OUTPUT/vision-certified.json"
           digest="$(sha256sum "$evidence" | awk '{print $1}')"

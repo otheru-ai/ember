@@ -232,6 +232,11 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
             gate,
         )
         self.assertIn('"profile_report": {"path": "profile/report.json"', gate)
+        self.assertIn("from qwen_integrity_cache import IntegrityCache", gate)
+        self.assertIn('"mtp", "vision_mmproj", "vision_vocab"', gate)
+        self.assertGreaterEqual(gate.count("defer_content=True"), 3)
+        self.assertLess(gate.index('sudo -n "$GPU_LOCK" acquire'),
+                        gate.index("from qwen_integrity_cache import IntegrityCache"))
 
     def test_workflow_yaml_shell_and_python_heredocs_parse(self) -> None:
         body = WORKFLOW.read_text(encoding="utf-8")
@@ -415,7 +420,11 @@ class QwenBakeoffWorkflowTest(unittest.TestCase):
         self.assertIn('"ember.qwen3.8.fresh-server-process.v2"', runner_body)
         self.assertIn('-e DFLASH_QWEN_MTP=/gate/mtp.gguf', runner_body)
         self.assertIn('DFLASH_QWEN_MTP_DEPTH=$mtp_depth', runner_body)
-        self.assertIn('O_DIRECT finalist MTP integrity failed', runner_body)
+        self.assertIn("from qwen_integrity_cache import IntegrityCache", runner_body)
+        self.assertIn("if path in seen: continue", runner_body)
+        self.assertIn("--integrity-cache", runner_body)
+        self.assertLess(runner_body.index('sudo -n "$GPU_LOCK" acquire'),
+                        runner_body.index("from qwen_integrity_cache import IntegrityCache"))
         self.assertIn('--prefix-cache-slots 1', runner_body)
         self.assertIn('process_instance_sha256', BALANCED_SLOT.read_text(encoding="utf-8"))
         slot_body = BALANCED_SLOT.read_text(encoding="utf-8")

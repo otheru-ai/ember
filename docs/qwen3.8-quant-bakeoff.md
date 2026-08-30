@@ -337,6 +337,13 @@ one recognized `w4a8_iu4_register_pack` or `w4a8_iu4_prepack` startup mode, and
 all six slots must agree. Dispatch-evidence environment decisions are cached
 once at process startup so disabled telemetry does not add per-dispatch
 `getenv` overhead to clean timing.
+Target-only, matching-MTP, balanced-finalist, vision, and serial quality gates
+share the same seven-day file-identity cache. An unchanged model, MTP, vision
+companion, or judge artifact is not rehashed between phases or reruns; a cache
+miss or any device/inode/size/mtime/ctime change forces a fresh direct-I/O
+digest only after the gate owns the GPU and production has released UMA. Cache
+hits therefore shorten iteration without weakening the exact artifact binding
+or warming the page cache before model load.
 The six confirmation slots are clean timing only; the screening gate's separate
 profile/counter evidence is retained, and no profiler runs concurrently with
 confirmation timing.
