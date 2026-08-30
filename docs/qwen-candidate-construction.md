@@ -203,7 +203,8 @@ SHA-256 of its decoded bytes. The envelope binds the same full Ember revision,
 one declared Qwen operation, exact operation inputs, and explicit
 non-publication/deletion lifecycle. Static local reusable-workflow calls then
 select request persistence, construction, retirement, vision, quality,
-candidate planning, bakeoff, or matched quant comparison. GitHub resolves a
+candidate planning, matched-IU4 planning, bakeoff, or matched quant
+comparison. GitHub resolves a
 `./.github/workflows/...` reusable
 workflow from the caller's same commit, so branch logic cannot drift from the
 `commit_sha` supplied to the dispatcher. Retirement keeps its literal
@@ -245,10 +246,21 @@ pathname or digest out of the protected runner, and a format build cannot
 choose a different intervention than the attested sweep winner. Planning
 acquires no GPU and neither publishes nor deletes anything.
 
-After a complete Q3 hardware run and construction of the matched IU4 format
-arm, the `quant-compare` operation accepts exact path/SHA-256 pairs for both
-construction descriptors and the retained Q3 hardware record plus a new fixed-
-root output directory. The reusable comparison workflow validates all Q3
+After a complete Q3 hardware run, the `matched-iu4-plan` operation accepts the
+exact Q3 construction and hardware path/SHA-256 pairs, a fresh safe candidate
+id, and a new request pathname under the fixed operation-request root. Its
+non-GPU planner reproduces the captured selection plan, requires the exact
+`rocmi4-q6k-main-rocmfp4-fast-mtp-d3` arm, and refuses stale or incomplete Q3
+evidence by binding the current runtime revision and benchmark/gate driver
+hashes. It emits a nonpublishing, nondeleting request and only then chains to
+the ordinary constructor. Thus IU4 construction cannot begin before the Q3
+benchmark is complete, and the exceptional comparison row is not mislabeled
+as a release-selectable format winner.
+
+After that matched IU4 construction, the separate `quant-compare` operation
+accepts exact path/SHA-256 pairs for both construction descriptors and the
+retained Q3 hardware record plus a new fixed-root output directory. The
+reusable comparison workflow validates all Q3
 evidence before taking the GPU, runs the ordinary full real-weight gate once
 for IU4, and emits and attests a descriptive comparison. It cannot select or
 publish a release bundle.

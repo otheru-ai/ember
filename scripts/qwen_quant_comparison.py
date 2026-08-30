@@ -44,6 +44,13 @@ Q3_ARM = "rocmfp4-fast-matrix-q3-ple-q6k-embedding-head"
 IU4_ARM = "rocmi4-q6k-embedding-head"
 MATCHED_MTP_CONTRACT = "Q4_0_ROCMFP4_FAST"
 HEX64 = re.compile(r"[0-9a-f]{64}")
+HEX40 = re.compile(r"[0-9a-f]{40}")
+SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+REQUEST_ROOT = Path(
+    "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/"
+    "evidence/operation-requests")
+Q3_ROW = "rocmfp4-fast-matrix-q3-ple-main-rocmfp4-fast-mtp-d3"
+IU4_ROW = "rocmi4-q6k-main-rocmfp4-fast-mtp-d3"
 
 
 class ComparisonError(ValueError):
@@ -655,6 +662,68 @@ def make_pair_binding(q3_construction: dict[str, Any],
     }
 
 
+def make_matched_iu4_request(q3_construction: dict[str, Any],
+                             q3_hardware: dict[str, Any], candidate_id: str,
+                             runtime_revision: str, output: Path) -> dict[str, Any]:
+    descriptor = q3_construction["descriptor"]
+    validate_arm_mode(Q3_ARM, q3_hardware)
+    contract_identity = q3_hardware["contract"]["identity"]
+    benchmark_driver = ROOT / "scripts/bench/benchmark.py"
+    gate_driver = ROOT / "scripts/qwen_real_weight_gate.sh"
+    if (SAFE_ID.fullmatch(candidate_id) is None
+            or HEX40.fullmatch(runtime_revision) is None
+            or descriptor.get("row_id") != Q3_ROW
+            or descriptor.get("runtime_revision") != runtime_revision
+            or contract_identity.get("benchmark_driver_sha256") !=
+               sha256_file(benchmark_driver, "current benchmark driver")
+            or contract_identity.get("gate_driver_sha256") !=
+               sha256_file(gate_driver, "current hardware gate driver")):
+        raise ComparisonError(
+            "matched IU4 request is not based on the complete current Q3 proof")
+    if (not output.is_absolute() or output.parent != REQUEST_ROOT
+            or re.fullmatch(r"construction-[A-Za-z0-9._-]{1,80}\.json",
+                            output.name) is None):
+        raise ComparisonError("matched IU4 request output escapes its fixed root")
+    base = Path(q3_construction["descriptor_path"]).parent
+    plan, _ = exact_descriptor(
+        descriptor.get("selection_plan"), base, "Q3 selection plan")
+    try:
+        verified_plan = bakeoff.verify_plan(plan)
+    except (KeyError, OSError, TypeError, ValueError, bakeoff.BakeoffError) as exc:
+        raise ComparisonError(f"Q3 selection plan does not reproduce: {exc}") from exc
+    matches = [
+        row for row in verified_plan.get("format_arms", [])
+        if isinstance(row, dict) and row.get("id") == IU4_ROW
+    ]
+    if (len(matches) != 1 or matches[0].get("quantization_arm") != IU4_ARM
+            or matches[0].get("mtp_matrix_quant_contract") != MATCHED_MTP_CONTRACT
+            or matches[0].get("mtp_depth") != 3):
+        raise ComparisonError("selection plan lacks the exact matched IU4 arm")
+    companions = descriptor["shared_companions"]
+    return {
+        "schema": "ember.qwen3.8.candidate-construction-request.v1",
+        "mode": "build-candidate",
+        "parameters": {
+            "capture_manifest": descriptor["capture"],
+            "cache_manifest": descriptor["bf16_cache"],
+            "companion_rocmi4": companions["Q4_0_ROCMI4"],
+            "companion_fast": companions[MATCHED_MTP_CONTRACT],
+            "selection_plan": descriptor["selection_plan"],
+            "candidate_kind": "intervention",
+            "candidate_stage": "format",
+            "row_id": IU4_ROW,
+            "candidate_id": candidate_id,
+            "intervention_configuration_id": descriptor[
+                "intervention_configuration_id"],
+            "intervention_manifest": descriptor["intervention_manifest"],
+            "quantization_arm": IU4_ARM,
+            "mtp_matrix_quant_contract": MATCHED_MTP_CONTRACT,
+        },
+        "publishes": False,
+        "deletes": False,
+    }
+
+
 def make_comparison(q3_construction: dict[str, Any], q3_hardware: dict[str, Any],
                     iu4_construction: dict[str, Any], iu4_hardware: dict[str, Any]) -> dict[str, Any]:
     q3_desc = q3_construction["descriptor"]
@@ -780,6 +849,14 @@ def parser() -> argparse.ArgumentParser:
         pair.add_argument(f"--{arm}-construction", type=Path, required=True)
         pair.add_argument(f"--{arm}-construction-sha256", required=True)
     pair.add_argument("--output", type=Path, required=True)
+    plan_iu4 = commands.add_parser("plan-matched-iu4")
+    plan_iu4.add_argument("--q3-construction", type=Path, required=True)
+    plan_iu4.add_argument("--q3-construction-sha256", required=True)
+    plan_iu4.add_argument("--q3-hardware", type=Path, required=True)
+    plan_iu4.add_argument("--q3-hardware-sha256", required=True)
+    plan_iu4.add_argument("--candidate-id", required=True)
+    plan_iu4.add_argument("--runtime-revision", required=True)
+    plan_iu4.add_argument("--output", type=Path, required=True)
     compare = commands.add_parser("compare")
     for arm in ("q3", "iu4"):
         compare.add_argument(f"--{arm}-construction", type=Path, required=True)
@@ -816,6 +893,15 @@ def main(argv: list[str] | None = None) -> int:
                               args.q3_construction_sha256, Q3_ARM, "Q3"),
                 _construction(args.iu4_construction,
                               args.iu4_construction_sha256, IU4_ARM, "IU4"))
+        elif args.command == "plan-matched-iu4":
+            q3_construction = _construction(
+                args.q3_construction, args.q3_construction_sha256, Q3_ARM, "Q3")
+            q3_hardware = validate_hardware(
+                args.q3_hardware, args.q3_hardware_sha256,
+                q3_construction, "Q3")
+            output = make_matched_iu4_request(
+                q3_construction, q3_hardware, args.candidate_id,
+                args.runtime_revision, args.output)
         else:
             q3_construction = _construction(
                 args.q3_construction, args.q3_construction_sha256, Q3_ARM, "Q3")
@@ -832,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"qwen_quant_comparison.py: error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({"output": str(args.output.absolute()),
-                      "status": output["status"]}, sort_keys=True))
+                      "status": output.get("status", "complete")}, sort_keys=True))
     return 0
 
 

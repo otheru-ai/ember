@@ -114,6 +114,8 @@ jobs:
       iu4_construction: ${{ steps.envelope.outputs.iu4_construction }}
       iu4_construction_sha256: ${{ steps.envelope.outputs.iu4_construction_sha256 }}
       comparison_output: ${{ steps.envelope.outputs.comparison_output }}
+      matched_iu4_candidate_id: ${{ steps.envelope.outputs.matched_iu4_candidate_id }}
+      matched_iu4_request_output: ${{ steps.envelope.outputs.matched_iu4_request_output }}
     steps:
       - name: Decode and validate exact branch-workflow dispatch envelope
         id: envelope
@@ -180,6 +182,9 @@ jobs:
                                 "q3_hardware", "q3_hardware_sha256",
                                 "iu4_construction", "iu4_construction_sha256",
                                 "output"},
+              "matched-iu4-plan": {"q3_construction", "q3_construction_sha256",
+                                   "q3_hardware", "q3_hardware_sha256",
+                                   "candidate_id", "construction_request_output"},
               "bakeoff": {"candidate_manifest", "candidate_manifest_sha256", "phase",
                            "phase_request", "phase_request_sha256"},
           }
@@ -317,6 +322,19 @@ jobs:
                   "iu4_construction": absolute("iu4_construction"),
                   "iu4_construction_sha256": digest("iu4_construction_sha256"),
                   "comparison_output": absolute("output"),
+              })
+          elif operation == "matched-iu4-plan":
+              candidate_id = scalar("candidate_id")
+              if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", candidate_id) is None:
+                  fail("matched IU4 candidate id is malformed")
+              result.update({
+                  "q3_construction": absolute("q3_construction"),
+                  "q3_construction_sha256": digest("q3_construction_sha256"),
+                  "q3_hardware": absolute("q3_hardware"),
+                  "q3_hardware_sha256": digest("q3_hardware_sha256"),
+                  "matched_iu4_candidate_id": candidate_id,
+                  "matched_iu4_request_output": absolute(
+                      "construction_request_output"),
               })
           else:
               phase = scalar("phase")
@@ -510,6 +528,31 @@ jobs:
       iu4_construction: ${{ needs.qwen-dispatch-envelope.outputs.iu4_construction }}
       iu4_construction_sha256: ${{ needs.qwen-dispatch-envelope.outputs.iu4_construction_sha256 }}
       output: ${{ needs.qwen-dispatch-envelope.outputs.comparison_output }}
+    secrets: inherit
+
+  qwen-call-matched-iu4-plan:
+    needs: qwen-dispatch-envelope
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'matched-iu4-plan'
+    uses: ./.github/workflows/qwen-matched-iu4-plan.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      q3_construction: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction }}
+      q3_construction_sha256: ${{ needs.qwen-dispatch-envelope.outputs.q3_construction_sha256 }}
+      q3_hardware: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware }}
+      q3_hardware_sha256: ${{ needs.qwen-dispatch-envelope.outputs.q3_hardware_sha256 }}
+      candidate_id: ${{ needs.qwen-dispatch-envelope.outputs.matched_iu4_candidate_id }}
+      construction_request_output: ${{ needs.qwen-dispatch-envelope.outputs.matched_iu4_request_output }}
+    secrets: inherit
+
+  qwen-build-matched-iu4:
+    needs: [qwen-dispatch-envelope, qwen-call-matched-iu4-plan]
+    if: needs.qwen-dispatch-envelope.outputs.operation == 'matched-iu4-plan'
+    uses: ./.github/workflows/qwen-gfx1151-construct.yml
+    with:
+      commit_sha: ${{ inputs.commit_sha }}
+      mode: build-candidate
+      operation_request: ${{ needs.qwen-call-matched-iu4-plan.outputs.operation_request }}
+      operation_request_sha256: ${{ needs.qwen-call-matched-iu4-plan.outputs.operation_request_sha256 }}
     secrets: inherit
 
   qwen-plan-q3-first-token:

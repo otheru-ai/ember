@@ -26,6 +26,7 @@ DISPATCHER = ROOT / ".github/workflows/gfx1151-certify.yml"
 Q3_FIRST_TOKEN_PLAN = ROOT / ".github/workflows/qwen-q3-first-token-plan.yml"
 Q3_FIRST_TOKEN = ROOT / ".github/workflows/qwen-q3-first-token.yml"
 Q3_IU4_COMPARE = ROOT / ".github/workflows/qwen-q3-iu4-compare.yml"
+MATCHED_IU4_PLAN = ROOT / ".github/workflows/qwen-matched-iu4-plan.yml"
 Q3_FIRST_TOKEN_EVIDENCE = ROOT / "scripts/qwen_first_token_evidence.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 import qwen_snapshot_lock_handoff as snapshot_handoff  # noqa: E402
@@ -859,7 +860,7 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                                      (ROOT / ".github/workflows/qwen-candidate-plan.yml", 4),
                                      (ROOT / ".github/workflows/qwen-gfx1151-bakeoff.yml", 6),
                                      (Q3_FIRST_TOKEN_PLAN, 1), (Q3_FIRST_TOKEN, 4),
-                                     (Q3_IU4_COMPARE, 8)):
+                                     (Q3_IU4_COMPARE, 8), (MATCHED_IU4_PLAN, 7)):
             called = re.search(r"workflow_call:\n    inputs:\n(.*?)(?:\n    outputs:|\n  workflow_dispatch:|\npermissions:)",
                                path.read_text(encoding="utf-8"), re.S)
             self.assertIsNotNone(called)
@@ -882,10 +883,11 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             "qwen-q3-first-token-plan.yml",
             "qwen-q3-first-token.yml",
             "qwen-q3-iu4-compare.yml",
+            "qwen-matched-iu4-plan.yml",
         ):
             self.assertIn(f"uses: ./.github/workflows/{workflow}", body)
         self.assertNotRegex(body, r"uses:.*\$\{\{")
-        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 7)
+        self.assertEqual(body.count("uses: ./.github/workflows/qwen-gfx1151-"), 8)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-capture.yml"), 2)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-quality-plan.yml"), 1)
         self.assertEqual(body.count("uses: ./.github/workflows/qwen-candidate-plan.yml"), 1)
@@ -1093,6 +1095,31 @@ class QwenConstructWorkflowTest(unittest.TestCase):
             self.assertIn("comparison_output=/var/tmp/ember-", emitted)
 
             output.unlink()
+            matched_iu4 = {
+                "schema": "ember.qwen3.8.branch-dispatch-envelope.v1",
+                "ember_revision": revision,
+                "operation": "matched-iu4-plan",
+                "inputs": {
+                    "q3_construction": "/var/tmp/ember-qwen3.8-flash-next/q3.json",
+                    "q3_construction_sha256": "1" * 64,
+                    "q3_hardware": "/var/tmp/ember-qwen3.8-flash-next/q3-hardware.json",
+                    "q3_hardware_sha256": "2" * 64,
+                    "candidate_id": "matched-iu4-after-q3",
+                    "construction_request_output": (
+                        "/var/tmp/ember-qwen3.8-flash-next/artifacts/qwen-workset/"
+                        "evidence/operation-requests/construction-iu4-after-q3.json"),
+                },
+                "publishes": False, "deletes": False,
+            }
+            accepted_matched_iu4 = invoke(matched_iu4)
+            self.assertEqual(accepted_matched_iu4.returncode, 0,
+                             accepted_matched_iu4.stderr)
+            emitted = output.read_text(encoding="utf-8")
+            self.assertIn("operation=matched-iu4-plan\n", emitted)
+            self.assertIn("matched_iu4_candidate_id=matched-iu4-after-q3\n", emitted)
+            self.assertIn("matched_iu4_request_output=/var/tmp/ember-", emitted)
+
+            output.unlink()
             invalid = dict(valid)
             invalid["deletes"] = True
             rejected = invoke(invalid)
@@ -1211,6 +1238,46 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertNotIn("ember-cert-production stop", body)
         self.assertNotIn("calibrate_gpu_counters", body)
         self.assertIn("qwen-call-quant-compare:", DISPATCHER.read_text(encoding="utf-8"))
+
+    def test_matched_iu4_planner_requires_completed_q3_before_construction(self) -> None:
+        body = MATCHED_IU4_PLAN.read_text(encoding="utf-8")
+        dispatcher = DISPATCHER.read_text(encoding="utf-8")
+        ruby = shutil.which("ruby")
+        if ruby:
+            subprocess.run(
+                [ruby, "-e", "require 'yaml'; YAML.parse_file(ARGV[0])",
+                 str(MATCHED_IU4_PLAN)], check=True,
+            )
+        for index, block in enumerate(workflow_run_blocks(body)):
+            neutral = re.sub(r"\$\{\{.*?\}\}", "github-expression", block)
+            shell = subprocess.run(
+                ["bash", "-n"], input=neutral, text=True, capture_output=True,
+            )
+            self.assertEqual(shell.returncode, 0,
+                             f"matched IU4 plan run block {index}: {shell.stderr}")
+            for script in re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", neutral, re.S):
+                compile(script, f"matched-iu4-plan-{index}-heredoc.py", "exec")
+        self.assertIn("scripts/qwen_quant_comparison.py plan-matched-iu4", body)
+        self.assertIn("--q3-hardware", body)
+        self.assertIn("--runtime-revision \"$TARGET_SHA\"", body)
+        self.assertIn("publication or deletion claim", body)
+        for forbidden in ("ember-gpu-lock", "ember-cert-production",
+                          "calibrate_gpu_counters", "docker run"):
+            self.assertNotIn(forbidden, body)
+        self.assertIn("qwen-call-matched-iu4-plan:", dispatcher)
+        self.assertIn("qwen-build-matched-iu4:", dispatcher)
+        plan_job = dispatcher.index("  qwen-call-matched-iu4-plan:")
+        build_job = dispatcher.index("  qwen-build-matched-iu4:")
+        self.assertLess(plan_job, build_job)
+        matched_job = dispatcher[build_job:dispatcher.index(
+            "  qwen-plan-q3-first-token:")]
+        self.assertIn(
+            "needs: [qwen-dispatch-envelope, qwen-call-matched-iu4-plan]",
+            matched_job)
+        self.assertIn("mode: build-candidate", matched_job)
+        self.assertIn(
+            "needs.qwen-call-matched-iu4-plan.outputs.operation_request",
+            matched_job)
 
     def test_candidate_reuse_rebinds_runtime_without_changing_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -387,8 +387,18 @@ and IU4-minus-Q3 deltas. Its output carries
 understanding the format tradeoff, but only the fresh-process ABBAAB gate may
 select the release bundle.
 
-The supported hardware entrypoint is the `quant-compare` branch-dispatch
-operation routed to `qwen-q3-iu4-compare.yml`. Its digest-bound envelope names
+IU4 construction is separately gated by the `matched-iu4-plan` branch-dispatch
+operation. It accepts the complete Q3 construction and hardware records,
+revalidates the current runtime and benchmark/gate driver hashes, reproduces
+the selection plan, and emits only the exact
+`rocmi4-q6k-main-rocmfp4-fast-mtp-d3` construction request. The planner takes
+no GPU and the dispatcher cannot call the ordinary constructor until planning
+succeeds. The request remains nonpublishing and nondeleting; this descriptive
+comparison arm is not promoted into the release selector.
+
+The subsequent supported hardware entrypoint is the `quant-compare`
+branch-dispatch operation routed to `qwen-q3-iu4-compare.yml`. Its digest-bound
+envelope names
 the retained Q3 construction and hardware evidence, the newly constructed IU4
 descriptor, and one new directory beneath the fixed comparison root. The lane
 validates the complete Q3 prerequisite before acquiring the GPU, runs exactly

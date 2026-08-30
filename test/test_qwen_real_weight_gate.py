@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -488,7 +489,9 @@ def restore_reconstructable():
                     "schema": quant_comparison.CONSTRUCTION_SCHEMA,
                     "status": "complete", "publishes": False, "deletes": False,
                     "candidate_id": f"{label}-candidate", "kind": "intervention",
-                    "intended_stage": "format", "row_id": f"{label}-row",
+                    "intended_stage": "format",
+                    "row_id": (quant_comparison.Q3_ROW if label == "q3"
+                               else quant_comparison.IU4_ROW),
                     "intervention_configuration_id": "lambda-0.25-band-10-42",
                     "quantization_arm": quant_arm,
                     "mtp_matrix_quant_contract": quant_comparison.MATCHED_MTP_CONTRACT,
@@ -591,6 +594,35 @@ def restore_reconstructable():
                              quant_comparison.ARM_EVIDENCE_SCHEMA)
             self.assertEqual(q3_evidence["construction"]["quantization_arm"],
                              quant_comparison.Q3_ARM)
+            q3_construction_value = quant_comparison._construction(
+                q3_construction, digest(q3_construction),
+                quant_comparison.Q3_ARM, "Q3")
+            q3_hardware_value = quant_comparison.validate_hardware(
+                q3_hardware, digest(q3_hardware), q3_construction_value, "Q3")
+            verified_plan = {"format_arms": [{
+                "id": quant_comparison.IU4_ROW,
+                "quantization_arm": quant_comparison.IU4_ARM,
+                "mtp_matrix_quant_contract": quant_comparison.MATCHED_MTP_CONTRACT,
+                "mtp_depth": 3,
+            }]}
+            request_output = quant_comparison.REQUEST_ROOT / "construction-iu4-test.json"
+            with mock.patch.object(
+                    quant_comparison.bakeoff, "verify_plan",
+                    return_value=verified_plan):
+                request = quant_comparison.make_matched_iu4_request(
+                    q3_construction_value, q3_hardware_value,
+                    "iu4-matched-test", revision, request_output)
+            self.assertEqual(request["mode"], "build-candidate")
+            self.assertEqual(request["parameters"]["row_id"],
+                             quant_comparison.IU4_ROW)
+            self.assertEqual(request["parameters"]["quantization_arm"],
+                             quant_comparison.IU4_ARM)
+            self.assertFalse(request["publishes"])
+            with self.assertRaisesRegex(
+                    quant_comparison.ComparisonError, "complete current Q3 proof"):
+                quant_comparison.make_matched_iu4_request(
+                    q3_construction_value, q3_hardware_value,
+                    "iu4-matched-test", "0" * 40, request_output)
             binding_path = root / "iu4-binding.json"
             inspected = subprocess.run([
                 sys.executable, str(ROOT / "scripts/qwen_quant_comparison.py"),
