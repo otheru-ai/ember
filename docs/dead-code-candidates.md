@@ -136,6 +136,21 @@ as a suspected source of per-token hard syncs and refuted.
 hit. Recorded so the next person does not re-derive it as a lever. See
 `docs/qwen3.8-performance-status.md`.
 
+**Scope correction, 20260831T092000Z — "never taken" is production-default
+only.** The F32 reference diagnostic (`DFLASH_CUBLAS_F32_REFERENCE=1` in a
+`GGML_CUDA_FORCE_CUBLAS` build) deliberately routes **every** routed expert
+through this path, and adds a branch inside it. So in that build the path is
+not merely live, it is load-bearing for the reference the release criterion
+will be judged against.
+
+That matters because this entry's evidence is the *reason* the path is
+untrusted: 0 executions means 0 validation. A reference computed on
+never-exercised code is not automatically more trustworthy than the quantized
+kernel it is judging. The F32 run therefore gates on `d_prod` at width 2,
+where default production is bit-identical to q1 and any measured distance is
+the reference's own error, before any conclusion is drawn about widths 6 and
+17.
+
 ---
 
 ## 4. HIP graph replay — permanently disabled, do not re-open
