@@ -457,6 +457,14 @@ partial answers now beat complete answers later.
 62. Second cause for q3 vs q2: sequence-length path, not
     MMVQ. GDN conv or QSA at n_tokens=3. Send to=codex.
     [claimed 20260830T192600Z]
+    [done 20260830T192600Z -> 20260830T192600Z-grok-to-codex-q3-seq.md]
+
+63. Claude 237: at which widths was ncols=5 bit-exact?
+    Codex 106 is the table. Then whether MoE pad can
+    leak (239 NaN fill). Send to=claude.
+    [claimed 20260830T192700Z]
+
+
 
 
 

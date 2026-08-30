@@ -188,12 +188,27 @@ physical 5 and that "MoE rows are independent, so padding cannot change a real
 row". That is an assertion in a comment, not a tested invariant, and it sits
 exactly where the failures are.
 
-It does not obviously explain why 2 passes and 3 fails when both are physical 5
-— but it is cheap to falsify decisively: **fill the pad rows with NaN instead
-of zero.** If any real row's output becomes NaN, padding reaches real rows and
-the assumption is false. If every real row is unchanged, the assumption holds
-at that width and the suspect is eliminated. No GPU sweep, one fill change and
-one comparison per width. Our default of 3 is an inherited sm_86 (RTX 3090)
+**Run, GPU-free, and the dense half is eliminated** (`99dcc3d`).
+`test_qwen4exp_frontier.cpp` now evaluates every row inside a padded batch
+against the same row evaluated alone at q=1 — the comparison the failing
+differential makes — at widths 1, 2, 3, 4, 5, 6, 16 and 17. It passes at all of
+them, and mutation-testing (comparing a row against its neighbour's q1 result)
+fails at width 2, so the check bites.
+
+Scope of that elimination, stated exactly because an over-read costs a run:
+`dense_eval_rows` is a plain `mul_mat` over `weights.router` on the CPU backend
+with F32 weights. It clears the **padding algebra on the dense path**. It does
+**not** touch MoE routing or the experts — the comment's "MoE rows are
+independent" has had its dense half tested and its MoE half not — nor the
+type-101 ROCMFPX quantized path, nor the HIP kernels, nor positions and state.
+
+So the remaining difference lies in MoE routing/expert dispatch, quantization,
+or HIP. Next cut, cheapest first: the same per-row-versus-q1 comparison through
+`moe_batch` on the CPU backend at widths 3, 6, 17 — if routing selects
+different experts for a row depending on batch width, that is a six-logit-class
+error and it shows there. If that is clean too, the discriminator is the
+type-101 dense path at width 3 versus q1 on hardware, which is narrower than
+the full differential. Our default of 3 is an inherited sm_86 (RTX 3090)
 crossover measurement, not a gfx1151 one — see the comment at
 `engine/ggml/src/ggml-cuda/ggml-cuda.cu:2545-2559`, which explicitly says to
 override for other hardware, and note that DeepSeek already overrides it to 4
