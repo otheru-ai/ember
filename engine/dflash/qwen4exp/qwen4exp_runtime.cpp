@@ -253,6 +253,130 @@ bool run_ple(const Qwen4ExpWeights & weights, Qwen4ExpState & state,
     return true;
 }
 
+bool run_ple_batch(const Qwen4ExpWeights & weights, Qwen4ExpState & state,
+                   const Qwen4ExpLayer & layer,
+                   const std::vector<int32_t> & tokens,
+                   std::vector<std::vector<float>> & hc_rows,
+                   std::string & error) {
+    const size_t rows = tokens.size();
+    if (rows == 0 || rows > 16 || hc_rows.size() != rows) {
+        error = "invalid Qwen4Exp batched PLE input";
+        return false;
+    }
+    for (const std::vector<float> & hc : hc_rows) {
+        if (hc.size() != static_cast<size_t>(kHcDim)) {
+            error = "invalid Qwen4Exp batched PLE HC row";
+            return false;
+        }
+    }
+
+    // PLE row identities depend only on the prior two token ids. Resolve that
+    // small causal chain first, then cross the large key/value projection
+    // boundary once for the complete q5/q16 chunk.
+    std::array<int32_t, 2> token_history = state.ple_tokens;
+    std::vector<float> embedded(rows * static_cast<size_t>(kEmbedding));
+    std::vector<float> one(160);
+    for (size_t row = 0; row < rows; ++row) {
+        const auto selected = qwen4exp_ple_rows(tokens[row], token_history);
+        for (int head = 0; head < 16; ++head) {
+            if (!qwen4exp_mapped_row_f32(
+                    weights.ple_table, selected[head], one.data(), one.size(),
+                    &error)) return false;
+            std::copy(one.begin(), one.end(),
+                      embedded.begin() + static_cast<std::ptrdiff_t>(
+                          row * static_cast<size_t>(kEmbedding) +
+                          static_cast<size_t>(head * 160)));
+        }
+        token_history = {token_history[1], tokens[row]};
+    }
+    std::vector<float> key, value;
+    if (!matmul_rows(weights.dense_cache, weights.backend, layer.ple_key,
+                     embedded.data(), kEmbedding, static_cast<int>(rows),
+                     key, error) ||
+        !matmul_rows(weights.dense_cache, weights.backend, layer.ple_value,
+                     embedded.data(), kEmbedding, static_cast<int>(rows),
+                     value, error) ||
+        key.size() != rows * static_cast<size_t>(kHcDim) ||
+        value.size() != rows * static_cast<size_t>(kEmbedding)) {
+        if (error.empty()) error = "Qwen4Exp batched PLE projection mismatch";
+        return false;
+    }
+    std::vector<float> key_norm, query_norm, conv_norm, conv_weight;
+    if (!tensor_f32(weights.dense_cache, layer.ple_norm_key, key_norm,
+                    error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_norm_query, query_norm,
+                    error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_norm_conv, conv_norm,
+                    error) ||
+        !tensor_f32(weights.dense_cache, layer.ple_conv, conv_weight, error))
+        return false;
+    if (state.ple_conv.empty()) state.ple_conv.assign(9 * kHcDim, 0.0f);
+    if (state.ple_conv.size() != 9U * static_cast<size_t>(kHcDim)) {
+        error = "invalid Qwen4Exp batched PLE convolution frontier";
+        return false;
+    }
+    for (size_t row = 0; row < rows; ++row) {
+        float * row_key = key.data() + row * static_cast<size_t>(kHcDim);
+        const float * row_value =
+            value.data() + row * static_cast<size_t>(kEmbedding);
+        std::vector<float> gated(static_cast<size_t>(kHcDim));
+        std::vector<float> normalized(static_cast<size_t>(kHcDim));
+        for (int stream = 0; stream < kHc; ++stream) {
+            float * key_stream = row_key + stream * kEmbedding;
+            std::vector<float> query(
+                hc_rows[row].begin() + stream * kEmbedding,
+                hc_rows[row].begin() + (stream + 1) * kEmbedding);
+            rms_norm(key_stream, kEmbedding,
+                     key_norm.data() + stream * kEmbedding);
+            rms_norm(query.data(), kEmbedding,
+                     query_norm.data() + stream * kEmbedding);
+            double dot = 0.0;
+            for (int channel = 0; channel < kEmbedding; ++channel)
+                dot += key_stream[channel] * query[channel];
+            const float score =
+                static_cast<float>(dot / std::sqrt(kEmbedding));
+            const float gate = sigmoid(std::copysign(
+                std::sqrt(std::max(std::fabs(score), 1e-6f)), score));
+            for (int channel = 0; channel < kEmbedding; ++channel) {
+                gated[static_cast<size_t>(stream * kEmbedding + channel)] =
+                    row_value[channel] * gate;
+            }
+            std::copy_n(
+                gated.data() + stream * kEmbedding, kEmbedding,
+                normalized.data() + stream * kEmbedding);
+            rms_norm(normalized.data() + stream * kEmbedding, kEmbedding,
+                     conv_norm.data() + stream * kEmbedding);
+        }
+        std::vector<float> conv(static_cast<size_t>(kHcDim), 0.0f);
+        for (int channel = 0; channel < kHcDim; ++channel) {
+            for (int tap = 0; tap < 4; ++tap) {
+                const int back = (3 - tap) * 3;
+                const float input = back == 0
+                    ? normalized[static_cast<size_t>(channel)]
+                    : state.ple_conv[static_cast<size_t>(9 - back) *
+                                         static_cast<size_t>(kHcDim) +
+                                     static_cast<size_t>(channel)];
+                conv[static_cast<size_t>(channel)] +=
+                    conv_weight[static_cast<size_t>(channel * 4 + tap)] *
+                    input;
+            }
+            conv[static_cast<size_t>(channel)] =
+                silu(conv[static_cast<size_t>(channel)]);
+        }
+        std::move(state.ple_conv.begin() + kHcDim, state.ple_conv.end(),
+                  state.ple_conv.begin());
+        std::copy(normalized.begin(), normalized.end(),
+                  state.ple_conv.end() - kHcDim);
+        for (int channel = 0; channel < kHcDim; ++channel) {
+            hc_rows[row][static_cast<size_t>(channel)] +=
+                gated[static_cast<size_t>(channel)] +
+                conv[static_cast<size_t>(channel)];
+        }
+    }
+    state.ple_tokens = token_history;
+    return true;
+}
+
 bool run_gdn_scalar(const Qwen4ExpWeights & weights,
                     Qwen4ExpLayerState & state,
                     const Qwen4ExpLayer & layer,
@@ -1519,13 +1643,12 @@ bool qwen4exp_batch_layer(
     const size_t rows = tokens.size();
     const Qwen4ExpLayer & layer =
         weights.layers[static_cast<size_t>(layer_index)];
+    if (layer_index == 1 &&
+        !run_ple_batch(weights, state, layer, tokens, hc_rows, error))
+        return false;
     std::vector<float> attention_hc(rows * static_cast<size_t>(kHcDim));
     for (size_t row = 0; row < rows; ++row) {
         state.hc = std::move(hc_rows[row]);
-        // PLE mutates the row's HC state and its own causal history. Preserve
-        // that row order, then batch only the independent HC projections.
-        if (layer_index == 1 &&
-            !run_ple(weights, state, layer, tokens[row], error)) return false;
         std::copy(state.hc.begin(), state.hc.end(),
                   attention_hc.begin() +
                       static_cast<std::ptrdiff_t>(row * kHcDim));

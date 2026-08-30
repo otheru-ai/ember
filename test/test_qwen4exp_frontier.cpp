@@ -1000,6 +1000,52 @@ static void test_causal_attention_stateless_ffn_batching() {
           "batched final HC and vocabulary projection preserves every verifier row");
 }
 
+static void test_causal_ple_projection_batching() {
+    constexpr size_t kRows = 7;
+    const std::array<int32_t, kRows> tokens = {19, 7, 31, 5, 11, 23, 3};
+    const std::array<float, kRows> inputs = {
+        0.3f, -0.8f, 1.2f, 0.05f, -0.4f, 0.9f, 0.17f};
+    const auto project = [](float input, int32_t token,
+                            const std::array<int32_t, 2> & history) {
+        // Miniature of PLE row selection followed by the independent key/value
+        // matrices. The selected identity is fixed entirely by token history.
+        return input + 0.01f * static_cast<float>(token) +
+            0.003f * static_cast<float>(history[0]) -
+            0.002f * static_cast<float>(history[1]);
+    };
+    const auto apply = [](float projected, float input, float & conv) {
+        // PLE gating and its dilated convolution remain causal and ordered.
+        conv = 0.61f * conv + projected;
+        return input + 0.13f * projected + 0.07f * conv;
+    };
+
+    std::array<int32_t, 2> q1_history{-1, -1};
+    float q1_conv = 0.0f;
+    std::array<float, kRows> q1_rows{};
+    for (size_t row = 0; row < kRows; ++row) {
+        const float projected = project(inputs[row], tokens[row], q1_history);
+        q1_history = {q1_history[1], tokens[row]};
+        q1_rows[row] = apply(projected, inputs[row], q1_conv);
+    }
+
+    std::array<int32_t, 2> batch_history{-1, -1};
+    std::array<float, kRows> projected{};
+    for (size_t row = 0; row < kRows; ++row) {
+        projected[row] = project(inputs[row], tokens[row], batch_history);
+        batch_history = {batch_history[1], tokens[row]};
+    }
+    float batch_conv = 0.0f;
+    std::array<float, kRows> batch_rows{};
+    for (size_t row = 0; row < kRows; ++row)
+        batch_rows[row] = apply(projected[row], inputs[row], batch_conv);
+
+    CHECK(close_vectors(
+              std::vector<float>(batch_rows.begin(), batch_rows.end()),
+              std::vector<float>(q1_rows.begin(), q1_rows.end()), 0.0f) &&
+              batch_history == q1_history && batch_conv == q1_conv,
+          "batched PLE key/value projections preserve token and convolution frontiers");
+}
+
 static void test_bounded_cache_and_prefill_policy() {
     using dflash::common::kQwen4ExpFrontierMoeCachedGraphsPerLayer;
     using dflash::common::kQwen4ExpFrontierMoeMaxBatch;
@@ -1150,6 +1196,7 @@ int main() {
     test_persistent_gdn_q1();
     test_persistent_qsa_q1();
     test_causal_attention_stateless_ffn_batching();
+    test_causal_ple_projection_batching();
     test_bounded_cache_and_prefill_policy();
     const Qwen4ExpFrontierMoeSpec spec{4, 5, 2, 3};
     ggml_backend_t backend = ggml_backend_cpu_init();

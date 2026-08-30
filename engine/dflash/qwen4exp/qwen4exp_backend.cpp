@@ -215,6 +215,7 @@ bool Qwen4ExpBackend::init() {
                  "vision=lazy mtp=%s mtp_depth=%d "
                  "mtp_verify=native-layer-major "
                  "prefill_batch=causal-q16 cache_variants=3 "
+                 "ple_projection_batch=q5-q16 "
                  "hc_projection_batch=q5-q16 "
                  "qsa_projection_batch=q5-q16 "
                  "verifier_output_batch=q5-q16 "
