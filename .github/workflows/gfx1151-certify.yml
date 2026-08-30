@@ -917,7 +917,7 @@ jobs:
           echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
           docker pull "$CALIBRATION_IMAGE"
           "$CALIBRATION_SOURCE/scripts/calibrate_counter_units.sh" \
-            --no-quiesce --image "$CALIBRATION_IMAGE" --out-dir "$out"
+            --image "$CALIBRATION_IMAGE" --out-dir "$out" --no-quiesce
           cat "$out/calibration.json"
       - name: Upload raw calibration evidence
         if: always() && env.CALIBRATION_OUT != '' && steps.safety.outputs.lock == 'yes'

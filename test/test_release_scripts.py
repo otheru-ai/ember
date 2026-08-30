@@ -359,9 +359,23 @@ class ReleaseScriptTests(unittest.TestCase):
         )[1].split("\n  qwen-resume-q3-timing:", 1)[0]
         self.assertIn(
             '"$CALIBRATION_SOURCE/scripts/calibrate_counter_units.sh" \\\n'
-            '            --no-quiesce --image "$CALIBRATION_IMAGE"',
+            '            --image "$CALIBRATION_IMAGE" --out-dir "$out" '
+            '--no-quiesce',
             calibration,
         )
+
+    def test_resumed_profiler_does_not_reacquire_workflow_gpu_lock(self) -> None:
+        certify = GITHUB_CERTIFY.read_text()
+        profiler = certify.split(
+            "\n  qwen-resume-q3-profile:", 1
+        )[1].split("\n  qwen-calibrate-counter-units:", 1)[0]
+        self.assertIn(
+            '"$PROFILE_SCRIPT_ROOT/scripts/profile_gpu.sh" --no-quiesce \\',
+            profiler,
+        )
+
+    def test_certification_uses_checked_in_counter_calibration(self) -> None:
+        certify = GITHUB_CERTIFY.read_text()
         self.assertIn(
             "/ember/share/benchmark/gfx1151-rocm10-counter-calibration.json",
             certify,
