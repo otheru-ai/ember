@@ -220,9 +220,13 @@ jobs:
           python3 - "$QWEN_FIRST_TOKEN_OUTPUT/prompt.txt" <<'PY'
           from pathlib import Path
           import sys
+          # The disk validator requires >=512 prompt tokens. Forty rows yield
+          # roughly 650 Qwen tokens and cross many q16 chunks, while avoiding
+          # the old 2,940-token four-path prefill immediately before the full
+          # real-weight gate repeats its longer differential.
           text = "\n".join(
               f"Constraint {i}: retain marker {i * 17 % 101} while reasoning deterministically."
-              for i in range(180))
+              for i in range(40))
           Path(sys.argv[1]).write_text(
               text + "\nState the invariant in one short sentence.\n", encoding="utf-8")
           PY

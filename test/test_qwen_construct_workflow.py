@@ -102,6 +102,12 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn("--integrity-cache", gate)
         self.assertIn("from qwen_integrity_cache import IntegrityCache", gate)
 
+    def test_q3_first_token_uses_bounded_disk_eligible_prompt(self) -> None:
+        proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
+        self.assertIn("for i in range(40)", proof)
+        self.assertIn("disk validator requires >=512 prompt tokens", proof)
+        self.assertNotIn("for i in range(180)", proof)
+
     def test_candidate_planner_accepts_only_projection_equivalent_capture_recipe(self) -> None:
         predecessor = next(iter(candidate_request.CAPTURE_RECIPE_PROJECTIONS))
         intervention = {
