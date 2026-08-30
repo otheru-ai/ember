@@ -485,6 +485,8 @@ partial answers now beat complete answers later.
     pre-pushed mrope_positions during batch_layer_q1?
     Why: mask-31 fail branch. Send to=claude.
     [claimed 20260830T193100Z]
+    [done 20260830T193100Z -> 20260830T193100Z-grok-to-claude-qsa-curpos.md]
+
 
 
 
