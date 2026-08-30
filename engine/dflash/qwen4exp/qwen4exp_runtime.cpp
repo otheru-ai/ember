@@ -1093,21 +1093,24 @@ bool prepare_mtp_hc_batch(
     return true;
 }
 
-bool hc_mix_batch(const Qwen4ExpWeights & target,
-                  Qwen4ExpFrontierDenseCache * cache,
-                  const Qwen4ExpLayer & layer, size_t rows,
-                  const std::vector<float> & hc_rows,
-                  std::vector<float> & mixed_rows, std::string & error) {
-    if (!layer.hc_attn_norm || !layer.hc_attn_down ||
-        !layer.hc_attn_up || rows == 0 || rows > 16 ||
+bool hc_mix_rows(const Qwen4ExpWeights & target,
+                 Qwen4ExpFrontierDenseCache * cache,
+                 ggml_tensor * norm, ggml_tensor * down, ggml_tensor * up,
+                 ggml_tensor * inject_weight, size_t rows,
+                 const std::vector<float> & hc_rows,
+                 std::vector<float> & mixed_rows,
+                 std::vector<std::array<float, kHc>> * inject_rows,
+                 std::string & error) {
+    if (!norm || !down || !up || (inject_rows && !inject_weight) ||
+        rows == 0 || rows > 16 ||
         hc_rows.size() != rows * 10240U ||
-        layer.hc_attn_down->ne[1] <= 0 ||
-        layer.hc_attn_down->ne[1] > std::numeric_limits<int>::max()) {
-        error = "invalid Qwen4Exp MTP HC cache batch shape";
+        down->ne[1] <= 0 ||
+        down->ne[1] > std::numeric_limits<int>::max()) {
+        error = "invalid Qwen4Exp HC row batch shape";
         return false;
     }
     std::vector<float> norm_weight;
-    if (!tensor_f32(cache, layer.hc_attn_norm, norm_weight, error) ||
+    if (!tensor_f32(cache, norm, norm_weight, error) ||
         norm_weight.size() != 10240U) return false;
     std::vector<float> normalized = hc_rows;
     for (size_t row = 0; row < rows; ++row) {
@@ -1117,16 +1120,16 @@ bool hc_mix_batch(const Qwen4ExpWeights & target,
         for (size_t value = 0; value < 10240U; ++value)
             base[value] *= norm_weight[value];
     }
-    const int low_width = static_cast<int>(layer.hc_attn_down->ne[1]);
+    const int low_width = static_cast<int>(down->ne[1]);
     std::vector<float> low;
-    if (!matmul_rows(cache, target.backend, layer.hc_attn_down,
+    if (!matmul_rows(cache, target.backend, down,
                      normalized.data(), kHcDim, static_cast<int>(rows), low,
                      error) ||
         low.size() != rows * static_cast<size_t>(low_width)) return false;
     for (float & value : low)
         value = silu(value / static_cast<float>(kHc));
     std::vector<float> gate;
-    if (!matmul_rows(cache, target.backend, layer.hc_attn_up, low.data(),
+    if (!matmul_rows(cache, target.backend, up, low.data(),
                      low_width, static_cast<int>(rows), gate, error) ||
         gate.size() != rows * 10240U) return false;
     for (float & value : gate) value = sigmoid(value);
@@ -1143,7 +1146,29 @@ bool hc_mix_batch(const Qwen4ExpWeights & target,
             }
         }
     }
+    if (inject_rows) {
+        std::vector<float> raw;
+        if (!matmul_rows(cache, target.backend, inject_weight,
+                         normalized.data(), kHcDim,
+                         static_cast<int>(rows), raw, error) ||
+            raw.size() != rows * static_cast<size_t>(kHc)) return false;
+        inject_rows->resize(rows);
+        for (size_t row = 0; row < rows; ++row) {
+            std::copy_n(raw.data() + row * static_cast<size_t>(kHc), kHc,
+                        (*inject_rows)[row].begin());
+        }
+    }
     return true;
+}
+
+bool hc_mix_batch(const Qwen4ExpWeights & target,
+                  Qwen4ExpFrontierDenseCache * cache,
+                  const Qwen4ExpLayer & layer, size_t rows,
+                  const std::vector<float> & hc_rows,
+                  std::vector<float> & mixed_rows, std::string & error) {
+    return hc_mix_rows(target, cache, layer.hc_attn_norm,
+                       layer.hc_attn_down, layer.hc_attn_up, nullptr, rows,
+                       hc_rows, mixed_rows, nullptr, error);
 }
 
 bool rotate_optional_batch(Qwen4ExpFrontierDenseCache * cache,
@@ -1338,57 +1363,50 @@ bool qwen4exp_batch_layer(
     const size_t rows = tokens.size();
     const Qwen4ExpLayer & layer =
         weights.layers[static_cast<size_t>(layer_index)];
-    std::vector<float> ffn_inputs(rows * static_cast<size_t>(kEmbedding));
-    std::vector<std::array<float, kHc>> ffn_inject(rows);
+    std::vector<float> attention_hc(rows * static_cast<size_t>(kHcDim));
+    for (size_t row = 0; row < rows; ++row) {
+        state.hc = std::move(hc_rows[row]);
+        // PLE mutates the row's HC state and its own causal history. Preserve
+        // that row order, then batch only the independent HC projections.
+        if (layer_index == 1 &&
+            !run_ple(weights, state, layer, tokens[row], error)) return false;
+        std::copy(state.hc.begin(), state.hc.end(),
+                  attention_hc.begin() +
+                      static_cast<std::ptrdiff_t>(row * kHcDim));
+        hc_rows[row] = std::move(state.hc);
+    }
+
+    std::vector<float> attention_inputs;
+    std::vector<std::array<float, kHc>> attention_inject;
+    if (!hc_mix_rows(weights, weights.dense_cache, layer.hc_attn_norm,
+                     layer.hc_attn_down, layer.hc_attn_up,
+                     layer.hc_attn_inject, rows, attention_hc,
+                     attention_inputs, &attention_inject, error)) return false;
+
     const bool qsa = (layer_index + 1) % 4 == 0;
     if (qsa) {
-        // QSA selection depends on every newly appended raw index-K row, so it
-        // remains strictly row ordered through the stateless FFN boundary.
+        // QSA selection depends on every newly appended raw index-K row. Its
+        // state update remains strictly row ordered; only the HC projection
+        // that produced each independent attention input was batched above.
         for (size_t row = 0; row < rows; ++row) {
             state.hc = std::move(hc_rows[row]);
-            std::vector<float> mixed, block;
-            std::array<float, kHc> inject{};
-            if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
-                        layer.hc_attn_down, layer.hc_attn_up,
-                        layer.hc_attn_inject, mixed, &inject, error))
-                return false;
+            const auto input_begin = attention_inputs.begin() +
+                static_cast<std::ptrdiff_t>(row * kEmbedding);
+            const std::vector<float> input(
+                input_begin,
+                input_begin + static_cast<std::ptrdiff_t>(kEmbedding));
+            std::vector<float> block;
             if (!run_qsa(weights,
                          state.layers[static_cast<size_t>(layer_index)], layer,
-                         layer_index, mixed, positions[row],
+                         layer_index, input, positions[row],
                          state.mrope_positions,
                          block, error)) return false;
-            hc_combine(state.hc, block, inject);
-            if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
-                        layer.hc_ffn_down, layer.hc_ffn_up,
-                        layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
-                return false;
-            std::copy(mixed.begin(), mixed.end(),
-                      ffn_inputs.begin() +
-                          static_cast<std::ptrdiff_t>(row * kEmbedding));
+            hc_combine(state.hc, block, attention_inject[row]);
             hc_rows[row] = std::move(state.hc);
         }
     } else {
-        // GDN is causal internally, but its HC inputs are independent rows.
-        // Advance the one PLE layer in row order first, then execute the exact
-        // q2-q16 recurrent sequence in one persistent graph/state boundary.
-        std::vector<float> attention_inputs(
-            rows * static_cast<size_t>(kEmbedding));
-        std::vector<std::array<float, kHc>> attention_inject(rows);
-        for (size_t row = 0; row < rows; ++row) {
-            state.hc = std::move(hc_rows[row]);
-            if (layer_index == 1 &&
-                !run_ple(weights, state, layer, tokens[row], error))
-                return false;
-            std::vector<float> mixed;
-            if (!hc_mix(weights, state.hc, layer.hc_attn_norm,
-                        layer.hc_attn_down, layer.hc_attn_up,
-                        layer.hc_attn_inject, mixed,
-                        &attention_inject[row], error)) return false;
-            std::copy(mixed.begin(), mixed.end(),
-                      attention_inputs.begin() +
-                          static_cast<std::ptrdiff_t>(row * kEmbedding));
-            hc_rows[row] = std::move(state.hc);
-        }
+        // GDN is causal internally and executes the exact q2-q16 recurrent
+        // sequence in one persistent graph/state boundary.
         std::vector<float> attention_outputs;
         if (!run_gdn_batch(
                 weights, state.layers[static_cast<size_t>(layer_index)],
@@ -1408,17 +1426,22 @@ bool qwen4exp_batch_layer(
                 block_begin,
                 block_begin + static_cast<std::ptrdiff_t>(kEmbedding));
             hc_combine(state.hc, block, attention_inject[row]);
-            std::vector<float> mixed;
-            if (!hc_mix(weights, state.hc, layer.hc_ffn_norm,
-                        layer.hc_ffn_down, layer.hc_ffn_up,
-                        layer.hc_ffn_inject, mixed, &ffn_inject[row], error))
-                return false;
-            std::copy(mixed.begin(), mixed.end(),
-                      ffn_inputs.begin() +
-                          static_cast<std::ptrdiff_t>(row * kEmbedding));
             hc_rows[row] = std::move(state.hc);
         }
     }
+
+    std::vector<float> ffn_hc(rows * static_cast<size_t>(kHcDim));
+    for (size_t row = 0; row < rows; ++row) {
+        std::copy(hc_rows[row].begin(), hc_rows[row].end(),
+                  ffn_hc.begin() +
+                      static_cast<std::ptrdiff_t>(row * kHcDim));
+    }
+    std::vector<float> ffn_inputs;
+    std::vector<std::array<float, kHc>> ffn_inject;
+    if (!hc_mix_rows(weights, weights.dense_cache, layer.hc_ffn_norm,
+                     layer.hc_ffn_down, layer.hc_ffn_up,
+                     layer.hc_ffn_inject, rows, ffn_hc, ffn_inputs,
+                     &ffn_inject, error)) return false;
 
     std::vector<float> ffn_outputs;
     if (qwen4exp_frontier_moe_available(weights, layer_index)) {

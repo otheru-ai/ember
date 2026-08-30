@@ -918,6 +918,15 @@ static void test_causal_attention_stateless_ffn_batching() {
             0.01f * static_cast<float>(3 * row + layer);
         return input + 0.19f * recurrent;
     };
+    const auto project = [](float input, size_t row, size_t layer,
+                            size_t boundary) {
+        // Miniature of the stateless HC norm/down/up/injection projections.
+        // Their result depends on this row's HC frontier but never another
+        // row, so all rows may cross each boundary in one matrix call.
+        return input * (1.0f + 0.01f * static_cast<float>(layer)) +
+            0.001f * static_cast<float>(row) +
+            0.02f * static_cast<float>(boundary);
+    };
     const auto ffn = [](float input, size_t layer) {
         // Stateless per row, like routed/shared MoE after expert selection.
         return input + 0.11f * std::tanh(
@@ -929,8 +938,10 @@ static void test_causal_attention_stateless_ffn_batching() {
     for (size_t row = 0; row < kRows; ++row) {
         float value = seed[row];
         for (size_t layer = 0; layer < kLayers; ++layer) {
-            value = ffn(attention(value, token_state[layer], row, layer),
-                        layer);
+            const float attention_input = project(value, row, layer, 0);
+            const float attention_output = attention(
+                attention_input, token_state[layer], row, layer);
+            value = ffn(project(attention_output, row, layer, 1), layer);
         }
         token_rows[row] = value;
     }
@@ -938,20 +949,26 @@ static void test_causal_attention_stateless_ffn_batching() {
     std::array<float, kLayers> batch_state{};
     std::array<float, kRows> batch_rows = seed;
     for (size_t layer = 0; layer < kLayers; ++layer) {
+        std::array<float, kRows> attention_input{};
+        for (size_t row = 0; row < kRows; ++row)
+            attention_input[row] = project(batch_rows[row], row, layer, 0);
         std::array<float, kRows> ffn_boundary{};
         for (size_t row = 0; row < kRows; ++row) {
             ffn_boundary[row] = attention(
-                batch_rows[row], batch_state[layer], row, layer);
+                attention_input[row], batch_state[layer], row, layer);
         }
+        std::array<float, kRows> ffn_input{};
+        for (size_t row = 0; row < kRows; ++row)
+            ffn_input[row] = project(ffn_boundary[row], row, layer, 1);
         for (size_t row = 0; row < kRows; ++row) {
-            batch_rows[row] = ffn(ffn_boundary[row], layer);
+            batch_rows[row] = ffn(ffn_input[row], layer);
         }
     }
     CHECK(close_vectors(
               std::vector<float>(batch_rows.begin(), batch_rows.end()),
               std::vector<float>(token_rows.begin(), token_rows.end()),
               1.0e-6f),
-          "batching only stateless FFN rows matches token-major outputs");
+          "batching HC projections and stateless FFN rows matches token-major outputs");
     CHECK(close_vectors(
               std::vector<float>(batch_state.begin(), batch_state.end()),
               std::vector<float>(token_state.begin(), token_state.end()),
