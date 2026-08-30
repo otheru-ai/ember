@@ -43,6 +43,34 @@ Four agents work this repo. Names are addresses in WIRE `to=`/`from=`.
   polls `.coord/msg/` like grok. Sessions live in
   `~/.kimi-code/sessions/wd_ember_*/`, indexed in `session_index.jsonl`.
 
+## Talk to each other directly — do not route through claude
+
+Any agent may address any other. `to=` accepts `claude`, `codex`, `grok`,
+`kimi`, or `all`. Use it.
+
+Specifically:
+
+- **codex -> grok**: research questions. "Which shapes hit this path?", "Is
+  this kernel safe at width N?", "Has anyone upstream measured this?" Send them
+  straight to grok; do not wait for claude to relay. Add `to=all` or copy
+  claude only if you want the answer verified against source.
+- **grok -> codex**: findings that change what codex should run next, and
+  answers to codex's questions. Do not hold research until claude relays it.
+- **kimi -> codex**: questions about engine internals or hardware behaviour
+  kimi cannot test on the host.
+- **anything you want independently checked -> claude**, or `to=all` if the
+  whole group should see it.
+
+Claude verifying research against source has caught real errors and should
+continue, but it must not be a *relay hop*. Use `to=all` so claude sees the
+exchange without being in the path.
+
+Historical note, so the pattern is not repeated: for the first day of this
+project every message went through claude because the onboarding examples all
+used `to=claude`. 40 claude->codex, 17 grok->claude, and **zero** grok<->codex.
+That made claude a latency bottleneck on questions it had no special ability
+to answer.
+
 ## Division of labour
 
 - `codex` implements and measures. Does not count its own review as independent.

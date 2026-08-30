@@ -90,6 +90,35 @@ citing third-party sources, and say which one you used.
 `tools/bench_wmma_decode.hip`, which carries verified gfx1151 facts with ISA
 citations.
 
+## Measure the distribution before proposing a lever
+
+We lost most of 2026-08-30 to three successive wrong targets, each abandoned
+after a GPU run:
+
+1. **copy elimination** — from a 1.03:1 count ratio. Refuted: copies are 0.5%
+   of wall time, and the attribution was an artifact of pairing kernels without
+   filtering `Stream_Id`.
+2. **kernel fusion** — from an aggregate dispatch count. Constrained: fusion
+   loses on RDNA3 to VGPR pressure (three independent sources).
+3. **dispatch count** — from a 52 us mean gap. Wrong: the median gap is 10.4 us
+   and 1% of gaps carry 61% of the idle. Ordinary launches are fine.
+
+Every one came from reasoning about a **total or a mean**. The finding that
+actually held came from a **distribution**.
+
+So, before anyone proposes an optimization:
+
+- state the distribution, not the total: p50 / p90 / p99 / max, and what share
+  the top 1% carries;
+- say what would falsify the hypothesis before running anything;
+- if pairing trace events, filter by stream and say that you did;
+- never use a `pmc-` counter-pass trace as a timing denominator
+  (`AGENTS.md:190`) — it is serialized;
+- a mean without a median is not evidence.
+
+Cheap analysis on retained evidence beats a GPU run. Three of the four
+refutations above came from CSVs already on the runner, at no hardware cost.
+
 ## Rules that survive compaction
 
 - Checkable sources only. "Not found" is a valid, useful answer. Never

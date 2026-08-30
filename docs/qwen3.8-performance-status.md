@@ -91,13 +91,32 @@ Independent published results for this model on gfx1151-class hardware:
 | llama.cpp PR 27842, Vulkan/RADV | Strix Halo gfx1151 | **25.2 tok/s** baseline, 38.7-48.7 with MTP n-max 3 | UD-IQ4_XS + Q8_0 draft, greedy |
 | HF agentionai ROCmFP4-FAST MTP | Radeon 8060S (gfx1151) | **28.1 tok/s** baseline, 31.8-32.4 with MTP | temp 0 |
 
-Both land near the 23.6-23.8 tok/s DeepSeek-parity target, so the target is
-neither conservative nor unreachable for this model on this silicon. Our
-current 11.757 is roughly **2.4x below what a stock llama.cpp Vulkan build
-already achieves on the same part**.
+Extended set, all gfx1151 / Radeon 8060S, all publisher claims except PR 27842:
 
-That reframes the work: we are not chasing an unproven number, we are behind a
-published one.
+| source | backend | decode AR | decode w/ spec | prefill |
+|---|---|---|---|---|
+| llama.cpp PR 27842 | Vulkan/RADV | 25.2 | 38.7-48.7 (n-max 3) | not found |
+| HF agentionai | Vulkan | 28.1 | 32.4 (n-max 3) | not found |
+| HF EasiiX | EngramHalo.cpp | 23.5 | 35.7 (~85% accept) | not found |
+| HF kingjones777 STRIX_LEAN | **HIP ROCmFPX fork** | 22.6-22.87 | not claimed | **345** short, 385 @ 6963 tok |
+
+**Gate calibration.** Against that published cluster:
+
+- prefill target ~345 is **parity** — kingjones777 reaches exactly that on the
+  same part with a HIP ROCmFPX fork, the same family as our stack, so 345 is
+  demonstrably achievable here and not a Vulkan-only result;
+- the encoded prefill gate of **412 is ~1.07-1.19x above** the published
+  345-385 cluster, i.e. slightly ambitious rather than parity;
+- decode AR target 23.6-23.8 is parity or slightly conservative against the
+  22.6-28.1 AR cluster;
+- the encoded decode gate of 39.49 is an **MTP-band** number (PR 27842 n-max 3
+  reaches 38.7-48.7), not an AR number. Our 11.757 was measured with MTP depth
+  3 at accept 0.767, so it is the right comparison, but the AR and MTP bands
+  should not be conflated when reporting.
+
+Our 11.757 decode is ~2.1-2.4x below a stock Vulkan AR result on this part.
+That is the gap: we are behind a published number, not chasing an unproven
+ceiling.
 
 ## MTP acceptance is healthy, not a lever
 
