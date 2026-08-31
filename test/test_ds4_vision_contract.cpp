@@ -280,9 +280,9 @@ static void test_image_aware_prefill_chunks() {
 
 static void test_routing_modes() {
     constexpr int32_t vocab = 5000;
-    CHECK(deepseek4_is_vision_router_bias_suffix("exp_probs_b_vl") &&
-              !deepseek4_is_vision_router_bias_suffix(
+    CHECK(deepseek4_is_vision_router_bias_suffix(
                   "exp_probs_b_vl.bias") &&
+              !deepseek4_is_vision_router_bias_suffix("exp_probs_b_vl") &&
               !deepseek4_is_vision_router_bias_suffix("exp_probs_b.bias"),
           "only the converter's exact vision-router suffix is recognized");
     CHECK(deepseek4_optional_vision_bias_set_valid(0, 43),

@@ -8,7 +8,7 @@
 //   attn_compressor_{ape,kv,gate,norm}, indexer.{attn_q_b, proj},
 //   indexer_compressor_{ape,kv,gate,norm},
 //   hc_attn_fn, hc_attn_scale, hc_attn_base,
-//   ffn_norm, ffn_gate_inp, exp_probs_b (bias), exp_probs_b_vl,
+//   ffn_norm, ffn_gate_inp, exp_probs_b (bias), exp_probs_b_vl (bias),
 //   ffn_gate_tid2eid,
 //   ffn_gate_exps, ffn_up_exps, ffn_down_exps,
 //   ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp,
@@ -938,7 +938,7 @@ bool load_deepseek4_gguf_partial(const std::string & path,
                  layer.ffn_exp_probs_b_vl->ne[0] !=
                      static_cast<int64_t>(n_expert))) {
                 invalid_vision_bias = prefix +
-                    "exp_probs_b_vl must be one F32 expert row";
+                    "exp_probs_b_vl.bias must be one F32 expert row";
             }
         }
         require_tensor(layer.ffn_gate_exps, prefix + "ffn_gate_exps.weight");
@@ -985,7 +985,7 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         !dflash::deepseek4_optional_vision_bias_set_valid(
             vision_biases_loaded, loaded_layer_count)) {
         invalid_vision_bias =
-            "exp_probs_b_vl must be present on every loaded layer or none";
+            "exp_probs_b_vl.bias must be present on every loaded layer or none";
     }
     if (!invalid_vision_bias.empty()) {
         set_last_error("invalid DeepSeek4 vision routing bias: " +

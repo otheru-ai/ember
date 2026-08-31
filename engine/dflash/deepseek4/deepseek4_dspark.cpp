@@ -104,7 +104,7 @@ bool recognized_block_suffix(const std::string & suffix) {
         "attn_sinks.weight", "attn_output_a.weight", "attn_output_b.weight",
         "hc_attn_fn.weight", "hc_attn_scale.weight", "hc_attn_base.weight",
         "ffn_norm.weight", "ffn_gate_inp.weight", "exp_probs_b.bias",
-        "exp_probs_b_vl",
+        "exp_probs_b_vl.bias",
         "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
         "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight",
         "hc_ffn_fn.weight", "hc_ffn_scale.weight", "hc_ffn_base.weight",
@@ -511,11 +511,11 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
         }
         if (L.ffn_exp_probs_b_vl) {
             ++vision_biases_loaded;
-            expect_shape(L.ffn_exp_probs_b_vl, p + "exp_probs_b_vl",
+            expect_shape(L.ffn_exp_probs_b_vl, p + "exp_probs_b_vl.bias",
                          {w.n_expert});
             if (shape_error.empty() &&
                 L.ffn_exp_probs_b_vl->type != GGML_TYPE_F32) {
-                shape_error = p + "exp_probs_b_vl must be F32";
+                shape_error = p + "exp_probs_b_vl.bias must be F32";
             }
         }
         expect_shape(L.ffn_gate_exps, p + "ffn_gate_exps.weight",
@@ -544,7 +544,7 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
     } else if (!deepseek4_optional_vision_bias_set_valid(
                    vision_biases_loaded, w.n_layer)) {
         contract_error =
-            "exp_probs_b_vl must be present on every drafter layer or none";
+            "exp_probs_b_vl.bias must be present on every drafter layer or none";
     } else if (!shape_error.empty()) {
         contract_error = shape_error;
     }
