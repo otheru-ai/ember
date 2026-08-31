@@ -101,7 +101,7 @@ anchor stops mattering.
 
 | depth | gate |
 |---|---|
-| block 0 | the 13-record numeric oracle, compounding budget, anchor 3e-5, first-red. Unchanged and discriminating. |
+| block 0 | the 13-record numeric oracle, corrected block-input compounding budget, anchor 6e-5, first-red where the measured budget still localizes. |
 | blocks 1-31 | **no numeric gate.** Not "a looser one" — none is possible. |
 | tower output | behavioural, below |
 

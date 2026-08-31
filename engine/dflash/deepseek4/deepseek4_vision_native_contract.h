@@ -97,6 +97,16 @@ bool deepseek4_vision_rope_angles(
     int n_vit_h, int n_vit_w, std::vector<float> & angles,
     std::string * error = nullptr);
 
+// Indices for the aligner's F.unfold(kernel=3,stride=3) input. The output is
+// [n_llm_h*n_llm_w, 9] in patch-position order; the graph transposes the
+// gathered [channel,9,row] tensor so 9 is contiguous inside each channel,
+// matching PyTorch's channel-major unfold layout.
+bool deepseek4_vision_pixel_shuffle_indices(
+    int n_vit_h, int n_vit_w,
+    int & padded_h, int & padded_w,
+    std::vector<int32_t> & indices,
+    std::string * error = nullptr);
+
 }  // namespace dflash
 
 #endif  // DFLASH_DEEPSEEK4_VISION_NATIVE_CONTRACT_H

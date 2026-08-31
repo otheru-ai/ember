@@ -185,6 +185,13 @@ add_executable(test_ds4_vision_native_contract
 target_include_directories(test_ds4_vision_native_contract PRIVATE engine)
 add_test(NAME ds4_vision_native_contract COMMAND test_ds4_vision_native_contract)
 
+add_executable(test_ds4_vision_oracle
+  test/test_ds4_vision_oracle.cpp
+  engine/dflash/deepseek4/deepseek4_vision_oracle.cpp)
+target_include_directories(test_ds4_vision_oracle PRIVATE engine)
+target_include_directories(test_ds4_vision_oracle PRIVATE engine/third_party)
+add_test(NAME ds4_vision_oracle COMMAND test_ds4_vision_oracle)
+
 add_executable(test_ds4_vision_artifact test/test_ds4_vision_artifact.cpp
   engine/dflash/deepseek4/deepseek4_vision_artifact.cpp
   engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
@@ -501,7 +508,7 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_artifact api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
@@ -799,6 +806,16 @@ if(EMBER_ENGINE)
   ember_strict(test_ds4_vision_mmproj)
   add_test(NAME ds4_vision_mmproj COMMAND test_ds4_vision_mmproj)
   set_tests_properties(ds4_vision_mmproj PROPERTIES TIMEOUT 60)
+
+  # Hardware oracle driver for the native tower. It is intentionally not a
+  # ctest: meaningful execution requires the real mmproj, paired BF16/F32
+  # authority files, their bound raw patch payload, and a target GPU.
+  add_executable(ds4_vision_tower_oracle
+    tools/ds4_vision_tower_oracle.cpp)
+  target_include_directories(ds4_vision_tower_oracle PRIVATE
+    engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(ds4_vision_tower_oracle PRIVATE ember_engine ggml)
+  ember_strict(ds4_vision_tower_oracle)
 
   # Metadata-only inventory gate for all 43 language-model vision routing
   # biases. An optional real path validates the produced full GGUF without

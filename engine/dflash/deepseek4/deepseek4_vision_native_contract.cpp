@@ -290,4 +290,60 @@ bool deepseek4_vision_rope_angles(
     return true;
 }
 
+bool deepseek4_vision_pixel_shuffle_indices(
+        int n_vit_h, int n_vit_w,
+        int & padded_h, int & padded_w,
+        std::vector<int32_t> & indices, std::string * error) {
+    padded_h = 0;
+    padded_w = 0;
+    indices.clear();
+    const int scale = deepseek4_vision_native_config().scale_factor;
+    if (n_vit_h <= 0 || n_vit_w <= 0 ||
+        n_vit_h > INT32_MAX - (scale - 1) ||
+        n_vit_w > INT32_MAX - (scale - 1)) {
+        set_error(error, "invalid DeepSeek4 pixel-shuffle grid");
+        return false;
+    }
+    const int n_llm_h = (n_vit_h + scale - 1) / scale;
+    const int n_llm_w = (n_vit_w + scale - 1) / scale;
+    if (n_llm_h > INT32_MAX / scale || n_llm_w > INT32_MAX / scale) {
+        set_error(error, "DeepSeek4 pixel-shuffle padded grid overflows");
+        return false;
+    }
+    padded_h = n_llm_h * scale;
+    padded_w = n_llm_w * scale;
+    const int64_t output_rows = static_cast<int64_t>(n_llm_h) * n_llm_w;
+    const int64_t count = output_rows * scale * scale;
+    if (count <= 0 || count > INT32_MAX ||
+        static_cast<uint64_t>(count) >
+            static_cast<uint64_t>(SIZE_MAX / sizeof(int32_t))) {
+        padded_h = 0;
+        padded_w = 0;
+        set_error(error, "DeepSeek4 pixel-shuffle index count overflows");
+        return false;
+    }
+    indices.resize(static_cast<size_t>(count));
+    const size_t group = static_cast<size_t>(scale) *
+                         static_cast<size_t>(scale);
+    for (int out_row = 0; out_row < n_llm_h; ++out_row) {
+        for (int out_column = 0; out_column < n_llm_w; ++out_column) {
+            const int output_index = out_row * n_llm_w + out_column;
+            for (int local_row = 0; local_row < scale; ++local_row) {
+                for (int local_column = 0; local_column < scale;
+                     ++local_column) {
+                    const size_t local =
+                        static_cast<size_t>(local_row) *
+                        static_cast<size_t>(scale) +
+                        static_cast<size_t>(local_column);
+                    const int source_row = out_row * scale + local_row;
+                    const int source_column = out_column * scale + local_column;
+                    indices[static_cast<size_t>(output_index) * group + local] =
+                        source_row * padded_w + source_column;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace dflash

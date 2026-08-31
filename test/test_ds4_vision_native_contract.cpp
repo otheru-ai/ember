@@ -171,11 +171,35 @@ static void test_rope_positions() {
           "empty RoPE grid is rejected");
 }
 
+static void test_pixel_shuffle_indices() {
+    int padded_h = 0;
+    int padded_w = 0;
+    std::vector<int32_t> indices;
+    std::string error;
+    CHECK(deepseek4_vision_pixel_shuffle_indices(
+              2, 4, padded_h, padded_w, indices, &error),
+          "non-multiple patch grid builds pixel-shuffle indices");
+    CHECK(padded_h == 3 && padded_w == 6 && indices ==
+              std::vector<int32_t>({
+                  0, 1, 2, 6, 7, 8, 12, 13, 14,
+                  3, 4, 5, 9, 10, 11, 15, 16, 17,
+              }),
+          "pixel-shuffle indices preserve output-row then kernel-row order");
+    CHECK(!deepseek4_vision_pixel_shuffle_indices(
+              0, 4, padded_h, padded_w, indices, &error) && indices.empty(),
+          "empty pixel-shuffle grid is rejected without partial indices");
+    CHECK(!deepseek4_vision_pixel_shuffle_indices(
+              50000, 50000, padded_h, padded_w, indices, &error) &&
+              indices.empty(),
+          "pixel-shuffle grid exceeding int32 indices is rejected");
+}
+
 int main() {
     test_exact_tensor_inventory();
     test_resize_policy();
     test_patch_packing();
     test_rope_positions();
+    test_pixel_shuffle_indices();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }
