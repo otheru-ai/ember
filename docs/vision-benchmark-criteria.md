@@ -97,6 +97,70 @@ Resolution must be reported with every image number. This model is
 dynamic-resolution under a 384-token budget, so an unqualified image throughput
 figure is meaningless.
 
+## C1 protocol — the base-type question, executable as written
+
+This exists so the run needs no design decisions. Codex owns execution; GPU and
+production quiesce are its claims to announce.
+
+**Question.** Production uses base `Q4_0_ROCMFP4_FAST` (4.25 bpw, described by
+the quantizer as a *single-scale speed layout*). Our build uses `Q4_K` because
+the only quantizer that loads `deepseek4` lacks the ROCmFP4 types. Porting that
+type is justified **only** if `Q4_K` costs throughput; the artifact comparison
+already showed size is a non-argument at +0.4%.
+
+**Arms**, sequential, never concurrent — each model is ~85 GiB:
+
+    A  /srv/models/DeepSeek-V4-Flash-fullROCMFP-down2bit-AFFINE.gguf   (ROCMFP4_FAST base)
+    B  /srv/models/DeepSeek-V4-Flash-Vision-Exp-Q4K-affine.gguf        (Q4_K base)
+
+**Text-only prompts.** No images in either arm. Arm B's vision path is not
+exercised and the Aug-9 binary ignores its vision biases anyway.
+
+### Why comparing two different checkpoints is legitimate here
+
+It would not be, for quality. For **throughput** it is, and the reason should be
+stated in the ledger rather than assumed: the two models have the **same
+architecture, same layer count, and the same 284.33 B parameters**, differing in
+trained weight *values* and in 46 extra F32 bias tensors. Weight values do not
+change the cost of a matmul. What differs in compute terms is the encoding —
+which is exactly the variable under test.
+
+Two residual confounds to report rather than ignore:
+
+- Arm B carries **22 tensors promoted to Q6_K** by llama.cpp's mixed-precision
+  heuristics, so B is not purely "Q4_K base". A difference is attributable to
+  "our recipe as built", not to `Q4_K` in isolation.
+- Arm B has 46 more tensors (43 F32 `exp_probs_b_vl` at 256 elements each).
+  Negligible, but state it.
+
+### Measurements
+
+Prefill tokens/s and decode tokens/s, at the shapes already in the ledger for
+0731 so the numbers join existing rows rather than starting a new series.
+
+**Establish noise before comparing.** At least 5 runs per arm; report median and
+spread. A difference inside the spread is not a result. This is the rule the
+Qwen work was built on and it is not optional here.
+
+### Void conditions
+
+Any of these voids the cell rather than caveating it:
+
+- a missing attestation (exact commit, model path and digest, power profile);
+- production not quiesced, or any concurrent job on the box — the quantize run
+  peaked 1.3 GiB under the OOM killer, so a second tenant is not merely noise;
+- both models resident at once;
+- arms from different binaries.
+
+### What the answer means
+
+- **B within noise of A** — do not port `ROCMFP4_FAST`. The 0.4% size gap does
+  not justify touching a vendored fork, and the port cost is real.
+- **B materially slower** — port it. That is then a measured reason, not a
+  preference for matching production.
+- **B faster** — report it and stop; we would have learned the speed layout is
+  not paying for itself on this hardware, which is worth knowing independently.
+
 ## Rules carried over
 
 - A run missing any required attestation is **void**, not "indicative".
