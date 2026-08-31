@@ -1216,14 +1216,21 @@ consistent, but its target byte accounting, weight type, q1 vectors, and logits
 do not match the historical Q3-PLE control. It is retained as ancillary
 evidence and must not be used for this comparison.
 
-#### The engine's own startup self-check already agreed at the failing widths
+#### A pre-existing projection control also agrees at the failing widths
+
+**Corrected 20260831T142000Z.** An earlier version of this entry called these
+numbers "the engine's own startup self-check" and said they run on every load.
+They do not. They come from `DFLASH_QWEN_NUMERICS_EVIDENCE`, an **opt-in**
+control codex had enabled in that attempt (and which, per codex 500,
+deliberately evaluates the rejected batched widths at backend load — the actual
+source of that run's void). Claiming it was the default load path was wrong.
 
 Found in the sealed evidence of a **voided** benchmark attempt
-(`bare-ar-exact-prefill-ecf6996-20260831T025546Z`), not in a run commissioned to
-find it. No GPU was spent on this observation.
+(`bare-ar-exact-prefill-ecf6996-20260831T025546Z`). No GPU was spent on the
+observation.
 
-At load the engine runs `[qwen-numerics] event=projection_compare` against its
-own reference at the two MoE bucket widths — `lazy_batch_widths=5,16`:
+`[qwen-numerics] event=projection_compare` against the control's own reference,
+at the two MoE bucket widths:
 
 | logical_q | weight | `normalized_rms` |
 |---:|---|---:|
@@ -1233,15 +1240,13 @@ own reference at the two MoE bucket widths — `lazy_batch_widths=5,16`:
 **Width 16 is the production prefill chunk width** — the one that fails in the
 full graph. The isolated projection agrees there to ~2e-4.
 
-This is a fourth independent line arriving at the same place as the operator
-oracles, the activation inventory and the same-width control: **components
-agree at widths where the composition fails.** It carries extra weight because
-it is the engine's own startup path rather than a fixture we designed, so it
-cannot share a construction error with them.
-
-It also suggests a standing habit worth keeping: this self-check runs on every
-load and nobody had read its numbers. Retained evidence from voided runs is
-still evidence.
+**What independence this does and does not have.** It is *not* an independent
+execution path — it is a diagnostic, deliberately run. It *is* independent in
+the sense that matters for construction error: it predates this investigation
+and was not designed to test the composition question, so it does not share a
+fixture design with the operator oracles. Weaker than the first version of this
+entry claimed, and still worth having: another component-level agreement at a
+width where the composition fails.
 
 #### Live type-101 operator oracle @ `b4e55d0` — green; isolated program exhausted
 
