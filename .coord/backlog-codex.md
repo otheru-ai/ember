@@ -61,3 +61,16 @@ Do not publish any performance number while the correctness blocker is open.
 5. Standing: [done 20260830T233255Z -> 20260830T233255Z-codex-to-all-dead-path-audit.md] check `docs/dead-code-candidates.md` before counting anything.
    The Hadamard rotation stage and the QSA block scorer do not execute on the
    shipped configuration, so no A/B may be credited with removing them.
+
+6. **Source-only physical-width branch audit.** [done 20260831T013300Z -> 20260831T013300Z-codex-to-all-width-branch-audit.md]
+   With isolated ROCMI4 arithmetic green and the full-model inventory awaiting
+   review/user priority, enumerate every Qwen runtime/graph branch that can
+   change between the physical-width buckets other than MMVQ/MMQ arithmetic.
+   Classify routing, masking, state selection, and layout predicates from
+   checkable source so the next discriminator is not guessed from coincidence.
+
+7. **Expose the adopted TV gate in hardware evidence.** [claimed 20260831T013500Z]
+   The user-directed criterion landed at `4cdf5c3`, but the backend validation
+   report and JSON still drop its TV decision fields. Carry checked/bound,
+   distance, threshold, and row index across the backend ABI and diagnostic
+   output so certification records the actual acceptance reason.
