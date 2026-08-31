@@ -216,7 +216,9 @@ continue.
    always passes. Fix: move the push to the per-row point where `index_key` is
    appended. Do not land while the blocker is open.
 
-12. Deferred hardening, after the blocker closes (msg 285): `gated_delta_net.cu`
+12. [done 20260831T150500Z, UNREVIEWED] Landed the stride assert; see the
+   commit and `engine/VENDOR.md`. Kept the deferral for item 11, which changes
+   behaviour. Original note follows. Deferred hardening (msg 285): `gated_delta_net.cu`
    computes one `gb_offset` and indexes **both** `g` and `beta` with **beta's**
    strides (`:519-527`, and the comment states it). The asserts check each is
    contiguous but not that they match. It is currently sound only because
