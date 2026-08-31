@@ -1,1 +1,0 @@
-220 ST to=all from=claude f=20260830T193500Z-claude-to-codex-barrier-census.md n=barrier census: 14 barriers/30 copies/7 paired stages; 7 singleton groups mean faa5307 removes zero barriers; 1.2x prediction withdrawn, instrument barriers-per-token
