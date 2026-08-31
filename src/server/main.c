@@ -1755,6 +1755,20 @@ static bool tool_result_forces_ar(void) {
     return cached != 0;
 }
 
+// Benchmark-only correctness control. The ordinary HTTP path batches Qwen
+// prefill, so a decode-only measurement at a deep context would otherwise
+// inherit state produced by the currently rejected multi-row path. Keep this
+// operator-wide rather than client-selectable: exact q=1 prefill is extremely
+// slow and must not become a remote denial-of-service knob.
+static bool force_exact_prefill_enabled(void) {
+    static _Thread_local int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("EMBER_FORCE_EXACT_PREFILL");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 // rather than a replacement for the validator.
 static bool tool_grammar_enabled(void) {
     static _Thread_local int cached = -1;
@@ -2617,7 +2631,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     greq.force_ar_decode =
         tool_result_forces_ar() &&
         ember_chat_request_is_tool_result_continuation(req);
-    greq.force_exact_prefill = false;
+    greq.force_exact_prefill = force_exact_prefill_enabled();
     // Lucebox parity (server/src/server/http_server.cpp): each omitted sampler
     // parameter resolves independently from the model card. Explicit request
     // values, including zero-valued additive penalties, always win. The CLI can

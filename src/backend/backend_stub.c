@@ -186,12 +186,13 @@ ember_gen_result ember_backend_generate(ember_backend *b,
         snprintf(fallback, sizeof(fallback),
                  "temp=%.3g top_p=%.3g top_k=%d min_p=%.3g rep_pen=%.3g "
                  "freq_pen=%.3g pres_pen=%.3g greedy=%d dry_mult=%.3g "
-                 "dry_base=%.3g dry_allow=%d dry_win=%d",
+                 "dry_base=%.3g dry_allow=%d dry_win=%d exact_prefill=%d",
                  req->temperature, req->top_p, req->top_k, req->min_p,
                  req->rep_pen, req->freq_pen, req->pres_pen,
                  req->greedy ? 1 : 0,
                  req->dry_multiplier, req->dry_base,
-                 req->dry_allowed_length, req->dry_window);
+                 req->dry_allowed_length, req->dry_window,
+                 req->force_exact_prefill ? 1 : 0);
         reply = fallback;
     }
     if (!reply) {

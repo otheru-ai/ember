@@ -62,6 +62,7 @@ def main() -> None:
         card_file.close()
 
         env = os.environ.copy()
+        env.pop("EMBER_FORCE_EXACT_PREFILL", None)
         env["EMBER_STUB_REPLY"] = "0123456789abcdef"
         env["EMBER_STUB_ECHO_SAMPLER"] = "1"
         proc = subprocess.Popen(
@@ -135,7 +136,7 @@ def main() -> None:
             assert sampler["choices"][0]["message"]["content"] == (
                 "temp=0.7 top_p=0.9 top_k=17 min_p=0.03 rep_pen=1.15 "
                 "freq_pen=0 pres_pen=-0.4 greedy=0 dry_mult=0 "
-                "dry_base=0 dry_allow=-1 dry_win=0"
+                "dry_base=0 dry_allow=-1 dry_win=0 exact_prefill=0"
             ), sampler
 
             overrides = dict(sampler_request)
@@ -155,7 +156,7 @@ def main() -> None:
             assert overridden["choices"][0]["message"]["content"] == (
                 "temp=0 top_p=1 top_k=0 min_p=0 rep_pen=1 "
                 "freq_pen=0 pres_pen=0 greedy=1 dry_mult=0 "
-                "dry_base=0 dry_allow=-1 dry_win=0"
+                "dry_base=0 dry_allow=-1 dry_win=0 exact_prefill=0"
             ), overridden
 
             # DRY explicitly requested: proves the chat layer resolves every
@@ -174,7 +175,8 @@ def main() -> None:
             )
             assert status == 200, dry_on
             assert dry_on["choices"][0]["message"]["content"].endswith(
-                "dry_mult=0.8 dry_base=1.75 dry_allow=3 dry_win=512"
+                "dry_mult=0.8 dry_base=1.75 dry_allow=3 dry_win=512 "
+                "exact_prefill=0"
             ), dry_on
             print("request budgets: omitted=card default, explicit=caller limit")
         finally:
@@ -185,6 +187,61 @@ def main() -> None:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+
+        exact_port = free_port()
+        exact_base = f"http://127.0.0.1:{exact_port}"
+        exact_env = env.copy()
+        exact_env["EMBER_FORCE_EXACT_PREFILL"] = "1"
+        exact_proc = subprocess.Popen(
+            [
+                sys.argv[1],
+                "-m",
+                "stub",
+                "--port",
+                str(exact_port),
+                "--max-ctx",
+                "4096",
+                "--model-card",
+                card_file.name,
+            ],
+            env=exact_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                if exact_proc.poll() is not None:
+                    raise RuntimeError(exact_proc.stderr.read())
+                try:
+                    request_json(exact_base + "/status")
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.03)
+            exact_request = {
+                "model": "stub",
+                "reasoning_effort": "none",
+                "max_tokens": 256,
+                "messages": [{"role": "user", "content": "exact setup"}],
+            }
+            status, exact = request_json(
+                exact_base + "/v1/chat/completions", exact_request
+            )
+            assert status == 200, exact
+            assert exact["choices"][0]["message"]["content"].endswith(
+                "exact_prefill=1"
+            ), exact
+        finally:
+            if exact_proc.poll() is None:
+                exact_proc.send_signal(signal.SIGTERM)
+                try:
+                    exact_proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    exact_proc.kill()
+                    exact_proc.wait()
     finally:
         try:
             os.unlink(card_file.name)
