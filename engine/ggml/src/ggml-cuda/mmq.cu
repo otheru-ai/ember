@@ -3,9 +3,9 @@
 #include "quantize.cuh"
 #include "mmid.cuh"
 
-static bool ggml_cuda_rocmi4_w4a8_dispatch_evidence_enabled() {
+static bool ggml_cuda_quant_dispatch_evidence_enabled() {
     // The legacy env name is retained for the release parser, but the evidence
-    // now distinguishes both default q8_1 DP4A MMQ and optional W4A8 variants.
+    // now distinguishes ROCMI4 and ROCmFP4-fast MMQ kernel variants.
     static const bool enabled = [] {
         const char * value = getenv("DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE");
         return value != nullptr && strcmp(value, "1") == 0;
@@ -13,9 +13,9 @@ static bool ggml_cuda_rocmi4_w4a8_dispatch_evidence_enabled() {
     return enabled;
 }
 
-static void ggml_cuda_log_rocmi4_mmq_dispatch(
+static void ggml_cuda_log_quant_mmq_dispatch(
         const mmq_args & args, const char * variant) {
-    if (!ggml_cuda_rocmi4_w4a8_dispatch_evidence_enabled()) {
+    if (!ggml_cuda_quant_dispatch_evidence_enabled()) {
         return;
     }
     const int device = ggml_cuda_get_device();
@@ -58,23 +58,25 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, args, stream);
             break;
         case GGML_TYPE_Q4_0_ROCMFP4_FAST:
+            ggml_cuda_log_quant_mmq_dispatch(
+                args, "rocmfp4_fast_q8_1_dp4a");
             mul_mat_q_case<GGML_TYPE_Q4_0_ROCMFP4_FAST>(ctx, args, stream);
             break;
         case GGML_TYPE_Q4_0_ROCMI4:
 #if GGML_ROCMI4_W4A8_IU4
             if (ggml_cuda_rocmi4_w4a8_iu4_enabled()) {
 #if GGML_ROCMI4_W4A8_IU4_PREPACK
-                ggml_cuda_log_rocmi4_mmq_dispatch(
+                ggml_cuda_log_quant_mmq_dispatch(
                     args, "w4a8_iu4_prepack");
 #else
-                ggml_cuda_log_rocmi4_mmq_dispatch(
+                ggml_cuda_log_quant_mmq_dispatch(
                     args, "w4a8_iu4_register_pack");
 #endif
                 mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4, true>(ctx, args, stream);
                 break;
             }
 #endif
-            ggml_cuda_log_rocmi4_mmq_dispatch(args, "q8_1_dp4a");
+            ggml_cuda_log_quant_mmq_dispatch(args, "q8_1_dp4a");
             mul_mat_q_case<GGML_TYPE_Q4_0_ROCMI4>(ctx, args, stream);
             break;
         case GGML_TYPE_Q2_0_ROCMFP2:

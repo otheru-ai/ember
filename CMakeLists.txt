@@ -762,13 +762,14 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
   set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
 
-  # HIP-only, opt-in fixed-input correctness oracle for ROCMI4. It compares
-  # convert.cu, dense/routed MMVQ, and dense/routed MMQ against the CPU decoder
-  # and an exact scalar matmul without loading model weights.
+  # HIP-only, opt-in fixed-input correctness oracle for the shipped ROCmFP4
+  # formats. It compares convert.cu, dense/routed MMVQ, and dense/routed MMQ
+  # against the CPU decoders and an exact scalar matmul without model weights.
   add_executable(test_rocmi4_operator_oracle
     test/test_rocmi4_operator_oracle.hip)
   target_include_directories(test_rocmi4_operator_oracle PRIVATE
     engine/ggml/include
+    engine/ggml/rocmfp4
     engine/ggml/rocmfpx
     engine/ggml/src
     engine/ggml/src/ggml-cuda)

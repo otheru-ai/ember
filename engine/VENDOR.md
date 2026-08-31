@@ -72,11 +72,13 @@ necessary instead of `ggml_mul_mat_set_prec(GGML_PREC_F32)` because upstream's
 and thereby silently drops the caller's precision request. Ordinary builds and
 force-cuBLAS builds without the env retain their prior operand precision.
 
-ROCMI4 MMQ dispatch evidence is also an Ember-owned diagnostic extension in
-`ggml-cuda/mmq.cu`: the legacy `DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE` gate now
-labels the default q8_1 DP4A kernel as well as the optional W4A8 variants. The
-model-free row-tail oracle requires that inner marker so a selector fallback
-cannot produce a vacuous green result; preserve it across vendor refreshes.
+ROCm-family MMQ dispatch evidence is also an Ember-owned diagnostic extension
+in `ggml-cuda/mmq.cu`: the legacy
+`DFLASH_ROCMI4_W4A8_DISPATCH_EVIDENCE` gate now labels the default ROCMI4 q8_1
+DP4A kernel, the optional W4A8 variants, and the ROCmFP4-fast q8_1 DP4A kernel.
+The model-free operator oracle requires that inner marker so a selector
+fallback or wrong quant type cannot produce a vacuous green result; preserve it
+across vendor refreshes.
 `DFLASH_MMQ_SRC1_INVENTORY=1` is the companion off-by-default full-model
 diagnostic: each dense MMQ dispatch records its activation dimensions, byte
 strides, contiguity/view predicates, weight identity, and selected MMQ route.
