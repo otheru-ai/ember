@@ -178,23 +178,35 @@ int main(int argc, char ** argv) {
             const char * name;
             const std::vector<float> * values;
             std::array<uint32_t, 4> expected_bits;
+            uint32_t expected_last_bits;
         } probes[] = {
             {"begin", &markers.start,
-             {0xbc170000, 0xbc3c0000, 0x3c970000, 0x3b540000}},
+             {0xbc170000, 0xbc3c0000, 0x3c970000, 0x3b540000},
+             0xbb6a0000},
             {"pad", &markers.pad,
-             {0xbc310000, 0xbd070000, 0x3c240000, 0xbb9b0000}},
+             {0xbc310000, 0xbd070000, 0x3c240000, 0xbb9b0000},
+             0xbbaf0000},
             {"newline", &markers.newline,
-             {0xbb120000, 0xbc910000, 0x3c290000, 0xbbef0000}},
+             {0xbb120000, 0xbc910000, 0x3c290000, 0xbbef0000},
+             0xbbc90000},
             {"end", &markers.end,
-             {0x3c300000, 0xbcf70000, 0x3c6a0000, 0x3cc90000}},
+             {0x3c300000, 0xbcf70000, 0x3c6a0000, 0x3cc90000},
+             0x3c3f0000},
         };
-        // Expected prefixes were extracted independently from the source
+        // Expected endpoints were extracted independently from the source
         // safetensors before the GGUF loader probe ran. They therefore test
         // source -> converter -> GGUF -> loader, not merely file self-consistency.
         for (const Probe & probe : probes) {
-            std::printf("%s %.9g %.9g %.9g %.9g\n", probe.name,
+            if (probe.values->size() != 4096) {
+                std::fprintf(stderr,
+                             "%s marker has %zu columns instead of 4096\n",
+                             probe.name, probe.values->size());
+                return 1;
+            }
+            std::printf("%s %.9g %.9g %.9g %.9g last %.9g\n", probe.name,
                         (*probe.values)[0], (*probe.values)[1],
-                        (*probe.values)[2], (*probe.values)[3]);
+                        (*probe.values)[2], (*probe.values)[3],
+                        probe.values->back());
             for (size_t i = 0; i < probe.expected_bits.size(); ++i) {
                 uint32_t actual_bits = 0;
                 std::memcpy(&actual_bits, &(*probe.values)[i],
@@ -205,6 +217,15 @@ int main(int argc, char ** argv) {
                                  probe.name, i);
                     return 1;
                 }
+            }
+            uint32_t actual_last_bits = 0;
+            std::memcpy(&actual_last_bits, &probe.values->back(),
+                        sizeof(actual_last_bits));
+            if (actual_last_bits != probe.expected_last_bits) {
+                std::fprintf(stderr,
+                             "%s marker differs from source at column 4095\n",
+                             probe.name);
+                return 1;
             }
         }
         Deepseek4ImageMarkers wrong;
