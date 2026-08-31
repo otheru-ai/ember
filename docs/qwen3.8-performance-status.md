@@ -1216,6 +1216,33 @@ consistent, but its target byte accounting, weight type, q1 vectors, and logits
 do not match the historical Q3-PLE control. It is retained as ancillary
 evidence and must not be used for this comparison.
 
+#### The engine's own startup self-check already agreed at the failing widths
+
+Found in the sealed evidence of a **voided** benchmark attempt
+(`bare-ar-exact-prefill-ecf6996-20260831T025546Z`), not in a run commissioned to
+find it. No GPU was spent on this observation.
+
+At load the engine runs `[qwen-numerics] event=projection_compare` against its
+own reference at the two MoE bucket widths — `lazy_batch_widths=5,16`:
+
+| logical_q | weight | `normalized_rms` |
+|---:|---|---:|
+| 5 | `blk.0.attn_qkv.weight` | 1.99e-4 |
+| **16** | `blk.0.attn_qkv.weight` | **2.14e-4** |
+
+**Width 16 is the production prefill chunk width** — the one that fails in the
+full graph. The isolated projection agrees there to ~2e-4.
+
+This is a fourth independent line arriving at the same place as the operator
+oracles, the activation inventory and the same-width control: **components
+agree at widths where the composition fails.** It carries extra weight because
+it is the engine's own startup path rather than a fixture we designed, so it
+cannot share a construction error with them.
+
+It also suggests a standing habit worth keeping: this self-check runs on every
+load and nobody had read its numbers. Retained evidence from voided runs is
+still evidence.
+
 #### Live type-101 operator oracle @ `b4e55d0` — green; isolated program exhausted
 
 Evidence:
