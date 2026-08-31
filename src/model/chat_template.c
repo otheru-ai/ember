@@ -15,6 +15,7 @@
 #define EOS  "<" PIPE "end" USCORE "of" USCORE "sentence" PIPE ">"
 #define USER "<" PIPE "User" PIPE ">"
 #define ASST "<" PIPE "Assistant" PIPE ">"
+#define IMAGE "<" PIPE "deepseek_image" PIPE ">"
 
 // ds4 DS4_REASONING_EFFORT_MAX_PREFIX (byte-exact) — injected after BOS on MAX.
 static const char *THINK_MAX_PREFIX =
@@ -28,6 +29,30 @@ static bool role_is_system(const char *r) {
 }
 static bool role_is_user_like(const char *r) {
     return r && (!strcmp(r, "user") || !strcmp(r, "tool") || !strcmp(r, "function"));
+}
+
+// DeepSeek-V4-Flash-Vision-Exp's processor replaces this exact placeholder
+// with the vocabulary-relative learned image block after tokenization. Only a
+// user turn may carry request media; images in system/assistant history fail
+// closed instead of being flattened out of the trained prompt structure.
+static bool append_message_content(ember_buf *out,
+                                   const ember_chat_msg *msg,
+                                   bool allow_images) {
+    if (!msg || msg->n_parts <= 0) {
+        ember_buf_puts(out, msg && msg->content ? msg->content : "");
+        return true;
+    }
+    for (int i = 0; i < msg->n_parts; ++i) {
+        const ember_content_part *part = &msg->parts[i];
+        if (part->kind == EMBER_CONTENT_TEXT) {
+            ember_buf_puts(out, part->text ? part->text : "");
+        } else if (part->kind == EMBER_CONTENT_IMAGE && allow_images) {
+            ember_buf_puts(out, IMAGE);
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ds4 chat_history_uses_tool_context: tools active, or any tool result / prior
@@ -231,7 +256,10 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
     for (int i = 0; i < req->n_messages; i++) {
         if (!role_is_system(req->messages[i].role)) continue;
         if (sys.len) ember_buf_puts(&sys, "\n\n");
-        ember_buf_puts(&sys, req->messages[i].content ? req->messages[i].content : "");
+        if (!append_message_content(&sys, &req->messages[i], false)) {
+            ember_buf_free(&sys);
+            return NULL;
+        }
     }
     if (req->has_tools) {
         if (sys.len) ember_buf_puts(&sys, "\n\n");
@@ -271,7 +299,10 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
             continue;
         } else if (m->role && !strcmp(m->role, "user")) {
             ember_buf_puts(&b, USER);
-            ember_buf_puts(&b, content);
+            if (!append_message_content(&b, m, true)) {
+                ember_buf_free(&b);
+                return NULL;
+            }
             pending_assistant = true;
             pending_tool_result = false;
         } else if (m->role &&
@@ -297,7 +328,10 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
                     ember_buf_puts(&b, "</think>");
                 }
             }
-            ember_buf_puts(&b, content);
+            if (!append_message_content(&b, m, false)) {
+                ember_buf_free(&b);
+                return NULL;
+            }
             if (m->raw_tool_text) {
                 // Dwarfstar-compatible replay scope: only the exact sampled
                 // DSML block is substituted. Reasoning and visible content are
