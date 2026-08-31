@@ -1,9 +1,12 @@
 #include "deepseek4_vision_artifact.h"
 
+#include <cerrno>
 #include <cstddef>
-#include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <limits>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace dflash {
 namespace {
@@ -133,35 +136,57 @@ bool deepseek4_load_vision_artifact(
     }
     const size_t max_bytes = kHeaderBytes +
                              kMaxImageRows * width * sizeof(float);
-    std::FILE * file = std::fopen(path.c_str(), "rb");
-    if (!file) {
+    const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
         error = "cannot open DeepSeek4 vision artifact";
         return false;
     }
-    if (std::fseek(file, 0, SEEK_END) != 0) {
-        std::fclose(file);
-        error = "cannot size DeepSeek4 vision artifact";
+    struct stat st {};
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        error = "cannot stat DeepSeek4 vision artifact";
         return false;
     }
-    const long end = std::ftell(file);
-    if (end < 0 || static_cast<unsigned long>(end) > max_bytes) {
-        std::fclose(file);
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        error = "DeepSeek4 vision artifact is not a regular file";
+        return false;
+    }
+    if (st.st_size < 0 ||
+        static_cast<uintmax_t>(st.st_size) >
+            static_cast<uintmax_t>(max_bytes)) {
+        close(fd);
         error = "DeepSeek4 vision artifact file is too large";
         return false;
     }
-    if (std::fseek(file, 0, SEEK_SET) != 0) {
-        std::fclose(file);
-        error = "cannot rewind DeepSeek4 vision artifact";
+    std::vector<uint8_t> bytes(static_cast<size_t>(st.st_size));
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t n = read(fd, bytes.data() + offset,
+                               bytes.size() - offset);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            close(fd);
+            error = "cannot read complete DeepSeek4 vision artifact";
+            return false;
+        }
+        offset += static_cast<size_t>(n);
+    }
+    uint8_t trailing = 0;
+    ssize_t trailing_read;
+    do {
+        trailing_read = read(fd, &trailing, 1);
+    } while (trailing_read < 0 && errno == EINTR);
+    if (trailing_read != 0) {
+        close(fd);
+        error = trailing_read > 0
+            ? "DeepSeek4 vision artifact grew while being read"
+            : "cannot verify DeepSeek4 vision artifact length";
         return false;
     }
-    std::vector<uint8_t> bytes(static_cast<size_t>(end));
-    if (!bytes.empty() &&
-        std::fread(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
-        std::fclose(file);
-        error = "cannot read complete DeepSeek4 vision artifact";
-        return false;
-    }
-    if (std::fclose(file) != 0) {
+    if (close(fd) != 0) {
         error = "cannot close DeepSeek4 vision artifact";
         return false;
     }

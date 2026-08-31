@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace dflash;
@@ -164,11 +165,41 @@ static void test_bounded_file_loader() {
           "missing artifact path fails closed");
 }
 
+static void test_file_loader_rejects_special_files() {
+    Deepseek4VisionArtifact artifact;
+    std::string error;
+
+    char fifo_path[] = "/tmp/ember-ds4-vision-fifo-XXXXXX";
+    const int fifo_seed = mkstemp(fifo_path);
+    CHECK(fifo_seed >= 0, "FIFO fixture path is reserved");
+    if (fifo_seed >= 0) {
+        close(fifo_seed);
+        unlink(fifo_path);
+    }
+    const bool made_fifo = fifo_seed >= 0 && mkfifo(fifo_path, 0600) == 0;
+    CHECK(made_fifo, "FIFO fixture is created");
+    CHECK(made_fifo && !deepseek4_load_vision_artifact(
+                           fifo_path, 2, artifact, error) &&
+              error == "DeepSeek4 vision artifact is not a regular file",
+          "FIFO artifact path is rejected without waiting for a writer");
+    if (made_fifo) unlink(fifo_path);
+
+    char directory_path[] = "/tmp/ember-ds4-vision-dir-XXXXXX";
+    CHECK(mkdtemp(directory_path) != nullptr,
+          "directory fixture is created");
+    CHECK(!deepseek4_load_vision_artifact(
+              directory_path, 2, artifact, error) &&
+              error == "DeepSeek4 vision artifact is not a regular file",
+          "directory artifact path receives the correct diagnostic");
+    rmdir(directory_path);
+}
+
 int main() {
     test_valid_artifact();
     test_version_and_grid_fail_closed();
     test_exact_length_and_header_contract();
     test_bounded_file_loader();
+    test_file_loader_rejects_special_files();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }

@@ -36,6 +36,8 @@ bool deepseek4_parse_vision_artifact(
     const std::vector<uint8_t> & bytes, int32_t model_n_embd,
     Deepseek4VisionArtifact & out, std::string & error);
 
+// Operator/offline validation input only. Request media is carried as bounded
+// bytes and must never supply a filesystem path to this loader.
 bool deepseek4_load_vision_artifact(
     const std::string & path, int32_t model_n_embd,
     Deepseek4VisionArtifact & out, std::string & error);
