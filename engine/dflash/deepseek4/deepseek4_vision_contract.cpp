@@ -233,6 +233,82 @@ bool deepseek4_prefill_cut_safe(const std::vector<int32_t> & input_ids,
     return depth == 0;
 }
 
+int deepseek4_image_aware_prefill_chunk(
+        const std::vector<int32_t> & input_ids, int32_t vocab_size,
+        int offset, int proposed, int max_chunk, std::string * error) {
+    if (vocab_size <= 0 || vocab_size > INT32_MAX - DEEPSEEK4_IMAGE_END ||
+        input_ids.size() > static_cast<size_t>(INT_MAX) || offset < 0 ||
+        proposed <= 0 || max_chunk <= 0 || proposed > max_chunk ||
+        static_cast<size_t>(offset) >= input_ids.size()) {
+        set_error(error, "invalid image-aware prefill chunk request");
+        return -1;
+    }
+    const int remaining = static_cast<int>(input_ids.size()) - offset;
+    const int ordinary = std::min(proposed, remaining);
+    const auto sentinel = [vocab_size](int32_t id) {
+        return id >= vocab_size &&
+               id <= vocab_size + DEEPSEEK4_IMAGE_END;
+    };
+
+    const size_t chunk_begin = static_cast<size_t>(offset);
+    size_t chunk_end = chunk_begin + static_cast<size_t>(ordinary);
+    size_t cursor = chunk_begin;
+    if (cursor > 0 && sentinel(input_ids[cursor - 1]) &&
+        input_ids[cursor - 1] != vocab_size + DEEPSEEK4_IMAGE_END) {
+        set_error(error, "prefill starts inside a learned image block");
+        return -1;
+    }
+    while (cursor < chunk_end) {
+        while (cursor < chunk_end && !sentinel(input_ids[cursor]))
+            ++cursor;
+        if (cursor == chunk_end) break;
+        const size_t run_begin = cursor;
+        bool saw_start = false;
+        bool saw_end = false;
+        while (cursor < input_ids.size()) {
+            if (!sentinel(input_ids[cursor])) break;
+            const int32_t type = input_ids[cursor] - vocab_size;
+            if (type == DEEPSEEK4_IMAGE_START) {
+                if (saw_start) {
+                    set_error(error,
+                              "learned image run contains duplicate starts");
+                    return -1;
+                }
+                saw_start = true;
+            } else if (!saw_start && type != DEEPSEEK4_IMAGE_PAD) {
+                set_error(error,
+                          "learned image run has content before its start");
+                return -1;
+            }
+            ++cursor;
+            if (type == DEEPSEEK4_IMAGE_END) {
+                saw_end = true;
+                break;
+            }
+        }
+        if (!saw_start || !saw_end) {
+            set_error(error, "learned image run is missing a boundary");
+            return -1;
+        }
+        const size_t run_end = cursor;
+
+        if (chunk_begin == run_begin && chunk_end < run_end) {
+            const size_t run_size = run_end - run_begin;
+            if (run_size > static_cast<size_t>(max_chunk)) {
+                set_error(error,
+                          "learned image block exceeds the prefill graph cap");
+                return -1;
+            }
+            chunk_end = run_end;
+        }
+        if (chunk_begin < run_begin && chunk_end > run_begin &&
+            chunk_end < run_end) {
+            return static_cast<int>(run_begin - chunk_begin);
+        }
+    }
+    return static_cast<int>(chunk_end - chunk_begin);
+}
+
 bool deepseek4_chunk_accepts_image_tokens(int start_pos,
                                           const std::vector<int32_t> & ids,
                                           int32_t vocab_size) {

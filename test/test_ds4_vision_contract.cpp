@@ -1,5 +1,6 @@
 #include "dflash/deepseek4/deepseek4_vision_contract.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -220,6 +221,63 @@ static void test_visibility_and_prefill_boundaries() {
           "later text-only chunk remains valid");
 }
 
+static void test_image_aware_prefill_chunks() {
+    constexpr int32_t vocab = 4500;
+    Deepseek4ImageBlock block;
+    CHECK(deepseek4_build_image_block(vocab, 2, 3, 2, block),
+          "chunking fixture builds at a nonzero prompt alignment");
+    std::vector<int32_t> prompt = {10, 11};
+    prompt.insert(prompt.end(), block.token_ids.begin(), block.token_ids.end());
+    prompt.insert(prompt.end(), {12, 13, 14});
+    std::string error;
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              prompt, vocab, 0, 5, 64, &error) == 2,
+          "a chunk that would enter an image run stops before its leading pad");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              prompt, vocab, 2, 1, 64, &error) ==
+              static_cast<int>(block.token_ids.size()),
+          "a chunk at the image-run boundary expands across the complete block");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              prompt, vocab, 2, 1,
+              static_cast<int>(block.token_ids.size()) - 1, &error) == -1,
+          "an image block larger than the graph cap fails closed");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              prompt, vocab, 3, 4, 64, &error) == -1,
+          "a restored prefill cannot begin inside a learned image run");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              {1, 2, 3, 4, 5}, vocab, 1, 3, 64, &error) == 3,
+          "text-only chunk sizing remains inert");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              {1, 2, 3}, INT32_MAX, 0, 1, 1, &error) == -1,
+          "a vocabulary whose virtual-id range would overflow fails closed");
+
+    std::vector<int32_t> missing_end = prompt;
+    const auto end = std::find(
+        missing_end.begin(), missing_end.end(),
+        vocab + DEEPSEEK4_IMAGE_END);
+    if (end != missing_end.end()) missing_end.erase(end);
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              missing_end, vocab, 2, 1, 64, &error) == -1,
+          "a malformed image run missing its end fails closed");
+
+    const int full = static_cast<int>(prompt.size());
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              prompt, vocab, 0, full, full, &error) == full,
+          "a chunk already containing the full image run is unchanged");
+
+    std::vector<int32_t> adjacent = block.token_ids;
+    adjacent.insert(adjacent.end(), block.token_ids.begin(),
+                    block.token_ids.end());
+    const int one_block = static_cast<int>(block.token_ids.size());
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              adjacent, vocab, 0, one_block + 1,
+              static_cast<int>(adjacent.size()), &error) == one_block,
+          "a chunk cannot consume a prefix of an adjacent second image block");
+    CHECK(deepseek4_image_aware_prefill_chunk(
+              adjacent, vocab, one_block, 1, one_block, &error) == one_block,
+          "a complete adjacent image block can start immediately after END");
+}
+
 static void test_routing_modes() {
     constexpr int32_t vocab = 5000;
     CHECK(deepseek4_route_mode(true, true, vocab + DEEPSEEK4_IMAGE,
@@ -250,6 +308,7 @@ int main() {
     test_embedding_assembly();
     test_trailing_alignment_pad();
     test_visibility_and_prefill_boundaries();
+    test_image_aware_prefill_chunks();
     test_routing_modes();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;

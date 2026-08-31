@@ -80,6 +80,14 @@ void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
 bool deepseek4_prefill_cut_safe(const std::vector<int32_t> & input_ids,
                                 int32_t vocab_size, int cut);
 
+// Adjust one proposed prefill chunk so each learned image block (leading PAD
+// through END) stays in one graph invocation. Returns a positive row count, or
+// -1 when the caller starts inside a block or the complete block exceeds max_chunk.
+// Text-only inputs return the ordinary min(proposed, remaining) count.
+int deepseek4_image_aware_prefill_chunk(
+    const std::vector<int32_t> & input_ids, int32_t vocab_size,
+    int offset, int proposed, int max_chunk, std::string * error = nullptr);
+
 // The published reference merges image embeddings only at start_pos == 0 and
 // asserts that every later chunk contains ordinary vocabulary IDs.
 bool deepseek4_chunk_accepts_image_tokens(int start_pos,
