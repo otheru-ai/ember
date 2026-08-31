@@ -1,4 +1,5 @@
 #include "deepseek4_vision_biases.h"
+#include "deepseek4_vision_contract.h"
 
 #include "ggml.h"
 #include "gguf.h"
@@ -87,7 +88,8 @@ void write_bias_gguf(const std::filesystem::path & path,
         if (mutation == Mutation::MissingLayer && layer == 1) continue;
         const std::string suffix =
             mutation == Mutation::WrongSuffix && layer == 1
-                ? "exp_probs_b_vl" : "exp_probs_b_vl.bias";
+                ? "exp_probs_b_vl"
+                : dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX;
         add_bias(model, gguf,
                  "blk." + std::to_string(layer) + "." + suffix,
                  mutation == Mutation::WrongType && layer == 1
@@ -96,11 +98,15 @@ void write_bias_gguf(const std::filesystem::path & path,
                  data.data());
     }
     if (mutation == Mutation::WrongBlockSpelling) {
-        add_bias(model, gguf, "blk.01.exp_probs_b_vl.bias",
+        add_bias(model, gguf,
+                 std::string("blk.01.") +
+                     dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX,
                  GGML_TYPE_F32, false, data.data());
     }
     if (mutation == Mutation::OutOfRangeLayer) {
-        add_bias(model, gguf, "blk.3.exp_probs_b_vl.bias",
+        add_bias(model, gguf,
+                 std::string("blk.3.") +
+                     dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX,
                  GGML_TYPE_F32, false, data.data());
     }
     if (!gguf_write_to_file(gguf, path.c_str(), false)) std::abort();
