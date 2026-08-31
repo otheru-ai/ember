@@ -1,4 +1,5 @@
 #include "logits_probe_format.h"
+#include "deepseek4_model_contract.h"
 
 #include <cerrno>
 #include <cmath>
@@ -34,6 +35,17 @@ static std::string read_file(const std::string &path) {
 }
 
 int main() {
+    CHECK(dflash::common::deepseek4_layer_contract_supported(43U, 3U, false),
+          "production layer contract accepted");
+    CHECK(!dflash::common::deepseek4_layer_contract_supported(1U, 1U, false),
+          "single-layer control rejected by default");
+    CHECK(dflash::common::deepseek4_layer_contract_supported(1U, 1U, true),
+          "single-layer control accepted when explicit");
+    CHECK(!dflash::common::deepseek4_layer_contract_supported(1U, 3U, true) &&
+              !dflash::common::deepseek4_layer_contract_supported(43U, 1U, true) &&
+              !dflash::common::deepseek4_layer_contract_supported(2U, 1U, true),
+          "control flag accepts no other layer contract");
+
     char root_template[] = "/tmp/ember-logits-format-XXXXXX";
     char *root = mkdtemp(root_template);
     CHECK(root != nullptr, "temporary directory");

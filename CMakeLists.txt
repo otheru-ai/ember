@@ -392,7 +392,8 @@ add_test(NAME gguf_quantize_common COMMAND test_gguf_quantize_common)
 add_executable(test_logits_probe_format
   test/test_logits_probe_format.cpp
   tools/logits_probe_format.cpp)
-target_include_directories(test_logits_probe_format PRIVATE tools)
+target_include_directories(test_logits_probe_format PRIVATE
+  tools engine/dflash/deepseek4)
 ember_strict(test_logits_probe_format)
 add_test(NAME logits_probe_format COMMAND test_logits_probe_format)
 

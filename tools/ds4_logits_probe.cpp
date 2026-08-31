@@ -207,6 +207,7 @@ int main(int argc, char **argv) {
     // Force a monolithic load. The diagnostic is a control for Ember's target
     // computation, not the optional CPU expert streaming path.
     config.fused_decode = true;
+    config.allow_single_layer_control = true;
     dflash::common::DeepSeek4Backend backend(config);
     if (!backend.init()) {
         std::fprintf(stderr, "cannot initialize DeepSeek4 control model\n");

@@ -831,6 +831,9 @@ bool DeepSeek4Backend::validate_prefill_mode() const {
 }
 
 bool DeepSeek4Backend::load_model() {
+    TargetLoadPlan load_plan;
+    load_plan.allow_single_layer_control =
+        cfg_.allow_single_layer_control;
     // Fused decode and layer-major prefill reference every expert directly.
     // Make their residency requirement explicit instead of silently falling
     // back to tokenwise hybrid execution.
@@ -840,7 +843,8 @@ bool DeepSeek4Backend::load_model() {
                      "(fused_decode=%s, prefill=%s)\n",
                      cfg_.fused_decode ? "on" : "off",
                      prefill_attention_mode_name(cfg_.prefill_mode));
-        if (!load_deepseek4_gguf(cfg_.model_path, backend_, w_)) {
+        if (!load_deepseek4_gguf_partial(
+                cfg_.model_path, backend_, load_plan, w_)) {
             if (prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
                 std::fprintf(stderr,
                     "[deepseek4] monolithic HIP load required for %s prefill: %s\n",
@@ -849,7 +853,9 @@ bool DeepSeek4Backend::load_model() {
                 return false;
             }
             std::fprintf(stderr,
-                         "[deepseek4] monolithic HIP load failed; trying hybrid mode\n");
+                         "[deepseek4] monolithic HIP load failed (%s); "
+                         "trying hybrid mode\n",
+                         last_error());
             if (!init_hybrid_model()) {
                 std::fprintf(stderr, "[deepseek4] hybrid mode also failed: %s\n",
                              cfg_.model_path);
@@ -1204,6 +1210,7 @@ bool DeepSeek4Backend::compute_uniform_hybrid_placement(const DeepSeek4Weights &
 bool DeepSeek4Backend::init_hybrid_model() {
     TargetLoadPlan plan;
     plan.skip_expert_tensors = true;
+    plan.allow_single_layer_control = cfg_.allow_single_layer_control;
     if (!load_deepseek4_gguf_partial(cfg_.model_path, backend_, plan, w_)) {
         std::fprintf(stderr, "[deepseek4] failed to partially load model for hybrid mode: %s\n",
                      cfg_.model_path);
@@ -1219,7 +1226,11 @@ bool DeepSeek4Backend::init_hybrid_model() {
 
     if (moe_placement_.total_hot >= w_.n_layer * w_.n_expert) {
         free_deepseek4_weights(w_);
-        if (!load_deepseek4_gguf(cfg_.model_path, backend_, w_)) {
+        TargetLoadPlan full_plan;
+        full_plan.allow_single_layer_control =
+            cfg_.allow_single_layer_control;
+        if (!load_deepseek4_gguf_partial(
+                cfg_.model_path, backend_, full_plan, w_)) {
             std::fprintf(stderr, "[deepseek4] failed to reload full model after placement: %s\n",
                          cfg_.model_path);
             return false;

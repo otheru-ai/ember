@@ -27,6 +27,7 @@
 #include "common/cpu_embedder.h"
 #include "placement/placement_config.h"
 #include "common/prefill_attention_mode.h"
+#include "deepseek4_model_contract.h"
 
 namespace dflash::common {
 
@@ -39,6 +40,9 @@ struct TargetLoadPlan {
     bool skip_expert_tensors = false;
     bool metadata_only = false;
     bool expert_metadata_only = false;
+    // The standalone full-logit control uses a deliberately sliced layer-0
+    // GGUF. Ordinary target loads must retain the production 43/3 contract.
+    bool allow_single_layer_control = false;
 };
 
 // Layer-major prefill may schedule two 2K numerical bands while preserving
@@ -349,6 +353,9 @@ struct DeepSeek4BackendConfig {
     int          max_ctx      = 0;     // 0 = auto from SWA + compression capacity
     int          expert_top_k = 0;     // 0 = use all model-routed experts
     bool         fused_decode = false; // single-graph GPU decode
+    // Standalone diagnostic only: accept exactly the layer-0/hash-layer-0
+    // control slice. No server option or environment variable sets this.
+    bool         allow_single_layer_control = false;
 };
 
 // ─── Function declarations ──────────────────────────────────────────────

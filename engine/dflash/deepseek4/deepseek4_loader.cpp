@@ -398,6 +398,21 @@ bool load_deepseek4_gguf_partial(const std::string & path,
     const uint32_t n_hc_sinkhorn  = get_u32_or(gctx, "deepseek4.hyper_connection.sinkhorn_iterations", 20);
     const uint32_t n_value_dim    = get_u32_or(
         gctx, "deepseek4.attention.value_length", head_dim);
+    const bool single_layer_control =
+        plan_in.allow_single_layer_control && n_layer == 1U &&
+        n_hash_layer == 1U;
+
+    if (!deepseek4_layer_contract_supported(
+            n_layer, n_hash_layer,
+            plan_in.allow_single_layer_control)) {
+        set_last_error(
+            "unsupported DeepSeek V4 Flash layer contract: block_count=" +
+            std::to_string(n_layer) + " hash_layer_count=" +
+            std::to_string(n_hash_layer));
+        gguf_free(gctx);
+        if (meta_ctx) ggml_free(meta_ctx);
+        return false;
+    }
 
     // RoPE parameters
     const float rope_freq_base    = get_f32_or(gctx, "deepseek4.rope.freq_base", 10000.0f);
@@ -470,7 +485,7 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         uint32_t expected;
     };
     const ExpectedU32 expected_shape[] = {
-        {"block_count", n_layer, 43},
+        {"block_count", n_layer, single_layer_control ? 1U : 43U},
         {"embedding_length", n_embd, 4096},
         {"vocab_size", n_vocab, 129280},
         {"attention.head_count", n_head, 64},
@@ -485,7 +500,8 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         {"expert_used_count", n_expert_used, 6},
         {"expert_shared_count", n_expert_shared, 1},
         {"expert_feed_forward_length", n_ff_exp, 2048},
-        {"hash_layer_count", n_hash_layer, 3},
+        {"hash_layer_count", n_hash_layer,
+         single_layer_control ? 1U : 3U},
         {"attention.sliding_window", n_swa, 128},
         {"attention.indexer.head_count", n_indexer_head, 64},
         {"attention.indexer.key_length", n_indexer_head_dim, 128},
