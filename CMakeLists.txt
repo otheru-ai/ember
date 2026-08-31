@@ -174,11 +174,6 @@ target_include_directories(test_prefill_policy PRIVATE
   engine/ggml/src)
 add_test(NAME prefill_policy COMMAND test_prefill_policy)
 
-add_executable(test_ds4_image_span test/test_ds4_image_span.cpp
-  engine/dflash/deepseek4/deepseek4_image_embed.cpp)
-target_include_directories(test_ds4_image_span PRIVATE engine/dflash)
-add_test(NAME ds4_image_span COMMAND test_ds4_image_span)
-
 add_executable(test_ds4_vision_contract test/test_ds4_vision_contract.cpp
   engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
 target_include_directories(test_ds4_vision_contract PRIVATE engine)
@@ -500,7 +495,7 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy ds4_image_span ds4_vision_contract ds4_vision_artifact api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_vision_contract ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference

@@ -49,8 +49,12 @@ bool ember_vision_prompt_expand(
                       "vision replacement token contract is invalid");
             return false;
         }
-        if (expanded_count < placeholder_count ||
-            images[i].n_tokens >
+        if (expanded_count < placeholder_count) {
+            set_error(error, error_cap,
+                      "prompt is too short to contain the expected image placeholder");
+            return false;
+        }
+        if (images[i].n_tokens >
                 INT_MAX - (expanded_count - placeholder_count)) {
             set_error(error, error_cap, "expanded vision prompt is too large");
             return false;

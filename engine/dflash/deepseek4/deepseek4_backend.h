@@ -153,7 +153,9 @@ private:
                    int kv_offset = 0,
                    int snap_pos = -1, int snap_slot = -1,
                    bool allow_spec_capture = true,
-                   bool force_exact_prefill = false);
+                   bool force_exact_prefill = false,
+                   const std::vector<VisionEmbeddingRun> * vision_runs =
+                       nullptr);
 
     // Autoregressive decode loop.
     // resume_from: number of tokens already present in `out_tokens` (and

@@ -96,6 +96,14 @@ static void test_fail_closed_contracts(void) {
               one, 4, placeholder, 2, &overflow, 1,
               &output, &count, offsets, error, sizeof(error)),
           "expanded prompt arithmetic fails before allocation overflow");
+
+    const int32_t short_prompt[] = {7};
+    memset(error, 0, sizeof(error));
+    CHECK(!ember_vision_prompt_expand(
+              short_prompt, 1, placeholder, 2, images, 1,
+              &output, &count, offsets, error, sizeof(error)) &&
+              strstr(error, "too short") != NULL,
+          "short prompt reports a missing-placeholder diagnostic");
 }
 
 static void test_text_only_inert(void) {

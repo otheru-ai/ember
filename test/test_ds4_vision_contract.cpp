@@ -83,6 +83,11 @@ static void test_grid_sweep_against_scalar_reference() {
     }
     CHECK(all_match,
           "grid/start sweep matches independent row-major transpose reference");
+
+    Deepseek4ImageBlock longest;
+    CHECK(deepseek4_build_image_block(vocab, 15, 24, 0, longest) &&
+              longest.token_ids.size() == 405,
+          "computed legal block length includes padding beyond 384-grid budget");
 }
 
 static void test_padding_and_mutations() {
@@ -341,6 +346,24 @@ static void test_vision_prefill_plan() {
     CHECK(!deepseek4_prepare_vision_prefill(
               prompt, vocab, n_embd, {bad_values}, safe_ids, &error),
           "non-finite learned rows fail before graph construction");
+
+    std::vector<Deepseek4VisionRunView> local;
+    CHECK(deepseek4_rebase_vision_runs(
+              {view}, 0, static_cast<int>(prompt.size()), local, &error) &&
+              local.size() == 1 && local[0].prompt_offset == view.prompt_offset,
+          "fresh prefill keeps request-owned run offsets");
+    CHECK(deepseek4_rebase_vision_runs(
+              {view}, view.prompt_offset, view.n_tokens + 1, local, &error) &&
+              local.size() == 1 && local[0].prompt_offset == 0,
+          "restore before an image rebases the complete learned run");
+    CHECK(deepseek4_rebase_vision_runs(
+              {view}, view.prompt_offset + view.n_tokens, 1, local, &error) &&
+              local.empty(),
+          "restore after an image omits the completed run");
+    CHECK(!deepseek4_rebase_vision_runs(
+              {view}, view.prompt_offset + 1, view.n_tokens, local, &error) &&
+              local.empty(),
+          "restore boundary inside a learned run fails closed");
 }
 
 static void test_visibility_and_prefill_boundaries() {

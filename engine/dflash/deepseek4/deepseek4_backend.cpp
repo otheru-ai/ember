@@ -6,7 +6,6 @@
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
 #include "deepseek4_dspark_scheduler.h"
-#include "deepseek4_image_embed.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
 
@@ -871,10 +870,6 @@ bool DeepSeek4Backend::load_model() {
         return false;
     }
     w_.routed_expert_top_k = cfg_.expert_top_k;
-    // Vision graft (validation path): resolve $EMBER_DS4_IMAGE_EMBED now that
-    // n_embd is known. Must happen before any request, because the encode-time
-    // shim in src/server/main.c reads the palette from the loaded instance.
-    Ds4ImageEmbed::instance(w_.n_embd);
     w_.fused_decode = cfg_.fused_decode && !moe_hybrid_;
     // PORTED from lucebox d03bcc4. Off by default: upstream documents that it
     // changes verifier floating-point inputs and can change generated tokens,
@@ -1228,7 +1223,8 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                                   int snap_pos,
                                   int snap_slot,
                                   bool allow_spec_capture,
-                                  bool force_exact_prefill) {
+                                  bool force_exact_prefill,
+                                  const std::vector<VisionEmbeddingRun> * vision_runs) {
     // The all-hot layer-range path supports causal chunked prefill. The
     // optimized graph snapshots the previous raw SWA window, attends over
     // that snapshot plus the current ubatch, and commits only the final SWA
@@ -1241,24 +1237,56 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         : cfg_.prefill_mode;
     const int requested_chunk = cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa;
     const int n_total = (int)tokens.size();
-
-    // Vision graft (validation path). The image span is located by matching the
-    // trained 64-id palette cycle, which cannot plausibly occur in text, so no
-    // span has to be threaded down from the server layer. A partial match means
-    // the prompt and the sidecar disagree about length -- abort rather than
-    // splice through it, because misaligned image rows still decode fluently.
-    const Ds4ImageEmbed & img_embed = Ds4ImageEmbed::instance(w_.n_embd);
-    int64_t img_span = -1;
-    if (img_embed.active) {
-        std::string img_err;
-        img_span = img_embed.find_span(tokens, &img_err);
-        if (!img_err.empty()) {
-            std::fprintf(stderr, "[ds4-image] %s\n", img_err.c_str());
+    const bool has_request_vision = vision_runs && !vision_runs->empty();
+    std::vector<dflash::Deepseek4VisionRunView> request_views;
+    // Intentionally the sole writer of graph-bound run views: every fresh or
+    // restored span must pass through absolute-to-local rebasing below.
+    std::vector<dflash::Deepseek4VisionRunView> local_vision;
+    dflash::Deepseek4EmbedOnlyTokenIds safe_embed_ids;
+    if (has_request_vision) {
+        request_views.reserve(vision_runs->size());
+        for (const VisionEmbeddingRun & run : *vision_runs) {
+            if (run.token_ids.size() > static_cast<size_t>(INT_MAX)) {
+                std::fprintf(stderr,
+                             "[deepseek4-vision] image run is too large\n");
+                return -1;
+            }
+            dflash::Deepseek4VisionRunView view;
+            view.prompt_offset = run.prompt_offset;
+            view.n_tokens = static_cast<int>(run.token_ids.size());
+            view.embedding_width = run.embedding_width;
+            view.token_ids = run.token_ids.data();
+            view.embeddings = run.embeddings.data();
+            view.embedding_values = run.embeddings.size();
+            request_views.push_back(view);
+        }
+        std::string vision_error;
+        if (!dflash::deepseek4_rebase_vision_runs(
+                request_views, kv_offset, n_total, local_vision,
+                &vision_error) ||
+            !dflash::deepseek4_prepare_vision_prefill(
+                tokens, w_.n_vocab, w_.n_embd, local_vision,
+                safe_embed_ids, &vision_error)) {
+            std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                         vision_error.c_str());
             return -1;
         }
-        if (img_span >= 0) {
-            std::fprintf(stderr, "[ds4-image] splicing %d image tokens at position %lld\n",
-                         img_embed.n_tokens, (long long) img_span);
+        if (!local_vision.empty() &&
+            (force_exact_prefill || moe_hybrid_ ||
+             !prefill_attention_mode_is_approximate(base_prefill_mode))) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] learned image prefill requires "
+                         "the approximate layer-major graph\n");
+            return -1;
+        }
+        if (snap_slot >= 0 && snap_pos > kv_offset &&
+            snap_pos < kv_offset + n_total &&
+            !dflash::deepseek4_prefill_cut_safe(
+                tokens, w_.n_vocab, snap_pos - kv_offset)) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] snapshot boundary bisects a "
+                         "learned image run\n");
+            return -1;
         }
     }
     // Bound the layer-major graph to the topology validated by the prefill
@@ -1303,7 +1331,8 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     last_logits_.clear();
     int spec_capture_from = n_total;
     const bool capture_spec_features =
-        allow_spec_capture && spec_enabled_ && spec_drafter_;
+        allow_spec_capture && !has_request_vision &&
+        spec_enabled_ && spec_drafter_;
     // The layer-major HIP graph can publish mean-over-HC capture rows while it
     // performs the configured dense/sparse prefill. Resident XDNA decode may
     // replace these with an isolated exact shadow suffix after authoritative
@@ -1391,15 +1420,35 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             proposed, i, pos,
             snap_slot >= 0 ? snap_pos : -1,
             capture_spec_features ? spec_capture_from : -1);
+        if (!local_vision.empty()) {
+            std::string vision_error;
+            n_tok = dflash::deepseek4_image_aware_prefill_chunk(
+                tokens, w_.n_vocab, i, n_tok, layer_major_cap,
+                &vision_error);
+            if (n_tok < 0) {
+                std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                             vision_error.c_str());
+                return -1;
+            }
+        }
 
         // Embed tokens
         std::vector<float> embed(w_.n_embd * n_tok);
         const auto embed_t0 = Clock::now();
-        w_.embedder.embed(tokens.data() + i, n_tok, embed.data());
-        // Vision graft: overwrite the rows carrying image positions. The palette
-        // IDs stay in `tokens`, so hash routing is unchanged -- which is exactly
-        // upstream's bridge. Prefill only; decode keeps ordinary token IDs.
-        img_embed.splice(embed.data(), i, n_tok, img_span);
+        const int32_t * embed_ids = has_request_vision
+            ? safe_embed_ids.values.data() + i
+            : tokens.data() + i;
+        w_.embedder.embed(embed_ids, n_tok, embed.data());
+        if (!local_vision.empty()) {
+            std::string vision_error;
+            if (!dflash::deepseek4_splice_vision_chunk(
+                    local_vision, w_.n_embd, i, n_tok, embed.data(),
+                    &vision_error)) {
+                std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                             vision_error.c_str());
+                return -1;
+            }
+        }
         DeepSeek4StepTelemetry step_tel;
         if (timing) step_tel.embed_us = elapsed_us(embed_t0, Clock::now());
 
@@ -2004,7 +2053,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = eligible_without_gate && profitability_allowed;
+    const bool prepare_spec = req.vision.empty() &&
+        eligible_without_gate && profitability_allowed;
     describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
                      prepare_spec, req.force_ar_decode,
                      (int)req.prompt.size());
@@ -2013,7 +2063,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     int committed = do_prefill(req.prompt, out_io, /*kv_offset=*/0,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill);
+                               req.force_exact_prefill,
+                               &req.vision);
     if (committed < 0) {
         result.fail(GenerateErrorCode::PrefillFailed);
         return result;
@@ -2388,7 +2439,8 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = eligible_without_gate && profitability_allowed;
+    const bool prepare_spec = req.vision.empty() &&
+        eligible_without_gate && profitability_allowed;
     if (!prepare_spec) {
         // An exact snapshot hit does not call do_prefill(), so clear restored
         // features here as well when this request cannot enter DSpark.
@@ -2407,7 +2459,8 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         committed = do_prefill(delta, out_io, snap_pos,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill);
+                               req.force_exact_prefill,
+                               &req.vision);
         if (committed < 0) {
             result.fail(GenerateErrorCode::PrefillFailed);
             return result;
@@ -2551,6 +2604,13 @@ bool DeepSeek4Backend::resident_session_create(
     if (error) error->clear();
     if (id == 0 || resident_sessions_.count(id) != 0) {
         if (error) *error = "invalid or duplicate resident session";
+        return false;
+    }
+    if (!request.vision.empty()) {
+        if (error) {
+            *error = "vision_resident_prefill_unsupported: learned image "
+                     "blocks require an indivisible prefill quantum";
+        }
         return false;
     }
     if (request.n_gen < 0 ||
@@ -2780,7 +2840,8 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
                                session.request.snap_pos,
                                session.request.snap_slot,
                                session.spec_eligible && !shadow_spec_capture,
-                               session.request.force_exact_prefill);
+                               session.request.force_exact_prefill,
+                               &session.request.vision);
     } catch (...) {
         swap_resident_state(session);
         session.failed = true;

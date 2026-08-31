@@ -21,6 +21,49 @@ bool is_type(int32_t token, int32_t vocab_size, Deepseek4ImageType type) {
 
 }  // namespace
 
+bool deepseek4_rebase_vision_runs(
+        const std::vector<Deepseek4VisionRunView> & request_runs,
+        int prefill_offset, int prefill_tokens,
+        std::vector<Deepseek4VisionRunView> & local_runs,
+        std::string * error) {
+    local_runs.clear();
+    if (prefill_offset < 0 || prefill_tokens < 0 ||
+        prefill_offset > INT_MAX - prefill_tokens) {
+        set_error(error, "invalid DeepSeek4 vision prefill span");
+        return false;
+    }
+    const int prefill_end = prefill_offset + prefill_tokens;
+    int previous_end = 0;
+    for (const Deepseek4VisionRunView & run : request_runs) {
+        if (run.prompt_offset < 0 || run.n_tokens <= 0 ||
+            run.prompt_offset > INT_MAX - run.n_tokens ||
+            run.prompt_offset < previous_end || run.embedding_width <= 0 ||
+            !run.token_ids || !run.embeddings ||
+            static_cast<size_t>(run.n_tokens) >
+                std::numeric_limits<size_t>::max() /
+                    static_cast<size_t>(run.embedding_width) ||
+            run.embedding_values != static_cast<size_t>(run.n_tokens) *
+                static_cast<size_t>(run.embedding_width)) {
+            set_error(error, "invalid or unordered request-owned vision runs");
+            local_runs.clear();
+            return false;
+        }
+        const int run_end = run.prompt_offset + run.n_tokens;
+        previous_end = run_end;
+        if (run_end <= prefill_offset || run.prompt_offset >= prefill_end)
+            continue;
+        if (run.prompt_offset < prefill_offset || run_end > prefill_end) {
+            set_error(error, "prefill span bisects a learned image run");
+            local_runs.clear();
+            return false;
+        }
+        Deepseek4VisionRunView local = run;
+        local.prompt_offset -= prefill_offset;
+        local_runs.push_back(local);
+    }
+    return true;
+}
+
 bool deepseek4_build_image_block(int32_t vocab_size, int n_llm_h, int n_llm_w,
                                  int start_pos, Deepseek4ImageBlock & out,
                                  std::string * error) {

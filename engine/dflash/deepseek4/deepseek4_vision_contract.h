@@ -85,6 +85,16 @@ struct Deepseek4EmbedOnlyTokenIds {
     std::vector<int32_t> values;
 };
 
+// Select request-owned runs that fall wholly inside one absolute prefill span
+// and rewrite their offsets relative to that span. A restore boundary that
+// bisects a learned block is rejected; completed runs before the restored
+// prefix and future runs after the supplied suffix are intentionally omitted.
+bool deepseek4_rebase_vision_runs(
+    const std::vector<Deepseek4VisionRunView> & request_runs,
+    int prefill_offset, int prefill_tokens,
+    std::vector<Deepseek4VisionRunView> & local_runs,
+    std::string * error = nullptr);
+
 bool deepseek4_build_image_block(int32_t vocab_size, int n_llm_h, int n_llm_w,
                                  int start_pos, Deepseek4ImageBlock & out,
                                  std::string * error = nullptr);
