@@ -830,8 +830,10 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
     // The GPU-free stub rejects vision before this point, so the regression is
     // intentionally uncovered by the host gauntlet; real-weight validation
     // exercises this guard on the Qwen vision deployment path.
-    if ((req && req->has_images) ||
-        ember_ds4_image_span_start(prompt_ids, n_prompt) >= 0)
+    const int image_span_start =
+        ember_ds4_image_span_start(prompt_ids, n_prompt);
+    if (!ember_kv_post_tool_snapshot_safe(
+            req && req->has_images, image_span_start))
         return;
     if (!generated_frontier_matches_text(be, g)) {
         fprintf(stderr,
@@ -931,7 +933,7 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
     pthread_mutex_lock(&srv->state_lock);
     bool committed = ember_kv_commit(&srv->kv, slot, seq, total,
                                      request_image_digest(req),
-                                     ember_ds4_image_span_start(seq, total));
+                                     image_span_start);
     if (!committed)
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
@@ -951,7 +953,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
 
 static void finish_prompt_snapshot(ember_server *srv, ember_backend *be,
                                    int slot, const int32_t *ids, int cut,
-                                   bool saved, int reason) {
+                                   bool saved, int reason,
+                                   uint64_t image_digest,
+                                   int image_span_start) {
     if (slot < 0) return;
     // Keep the physical slot reserved until any durable copy has completed.
     // Only then publish the logical prefix, so another session cannot restore
@@ -960,8 +964,7 @@ static void finish_prompt_snapshot(ember_server *srv, ember_backend *be,
         (void)ember_backend_disk_save(be, slot, ids, cut, reason);
     pthread_mutex_lock(&srv->state_lock);
     if (!saved || !ember_kv_commit(&srv->kv, slot, ids, cut,
-                                   ember_ds4_image_digest(),
-                                   ember_ds4_image_span_start(ids, cut)))
+                                   image_digest, image_span_start))
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
 }
@@ -2910,7 +2913,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_buf_free(&hdr);
         if (!header_ok) {
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -2939,7 +2943,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         if (!role_ok) {
             ember_sse_free(&st);
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
         gen_ctx g = {0};
@@ -2966,7 +2971,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // the backend can't honor (full re-prefill, no repair snapshot reserved).
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         (void)continue_tool_started_in_think(
             srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
         bool unclosed_think_tool =
@@ -3148,7 +3154,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_buf_free(&hdr);
         if (!header_ok) {
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -3176,7 +3183,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             ember_protocol_stream_free(&protocol);
             ember_sse_free(&splitter);
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -3208,7 +3216,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_gen_result res = ember_backend_generate(be, &greq);
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         (void)continue_tool_started_in_think(
             srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
         bool unclosed_think_tool =
@@ -3409,7 +3418,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // #2: commit only on a real backend snapshot save (see streaming path).
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         // Non-stream responses are atomic: never present partial output as a
         // successful completion or retain it in exact-tool replay memory.
         if (!res.ok) {

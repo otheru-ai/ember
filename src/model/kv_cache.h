@@ -79,6 +79,13 @@ void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
 // Kept as a pure policy helper so both doors are pinned by GPU-free tests.
 int ember_kv_clamp_before_image(int candidate, int img_span_start);
 
+// A post-tool snapshot physically contains the full current frontier and
+// cannot be relabeled as a shorter pre-image prefix. Until the disk format is
+// media-aware, skip this snapshot entirely when either request metadata or the
+// legacy token span says that frontier contains image state.
+bool ember_kv_post_tool_snapshot_safe(bool request_has_images,
+                                      int img_span_start);
+
 // Prevent a selected snapshot slot from being evicted/overwritten while a
 // concurrent backend request restores it.
 bool ember_kv_pin(ember_kv_cache *c, int slot);

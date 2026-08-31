@@ -217,6 +217,12 @@ static void test_disk_lengths_clamp_before_image(void) {
           "text-only disk prefix remains unchanged");
     CHECK(ember_kv_clamp_before_image(-1, 40) == -1,
           "missing save candidate remains missing");
+    CHECK(ember_kv_post_tool_snapshot_safe(false, -1),
+          "text-only post-tool snapshot may reach disk save");
+    CHECK(!ember_kv_post_tool_snapshot_safe(true, -1),
+          "request media blocks post-tool disk save without a token span");
+    CHECK(!ember_kv_post_tool_snapshot_safe(false, 40),
+          "legacy image span blocks post-tool disk save");
 }
 
 int main(void) {

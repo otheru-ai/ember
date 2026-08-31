@@ -61,6 +61,11 @@ int ember_kv_clamp_before_image(int candidate, int img_span_start) {
     return candidate;
 }
 
+bool ember_kv_post_tool_snapshot_safe(bool request_has_images,
+                                      int img_span_start) {
+    return !request_has_images && img_span_start < 0;
+}
+
 bool ember_kv_pin(ember_kv_cache *c, int slot) {
     if (!c || slot < 0 || slot >= c->cap ||
         c->pins[slot] == UINT_MAX) return false;
