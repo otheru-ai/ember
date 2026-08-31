@@ -105,3 +105,11 @@ Do not publish any performance number while the correctness blocker is open.
     widths.  Remove that unrequested control, retain inventory telemetry, and
     require both the process environment and every response to prove exact-q1
     prefill before accepting either cell.
+
+12. **Make the GDN scalar/KDA gate-layout contract testable.** [claimed 20260831T113735Z]
+    The independent review of `1f8ba73` found that the ordinary frontier suite
+    cannot exercise KDA, so its green result could not detect an unconditional
+    same-stride assertion rejecting that supported form.  Extract the exact
+    host-side layout predicate used by the CUDA entry point and add GPU-free
+    metadata tests proving scalar and KDA layouts pass while outer-shape and
+    scalar-stride mismatches fail.
