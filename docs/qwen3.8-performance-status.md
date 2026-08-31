@@ -1075,27 +1075,37 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
-#### Isolated ROCMI4 operator oracle @ `b4fb6fe` — green, narrow
+#### Isolated ROCMI4 operator oracle @ `5bfc135` — green, narrow
 
 Evidence:
 `rocmi4-operator-oracle-5b8e368-20260831T003000Z` and
-`rocmi4-partial-k-oracle-b4fb6fe-20260831T005301Z`. These are model-free
+`rocmi4-partial-k-oracle-b4fb6fe-20260831T005301Z`, plus the row-tail extension
+`rocmi4-row-tail-oracle-5bfc135-20260831T012021Z`. These are model-free
 correctness diagnostics; they collected no timing.
 
-All 23 predeclared checks passed on gfx1151. The exact fixture independently
+All 43 predeclared checks passed on gfx1151. The exact fixture independently
 covered the production `convert.cu` decoder, dense MMVQ/MMQ, routed-expert
 MMVQ/MMQ, and a CPU ROCMI4 decode plus scalar F32 matmul with a zero-error
 budget at K = 160, 256, 320, and 640. Thus the full MMQ iteration control and
-all shipped partial-iteration K values are green. Dispatch logs prove that
-both dense and routed cases reached both kernel families. The non-grid fixture
-also kept the direct and routed MMVQ/MMQ outputs within the predeclared
-per-output bound of one Q8_1 activation-quantization step per K32, weighted by
-the row L1 norm.
+all shipped partial-iteration K values are green. The independent N sweep at
+fixed K = 256 is also exact for N = 4, 48, 128, and 320, covering both
+guaranteed `need_check=true` row tails and a full-row control. Per-case
+assertions require the selected dense/routed route and the inner default-MMQ
+`variant=q8_1_dp4a` launch record, so no fallback can make an MMQ case vacuously
+green. Sentinels immediately beyond the logical dense and routed MMQ outputs
+remain unchanged at every partial-row shape. The oracle and the controlled-red
+width-4 validator both record W4A4 OFF, W4A8_IU4 OFF, and PREPACK OFF, so this
+is the same default kernel family rather than the optional experiment. The
+non-grid fixture also kept the direct and routed MMVQ/MMQ outputs within the
+predeclared per-output bound of one Q8_1 activation-quantization step per K32,
+weighted by the row L1 norm.
 
-This eliminates an isolated ROCMI4 device decoder or accumulation failure on
-these fixed fixtures. It does **not** validate the full-model activation,
-routing, masking, or state-selection context, so it remains compatible with
-the controlled full-model red result below.
+This eliminates an isolated ROCMI4 device decoder, K-tail, output-row-tail, or
+write-extent failure on these fixed fixtures. It does **not** validate the
+full-model activation layout, routing, masking, or state-selection context, so
+it remains compatible with the controlled full-model red result below. A green
+operator oracle is therefore a useful redirection away from quantized matmul
+arithmetic, not an inconclusive result.
 
 #### REFUTED: MMQ partial-K handling is not the defect
 
@@ -1112,8 +1122,11 @@ scale and integers). The foreign weight blocks are therefore multiplied by
 zero. The model-free exact oracle confirms that this mechanism is sound at
 every shipped partial K rather than merely avoiding a fault.
 
-The next missing isolated dimensions are the production output-row values and
-the non-contiguous/view activation layouts absent from the current fixture.
+The next discriminator is a complete inventory of every dense MMQ activation
+shape, stride tuple, contiguity result, and route in the controlled width-4
+full-model run. The earlier direct-strided optimization removed no dispatches,
+but that does not prove the failing nodes are contiguous. Add a synthetic view
+fixture only if the inventory identifies a live non-contiguous candidate.
 
 #### PROPOSED CRITERION: total-variation distance at the serving temperature
 
