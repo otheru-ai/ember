@@ -15,6 +15,7 @@
 #include "../common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
+#include "deepseek4_vision_contract.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -40,6 +41,9 @@ public:
     // ModelBackend interface
     GenerateResult generate_impl(const GenerateRequest & req,
                                  const DaemonIO & io) override;
+    std::string_view vision_placeholder_text() const override {
+        return dflash::DEEPSEEK4_IMAGE_PLACEHOLDER_UTF8;
+    }
 
     void release_idle_graphs() override;
     bool snapshot_save(int slot) override;

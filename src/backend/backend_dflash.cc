@@ -204,6 +204,32 @@ extern "C" void ember_backend_vision_image_free(ember_vision_image *image) {
     *image = {};
 }
 
+extern "C" int ember_backend_vision_placeholder_ids(
+        ember_backend *b, int32_t **ids_out) {
+    if (!ids_out) return -1;
+    *ids_out = nullptr;
+    if (!b || !b->be) return -1;
+    try {
+        const std::string_view placeholder =
+            b->be->vision_placeholder_text();
+        if (placeholder.empty()) return -1;
+        const std::vector<int32_t> ids = b->tok.encode(
+            std::string(placeholder));
+        if (ids.empty() || ids.size() > static_cast<size_t>(INT_MAX) ||
+            ids.size() > SIZE_MAX / sizeof(int32_t)) {
+            return -1;
+        }
+        int32_t *copy = static_cast<int32_t *>(
+            std::malloc(ids.size() * sizeof(int32_t)));
+        if (!copy) return -1;
+        std::memcpy(copy, ids.data(), ids.size() * sizeof(int32_t));
+        *ids_out = copy;
+        return static_cast<int>(ids.size());
+    } catch (...) {
+        return -1;
+    }
+}
+
 static char *c_err(const char *m) { return m ? strdup(m) : nullptr; }
 
 static int64_t batch_now_us() {

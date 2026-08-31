@@ -75,6 +75,10 @@ bool ember_backend_vision_encode(ember_backend *b,
                                  ember_vision_image *out,
                                  char *error, size_t error_cap);
 void ember_backend_vision_image_free(ember_vision_image *image);
+// Tokenize the loaded architecture's private image placeholder. The returned
+// malloc'd sequence is matched exactly in the already-tokenized full prompt.
+// Returns its positive length, or -1 when vision placeholders are unsupported.
+int ember_backend_vision_placeholder_ids(ember_backend *b, int32_t **ids_out);
 
 // ── generation ──
 // on_token: called per generated token; return false to cancel (client gone).

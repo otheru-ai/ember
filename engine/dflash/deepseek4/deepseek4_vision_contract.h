@@ -20,6 +20,9 @@
 
 namespace dflash {
 
+inline constexpr char DEEPSEEK4_IMAGE_PLACEHOLDER_UTF8[] =
+    "<\xEF\xBD\x9C" "deepseek_image" "\xEF\xBD\x9C>";
+
 enum Deepseek4ImageType : int32_t {
     DEEPSEEK4_IMAGE_START = 0,
     DEEPSEEK4_IMAGE_PAD = 1,

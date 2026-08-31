@@ -111,6 +111,7 @@ add_library(ember_core STATIC
   src/model/chat_template.c
   src/model/chat_template_qwen4.c
   src/model/image_input.c
+  src/model/vision_prompt.c
   src/model/gguf.c
   src/model/model_profile.c
   src/backend/backend_stub.c
@@ -216,6 +217,10 @@ add_test(NAME model_profile COMMAND test_model_profile)
 add_executable(test_image_input test/test_image_input.c)
 target_link_libraries(test_image_input ember_core)
 add_test(NAME image_input COMMAND test_image_input)
+
+add_executable(test_vision_prompt test/test_vision_prompt.c)
+target_link_libraries(test_vision_prompt ember_core)
+add_test(NAME vision_prompt COMMAND test_vision_prompt)
 
 add_executable(test_compaction test/test_compaction.c)
 target_link_libraries(test_compaction ember_core m)
@@ -497,7 +502,7 @@ set(EMBER_C_TESTS
   continuation dsml_decode json
   chat_api prefill_policy ds4_image_span ds4_vision_contract ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
-  compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
+  compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
   qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
@@ -526,7 +531,8 @@ set(EMBER_STRICT_TARGETS
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
   test_chat_template_qwen4
-  test_compaction test_gguf test_model_card test_model_profile test_image_input test_kv_cache test_qa)
+  test_compaction test_gguf test_model_card test_model_profile test_image_input
+  test_vision_prompt test_kv_cache test_qa)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
 endforeach()
@@ -969,6 +975,7 @@ if(EMBER_ENGINE)
     src/model/chat_template.c
     src/model/chat_template_qwen4.c
     src/model/image_input.c
+    src/model/vision_prompt.c
     src/model/gguf.c
     src/model/model_profile.c
     src/model/model_card.c

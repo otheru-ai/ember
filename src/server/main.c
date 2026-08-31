@@ -25,6 +25,7 @@
 #include "../model/model_profile.h"
 #include "../model/kv_cache.h"
 #include "../model/image_input.h"
+#include "../model/vision_prompt.h"
 #include "../model/tool_memory.h"
 #include "../model/continuation.h"
 #include "../model/dsml_decode.h"
@@ -2272,11 +2273,10 @@ static void free_vision_runs(ember_vision_run *runs, int count) {
     free(runs);
 }
 
-// Encode images in message/part order, then expand each single Qwen image_pad
-// token to exactly the projector's merged row count. DeepSeek providers carry
-// their learned sentinel ids through the same request-owned run; replacing the
-// multi-token DeepSeek placeholder is wired separately from this legacy Qwen
-// locator so that BPE boundaries are never guessed here.
+// Encode images in message/part order, tokenize the loaded architecture's
+// private placeholder, and replace each exact sequence in the already-tokenized
+// prompt. DeepSeek may use a multi-token sequence; Qwen's single image_pad
+// retains its repeated-id fallback.
 static bool prepare_vision_prompt(
         ember_backend *be, const ember_chat_request *req,
         int32_t **ids_io, int *count_io,
@@ -2322,29 +2322,38 @@ static bool prepare_vision_prompt(
     }
     if (!ok) goto cleanup;
 
-    size_t expanded_count = (size_t)*count_io;
-    for (int i = 0; i < images; ++i) {
-        const size_t extra = (size_t)(encoded[i].n_tokens - 1);
-        if (expanded_count > (size_t)INT_MAX - extra) {
-            snprintf(error, error_cap, "expanded vision prompt is too large");
-            ok = false;
-            goto cleanup;
-        }
-        expanded_count += extra;
+    int32_t *placeholder_ids = NULL;
+    const int placeholder_count =
+        ember_backend_vision_placeholder_ids(be, &placeholder_ids);
+    if (placeholder_count <= 0 || !placeholder_ids) {
+        free(placeholder_ids);
+        snprintf(error, error_cap,
+                 "vision backend has no image placeholder contract");
+        ok = false;
+        goto cleanup;
     }
-    int32_t *expanded = malloc((expanded_count ? expanded_count : 1) * sizeof(*expanded));
-    if (!expanded) abort();
-    size_t src = 0, dst = 0;
+    ember_vision_prompt_image *replacement = calloc(
+        (size_t)images, sizeof(*replacement));
+    int *offsets = calloc((size_t)images, sizeof(*offsets));
+    if (!replacement || !offsets) abort();
     for (int i = 0; i < images; ++i) {
-        while (src < (size_t)*count_io && (*ids_io)[src] != 248056)
-            expanded[dst++] = (*ids_io)[src++];
-        if (src == (size_t)*count_io) {
-            snprintf(error, error_cap, "rendered prompt has fewer image_pad tokens than images");
-            free(expanded);
-            ok = false;
-            goto cleanup;
-        }
-        runs[i].prompt_offset = (int)dst;
+        replacement[i].token_ids = encoded[i].token_ids;
+        replacement[i].n_tokens = encoded[i].n_tokens;
+    }
+    int32_t *expanded = NULL;
+    int expanded_count = 0;
+    ok = ember_vision_prompt_expand(
+        *ids_io, *count_io, placeholder_ids, placeholder_count,
+        replacement, images, &expanded, &expanded_count, offsets,
+        error, error_cap);
+    free(placeholder_ids);
+    free(replacement);
+    if (!ok) {
+        free(offsets);
+        goto cleanup;
+    }
+    for (int i = 0; i < images; ++i) {
+        runs[i].prompt_offset = offsets[i];
         runs[i].grid_t = encoded[i].grid_t;
         runs[i].grid_h = encoded[i].grid_h;
         runs[i].grid_w = encoded[i].grid_w;
@@ -2354,24 +2363,11 @@ static bool prepare_vision_prompt(
         runs[i].token_ids = encoded[i].token_ids;
         encoded[i].embeddings = NULL;
         encoded[i].token_ids = NULL;
-        for (int row = 0; row < runs[i].n_tokens; ++row) {
-            expanded[dst++] = runs[i].token_ids
-                ? runs[i].token_ids[row] : 248056;
-        }
-        ++src;
     }
-    while (src < (size_t)*count_io) {
-        if ((*ids_io)[src] == 248056) {
-            snprintf(error, error_cap, "rendered prompt has more image_pad tokens than images");
-            free(expanded);
-            ok = false;
-            goto cleanup;
-        }
-        expanded[dst++] = (*ids_io)[src++];
-    }
+    free(offsets);
     free(*ids_io);
     *ids_io = expanded;
-    *count_io = (int)dst;
+    *count_io = expanded_count;
     *runs_out = runs;
     *run_count_out = images;
     runs = NULL;

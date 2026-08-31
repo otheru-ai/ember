@@ -91,6 +91,13 @@ void ember_backend_vision_image_free(ember_vision_image *image) {
     memset(image, 0, sizeof(*image));
 }
 
+int ember_backend_vision_placeholder_ids(ember_backend *b,
+                                         int32_t **ids_out) {
+    (void)b;
+    if (ids_out) *ids_out = NULL;
+    return -1;
+}
+
 // Legacy DeepSeek image-sidecar seam. The real definitions live in the
 // vendored backend; inert stub values keep text-only builds linkable and make
 // every attempted image request fail through ember_backend_vision_encode().

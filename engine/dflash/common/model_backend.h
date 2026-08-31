@@ -393,6 +393,7 @@ struct ModelBackend {
         error = "vision input is not supported by this backend";
         return false;
     }
+    virtual std::string_view vision_placeholder_text() const { return {}; }
 
     // ── Snapshots ────────────────────────────────────────────────────
     // With right-sized CPU-resident snapshots, each slot costs only
