@@ -1,12 +1,16 @@
 # Qwen3.8-Flash-Next performance status
 
-Measured status against the parity target. This is a ledger, not a claim: every
-row states the exact commit, recipe, and what invalidates it. Update it when a
+Measured status against the target. This is a ledger, not a claim: every row
+states the exact commit, recipe, and what invalidates it. Update it when a
 measurement lands; do not delete superseded rows, mark them.
 
-Recording methodology is `docs/qwen3.8-performance-baseline.md`. The target
-figures come from `docs/performance.md` (DeepSeek-V4-Flash on the same
-gfx1151 host).
+Recording methodology is `docs/qwen3.8-performance-baseline.md`. **The target
+changed on 2026-08-31**: it is now
+`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF` — our own model, this
+silicon, the ROCmFP4-FAST quant family, on the `LaurentZuijdwijk/llama.cpp`
+Vulkan fork. The DeepSeek-V4-Flash parity figures in `docs/performance.md` are
+**superseded and now a floor**. See
+`docs/reference/llama-cpp-strix-halo-fork.md`.
 
 ## Where this stands — read this first
 
@@ -42,21 +46,31 @@ rejected by the adopted distributional gate, but its root cause is unknown.
   MMVQ/MMQ arithmetic program is exhausted. It does **not** make the rejected
   full graph correct. → *Type-101 operator result below*
 
-**Performance.** No publishable number exists yet, and none may be published
-while the above is open.
+**Performance.** **Two valid measurements now exist** — the first in this
+document that are neither superseded nor blocked. They were constructed to be
+publishable *despite* the open blocker by staying on the validator-accepted
+path.
 
-- Best valid measurement: prefill peak **39.40** against a 412 gate, decode
-  median **12.13** against 39.49 (`faa5307`, hard gate, exact binary).
-- The gap is architectural, not a missing kernel: a working implementation on
-  this same silicon reaches **345 prefill** by building **one graph** for the
-  whole model. Ours runs 12 host barriers per layer group at 15.6% GPU busy.
-  → *The 345-prefill reference implementation*
-- Tranches 1, 2 and 3 are each mapped onto that reference rather than inferred.
-  Order: 1, 2, then 3 — the indexer scorer does not execute at our
-  certification widths at all.
-- Sized but deliberately **not** promoted to a lever: asymmetric KV cache
-  quantization, ~101 MB of upload per decode token at ctx 2048.
-  → *Candidate, unsized*
+- **Bare AR decode, forced-q1 prefill, zero dense MMQ dispatches proven:**
+  **13.84 tok/s @ depth 512**, **8.14 @ depth 2048** (`ecf6996`). Against the
+  target's no-MTP column (27.77 / 27.36) that is **0.50x and 0.30x**.
+  → *First valid Qwen measurement*
+- **The finding is the slope, not the ratio.** Ours falls **41.2%** from depth
+  512 to 2048; theirs falls **1.5%**. We carry a depth-dependent per-token cost
+  they do not. → *Depth 2048*
+- That promotes **KV residency** from "sized, deliberately not a lever" to the
+  **leading decode candidate**: the fit is ~0.665 ms/MB (~1.5 GB/s) plus
+  ~55.6 ms fixed, and the host-resident COW slab cache is what buys cheap
+  prefix snapshots. → *Why the KV state is host-resident*
+- Still unmeasured: **prefill**, because production prefill chunks at 16 rows —
+  the rejected path. And **speculative decode**, blocked above width 3. Both
+  need the blocker closed. The 13.84/8.14 figures are a **floor**, not the
+  shipped configuration.
+- Superseded: prefill peak 39.40 / decode median 12.13 at `faa5307` against the
+  old 412 and 39.49 gates.
+- The barrier census in this file is **static** (sites in one file). The
+  per-token dynamic count is **≥216**. Do not divide token time by 12.
+  → *What the 13.84 figure implies*
 
 **Expect this.** Most published numbers on this part sit at 22.6-28.1 decode
 and 345-385 prefill, below our 39.49 and 412 gates, so the first green
