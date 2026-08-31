@@ -18,7 +18,7 @@ Do not publish any performance number while the correctness blocker is open.
 
 ---
 
-1. **The correctness blocker. Nothing else outranks it.** [claimed 20260830T200352Z]
+1. **SHELVED — do not resume without user direction: the Qwen correctness blocker.** [claimed 20260830T200352Z]
    `docs/qwen3.8-performance-status.md` is the live state. Current position:
    under `LUCE_MMVQ_MAX_NCOLS=5` at `a3a50c4`, width 2 passes and widths 3, 6
    and 17 fail; every singleton mask 1/2/4/8/16 is red and mask 31 is green.
@@ -106,10 +106,18 @@ Do not publish any performance number while the correctness blocker is open.
     require both the process environment and every response to prove exact-q1
     prefill before accepting either cell.
 
-12. **Make the GDN scalar/KDA gate-layout contract testable.** [claimed 20260831T113735Z]
+12. **Make the GDN scalar/KDA gate-layout contract testable.** [done 20260831T122635Z -> 20260831T122635Z-codex-to-all-gdn-layout-test-landed-qwen-shelved.md]
     The independent review of `1f8ba73` found that the ordinary frontier suite
     cannot exercise KDA, so its green result could not detect an unconditional
     same-stride assertion rejecting that supported form.  Extract the exact
     host-side layout predicate used by the CUDA entry point and add GPU-free
     metadata tests proving scalar and KDA layouts pass while outer-shape and
     scalar-stride mismatches fail.
+
+13. **Qwen shelving handoff.** [done 20260831T122635Z -> 20260831T122507Z-codex-to-all-depth4096-withdrawn-after-stop-order.md]
+    Do not start the shadow diagnostic. Its retained design is msg 493 with
+    msgs 420/434 additions: width-3 noise-floor control, full per-layer curve,
+    aligned token positions, and ordinary-arm non-perturbation falsifier before
+    any localization is interpreted. The post-stop depth-4096 runner directory
+    is an audit artifact only and its result is withdrawn. Production is
+    healthy and the runner is free. Resume only on new user direction.
