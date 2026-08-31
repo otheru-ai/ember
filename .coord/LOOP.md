@@ -38,24 +38,28 @@ agent" — take backlog work while waiting.
 ## The goal, so you can reconstruct it after compaction
 
 Make Ember's Qwen3.8-Flash-Next inference engine on AMD Strix Halo (gfx1151)
-**exceed `LaurentZuijdwijk/llama.cpp`**, the fastest published engine on this
-silicon (user direction, 2026-08-31). The prior bar — DeepSeek-V4-Flash parity
-at prefill peak ~345 tok/s, decode 23.6-23.8 tok/s AR — is **superseded and is
-now a floor, not the target**. Neither is met until a valid measurement says so,
-and no valid Qwen measurement exists while the correctness blocker is open.
+**exceed `agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF`** (user
+direction, 2026-08-31). The prior bar — DeepSeek-V4-Flash parity at prefill peak
+~345 tok/s, decode 23.6-23.8 tok/s AR — is **superseded and is now a floor**.
+Not met until a valid measurement says so, and no valid Qwen measurement exists
+while the correctness blocker is open.
 
-**That fork's numbers are higher than our own gates.** Its figures, conditions
-and the comparability problem are in
-[`docs/reference/llama-cpp-strix-halo-fork.md`](../docs/reference/llama-cpp-strix-halo-fork.md)
-and the derived bar is in the ledger. Two things to hold on to here:
+**This is a true like-for-like comparison, which is rare and worth protecting:**
+same model (Qwen3.8-Flash-Next), same silicon (Strix Halo / 8060S), same quant
+family (ROCmFP4-FAST — GGML type 101, the type our failing dispatches use). It
+runs on `LaurentZuijdwijk/llama.cpp` branch `vulkan/qwen4exp-rocmfpx`, so the
+engine under comparison is Vulkan/RADV against our HIP/ROCm.
 
-- **It is a different backend (Vulkan/RADV, no ROCm) and its published results
-  are on different models.** Beating a number measured on another model is not
-  beating the engine. The comparison that settles it is **the same model on
-  both engines, same box, interleaved** — and that fork has `qwen4exp` branches
-  in flight, so a head-to-head on our own model may become possible.
-- Their absolute t/s are power-profile dependent and they say so. Compare
-  deltas and same-session absolutes, never a headline across tables.
+Their published figures and the derived bar are in
+[`docs/reference/llama-cpp-strix-halo-fork.md`](../docs/reference/llama-cpp-strix-halo-fork.md);
+measurements stay in the ledger. Two things to hold on to:
+
+- **Match the depth before comparing.** Prefill t/s falls with context, so a
+  headline at one depth is not a bar at another. Their depth-2048 prefill is the
+  cell that lines up with our 2074-token gate.
+- Their generation figures come in two forms — a no-MTP sweep and an
+  MTP-plus-adaptive-drafting headline. Compare like with like, and note that
+  their own text calls the MTP rate content-dependent.
 
 **Measurements live in [`docs/qwen3.8-performance-status.md`](../docs/qwen3.8-performance-status.md),
 and only there.** Do not copy numbers into this file.

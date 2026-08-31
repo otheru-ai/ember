@@ -88,59 +88,65 @@ and the methodology, not the numbers.
 
 ## The bar, after the 2026-08-31 goal change
 
-The user directed that Ember must **exceed** this fork. Their published figures,
-with conditions, from `bench/RESULTS.md` (generated from JSONL by script, not
-hand-edited):
+**Corrected.** An earlier version of this section anchored the bar to the fork's
+**Ornith-1.5-35B-A3B** row and derived a 2.34x prefill gap. That was the wrong
+comparison — a different model. The user's intended bar is
+[`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF`](https://huggingface.co/agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF),
+which is **our own model** on this fork (`vulkan/qwen4exp-rocmfpx`), on this
+silicon, in the ROCmFP4-FAST quant family. That is a genuine like-for-like
+comparison and it supersedes the cross-model estimate entirely.
 
-| model | test | depth | fork t/s | mainline t/s |
-|---|---|---:|---:|---:|
-| **ornith-35b-a3b-q4km** (MoE, ~3B active) | pp2048 `-ub 512` | 0 | **964.7 ± 4.2** | 856.8 |
-| | pp2048 | 4096 | 845.5 | 768.6 |
-| | pp2048 | 65536 | 376.5 | 379.9 (noise) |
-| | tg64 | 0 | **65.8 ± 0.0** | 65.5 |
-| | tg64 | 65536 | 45.0 | 45.2 (noise) |
-| qwen38-27b-q4kxl (dense 27B) | pp2048 | 0 | 288.7 | 255.6 |
-| | tg64 | 0 | 11.6 | 11.7 |
-| ornith-35b-a3b-q4km | pp2048 `-ub 2048` | 0 | **1648.5** | 870.5 |
+Published figures (their card, `q8_0` KV, arms interleaved, MTP excluded from
+the sweep):
 
-**The comparable row is the MoE one.** Qwen3.8-Flash-Next is MoE with roughly
-3B active parameters (512 experts, top-10, `n_embd` 2560, expert intermediate
-640), which is the same activation scale as Ornith-1.5-35B-A3B. The dense 27B
-row is not our shape.
+| depth | prefill t/s | generation t/s (no MTP) |
+|---:|---:|---:|
+| 512 | 423.3 | 27.77 |
+| **2048** | **406.5** | **27.36** |
+| 8192 | 357.2 | 26.67 |
+| 16384 | 301.0 | 25.54 |
+| 32768 | 245.5 | 24.67 |
+| 65536 | 188.0 | 23.09 |
+| 131072 | 137.7 | 19.70 |
 
-### Against our current gates
+Separately, the card claims **up to 40 tok/s generation** with the model's own
+MTP head and adaptive drafting, explicitly content-dependent.
 
-| | our gate | fork, nearest comparable | ratio |
-|---|---:|---:|---:|
-| prefill | `prefill_2074_peak_tps` **412.0** | 964.7 (pp2048, depth 0, ub 512) | **2.34x** |
-| prefill (wide ubatch) | — | 1648.5 (ub 2048) | **4.0x** |
-| decode | `decode_256_median_tps` **39.49** | 65.8 (tg64, depth 0) | **1.67x** |
+### Against our gates — at matched depth
 
-The superseded DeepSeek-parity target (prefill ~345, decode 23.6-23.8 AR) sits
-**below our own gates**, so it is now a floor rather than a goal.
+| | our gate | theirs, matched | standing |
+|---|---:|---:|---|
+| prefill | **412.0** @ 2074 | **406.5** @ 2048 | **+1.4%** — parity, marginally ahead |
+| generation, with speculation | **39.49** median @ 256 | **~40** (MTP + adaptive) | parity |
+| generation, no speculation | — | 27.36 @ 2048 | not directly gated on our side |
 
-### What this comparison does and does not license
+**The bar is close, not distant.** Matching depth is what makes it so: their
+headline 423.3 is at 512 tokens, and comparing that against our 2074-token gate
+would have manufactured a deficit that does not exist. The correct cell, 406.5
+at 2048, sits just under our 412.0 gate.
 
-**Does not**: their numbers are on *different models*. Beating 964.7 on
-Qwen3.8-Flash-Next would not prove we beat their engine — it would prove our
-model is cheaper, or that we measured differently. Their absolute t/s are also
-power-profile dependent by their own statement, and their MoE prefill win is
-concentrated at wide ubatch where mainline *regresses*.
+### What "exceed" therefore requires
 
-**Does**: set a defensible bar in the absence of a head-to-head. Until one
-exists, treat **prefill ≥ 965 t/s at pp2048 depth 0** and **decode ≥ 66 t/s
-tg64 depth 0** as the target on our own model, measured the way they measure —
-palindrome-ordered arms, discarded warmup, per-cell σ, depth attached to every
-generation figure, and the power profile recorded.
+1. **Prefill > 406.5 t/s at depth 2048** on our engine, and ideally the whole
+   depth curve above theirs — their curve is shallow (137.7 at 128k, 33% of its
+   512 value), and holding at depth is the property they advertise.
+2. **Generation > 40 tok/s** with MTP and adaptive drafting, or > 27.36 without.
+   Our current decode gate of 39.49 sits fractionally *below* their MTP claim.
+3. Measured our way and reported with depth attached, since a generation number
+   without a depth is not a claim — their card says so too.
 
-**What would settle it**: the same model on both engines on the same box. That
-fork has `qwen4exp/*` and `vulkan/qwen4exp-rocmfpx` branches in flight, so a
-head-to-head on Qwen3.8-Flash-Next may become possible. That, not a number
-comparison across models, is the measurement to want.
+### Caveats that survive the correction
 
-**Precondition**: no valid Qwen performance number exists on our side while the
-correctness blocker is open, so the gap above is a target, not a measured
-deficit.
+- **Their engine is Vulkan/RADV; ours is HIP/ROCm.** Same model and silicon, so
+  the comparison is fair, but a win is a win over that stack on that driver.
+- **The card's prefill advantage is not purely quant.** Their own text: this
+  file splits the n-gram table per head so it stays in VRAM, while their
+  comparison quant keeps it as one 28.8 GiB host-RAM tensor — "this comparison
+  does not separate them". Our PLE handling is a live variable in any gap we
+  measure, not a constant.
+- **No valid Qwen number exists on our side** while the correctness blocker is
+  open, so the standing above is gate-versus-published, not measured-versus-
+  measured.
 
 ## Licensing / provenance
 
