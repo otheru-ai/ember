@@ -1094,6 +1094,51 @@ these fixed fixtures. It does **not** validate the full-model activation,
 routing, masking, or state-selection context, so it remains compatible with
 the controlled full-model red result below.
 
+#### SOURCE-LEVEL: MMQ's ROCMI4 tile loader has no K bound (claude, awaiting oracle)
+
+**Predicted defect, read from source, not yet empirically confirmed** — the
+partial-K oracle run is the test. Recorded now so the run has a stated
+prediction rather than an interpretation after the fact.
+
+gfx1151 does **not** take the stream-K path (an earlier claim of mine, corrected
+by codex msg 445). The non-CDNA HIP branch at `mmq.cuh:4158-4209` calls
+`mul_mat_q_process_tile(..., 0, ncols_x/qk)` and returns at `:4209`. That
+function loops:
+
+    :4033  for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter)
+    :4034      load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
+
+`blocks_per_iter` is 8 (`ITER_K/qk` = 256/32). The loop is entered whenever
+**any** blocks remain, and `load_tiles_rocmi4_packed` (`:1094-1126`) receives no
+K bound — its only clamp is on the row index:
+
+    :1108  if (need_check) i = min(i, i_max);
+    :1109  const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbx;
+
+`kbx0 + kbx` is never compared against the row's block count.
+
+**Worked example, K = 320 (10 blocks/row):** `kb0 = 0` loads blocks 0-7
+correctly; `kb0 = 8` satisfies `8 < 10`, so the iteration runs and the loader
+reads blocks **8-15**. Blocks 10-15 do not exist in that row — with rows
+contiguous at `stride` = 10 blocks, they are the **next row's blocks 0-5**,
+accumulated into this row's dot product.
+
+**Predicted consequences, each matching an observation already in this ledger:**
+
+| prediction | observation |
+|---|---|
+| foreign data, not rounding | r ≈ 0.55, never ≈ 0.9999 |
+| deterministic | same prompt, same wrong token, reproduced twice |
+| never faults | interior rows read within the tensor, just the wrong part |
+| MMVQ immune | MMVQ walks 32-element blocks; every shipped K is a multiple of 32 |
+| K ∈ {160, 320, 640} affected | `hc_attn_up`/`hc_ffn_up` (97), `ffn_down_exps`/`ffn_down_shexp` (96), `per_layer_token_embd` |
+| K ∈ {2560, 6144, 10240} clean | exact multiples of 8 blocks |
+
+**Falsifier.** The partial-K oracle at K = 320 or 640 must go red while K = 256
+stays green. If all four pass, this is wrong — either the loader clamps
+somewhere unread or the fixture's allocation masks it — and the per-row error
+breakdown is what distinguishes those.
+
 #### DECISIVE: a token-exact, validator-GREEN run with a destroyed logit distribution
 
 Width 4, `LUCE_MMVQ_MAX_NCOLS=3`, capture-capable runtime (`5b8e368`), evidence
