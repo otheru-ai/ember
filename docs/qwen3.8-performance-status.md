@@ -891,6 +891,57 @@ and `WRITE_SIZE` at 128-byte transactions, relative RMSE ~0.0012. `AGENTS.md`
 previously asserted KiB. Any bandwidth figure computed under the KiB assumption
 is wrong by 16x/8x.
 
+## F32 dequantized reference @ `8815442` — width 2 gate RED, `f32-reference-8815442-20260830T235900Z`
+
+The reference build (`GGML_CUDA_FORCE_CUBLAS=ON` + `DFLASH_CUBLAS_F32_REFERENCE=1`
++ `GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1`) positively logged true-F32 compute,
+dense `cublas_f32` and routed `sync_fallback_f32`, with no quantized MMVQ/MMQ
+route. It still failed its own trust gate.
+
+At width 2 the default build's q1 and production are bit-identical, so any
+distance from the reference is **the reference's own error**:
+
+    d_q1 = d_prod = 12.0171
+
+Verified independently by claude with `scripts/qwen_f32_reference_compare.py`
+against the raw rows.
+
+### The reference is wrong at the top of the distribution, not just in the tail
+
+Max `|delta|` against the trusted default, restricted to the default's own
+top-ranked logits:
+
+| rank window | row 0 | row 1 |
+|---|---|---|
+| top-1 | 0.519 | **4.827** |
+| top-2 | 7.120 | 5.813 |
+| top-10 | 7.220 | 7.557 |
+| top-50 | 11.968 | 8.689 |
+| top-2 margin | 2.167 → **8.768** | 3.313 → 4.299 |
+
+Row 1's single most probable token moves by 4.83. Both rows keep argmax 830,
+which is why the run completed, but argmax agreement alongside a top-2 margin
+moving 2.167 → 8.768 is not agreement. **`sync_fallback` + dequantize-to-F32 is
+not a trustworthy oracle for this model** — the outcome the 0-of-4924 evidence
+predicted, and the reason the width-2 gate existed. No conclusion about MMQ
+follows from this run.
+
+### `max_abs_logit_delta` is rank-blind — a criterion defect in its own right
+
+Row 0's largest single deviation sits at **rank 247775 of 248320** (logit −8.5
+against a maximum of 19.7 — unsamplable at any temperature we ship). Row 1's
+sits at rank 4019.
+
+The statistic cannot distinguish that from an error at rank 2. The release
+criterion therefore compares `q1_top2_margin`, a strictly top-of-distribution
+quantity, against a value that may be set by a token a quarter-million deep.
+**These are incommensurable.** This is separate from the inverted incentive
+recorded above, and separate from whether MMQ is defective.
+
+It also weakens the earlier reading of widths 6/17: a delta of ~11.9 says
+nothing until its rank is known. The rank-restricted statistics above are what
+that question needs.
+
 ## Tranche 1 correctness @ `8c67086` — hardware, `tranche1-qsa-8c67086-20260830T232419Z`
 
 Copied from the runner evidence at codex's request (msg 402). Correctness run;
@@ -939,6 +990,31 @@ sit somewhat above it. What it cannot plausibly do is sit 200x above it. This is
 strong evidence that the MMQ path is wrong rather than merely coarser — but it
 is evidence, not proof, and the F32 reference run (msg 364) is what separates
 the two.
+
+## F32 dequantized reference @ `8815442` — trust gate failed
+
+Evidence:
+`f32-reference-8815442-20260830T235900Z`. This is a correctness diagnostic,
+not a performance run; no timing from the force-cuBLAS build is usable.
+
+The default and reference width-2 validators both completed successfully with
+equal, finite two-row captures. The reference build positively logged
+`GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F`, `path=cublas_f32`, and
+`path=sync_fallback_f32`, with no quantized MMVQ or MMQ route. Thus C reached
+the intended dequantize-to-F32 plus SGEMM family for both dense and routed
+expert matrices.
+
+| width | `d_q1 = max|B-C|` | `d_prod = max|A-C|` | result |
+|---|---:|---:|---|
+| 2 | 12.0171 | 12.0171 | **reference trust gate failed** |
+
+At width 2 the default production and q1 captures are bit-identical, so the
+equal distances are the reference path's own error. That error is on the same
+scale as the width-6/17 effect the experiment was meant to adjudicate, rather
+than the within-MMVQ width-3 scale. Per the predeclared gate, this run says
+that the newly exercised `sync_fallback`/F32 composite is not a trustworthy
+reference; it says nothing for or against MMQ. Wider captures may characterize
+the invalid reference path, but must not be interpreted as an MMQ verdict.
 
 ## Host-barrier census @ `faa5307` (static, `qwen4exp_frontier.cpp`)
 
