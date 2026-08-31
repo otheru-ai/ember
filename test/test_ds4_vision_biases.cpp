@@ -86,6 +86,7 @@ void write_bias_gguf(const std::filesystem::path & path,
     std::array<float, 8> data {};
     for (int layer = 0; layer < 3; ++layer) {
         if (mutation == Mutation::MissingLayer && layer == 1) continue;
+        // Deliberate bare-name decoy: do not replace it with the shared suffix.
         const std::string suffix =
             mutation == Mutation::WrongSuffix && layer == 1
                 ? "exp_probs_b_vl"

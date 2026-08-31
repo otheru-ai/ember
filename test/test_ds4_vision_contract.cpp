@@ -347,6 +347,7 @@ static void test_image_aware_prefill_chunks() {
 
 static void test_routing_modes() {
     constexpr int32_t vocab = 5000;
+    // The bare names are deliberate decoys for the exact shared suffix.
     CHECK(deepseek4_is_vision_router_bias_suffix(
                   DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX) &&
               !deepseek4_is_vision_router_bias_suffix("exp_probs_b_vl") &&
