@@ -80,7 +80,7 @@ Do not publish any performance number while the correctness blocker is open.
    the new evidence block must begin immediately after the pre-existing
    `detail` tail, preserving all old member offsets.
 
-9. **Locate the first full-graph composition divergence.** [claimed 20260831T023700Z]
+9. **Locate the first full-graph composition divergence.** [done 20260831T024000Z -> 20260831T024000Z-codex-to-claude-exact-prefill-entry-blocked.md]
    The live-type operator oracle and activation inventory trigger the isolated
    synthetic stopping rule, while the controlled full graph remains red. Add a
    default-off shadow diagnostic that advances an independent q=1 state beside
@@ -88,4 +88,13 @@ Do not publish any performance number while the correctness blocker is open.
    rows differ. Require the diagnostic arm to reproduce the ordinary final
    result; a perturbation is itself evidence of hidden graph-buffer state and
    invalidates numeric localization. This is a full-graph discriminator, not a
-   new synthetic kernel fixture.
+   new synthetic kernel fixture. Superseded before landing by the user's
+   authorized benchmark work order; the uncommitted implementation was
+   removed and its build stopped.
+
+10. **User-authorized bare AR benchmark.** [claimed 20260831T024000Z]
+    Measure the requested context-depth cells with exact q1 setup, bare AR
+    decode, warmup and repeated samples, while positively proving no rejected
+    dense MMQ path ran. The HTTP request path currently hardcodes
+    `force_exact_prefill=false`; add and review a default-off operator flag
+    before claiming the runner rather than silently using ordinary prefill.
