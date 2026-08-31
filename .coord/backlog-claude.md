@@ -318,7 +318,8 @@ results were valid and are recorded. Production healthy, tree clean, all pushed.
     64 = 299 tensors (32 fused w1 removed, 64 gate/up added), and `v.blk.31.*`
     exists. Anything else means the layer count or the split is wrong.
 
-21. **C: build the benchmark harness before there is anything to benchmark.**
+21. [done 20260831T125000Z -> docs/vision-benchmark-criteria.md]
+    **C: build the benchmark harness before there is anything to benchmark.**
     C is "meets or exceeds production 0731 affine, 85.6 GiB / 2.59 BPW", on
     quality AND throughput. Neither has a defined measurement for a vision
     model yet, and the Qwen work is the standing lesson that inventing the
