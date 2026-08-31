@@ -289,6 +289,75 @@ typedef struct {
     double prefill_tv_threshold;
 } ember_validation_report;
 
+// These offsets are measured on Ember's supported 64-bit ABI, not chosen.
+// A legitimate extension appends members and leaves every value below intact.
+// If an assertion fires, move the new member to the end; do not re-pin the
+// existing offset. Pinning every member (rather than only the old tail) also
+// catches same-sized reordering and insertions absorbed by alignment padding.
+#if defined(__cplusplus)
+#define EMBER_VALIDATION_ABI_OFFSET(member, expected)                         \
+    static_assert(offsetof(ember_validation_report, member) == (expected),   \
+                  "validation report ABI changed; append members instead")
+#else
+#define EMBER_VALIDATION_ABI_OFFSET(member, expected)                         \
+    _Static_assert(offsetof(ember_validation_report, member) == (expected),  \
+                   "validation report ABI changed; append members instead")
+#endif
+
+EMBER_VALIDATION_ABI_OFFSET(ok, 0);
+EMBER_VALIDATION_ABI_OFFSET(snapshot_ok, 1);
+EMBER_VALIDATION_ABI_OFFSET(prefill_checked, 2);
+EMBER_VALIDATION_ABI_OFFSET(prefill_exact, 3);
+EMBER_VALIDATION_ABI_OFFSET(prefill_accepted, 4);
+EMBER_VALIDATION_ABI_OFFSET(prefill_margin_checked, 5);
+EMBER_VALIDATION_ABI_OFFSET(spec_checked, 6);
+EMBER_VALIDATION_ABI_OFFSET(spec_exact, 7);
+EMBER_VALIDATION_ABI_OFFSET(disk_checked, 8);
+EMBER_VALIDATION_ABI_OFFSET(disk_exact, 9);
+EMBER_VALIDATION_ABI_OFFSET(batch_checked, 10);
+EMBER_VALIDATION_ABI_OFFSET(batch_exact, 11);
+EMBER_VALIDATION_ABI_OFFSET(batch_spec_required, 12);
+EMBER_VALIDATION_ABI_OFFSET(baseline_tokens, 16);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tokens, 20);
+EMBER_VALIDATION_ABI_OFFSET(spec_tokens, 24);
+EMBER_VALIDATION_ABI_OFFSET(disk_tokens, 28);
+EMBER_VALIDATION_ABI_OFFSET(batch_rows, 32);
+EMBER_VALIDATION_ABI_OFFSET(batch_tokens, 36);
+EMBER_VALIDATION_ABI_OFFSET(batch_spec_rows, 40);
+EMBER_VALIDATION_ABI_OFFSET(mismatch_index, 44);
+EMBER_VALIDATION_ABI_OFFSET(prefill_numerics_index, 48);
+EMBER_VALIDATION_ABI_OFFSET(expected_token, 52);
+EMBER_VALIDATION_ABI_OFFSET(actual_token, 56);
+EMBER_VALIDATION_ABI_OFFSET(prefill_q1_top2_margin, 64);
+EMBER_VALIDATION_ABI_OFFSET(prefill_max_abs_logit_delta, 72);
+EMBER_VALIDATION_ABI_OFFSET(baseline_decode_s, 80);
+EMBER_VALIDATION_ABI_OFFSET(restored_spec_decode_s, 88);
+EMBER_VALIDATION_ABI_OFFSET(spec_decode_s, 96);
+EMBER_VALIDATION_ABI_OFFSET(spec_accept_rate, 104);
+EMBER_VALIDATION_ABI_OFFSET(batch_spec_accept_rate, 112);
+EMBER_VALIDATION_ABI_OFFSET(detail, 120);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tv_checked, 312);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tv_within_bound, 313);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tv_index, 316);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tv_distance, 320);
+EMBER_VALIDATION_ABI_OFFSET(prefill_tv_threshold, 328);
+
+#if defined(__cplusplus)
+static_assert(
+    offsetof(ember_validation_report, prefill_tv_checked) ==
+        offsetof(ember_validation_report, detail) +
+            sizeof(((ember_validation_report *) nullptr)->detail),
+    "validation evidence must extend the backend ABI append-only");
+#else
+_Static_assert(
+    offsetof(ember_validation_report, prefill_tv_checked) ==
+        offsetof(ember_validation_report, detail) +
+            sizeof(((ember_validation_report *) 0)->detail),
+    "validation evidence must extend the backend ABI append-only");
+#endif
+
+#undef EMBER_VALIDATION_ABI_OFFSET
+
 bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
                             int n_prompt, int n_gen,
                             ember_validation_report *report);
