@@ -92,7 +92,7 @@ Do not publish any performance number while the correctness blocker is open.
    authorized benchmark work order; the uncommitted implementation was
    removed and its build stopped.
 
-10. **User-authorized bare AR benchmark.** [claimed 20260831T024000Z]
+10. **User-authorized bare AR benchmark.** [done 20260831T030250Z -> 20260831T030250Z-codex-to-all-gpu-release-bare-ar-void.md]
     Measure the requested context-depth cells with exact q1 setup, bare AR
     decode, warmup and repeated samples, while positively proving no rejected
     dense MMQ path ran. The HTTP request path currently hardcodes
