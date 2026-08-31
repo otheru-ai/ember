@@ -2265,13 +2265,18 @@ static void log_generation_performance(const ember_gen_result *res) {
 
 static void free_vision_runs(ember_vision_run *runs, int count) {
     if (!runs) return;
-    for (int i = 0; i < count; ++i) free((void *)runs[i].embeddings);
+    for (int i = 0; i < count; ++i) {
+        free((void *)runs[i].embeddings);
+        free((void *)runs[i].token_ids);
+    }
     free(runs);
 }
 
-// Encode images in message/part order, then expand each single image_pad token
-// to exactly the projector's merged row count. The repeated ids are retained
-// for PLE; only their embedding rows are replaced below the backend ABI.
+// Encode images in message/part order, then expand each single Qwen image_pad
+// token to exactly the projector's merged row count. DeepSeek providers carry
+// their learned sentinel ids through the same request-owned run; replacing the
+// multi-token DeepSeek placeholder is wired separately from this legacy Qwen
+// locator so that BPE boundaries are never guessed here.
 static bool prepare_vision_prompt(
         ember_backend *be, const ember_chat_request *req,
         int32_t **ids_io, int *count_io,
@@ -2307,6 +2312,7 @@ static bool prepare_vision_prompt(
                 error, error_cap);
             if (ok && (encoded[image_index].grid_t != 1 ||
                        encoded[image_index].n_tokens <= 0 ||
+                       encoded[image_index].embedding_width <= 0 ||
                        !encoded[image_index].embeddings)) {
                 snprintf(error, error_cap, "vision provider returned an invalid still-image result");
                 ok = false;
@@ -2344,9 +2350,14 @@ static bool prepare_vision_prompt(
         runs[i].grid_w = encoded[i].grid_w;
         runs[i].n_tokens = encoded[i].n_tokens;
         runs[i].embeddings = encoded[i].embeddings;
+        runs[i].embedding_width = encoded[i].embedding_width;
+        runs[i].token_ids = encoded[i].token_ids;
         encoded[i].embeddings = NULL;
-        for (int row = 0; row < runs[i].n_tokens; ++row)
-            expanded[dst++] = 248056;
+        encoded[i].token_ids = NULL;
+        for (int row = 0; row < runs[i].n_tokens; ++row) {
+            expanded[dst++] = runs[i].token_ids
+                ? runs[i].token_ids[row] : 248056;
+        }
         ++src;
     }
     while (src < (size_t)*count_io) {

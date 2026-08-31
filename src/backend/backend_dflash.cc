@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -141,14 +142,22 @@ extern "C" bool ember_backend_vision_encode(
         return false;
     }
     const size_t count = image.embeddings.size();
-    if (count % EMBER_QWEN_VISION_EMBEDDING_WIDTH != 0) {
+    if (image.embedding_width <= 0 ||
+        count % static_cast<size_t>(image.embedding_width) != 0) {
         if (error && error_cap)
             std::snprintf(error, error_cap, "%s",
                           "vision embedding size is not a whole number of rows");
         return false;
     }
-    if (count > SIZE_MAX / sizeof(float)) {
+    const size_t rows = count / static_cast<size_t>(image.embedding_width);
+    if (count > SIZE_MAX / sizeof(float) || rows > INT_MAX) {
         if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding size overflow");
+        return false;
+    }
+    if (!image.token_ids.empty() && image.token_ids.size() != rows) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "vision token ids do not match embedding rows");
         return false;
     }
     float *copy = static_cast<float *>(std::malloc(count * sizeof(float)));
@@ -157,18 +166,41 @@ extern "C" bool ember_backend_vision_encode(
         return false;
     }
     if (count) std::memcpy(copy, image.embeddings.data(), count * sizeof(float));
+    int32_t *token_ids = nullptr;
+    if (!image.token_ids.empty()) {
+        if (rows > SIZE_MAX / sizeof(int32_t)) {
+            std::free(copy);
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s",
+                              "vision token-id allocation overflow");
+            return false;
+        }
+        token_ids = static_cast<int32_t *>(
+            std::malloc(rows * sizeof(int32_t)));
+        if (!token_ids && rows != 0) {
+            std::free(copy);
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s",
+                              "vision token-id allocation failed");
+            return false;
+        }
+        std::memcpy(token_ids, image.token_ids.data(),
+                    rows * sizeof(int32_t));
+    }
     out->grid_t = image.grid_t;
     out->grid_h = image.grid_h;
     out->grid_w = image.grid_w;
-    out->n_tokens = static_cast<int>(count /
-                                     EMBER_QWEN_VISION_EMBEDDING_WIDTH);
+    out->n_tokens = static_cast<int>(rows);
     out->embeddings = copy;
+    out->embedding_width = image.embedding_width;
+    out->token_ids = token_ids;
     return true;
 }
 
 extern "C" void ember_backend_vision_image_free(ember_vision_image *image) {
     if (!image) return;
     std::free(image->embeddings);
+    std::free(image->token_ids);
     *image = {};
 }
 
@@ -682,11 +714,20 @@ static void build_generate_request(const ember_gen_request *req,
             dst.grid_t = src.grid_t;
             dst.grid_h = src.grid_h;
             dst.grid_w = src.grid_w;
-            const size_t count = src.n_tokens > 0
-                ? static_cast<size_t>(src.n_tokens) *
-                  EMBER_QWEN_VISION_EMBEDDING_WIDTH : 0;
+            dst.embedding_width = src.embedding_width;
+            size_t count = 0;
+            if (src.n_tokens > 0 && src.embedding_width > 0 &&
+                static_cast<size_t>(src.n_tokens) <=
+                    SIZE_MAX / static_cast<size_t>(src.embedding_width)) {
+                count = static_cast<size_t>(src.n_tokens) *
+                    static_cast<size_t>(src.embedding_width);
+            }
             if (src.embeddings && count)
                 dst.embeddings.assign(src.embeddings, src.embeddings + count);
+            if (src.token_ids && src.n_tokens > 0) {
+                dst.token_ids.assign(src.token_ids,
+                                     src.token_ids + src.n_tokens);
+            }
             greq.vision.push_back(std::move(dst));
         }
     }

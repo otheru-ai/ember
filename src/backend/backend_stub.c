@@ -87,6 +87,7 @@ bool ember_backend_vision_encode(ember_backend *b,
 void ember_backend_vision_image_free(ember_vision_image *image) {
     if (!image) return;
     free(image->embeddings);
+    free(image->token_ids);
     memset(image, 0, sizeof(*image));
 }
 

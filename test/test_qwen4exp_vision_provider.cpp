@@ -79,6 +79,8 @@ int main(int argc, char ** argv) {
                 static_cast<uint8_t>(7 + i), 8, 9};
             encoded[static_cast<size_t>(i)] = provider.encode(
                 thread_bytes, sizeof(thread_bytes), thread_out, thread_error) &&
+                thread_out.embedding_width ==
+                    static_cast<int>(kQwen4ExpVisionEmbeddingWidth) &&
                 thread_out.embeddings.size() == kQwen4ExpVisionEmbeddingWidth &&
                 thread_out.embeddings[0] == static_cast<float>(7 + i);
         });
@@ -100,6 +102,8 @@ int main(int argc, char ** argv) {
     CHECK(provider.encode(bytes, sizeof(bytes), out, error),
           "provider remains usable after concurrent first use");
     CHECK(out.grid_t == 1 && out.grid_h == 2 && out.grid_w == 2 &&
+          out.embedding_width ==
+              static_cast<int>(kQwen4ExpVisionEmbeddingWidth) &&
           out.embeddings.size() == kQwen4ExpVisionEmbeddingWidth &&
           out.embeddings[0] == 7.0f,
           "provider result is copied exactly");

@@ -63,7 +63,11 @@ typedef struct {
     int    grid_h;
     int    grid_w;
     int    n_tokens;
-    float *embeddings; // row-major [n_tokens,EMBER_QWEN_VISION_EMBEDDING_WIDTH]
+    float *embeddings; // row-major [n_tokens,embedding_width]
+    // Appended model-neutral contract. token_ids may be NULL only for the
+    // legacy Qwen repeated-image_pad path.
+    int      embedding_width;
+    int32_t *token_ids;
 } ember_vision_image;
 
 bool ember_backend_vision_encode(ember_backend *b,
@@ -86,7 +90,44 @@ typedef struct {
     int          grid_w;
     int          n_tokens;
     const float *embeddings;
+    // Appended so pre-existing field offsets remain stable.
+    int            embedding_width;
+    const int32_t *token_ids;
 } ember_vision_run;
+
+// These offsets are measured on Ember's supported 64-bit ABI, not chosen.
+// A legitimate extension appends members and leaves every value below intact.
+// If an assertion fires, move the new member to the end; do not re-pin an
+// existing offset. Pinning every member catches insertions and reordering even
+// when the new layout preserves the relationship between the final fields.
+#if defined(__cplusplus)
+#define EMBER_VISION_ABI_OFFSET(type, member, expected)                     \
+    static_assert(offsetof(type, member) == (expected),                     \
+                  "vision ABI changed; append members instead")
+#else
+#define EMBER_VISION_ABI_OFFSET(type, member, expected)                     \
+    _Static_assert(offsetof(type, member) == (expected),                    \
+                   "vision ABI changed; append members instead")
+#endif
+
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_t, 0);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_h, 4);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_w, 8);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, n_tokens, 12);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, embeddings, 16);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, embedding_width, 24);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, token_ids, 32);
+
+EMBER_VISION_ABI_OFFSET(ember_vision_run, prompt_offset, 0);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_t, 4);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_h, 8);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_w, 12);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, n_tokens, 16);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, embeddings, 24);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, embedding_width, 32);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, token_ids, 40);
+
+#undef EMBER_VISION_ABI_OFFSET
 
 typedef struct {
     const int32_t     *prompt;

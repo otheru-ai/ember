@@ -136,6 +136,7 @@ bool Qwen4ExpLazyVisionProvider::encode(
     out.grid_t = static_cast<int>(grid.t);
     out.grid_h = static_cast<int>(grid.h);
     out.grid_w = static_cast<int>(grid.w);
+    out.embedding_width = static_cast<int>(raw.embedding_width);
     out.embeddings.assign(raw.rows, raw.rows + value_count);
     return true;
 }

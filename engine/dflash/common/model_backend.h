@@ -122,14 +122,17 @@ struct BudgetHook {
 
 // Optional image rows already projected to the language-model width.  The
 // projector remains a separate, lazily loaded mmproj artifact; generation owns
-// only these request-scoped rows.  `prompt_offset` points at the first repeated
-// image placeholder token, which remains in `prompt` for PLE hashing.
+// only these request-scoped rows. `prompt_offset` points at the first row in
+// `prompt`. token_ids is empty for legacy Qwen repeated-image_pad runs and
+// otherwise carries the learned sentinel id for every embedding row.
 struct VisionEmbeddingRun {
     int prompt_offset = 0;
     int grid_t = 0;
     int grid_h = 0;
     int grid_w = 0;
-    std::vector<float> embeddings; // [merged image tokens, model embedding]
+    std::vector<float> embeddings; // [token_ids/merged rows, embedding_width]
+    int embedding_width = 0;
+    std::vector<int32_t> token_ids;
 };
 
 struct EncodedVisionImage {
@@ -137,6 +140,8 @@ struct EncodedVisionImage {
     int grid_h = 0;
     int grid_w = 0;
     std::vector<float> embeddings;
+    int embedding_width = 0;
+    std::vector<int32_t> token_ids;
 };
 
 struct GenerateRequest {
