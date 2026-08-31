@@ -1075,6 +1075,44 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
+#### Correlation: widths 6/17 are not a perturbation of q1 at all
+
+Offline from the same retained default-build vectors (claude, no GPU). Pearson
+correlation between the q1 and production logit vectors, over the full
+248320-token vocabulary and restricted to q1's top-ranked entries:
+
+| w | row | r (all) | r (top 1000) | r (top 100) | slope | residual max |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 0 | 1.00000 | 1.00000 | 1.00000 | 1.00000 | 0 |
+| 2 | 1 | 1.00000 | 1.00000 | 1.00000 | 1.00000 | 0 |
+| 3 | 0 | 0.99999 | 0.99996 | 0.99998 | 1.00017 | 0.059 |
+| 3 | 1 | 1.00000 | 1.00000 | 1.00000 | 1.00000 | 0 |
+| 6 | 0 | **0.59862** | 0.53633 | 0.62863 | 0.612 | 9.467 |
+| 6 | 1 | **0.54019** | 0.52150 | 0.45133 | 0.530 | 9.540 |
+| 17 | 0 | **0.67497** | 0.67500 | 0.59550 | 0.686 | 12.024 |
+| 17 | 1 | **0.62216** | 0.50493 | 0.51184 | 0.654 | 11.358 |
+
+**This reframes the blocker.** At widths 6 and 17 the two paths share roughly
+25-45% of their variance. That is not a perturbed version of the same
+computation — the logit vectors are substantially unrelated. And it is not a
+tail artefact: restricting to q1's top 100 gives r as low as 0.451.
+
+Width 3 is the control that makes the contrast unambiguous. It **also** crosses
+a reduction shape and is **also** non-bit-identical (residual 0.059), yet
+r = 0.99999. A kernel-precision difference looks like width 3. Widths 6 and 17
+do not look like a kernel-precision difference.
+
+The standard deviations stay comparable on both sides (2.05-2.23), so this is
+not a scale or normalisation factor either; the structure itself differs.
+
+**Consequence for the MMVQ/MMQ hypothesis.** MMQ and MMVQ compute the same
+matmul over the same int8-quantized activations. Their disagreement should look
+like width 3's 0.059, not like r = 0.5. On this evidence the quantized-matmul
+family boundary is unlikely to be the *cause* of the width-6/17 divergence, even
+though it coincides exactly with the observed threshold. Something that also
+changes at that width — routing, masking, or state selection — is the better
+suspect. This is a lead from an offline measurement, not a proof.
+
 #### Cross-evaluation: how each side scores the other's winner
 
 Requested in msg 380 and computed offline from the same retained default-build
