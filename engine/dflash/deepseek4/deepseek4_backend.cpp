@@ -1115,6 +1115,61 @@ bool DeepSeek4Backend::init() {
     return true;
 }
 
+bool DeepSeek4Backend::diagnostic_next_logits(
+        const std::vector<int32_t> &token_ids, bool force_exact_prefill,
+        std::vector<float> &logits, int &effective_prefill_chunk,
+        std::string &error) {
+    logits.clear();
+    effective_prefill_chunk = 0;
+    error.clear();
+    if (!backend_ || !cache_.ctx || token_ids.empty()) {
+        error = "logit diagnostic requires an initialized backend and tokens";
+        return false;
+    }
+    if (moe_hybrid_) {
+        error = "logit diagnostic requires monolithic GPU model placement";
+        return false;
+    }
+    const int max_ctx = cfg_.max_ctx > 0 ? cfg_.max_ctx : 8192;
+    if (token_ids.size() > static_cast<size_t>(max_ctx)) {
+        error = "logit diagnostic token sequence exceeds configured context";
+        return false;
+    }
+    for (int32_t token : token_ids) {
+        if (token < 0 || token >= w_.n_vocab) {
+            error = "logit diagnostic token id is outside the model vocabulary";
+            return false;
+        }
+    }
+
+    // This executable constructs a fresh backend, but reset explicitly so the
+    // evidence contract cannot start from a stale cache if the seam is reused.
+    reset_deepseek4_cache(cache_);
+    last_logits_.clear();
+    spec_feat_window_.clear();
+    inline_snapshot_saved_ = false;
+    DaemonIO io;
+    const int committed = do_prefill(
+        token_ids, io, 0, -1, -1, false, force_exact_prefill, nullptr,
+        &effective_prefill_chunk);
+    if (committed != static_cast<int>(token_ids.size())) {
+        error = "diagnostic prefill did not commit the complete token sequence";
+        return false;
+    }
+    if (last_logits_.size() != static_cast<size_t>(w_.n_vocab)) {
+        error = "diagnostic prefill did not produce one complete vocabulary row";
+        return false;
+    }
+    for (float value : last_logits_) {
+        if (!std::isfinite(value)) {
+            error = "diagnostic prefill produced a non-finite logit";
+            return false;
+        }
+    }
+    logits = last_logits_;
+    return true;
+}
+
 bool DeepSeek4Backend::compute_uniform_hybrid_placement(const DeepSeek4Weights & w,
                                                        int max_ctx,
                                                        MoeHybridPlacement & out,
@@ -1261,7 +1316,8 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                                   int snap_slot,
                                   bool allow_spec_capture,
                                   bool force_exact_prefill,
-                                  const std::vector<VisionEmbeddingRun> * vision_runs) {
+                                  const std::vector<VisionEmbeddingRun> * vision_runs,
+                                  int * max_dispatched_chunk) {
     // The all-hot layer-range path supports causal chunked prefill. The
     // optimized graph snapshots the previous raw SWA window, attends over
     // that snapshot plus the current ubatch, and commits only the final SWA
@@ -1274,6 +1330,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         : cfg_.prefill_mode;
     const int requested_chunk = cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa;
     const int n_total = (int)tokens.size();
+    if (max_dispatched_chunk) *max_dispatched_chunk = 0;
     const bool has_request_vision = vision_runs && !vision_runs->empty();
     std::vector<dflash::Deepseek4VisionRunView> request_views;
     // Intentionally the sole writer of graph-bound run views: every fresh or
@@ -1469,6 +1526,9 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                              vision_error.c_str());
                 return -1;
             }
+        }
+        if (max_dispatched_chunk) {
+            *max_dispatched_chunk = std::max(*max_dispatched_chunk, n_tok);
         }
 
         // Embed tokens

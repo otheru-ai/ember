@@ -389,6 +389,13 @@ target_include_directories(test_gguf_quantize_common PRIVATE tools)
 ember_strict(test_gguf_quantize_common)
 add_test(NAME gguf_quantize_common COMMAND test_gguf_quantize_common)
 
+add_executable(test_logits_probe_format
+  test/test_logits_probe_format.cpp
+  tools/logits_probe_format.cpp)
+target_include_directories(test_logits_probe_format PRIVATE tools)
+ember_strict(test_logits_probe_format)
+add_test(NAME logits_probe_format COMMAND test_logits_probe_format)
+
 add_executable(test_continuous_batch_scheduler
   test/test_continuous_batch_scheduler.cpp
   engine/dflash/common/continuous_batch_scheduler.cpp)
@@ -515,6 +522,7 @@ set(EMBER_C_TESTS
   qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
   gguf_quantize_common
+  logits_probe_format
   continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator
   xdna_dspark_provider xdna_dspark_cpu_ops
@@ -986,6 +994,21 @@ if(EMBER_ENGINE)
     set_target_properties(ember-gguf-quantize PROPERTIES
       BUILD_RPATH "$ORIGIN/engine/ggml/src"
       BUILD_RPATH_USE_ORIGIN TRUE)
+
+    # Default-off full-vocabulary control probe. It is intentionally a
+    # separate executable: no server request or environment option can make
+    # ordinary serving retain or emit this diagnostic payload. Like the
+    # quantizer above, it is omitted rather than built without provenance.
+    add_executable(ds4_logits_probe
+      tools/ds4_logits_probe.cpp
+      tools/logits_probe_format.cpp)
+    target_include_directories(ds4_logits_probe PRIVATE
+      tools engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+    target_compile_definitions(ds4_logits_probe PRIVATE
+      EMBER_CONFIGURED_GIT_HEAD="${EMBER_CONFIGURED_GIT_HEAD}")
+    target_link_libraries(ds4_logits_probe PRIVATE ember_engine ggml)
+    ember_strict(ds4_logits_probe)
+
     if(Python3_Interpreter_FOUND)
       add_test(
         NAME gguf_quantize_tool

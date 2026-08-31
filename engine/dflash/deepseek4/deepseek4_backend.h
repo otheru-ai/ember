@@ -38,6 +38,17 @@ public:
 
     bool init();
 
+    // Default-off evidence seam used only by ds4_logits_probe. It clears the
+    // private runtime frontier, evaluates the supplied ids through the named
+    // configured prefill topology, and returns the full row predicting the
+    // token after the final id. Ordinary generation and protocol output cannot
+    // reach this method.
+    bool diagnostic_next_logits(const std::vector<int32_t> &token_ids,
+                                bool force_exact_prefill,
+                                std::vector<float> &logits,
+                                int &effective_prefill_chunk,
+                                std::string &error);
+
     // ModelBackend interface
     GenerateResult generate_impl(const GenerateRequest & req,
                                  const DaemonIO & io) override;
@@ -161,7 +172,8 @@ private:
                    bool allow_spec_capture = true,
                    bool force_exact_prefill = false,
                    const std::vector<VisionEmbeddingRun> * vision_runs =
-                       nullptr);
+                       nullptr,
+                   int * max_dispatched_chunk = nullptr);
 
     // Autoregressive decode loop.
     // resume_from: number of tokens already present in `out_tokens` (and
