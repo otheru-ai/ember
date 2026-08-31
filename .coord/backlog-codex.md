@@ -98,3 +98,10 @@ Do not publish any performance number while the correctness blocker is open.
     dense MMQ path ran. The HTTP request path currently hardcodes
     `force_exact_prefill=false`; add and review a default-off operator flag
     before claiming the runner rather than silently using ordinary prefill.
+
+11. **Correct and rerun the authorized bare AR benchmark.** [claimed 20260831T030532Z]
+    The first attempt was void because codex added the optional numerics
+    evidence flag, whose startup projection control itself dispatches rejected
+    widths.  Remove that unrequested control, retain inventory telemetry, and
+    require both the process environment and every response to prove exact-q1
+    prefill before accepting either cell.
