@@ -1075,69 +1075,45 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
-#### Isolated ROCMI4 operator oracle @ `5b8e368` — green, narrow
+#### Isolated ROCMI4 operator oracle @ `b4fb6fe` — green, narrow
 
 Evidence:
-`rocmi4-operator-oracle-5b8e368-20260831T003000Z`. This is a model-free
-correctness diagnostic; it collected no timing.
+`rocmi4-operator-oracle-5b8e368-20260831T003000Z` and
+`rocmi4-partial-k-oracle-b4fb6fe-20260831T005301Z`. These are model-free
+correctness diagnostics; they collected no timing.
 
-All eight predeclared cases passed on gfx1151. The exact fixture independently
+All 23 predeclared checks passed on gfx1151. The exact fixture independently
 covered the production `convert.cu` decoder, dense MMVQ/MMQ, routed-expert
 MMVQ/MMQ, and a CPU ROCMI4 decode plus scalar F32 matmul with a zero-error
-budget. Dispatch logs prove that both dense and routed cases reached both
-kernel families. The non-grid fixture also kept the direct and routed
-MMVQ/MMQ outputs within the predeclared per-output bound of one Q8_1
-activation-quantization step per K32, weighted by the row L1 norm.
+budget at K = 160, 256, 320, and 640. Thus the full MMQ iteration control and
+all shipped partial-iteration K values are green. Dispatch logs prove that
+both dense and routed cases reached both kernel families. The non-grid fixture
+also kept the direct and routed MMVQ/MMQ outputs within the predeclared
+per-output bound of one Q8_1 activation-quantization step per K32, weighted by
+the row L1 norm.
 
 This eliminates an isolated ROCMI4 device decoder or accumulation failure on
 these fixed fixtures. It does **not** validate the full-model activation,
 routing, masking, or state-selection context, so it remains compatible with
 the controlled full-model red result below.
 
-#### SOURCE-LEVEL: MMQ's ROCMI4 tile loader has no K bound (claude, awaiting oracle)
+#### REFUTED: MMQ partial-K handling is not the defect
 
-**Predicted defect, read from source, not yet empirically confirmed** — the
-partial-K oracle run is the test. Recorded now so the run has a stated
-prediction rather than an interpretation after the fact.
+The predeclared falsifier was a red K = 320 or 640 result beside the green
+K = 256 control. All four K shapes instead pass the zero-error oracle through
+both dense and routed MMQ, so the partial-K hypothesis is eliminated.
 
-gfx1151 does **not** take the stream-K path (an earlier claim of mine, corrected
-by codex msg 445). The non-CDNA HIP branch at `mmq.cuh:4158-4209` calls
-`mul_mat_q_process_tile(..., 0, ncols_x/qk)` and returns at `:4209`. That
-function loops:
+The source reading missed the paired activation padding. gfx1151 does take the
+conventional non-CDNA HIP path, and its ROCMI4 weight loader reads a complete
+eight-block tile on a short final iteration. But `ggml_cuda_op_mul_mat` pads K
+to `MATRIX_ROW_PADDING` before `quantize_mmq_q8_1_cuda`; the quantizer emits a
+real zero Q8 block whenever `i0 >= ne00` (`quantize.cu:221-223`, with zero
+scale and integers). The foreign weight blocks are therefore multiplied by
+zero. The model-free exact oracle confirms that this mechanism is sound at
+every shipped partial K rather than merely avoiding a fault.
 
-    :4033  for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter)
-    :4034      load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
-
-`blocks_per_iter` is 8 (`ITER_K/qk` = 256/32). The loop is entered whenever
-**any** blocks remain, and `load_tiles_rocmi4_packed` (`:1094-1126`) receives no
-K bound — its only clamp is on the row index:
-
-    :1108  if (need_check) i = min(i, i_max);
-    :1109  const block_rocmi4 * bxi = (const block_rocmi4 *) x + kbx0 + i*stride + kbx;
-
-`kbx0 + kbx` is never compared against the row's block count.
-
-**Worked example, K = 320 (10 blocks/row):** `kb0 = 0` loads blocks 0-7
-correctly; `kb0 = 8` satisfies `8 < 10`, so the iteration runs and the loader
-reads blocks **8-15**. Blocks 10-15 do not exist in that row — with rows
-contiguous at `stride` = 10 blocks, they are the **next row's blocks 0-5**,
-accumulated into this row's dot product.
-
-**Predicted consequences, each matching an observation already in this ledger:**
-
-| prediction | observation |
-|---|---|
-| foreign data, not rounding | r ≈ 0.55, never ≈ 0.9999 |
-| deterministic | same prompt, same wrong token, reproduced twice |
-| never faults | interior rows read within the tensor, just the wrong part |
-| MMVQ immune | MMVQ walks 32-element blocks; every shipped K is a multiple of 32 |
-| K ∈ {160, 320, 640} affected | `hc_attn_up`/`hc_ffn_up` (97), `ffn_down_exps`/`ffn_down_shexp` (96), `per_layer_token_embd` |
-| K ∈ {2560, 6144, 10240} clean | exact multiples of 8 blocks |
-
-**Falsifier.** The partial-K oracle at K = 320 or 640 must go red while K = 256
-stays green. If all four pass, this is wrong — either the loader clamps
-somewhere unread or the fixture's allocation masks it — and the per-row error
-breakdown is what distinguishes those.
+The next missing isolated dimensions are the production output-row values and
+the non-contiguous/view activation layouts absent from the current fixture.
 
 #### DECISIVE: a token-exact, validator-GREEN run with a destroyed logit distribution
 
