@@ -1124,8 +1124,9 @@ bool DeepSeek4Backend::init() {
 bool DeepSeek4Backend::diagnostic_next_logits(
         const std::vector<int32_t> &token_ids, bool force_exact_prefill,
         std::vector<float> &logits, int &effective_prefill_chunk,
-        std::string &error) {
+        std::string &error, std::vector<float> *layer0_mean_hc) {
     logits.clear();
+    if (layer0_mean_hc) layer0_mean_hc->clear();
     effective_prefill_chunk = 0;
     error.clear();
     if (!backend_ || !cache_.ctx || token_ids.empty()) {
@@ -1134,6 +1135,10 @@ bool DeepSeek4Backend::diagnostic_next_logits(
     }
     if (moe_hybrid_) {
         error = "logit diagnostic requires monolithic GPU model placement";
+        return false;
+    }
+    if (layer0_mean_hc && !force_exact_prefill) {
+        error = "layer capture requires exact q1 prefill";
         return false;
     }
     const int max_ctx = cfg_.max_ctx > 0 ? cfg_.max_ctx : 8192;
@@ -1155,9 +1160,11 @@ bool DeepSeek4Backend::diagnostic_next_logits(
     spec_feat_window_.clear();
     inline_snapshot_saved_ = false;
     DaemonIO io;
+    const std::vector<int> capture_layers = {0};
     const int committed = do_prefill(
         token_ids, io, 0, -1, -1, false, force_exact_prefill, nullptr,
-        &effective_prefill_chunk);
+        &effective_prefill_chunk,
+        layer0_mean_hc ? &capture_layers : nullptr, layer0_mean_hc);
     if (committed != static_cast<int>(token_ids.size())) {
         error = "diagnostic prefill did not commit the complete token sequence";
         return false;
@@ -1170,6 +1177,18 @@ bool DeepSeek4Backend::diagnostic_next_logits(
         if (!std::isfinite(value)) {
             error = "diagnostic prefill produced a non-finite logit";
             return false;
+        }
+    }
+    if (layer0_mean_hc) {
+        if (layer0_mean_hc->size() != static_cast<size_t>(w_.n_embd)) {
+            error = "layer capture did not produce one embedding-width row";
+            return false;
+        }
+        for (float value : *layer0_mean_hc) {
+            if (!std::isfinite(value)) {
+                error = "layer capture produced a non-finite value";
+                return false;
+            }
         }
     }
     logits = last_logits_;
@@ -1328,7 +1347,9 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                                   bool allow_spec_capture,
                                   bool force_exact_prefill,
                                   const std::vector<VisionEmbeddingRun> * vision_runs,
-                                  int * max_dispatched_chunk) {
+                                  int * max_dispatched_chunk,
+                                  const std::vector<int> * diagnostic_capture_layer_ids,
+                                  std::vector<float> * diagnostic_capture_out) {
     // The all-hot layer-range path supports causal chunked prefill. The
     // optimized graph snapshots the previous raw SWA window, attends over
     // that snapshot plus the current ubatch, and commits only the final SWA
@@ -1342,6 +1363,13 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     const int requested_chunk = cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa;
     const int n_total = (int)tokens.size();
     if (max_dispatched_chunk) *max_dispatched_chunk = 0;
+    if ((diagnostic_capture_layer_ids == nullptr) !=
+        (diagnostic_capture_out == nullptr)) {
+        std::fprintf(stderr,
+                     "[deepseek4] diagnostic capture contract is incomplete\n");
+        return -1;
+    }
+    if (diagnostic_capture_out) diagnostic_capture_out->clear();
     const bool has_request_vision = vision_runs && !vision_runs->empty();
     std::vector<dflash::Deepseek4VisionRunView> request_views;
     // Intentionally the sole writer of graph-bound run views: every fresh or
@@ -1571,6 +1599,22 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             spec_hooks.capture_out = &spec_cap;
             spec_hooks.require_fused_q1 = !layer_major_spec_capture;
             hp = &spec_hooks;
+        }
+        const bool diagnostic_capture_step =
+            diagnostic_capture_layer_ids && i + n_tok == n_total;
+        Ds4VerifyHooks diagnostic_hooks;
+        if (diagnostic_capture_step) {
+            if (hp || !step_exact || n_tok != 1) {
+                std::fprintf(stderr,
+                             "[deepseek4] diagnostic capture requires an "
+                             "unshared exact q1 final step\n");
+                return -1;
+            }
+            diagnostic_hooks.capture_layer_ids =
+                diagnostic_capture_layer_ids;
+            diagnostic_hooks.capture_out = diagnostic_capture_out;
+            diagnostic_hooks.require_fused_q1 = true;
+            hp = &diagnostic_hooks;
         }
         const bool need_step_logits =
             i + n_tok == n_total ||

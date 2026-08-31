@@ -47,7 +47,8 @@ public:
                                 bool force_exact_prefill,
                                 std::vector<float> &logits,
                                 int &effective_prefill_chunk,
-                                std::string &error);
+                                std::string &error,
+                                std::vector<float> *layer0_mean_hc = nullptr);
 
     // ModelBackend interface
     GenerateResult generate_impl(const GenerateRequest & req,
@@ -173,7 +174,10 @@ private:
                    bool force_exact_prefill = false,
                    const std::vector<VisionEmbeddingRun> * vision_runs =
                        nullptr,
-                   int * max_dispatched_chunk = nullptr);
+                   int * max_dispatched_chunk = nullptr,
+                   const std::vector<int> * diagnostic_capture_layer_ids =
+                       nullptr,
+                   std::vector<float> * diagnostic_capture_out = nullptr);
 
     // Autoregressive decode loop.
     // resume_from: number of tokens already present in `out_tokens` (and

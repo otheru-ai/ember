@@ -39,22 +39,28 @@ struct ProbeMode {
     int chunk;
     dflash::common::PrefillAttentionMode prefill_mode;
     bool force_exact;
+    bool layer0_capture;
 };
 
 bool parse_mode(const char *text, ProbeMode &mode) {
     if (std::strcmp(text, "exact-q1") == 0) {
         mode = {"exact-q1", "authority", 1,
-                dflash::common::PrefillAttentionMode::Exact, true};
+                dflash::common::PrefillAttentionMode::Exact, true, false};
         return true;
     }
     if (std::strcmp(text, "exact-q4") == 0) {
         mode = {"exact-q4", "exact-batching-control", 4,
-                dflash::common::PrefillAttentionMode::Exact, true};
+                dflash::common::PrefillAttentionMode::Exact, true, false};
         return true;
     }
     if (std::strcmp(text, "dense-q8") == 0) {
         mode = {"dense-q8", "shape-matched-approximate-diagnostic", 8,
-                dflash::common::PrefillAttentionMode::Dense, false};
+                dflash::common::PrefillAttentionMode::Dense, false, false};
+        return true;
+    }
+    if (std::strcmp(text, "layer0-q1") == 0) {
+        mode = {"exact-q1", "first-boundary-diagnostic", 1,
+                dflash::common::PrefillAttentionMode::Exact, true, true};
         return true;
     }
     return false;
@@ -95,7 +101,7 @@ bool current_executable(std::string &path, std::string &error) {
 
 void usage(const char *program) {
     std::fprintf(stderr,
-        "usage: %s {exact-q1|exact-q4|dense-q8} MODEL.gguf "
+        "usage: %s {exact-q1|exact-q4|dense-q8|layer0-q1} MODEL.gguf "
         "/absolute/output-dir TOKEN_ID [TOKEN_ID ...]\n",
         program);
 }
@@ -215,9 +221,46 @@ int main(int argc, char **argv) {
     }
     std::vector<float> logits;
     int effective_prefill_chunk = 0;
-    if (!backend.diagnostic_next_logits(
-            token_ids, mode.force_exact, logits, effective_prefill_chunk,
-            error)) {
+    std::vector<float> layer0_mean_hc;
+    bool capture_logits_identical = false;
+    static constexpr const char *retained_q1_payload_sha256 =
+        "5bc73b8471fd408f322ab95d373a5f57ba4ca6b0fc32d6d9a7747a117990e965";
+    if (mode.layer0_capture) {
+        std::vector<float> ordinary_logits;
+        int ordinary_chunk = 0;
+        if (!backend.diagnostic_next_logits(
+                token_ids, true, ordinary_logits, ordinary_chunk, error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        std::string ordinary_digest;
+        if (!ember_logits_payload_sha256(
+                ordinary_logits, ordinary_digest, error) ||
+            ordinary_digest != retained_q1_payload_sha256) {
+            std::fprintf(stderr,
+                "ordinary q1 logits differ from retained authority payload\n");
+            return 1;
+        }
+        if (!backend.diagnostic_next_logits(
+                token_ids, true, logits, effective_prefill_chunk, error,
+                &layer0_mean_hc)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        capture_logits_identical =
+            logits.size() == ordinary_logits.size() &&
+            std::memcmp(logits.data(), ordinary_logits.data(),
+                        logits.size() * sizeof(float)) == 0;
+        /* Byte identity proves both capture passivity and state reset: stale
+         * KV or HC state would make the second prefill differ from the first. */
+        if (ordinary_chunk != 1 || !capture_logits_identical) {
+            std::fprintf(stderr,
+                "passive layer capture perturbed exact q1 logits\n");
+            return 1;
+        }
+    } else if (!backend.diagnostic_next_logits(
+                   token_ids, mode.force_exact, logits,
+                   effective_prefill_chunk, error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }
@@ -251,6 +294,27 @@ int main(int argc, char **argv) {
     bundle.prefill_chunk = effective_prefill_chunk;
     bundle.token_ids = token_ids;
     bundle.logits = std::move(logits);
+    if (mode.layer0_capture) {
+        EmberLayerCaptureBundle capture_bundle;
+        capture_bundle.logits = std::move(bundle);
+        capture_bundle.checkpoint_name = "post_layer_0_mean_hc";
+        capture_bundle.checkpoint_layer = 0;
+        capture_bundle.checkpoint_width =
+            static_cast<int>(layer0_mean_hc.size());
+        capture_bundle.checkpoint = std::move(layer0_mean_hc);
+        capture_bundle.retained_logits_sha256 = retained_q1_payload_sha256;
+        capture_bundle.capture_logits_identical = capture_logits_identical;
+        if (!ember_write_layer_capture_bundle(
+                output_directory, capture_bundle, error)) {
+            std::fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+        std::fprintf(stderr,
+            "[ds4-logits-probe] wrote bound layer-0 checkpoint: "
+            "dir=%s width=%d\n",
+            output_directory.c_str(), capture_bundle.checkpoint_width);
+        return 0;
+    }
     if (!ember_write_logits_probe_bundle(output_directory, bundle, error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;

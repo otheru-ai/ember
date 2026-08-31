@@ -268,6 +268,18 @@ bool valid_prefill_contract(const EmberLogitsProbeBundle &bundle) {
                 "shape-matched-approximate-diagnostic");
 }
 
+bool valid_capture_contract(const EmberLayerCaptureBundle &bundle) {
+    return bundle.logits.prefill_mode == "exact-q1" &&
+           bundle.logits.prefill_chunk == 1 &&
+           bundle.logits.comparison_role == "first-boundary-diagnostic" &&
+           bundle.checkpoint_name == "post_layer_0_mean_hc" &&
+           bundle.checkpoint_layer == 0 && bundle.checkpoint_width > 0 &&
+           bundle.checkpoint.size() ==
+               static_cast<size_t>(bundle.checkpoint_width) &&
+           valid_lower_hex(bundle.retained_logits_sha256, 64U) &&
+           bundle.capture_logits_identical;
+}
+
 }  // namespace
 
 bool ember_parse_logits_probe_token(const char *text, int32_t &token,
@@ -326,6 +338,20 @@ bool ember_sha256_regular_file(const std::string &path, std::string &digest,
     }
     if (!sha.finish(digest)) {
         error = "SHA-256 input is too large";
+        return false;
+    }
+    return true;
+}
+
+bool ember_logits_payload_sha256(const std::vector<float> &logits,
+                                 std::string &digest,
+                                 std::string &error) {
+    digest.clear();
+    std::vector<uint8_t> payload = pack_logits(logits, error);
+    if (payload.empty()) return false;
+    digest = sha256_bytes(payload);
+    if (digest.empty()) {
+        error = "cannot hash logit payload";
         return false;
     }
     return true;
@@ -396,6 +422,113 @@ bool ember_write_logits_probe_bundle(const std::string &directory,
             manifest_path,
             reinterpret_cast<const uint8_t *>(manifest_text.data()),
             manifest_text.size(), error)) {
+        (void)unlink(logits_path.c_str());
+        (void)rmdir(directory.c_str());
+        return false;
+    }
+    const int directory_fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY |
+                                                     O_CLOEXEC);
+    if (directory_fd < 0 || fsync(directory_fd) != 0) {
+        error = "cannot sync output directory " + directory;
+        if (directory_fd >= 0) close(directory_fd);
+        return false;
+    }
+    if (close(directory_fd) != 0) {
+        error = "cannot close output directory " + directory;
+        return false;
+    }
+    return true;
+}
+
+bool ember_write_layer_capture_bundle(const std::string &directory,
+                                      const EmberLayerCaptureBundle &bundle,
+                                      std::string &error) {
+    error.clear();
+    if (directory.empty() || directory[0] != '/') {
+        error = "output directory must be absolute";
+        return false;
+    }
+    if (!valid_lower_hex(bundle.logits.model_sha256, 64U) ||
+        !valid_lower_hex(bundle.logits.binary_sha256, 64U) ||
+        !valid_lower_hex(bundle.logits.ember_revision, 40U) ||
+        bundle.logits.token_ids.empty() || !valid_capture_contract(bundle)) {
+        error = "capture bundle identity is incomplete";
+        return false;
+    }
+    std::vector<uint8_t> logits_payload = pack_logits(bundle.logits.logits, error);
+    if (logits_payload.empty()) return false;
+    std::vector<uint8_t> checkpoint_payload =
+        pack_logits(bundle.checkpoint, error);
+    if (checkpoint_payload.empty()) return false;
+    const std::string logits_digest = sha256_bytes(logits_payload);
+    const std::string checkpoint_digest = sha256_bytes(checkpoint_payload);
+    if (logits_digest.empty() || checkpoint_digest.empty()) {
+        error = "cannot hash capture payload";
+        return false;
+    }
+    if (logits_digest != bundle.retained_logits_sha256) {
+        error = "capture logits differ from retained authority payload";
+        return false;
+    }
+    if (mkdir(directory.c_str(), S_IRWXU | S_IRGRP | S_IXGRP |
+                                 S_IROTH | S_IXOTH) != 0) {
+        error = "cannot create output directory " + directory + ": " +
+                std::strerror(errno);
+        return false;
+    }
+
+    const std::string logits_path = directory + "/logits.f32";
+    const std::string checkpoint_path = directory + "/layer0-mean-hc.f32";
+    const std::string manifest_path = directory + "/manifest.json";
+    if (!write_exclusive_file(logits_path, logits_payload.data(),
+                              logits_payload.size(), error)) {
+        (void)rmdir(directory.c_str());
+        return false;
+    }
+    if (!write_exclusive_file(checkpoint_path, checkpoint_payload.data(),
+                              checkpoint_payload.size(), error)) {
+        (void)unlink(logits_path.c_str());
+        (void)rmdir(directory.c_str());
+        return false;
+    }
+
+    std::ostringstream manifest;
+    manifest << "{\"schema\":\"ember-ds4-layer-capture-v1\""
+             << ",\"semantics\":\"next_token_after_final_input\""
+             << ",\"format\":\"little-endian-f32\""
+             << ",\"model_path\":" << json_string(bundle.logits.model_path)
+             << ",\"model_sha256\":" << json_string(bundle.logits.model_sha256)
+             << ",\"binary_sha256\":" << json_string(bundle.logits.binary_sha256)
+             << ",\"ember_revision\":" << json_string(bundle.logits.ember_revision)
+             << ",\"prefill\":\"exact-q1\""
+             << ",\"prefill_chunk\":1"
+             << ",\"skip_intermediate_logits\":true"
+             << ",\"comparison_role\":\"first-boundary-diagnostic\""
+             << ",\"placement\":\"monolithic-gpu\""
+             << ",\"row_position\":" << (bundle.logits.token_ids.size() - 1U)
+             << ",\"vocab_width\":" << bundle.logits.logits.size()
+             << ",\"payload_sha256\":" << json_string(logits_digest)
+             << ",\"retained_authority_payload_sha256\":"
+             << json_string(bundle.retained_logits_sha256)
+             << ",\"capture_logits_identical\":true"
+             << ",\"checkpoint_name\":" << json_string(bundle.checkpoint_name)
+             << ",\"checkpoint_semantics\":\"mean_hc_after_layer_ffn\""
+             << ",\"checkpoint_layer\":" << bundle.checkpoint_layer
+             << ",\"checkpoint_width\":" << bundle.checkpoint_width
+             << ",\"checkpoint_payload_sha256\":"
+             << json_string(checkpoint_digest)
+             << ",\"token_ids\":[";
+    for (size_t i = 0; i < bundle.logits.token_ids.size(); ++i) {
+        if (i != 0U) manifest << ',';
+        manifest << bundle.logits.token_ids[i];
+    }
+    manifest << "]}\n";
+    const std::string manifest_text = manifest.str();
+    if (!write_exclusive_file(
+            manifest_path,
+            reinterpret_cast<const uint8_t *>(manifest_text.data()),
+            manifest_text.size(), error)) {
+        (void)unlink(checkpoint_path.c_str());
         (void)unlink(logits_path.c_str());
         (void)rmdir(directory.c_str());
         return false;

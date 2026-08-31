@@ -118,6 +118,72 @@ int main() {
     CHECK(!ember_write_logits_probe_bundle(output_dir, bundle, error),
           "existing evidence directory fails closed");
 
+    std::string retained_digest;
+    CHECK(ember_logits_payload_sha256(
+              bundle.logits, retained_digest, error),
+          "hash in-memory logit payload");
+    CHECK(retained_digest ==
+              "6be7a0225e3fc2f6ad1f1f1827362d7a7d849414c3f116b6d7667f4ff671083e",
+          "in-memory payload digest is stable");
+
+    EmberLayerCaptureBundle capture;
+    capture.logits = bundle;
+    capture.logits.comparison_role = "first-boundary-diagnostic";
+    capture.checkpoint_name = "post_layer_0_mean_hc";
+    capture.checkpoint_layer = 0;
+    capture.checkpoint_width = 3;
+    capture.checkpoint = {0.5F, -0.25F, 2.0F};
+    capture.retained_logits_sha256 = retained_digest;
+    capture.capture_logits_identical = true;
+    const std::string capture_dir = std::string(root) + "/capture";
+    CHECK(ember_write_layer_capture_bundle(capture_dir, capture, error),
+          "write paired layer capture bundle");
+    CHECK(stat((capture_dir + "/logits.f32").c_str(), &status) == 0 &&
+              status.st_size == 12,
+          "capture retains exact logit payload width");
+    CHECK(stat((capture_dir + "/layer0-mean-hc.f32").c_str(), &status) == 0 &&
+              status.st_size == 12,
+          "capture checkpoint has exact F32 width");
+    const std::string capture_manifest =
+        read_file(capture_dir + "/manifest.json");
+    CHECK(capture_manifest.find(
+              "\"schema\":\"ember-ds4-layer-capture-v1\"") !=
+              std::string::npos,
+          "capture manifest names schema");
+    CHECK(capture_manifest.find(
+              "\"retained_authority_payload_sha256\":\"" +
+              retained_digest + "\"") != std::string::npos,
+          "capture manifest binds retained authority");
+    CHECK(capture_manifest.find(
+              "\"capture_logits_identical\":true") !=
+              std::string::npos,
+          "capture manifest records non-perturbation proof");
+    CHECK(capture_manifest.find("\"checkpoint_layer\":0") !=
+              std::string::npos &&
+              capture_manifest.find("\"checkpoint_width\":3") !=
+              std::string::npos,
+          "capture manifest binds checkpoint shape");
+    CHECK(!ember_write_layer_capture_bundle(
+              capture_dir, capture, error),
+          "existing capture directory fails closed");
+
+    capture.capture_logits_identical = false;
+    const std::string perturbed_dir = std::string(root) + "/perturbed";
+    CHECK(!ember_write_layer_capture_bundle(
+              perturbed_dir, capture, error),
+          "capture without non-perturbation proof rejected");
+    CHECK(stat(perturbed_dir.c_str(), &status) != 0,
+          "rejected capture creates no directory");
+    capture.capture_logits_identical = true;
+    capture.retained_logits_sha256 = std::string(64U, 'f');
+    const std::string wrong_baseline_dir =
+        std::string(root) + "/wrong-baseline";
+    CHECK(!ember_write_layer_capture_bundle(
+              wrong_baseline_dir, capture, error),
+          "capture differing from retained logits rejected");
+    CHECK(stat(wrong_baseline_dir.c_str(), &status) != 0,
+          "wrong-baseline capture creates no directory");
+
     bundle.logits[0] = std::numeric_limits<float>::quiet_NaN();
     const std::string nan_dir = std::string(root) + "/nan";
     CHECK(!ember_write_logits_probe_bundle(nan_dir, bundle, error),
@@ -128,6 +194,10 @@ int main() {
     (void)unlink((output_dir + "/manifest.json").c_str());
     (void)unlink((output_dir + "/logits.f32").c_str());
     (void)rmdir(output_dir.c_str());
+    (void)unlink((capture_dir + "/manifest.json").c_str());
+    (void)unlink((capture_dir + "/layer0-mean-hc.f32").c_str());
+    (void)unlink((capture_dir + "/logits.f32").c_str());
+    (void)rmdir(capture_dir.c_str());
     (void)unlink(abc_path.c_str());
     (void)rmdir(root);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
