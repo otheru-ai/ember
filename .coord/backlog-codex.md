@@ -79,3 +79,13 @@ Do not publish any performance number while the correctness blocker is open.
    Turn the corrected TV-field placement into a C/C++ compile-time invariant:
    the new evidence block must begin immediately after the pre-existing
    `detail` tail, preserving all old member offsets.
+
+9. **Locate the first full-graph composition divergence.** [claimed 20260831T023700Z]
+   The live-type operator oracle and activation inventory trigger the isolated
+   synthetic stopping rule, while the controlled full graph remains red. Add a
+   default-off shadow diagnostic that advances an independent q=1 state beside
+   the ordinary batched state and reports the first layer boundary whose HC
+   rows differ. Require the diagnostic arm to reproduce the ordinary final
+   result; a perturbation is itself evidence of hidden graph-buffer state and
+   invalidates numeric localization. This is a full-graph discriminator, not a
+   new synthetic kernel fixture.
