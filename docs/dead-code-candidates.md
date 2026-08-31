@@ -149,6 +149,12 @@ reference. That diagnostic does not make the path live in the shipped
 configuration, and its output is invalid unless the companion F32-reference
 route evidence proves the fallback actually ran.
 
+**Corroborated on the live artifact, 20260831T151500Z.** The 0-of-4924 figure
+predates the artifact audit. Today's full-model activation inventory on the
+Q3-PLE/type-101 target the shipped runs actually load recorded **1689 dispatches,
+`route=dense` on every one — zero routed** — which is what this entry predicts,
+measured on the right file and by a different instrument.
+
 **Falsifier.** A default shipped run whose routed-expert dispatch evidence
 contains `path=sync_fallback` makes this entry live. A force-cuBLAS diagnostic
 run does not, because that configuration is outside the stated scope.
