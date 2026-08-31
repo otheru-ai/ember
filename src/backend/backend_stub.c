@@ -90,6 +90,26 @@ void ember_backend_vision_image_free(ember_vision_image *image) {
     memset(image, 0, sizeof(*image));
 }
 
+// Legacy DeepSeek image-sidecar seam. The real definitions live in the
+// vendored backend; inert stub values keep text-only builds linkable and make
+// every attempted image request fail through ember_backend_vision_encode().
+uint64_t ember_ds4_image_digest(void) {
+    return 0;
+}
+
+int ember_ds4_image_span_start(const int32_t *ids, int n) {
+    (void)ids;
+    (void)n;
+    return -1;
+}
+
+int ember_ds4_image_token_count(const int32_t **palette_out,
+                                int *n_palette_out) {
+    if (palette_out) *palette_out = NULL;
+    if (n_palette_out) *n_palette_out = 0;
+    return 0;
+}
+
 static bool prompt_contains(const ember_gen_request *req, const char *needle) {
     size_t n = strlen(needle);
     if (!req || !req->prompt || n == 0 || req->n_prompt < (int)n)

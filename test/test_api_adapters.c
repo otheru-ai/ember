@@ -208,10 +208,22 @@ static void test_responses(void) {
     j = ember_json_parse(
         "{\"input\":[{\"type\":\"message\",\"role\":\"user\","
         "\"content\":[{\"type\":\"input_text\",\"text\":\"look\"},"
-        "{\"type\":\"input_image\",\"image_url\":\"https://example.invalid/x.png\"}]}]}");
+        "{\"type\":\"input_image\",\"image_url\":"
+        "\"data:image/png;base64,iVBORw==\"}]}]}");
+    memset(err, 0, sizeof(err));
+    CHECK(j && ember_responses_request_parse(j, &r, err, sizeof(err)));
+    CHECK(r.has_images && r.messages[0].n_parts == 2 &&
+          r.messages[0].parts[1].image.size == 4);
+    ember_chat_request_free(&r);
+    ember_json_free(j);
+
+    j = ember_json_parse(
+        "{\"input\":[{\"type\":\"message\",\"role\":\"user\","
+        "\"content\":[{\"type\":\"input_image\",\"image_url\":"
+        "\"https://example.invalid/x.png\"}]}]}");
     memset(err, 0, sizeof(err));
     CHECK(j && !ember_responses_request_parse(j, &r, err, sizeof(err)));
-    CHECK(strstr(err, "does not support image inputs") != NULL);
+    CHECK(strstr(err, "invalid normalized Responses input") != NULL);
     ember_json_free(j);
 
     j = ember_json_parse(
@@ -648,6 +660,28 @@ static void test_anthropic_text_block_validation(void) {
     CHECK(j && ember_anthropic_request_parse(j, &r, err, sizeof(err)));
     if (j) ember_json_free(j);
     ember_chat_request_free(&r);
+
+    j = ember_json_parse(
+        "{\"max_tokens\":10,\"messages\":[{\"role\":\"user\","
+        "\"content\":[{\"type\":\"text\",\"text\":\"look\"},"
+        "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+        "\"media_type\":\"image/png\",\"data\":\"iVBORw==\"}},"
+        "{\"type\":\"text\",\"text\":\"now\"}]}]}" );
+    memset(err, 0, sizeof(err));
+    CHECK(j && ember_anthropic_request_parse(j, &r, err, sizeof(err)));
+    CHECK(r.has_images && r.messages[0].n_parts == 3 &&
+          r.messages[0].parts[1].image.size == 4);
+    if (j) ember_json_free(j);
+    ember_chat_request_free(&r);
+
+    j = ember_json_parse(
+        "{\"max_tokens\":10,\"messages\":[{\"role\":\"user\","
+        "\"content\":[{\"type\":\"image\",\"source\":{"
+        "\"type\":\"url\",\"url\":\"https://example.invalid/x.png\"}}]}]}" );
+    memset(err, 0, sizeof(err));
+    CHECK(j && !ember_anthropic_request_parse(j, &r, err, sizeof(err)));
+    CHECK(strstr(err, "supported base64 source") != NULL);
+    if (j) ember_json_free(j);
 
     // A non-text block in `system` must be rejected, not silently dropped —
     // dropping it would quietly discard part of the operator's instructions.

@@ -74,6 +74,11 @@ void ember_kv_free(ember_kv_cache *c);
 void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
                      uint64_t img_digest, int *slot_out, int *len_out);
 
+// Token-only disk keys cannot identify image content. Clamp any candidate
+// lookup/save length to the first image row; -1 means no image is present.
+// Kept as a pure policy helper so both doors are pinned by GPU-free tests.
+int ember_kv_clamp_before_image(int candidate, int img_span_start);
+
 // Prevent a selected snapshot slot from being evicted/overwritten while a
 // concurrent backend request restores it.
 bool ember_kv_pin(ember_kv_cache *c, int slot);

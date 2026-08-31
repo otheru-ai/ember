@@ -188,6 +188,10 @@ static struct timespec monotonic_deadline(double when) {
 uint64_t ember_ds4_image_digest(void);
 int      ember_ds4_image_span_start(const int32_t *ids, int n);
 
+static uint64_t request_image_digest(const ember_chat_request *req) {
+    return req && req->image_digest ? req->image_digest
+                                    : ember_ds4_image_digest();
+}
 
 // JSON-escape `s` into `b` (no surrounding quotes).
 static void json_escape_str(ember_buf *b, const char *s) {
@@ -826,7 +830,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
     // The GPU-free stub rejects vision before this point, so the regression is
     // intentionally uncovered by the host gauntlet; real-weight validation
     // exercises this guard on the Qwen vision deployment path.
-    if (req && req->has_images) return;
+    if ((req && req->has_images) ||
+        ember_ds4_image_span_start(prompt_ids, n_prompt) >= 0)
+        return;
     if (!generated_frontier_matches_text(be, g)) {
         fprintf(stderr,
                 "[ember] post-tool snapshot skipped: sampled token frontier "
@@ -924,7 +930,7 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
     }
     pthread_mutex_lock(&srv->state_lock);
     bool committed = ember_kv_commit(&srv->kv, slot, seq, total,
-                                     ember_ds4_image_digest(),
+                                     request_image_digest(req),
                                      ember_ds4_image_span_start(seq, total));
     if (!committed)
         ember_kv_release(&srv->kv, slot);
@@ -2273,7 +2279,7 @@ static bool prepare_vision_prompt(
     int images = 0;
     for (int m = 0; m < req->n_messages; ++m)
         for (int p = 0; p < req->messages[m].n_parts; ++p)
-            if (req->messages[m].parts[p].kind == EMBER_CONTENT_IMAGE_URL)
+            if (req->messages[m].parts[p].kind == EMBER_CONTENT_IMAGE)
                 ++images;
     if (images <= 0) {
         snprintf(error, error_cap, "image content was not preserved in the request");
@@ -2287,13 +2293,15 @@ static bool prepare_vision_prompt(
     for (int m = 0; m < req->n_messages && ok; ++m) {
         for (int p = 0; p < req->messages[m].n_parts && ok; ++p) {
             const ember_content_part *part = &req->messages[m].parts[p];
-            if (part->kind != EMBER_CONTENT_IMAGE_URL) continue;
-            ember_image_bytes bytes = {0};
-            ok = ember_image_data_url_decode(part->text, &bytes, error, error_cap);
+            if (part->kind != EMBER_CONTENT_IMAGE) continue;
+            if (!part->image.data || part->image.size == 0) {
+                snprintf(error, error_cap,
+                         "image content was not normalized at request intake");
+                ok = false;
+            }
             if (ok) ok = ember_backend_vision_encode(
-                be, bytes.data, bytes.size, &encoded[image_index],
+                be, part->image.data, part->image.size, &encoded[image_index],
                 error, error_cap);
-            ember_image_bytes_free(&bytes);
             if (ok && (encoded[image_index].grid_t != 1 ||
                        encoded[image_index].n_tokens <= 0 ||
                        !encoded[image_index].embeddings)) {
@@ -2499,6 +2507,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int32_t *ids = NULL;
     ember_vision_run *vision_runs = NULL;
     int n_vision_runs = 0;
+    int image_span_start = -1;
     bool started_thinking = false;
     int n_prompt;
     if (req->continuation_only) {
@@ -2627,6 +2636,27 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // The processor-expanded image rows are model input tokens and are the
         // meaningful prompt-token count for usage/context accounting.
         client_prompt_tokens_pre = n_prompt;
+        image_span_start = vision_runs[0].prompt_offset;
+    } else {
+        image_span_start = ember_ds4_image_span_start(ids, n_prompt);
+    }
+
+    // Image-bearing requests cannot be summarized without carrying their
+    // request-owned media spans through the compactor. Fail with a distinct
+    // boundary instead of silently skipping compaction and later reporting a
+    // generic context overflow.
+    if (srv->auto_compact && image_span_start >= 0 &&
+        ember_compaction_needed(n_prompt, n_ctx)) {
+        respond_api_error(fd, req->api, 400,
+                          "context compaction is not supported for image-bearing requests",
+                          "invalid_request_error",
+                          "vision_compaction_unsupported");
+        free_vision_runs(vision_runs, n_vision_runs);
+        free(ids);
+        atomic_fetch_sub(&srv->busy, 1);
+        ember_backend_generation_release(be);
+        if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+        return;
     }
 
     // Context-length guard (ds4 http_error_context_length_exceeded): reject a
@@ -2783,7 +2813,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int restore_slot = -1, restore_len = 0;
     bool restore_pinned = false;
     pthread_mutex_lock(&srv->state_lock);
-    ember_kv_lookup(&srv->kv, ids, n_prompt, ember_ds4_image_digest(),
+    const uint64_t image_digest = request_image_digest(req);
+    ember_kv_lookup(&srv->kv, ids, n_prompt, image_digest,
                     &restore_slot, &restore_len);
     if (restore_slot >= 0) {
         restore_pinned = ember_kv_pin(&srv->kv, restore_slot);
@@ -2793,8 +2824,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         }
     }
     int snap_is_anchor = 0;
-    int snap_cut = req->has_images ? -1 :
-        ember_kv_snap_cut(&srv->kv, ids, n_prompt, &snap_is_anchor);
+    int snap_cut = ember_kv_snap_cut(
+        &srv->kv, ids, n_prompt, &snap_is_anchor);
+    snap_cut = ember_kv_clamp_before_image(snap_cut, image_span_start);
     // A cold-prompt anchor (shared system-prefix, no completed turn yet) is
     // expensive to rebuild, so tag it COLD for eviction protection; a completed
     // turn boundary is a routine waypoint.
@@ -2807,8 +2839,12 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // Keep the resident snapshot pinned until the longer disk checkpoint has
     // loaded and committed successfully, so an I/O failure still has a safe
     // fallback.
-    if (!req->has_images && ember_backend_disk_enabled(be)) {
+    if (ember_backend_disk_enabled(be)) {
         int dl = ember_backend_disk_prefix(be, ids, n_prompt);
+        // Disk keys contain token IDs only. Clamp the backend's returned hit,
+        // as well as save eligibility, before the first image row so a stored
+        // checkpoint can never restore KV computed for different pixels.
+        dl = ember_kv_clamp_before_image(dl, image_span_start);
         int disk_slot = -1;
         if (dl > restore_len) {
             pthread_mutex_lock(&srv->state_lock);
@@ -2820,8 +2856,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         pthread_mutex_lock(&srv->state_lock);
         if (loaded &&
             ember_kv_commit(&srv->kv, disk_slot, ids, dl,
-                            ember_ds4_image_digest(),
-                            ember_ds4_image_span_start(ids, dl)) &&
+                            image_digest, image_span_start) &&
             ember_kv_pin(&srv->kv, disk_slot)) {
             if (restore_pinned)
                 ember_kv_unpin(&srv->kv, restore_slot);

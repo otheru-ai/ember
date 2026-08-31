@@ -47,7 +47,8 @@ static void test_multimodal_content(void) {
     const char *body =
         "{\"messages\":[{\"role\":\"user\",\"content\":["
         "{\"type\":\"text\",\"text\":\"look: \"},"
-        "{\"type\":\"image_url\",\"image_url\":{\"url\":\"x\"}},"
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"data:image/png;base64,iVBORw==\"}},"
         "{\"type\":\"text\",\"text\":\"a cat\"}]}]}";
     ember_json *v = ember_json_parse(body);
     ember_chat_request req;
@@ -57,12 +58,54 @@ static void test_multimodal_content(void) {
     CHECK(req.has_images, "multimodal request records an image");
     CHECK(req.messages[0].n_parts == 3,
           "ordered multimodal parts are preserved");
-    CHECK(req.messages[0].parts[1].kind == EMBER_CONTENT_IMAGE_URL &&
-          strcmp(req.messages[0].parts[1].text, "x") == 0,
-          "image URL survives request normalization");
+    CHECK(req.messages[0].parts[1].kind == EMBER_CONTENT_IMAGE &&
+          req.messages[0].parts[1].text == NULL &&
+          req.messages[0].parts[1].image.size == 4 &&
+          memcmp(req.messages[0].parts[1].image.data, "\x89PNG", 4) == 0,
+          "image bytes are normalized and request-owned");
+    CHECK(req.image_digest != 0,
+          "image-bearing request has a nonzero media digest");
     CHECK(!req.has_tools, "no tools");
     CHECK(!ember_chat_request_is_tool_result_continuation(&req),
           "ordinary message history may use speculative decode");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    v = ember_json_parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"input_image\",\"image_url\":"
+        "\"data:image/jpeg;base64,/9g=\"}]}]}" );
+    CHECK(ember_chat_request_parse(v, &req) && req.has_images &&
+              req.messages[0].parts[0].image.format == EMBER_IMAGE_JPEG,
+          "Responses-style input_image normalizes at the chat boundary");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    v = ember_json_parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"https://example.invalid/x.png\"}}]}]}" );
+    CHECK(!ember_chat_request_parse(v, &req),
+          "remote images fail at request normalization");
+    ember_json_free(v);
+
+    const char *ordered =
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,AAAA\"},"
+        "{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,AQID\"}]}]}";
+    const char *reversed =
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,AQID\"},"
+        "{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,AAAA\"}]}]}";
+    v = ember_json_parse(ordered);
+    CHECK(ember_chat_request_parse(v, &req), "ordered image pair parses");
+    const uint64_t ordered_digest = req.image_digest;
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+    v = ember_json_parse(reversed);
+    CHECK(ember_chat_request_parse(v, &req), "reversed image pair parses");
+    CHECK(ordered_digest != 0 && req.image_digest != ordered_digest,
+          "media digest includes image order and content");
     ember_chat_request_free(&req);
     ember_json_free(v);
 }

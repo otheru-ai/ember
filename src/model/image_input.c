@@ -15,15 +15,24 @@ static int base64_value(unsigned char c) {
     return -1;
 }
 
-static bool supported_prefix(const char *url, const char **payload) {
-    static const char *prefixes[] = {
-        "data:image/png;base64,", "data:image/jpeg;base64,",
-        "data:image/webp;base64,", "data:image/gif;base64,",
+typedef struct {
+    const char *prefix;
+    int format;
+} image_prefix;
+
+static bool supported_prefix(const char *url, const char **payload,
+                             int *format) {
+    static const image_prefix prefixes[] = {
+        {"data:image/png;base64,", EMBER_IMAGE_PNG},
+        {"data:image/jpeg;base64,", EMBER_IMAGE_JPEG},
+        {"data:image/webp;base64,", EMBER_IMAGE_WEBP},
+        {"data:image/gif;base64,", EMBER_IMAGE_GIF},
     };
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i) {
-        const size_t n = strlen(prefixes[i]);
-        if (strncmp(url, prefixes[i], n) == 0) {
+        const size_t n = strlen(prefixes[i].prefix);
+        if (strncmp(url, prefixes[i].prefix, n) == 0) {
             *payload = url + n;
+            *format = prefixes[i].format;
             return true;
         }
     }
@@ -38,7 +47,8 @@ bool ember_image_data_url_decode(const char *url, ember_image_bytes *out,
         return false;
     }
     const char *payload = NULL;
-    if (!supported_prefix(url, &payload)) {
+    int format = 0;
+    if (!supported_prefix(url, &payload, &format)) {
         if (error && error_cap)
             snprintf(error, error_cap,
                      "only base64 PNG/JPEG/WebP/GIF data URLs are supported; remote image fetching is disabled");
@@ -77,6 +87,17 @@ bool ember_image_data_url_decode(const char *url, ember_image_bytes *out,
             if (error && error_cap) snprintf(error, error_cap, "invalid image base64 padding");
             return false;
         }
+        // RFC 4648 canonical padding: unused low bits in the last data sextet
+        // must be zero. Accepting aliases would make one byte string have many
+        // request spellings and weakens the normalization boundary.
+        if ((payload[i + 2] == '=' && (v[1] & 0x0f) != 0) ||
+            (payload[i + 3] == '=' && payload[i + 2] != '=' &&
+             (v[2] & 0x03) != 0)) {
+            free(bytes);
+            if (error && error_cap)
+                snprintf(error, error_cap, "non-canonical image base64 padding");
+            return false;
+        }
         const uint32_t word = (uint32_t)v[0] << 18 |
                               (uint32_t)v[1] << 12 |
                               (uint32_t)v[2] << 6 | (uint32_t)v[3];
@@ -91,6 +112,7 @@ bool ember_image_data_url_decode(const char *url, ember_image_bytes *out,
     }
     out->data = bytes;
     out->size = decoded;
+    out->format = format;
     return true;
 }
 

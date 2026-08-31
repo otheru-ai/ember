@@ -53,9 +53,9 @@ static char *content_text(const ember_json *v) {
     return out ? out : strdup("");
 }
 
-static bool responses_message_content_is_text_only(const ember_json *v,
-                                                   char *err,
-                                                   size_t err_cap) {
+static bool responses_message_content_is_supported(const ember_json *v,
+                                                    char *err,
+                                                    size_t err_cap) {
     if (!v || v->type == EMBER_JSON_STRING) return true;
     if (v->type != EMBER_JSON_ARRAY) {
         set_err(err, err_cap,
@@ -75,8 +75,12 @@ static bool responses_message_content_is_text_only(const ember_json *v,
             !strcmp(type, "output_text") || !strcmp(type, "summary_text"))
             continue;
         if (!strcmp(type, "input_image")) {
+            const ember_json *image_url = ember_json_get(part, "image_url");
+            if (image_url && (image_url->type == EMBER_JSON_STRING ||
+                              image_url->type == EMBER_JSON_OBJECT))
+                continue;
             set_err(err, err_cap,
-                    "the Responses adapter does not support image inputs; send images through /v1/chat/completions");
+                    "Responses input_image requires image_url");
             return false;
         }
         set_err(err, err_cap, "unsupported Responses message content block");
@@ -92,6 +96,45 @@ static void message_begin(ember_buf *messages, bool *comma,
     ember_json_escape(messages, role);
     ember_buf_puts(messages, ",\"content\":");
     ember_json_escape(messages, content ? content : "");
+    *comma = true;
+}
+
+// Preserve Responses content order while translating its block names to the
+// normalized Chat surface consumed by chat_api.c. Image URLs remain values only
+// until that parser decodes and bounds the data URL into request-owned bytes.
+static void responses_message_begin(ember_buf *messages, bool *comma,
+                                    const char *role,
+                                    const ember_json *content) {
+    if (!content || content->type != EMBER_JSON_ARRAY) {
+        message_begin(messages, comma, role,
+                      ember_json_str(content, ""));
+        return;
+    }
+    if (*comma) ember_buf_putc(messages, ',');
+    ember_buf_puts(messages, "{\"role\":");
+    ember_json_escape(messages, role);
+    ember_buf_puts(messages, ",\"content\":[");
+    bool part_comma = false;
+    for (int i = 0; i < ember_json_len(content); ++i) {
+        const ember_json *part = ember_json_at(content, i);
+        const char *type = ember_json_str(ember_json_get(part, "type"), "");
+        if (part_comma) ember_buf_putc(messages, ',');
+        if (!strcmp(type, "input_image")) {
+            char *url = ember_json_dump(ember_json_get(part, "image_url"));
+            ember_buf_puts(messages,
+                           "{\"type\":\"image_url\",\"image_url\":");
+            ember_buf_puts(messages, url ? url : "null");
+            ember_buf_putc(messages, '}');
+            free(url);
+        } else {
+            ember_buf_puts(messages, "{\"type\":\"text\",\"text\":");
+            ember_json_escape(messages,
+                ember_json_str(ember_json_get(part, "text"), ""));
+            ember_buf_putc(messages, '}');
+        }
+        part_comma = true;
+    }
+    ember_buf_putc(messages, ']');
     *comma = true;
 }
 
@@ -448,20 +491,18 @@ static bool build_responses_messages(const ember_json *input,
                 flush_pending_reasoning(
                     messages, &comma, &pending_reasoning);
             const ember_json *message_content = ember_json_get(item, "content");
-            if (!responses_message_content_is_text_only(
+            if (!responses_message_content_is_supported(
                     message_content, err, err_cap)) {
                 free(pending_reasoning);
                 return false;
             }
-            char *text = content_text(message_content);
-            message_begin(messages, &comma, role, text);
+            responses_message_begin(messages, &comma, role, message_content);
             if (!strcmp(role, "assistant") &&
                 pending_reasoning && pending_reasoning[0]) {
                 ember_buf_puts(messages, ",\"reasoning_content\":");
                 ember_json_escape(messages, pending_reasoning);
             }
             message_end(messages);
-            free(text);
             free(pending_reasoning);
             pending_reasoning = NULL;
             continue;
@@ -779,19 +820,43 @@ static void append_anthropic_message(ember_buf *messages, bool *comma,
         return;
     }
 
-    ember_buf text = {0};
+    ember_buf parts = {0};
+    bool parts_comma = false;
     for (int i = 0; i < ember_json_len(content); ++i) {
         const ember_json *p = ember_json_at(content, i);
         const char *t = ember_json_str(ember_json_get(p, "type"), "");
         if (!strcmp(t, "text")) {
-            ember_buf_puts(&text,
+            if (parts_comma) ember_buf_putc(&parts, ',');
+            ember_buf_puts(&parts, "{\"type\":\"text\",\"text\":");
+            ember_json_escape(&parts,
                 ember_json_str(ember_json_get(p, "text"), ""));
+            ember_buf_putc(&parts, '}');
+            parts_comma = true;
+        } else if (!strcmp(t, "image")) {
+            const ember_json *source = ember_json_get(p, "source");
+            const char *media_type = ember_json_str(
+                ember_json_get(source, "media_type"), "");
+            const char *data = ember_json_str(
+                ember_json_get(source, "data"), "");
+            if (parts_comma) ember_buf_putc(&parts, ',');
+            ember_buf_puts(&parts,
+                "{\"type\":\"image_url\",\"image_url\":\"data:");
+            ember_buf_puts(&parts, media_type);
+            ember_buf_puts(&parts, ";base64,");
+            ember_buf_puts(&parts, data);
+            ember_buf_puts(&parts, "\"}");
+            parts_comma = true;
         } else if (!strcmp(t, "tool_result")) {
-            if (text.len) {
-                message_begin(messages, comma, "user", text.ptr);
-                message_end(messages);
-                text.len = 0;
-                if (text.ptr) text.ptr[0] = '\0';
+            if (parts_comma) {
+                if (*comma) ember_buf_putc(messages, ',');
+                ember_buf_puts(messages,
+                    "{\"role\":\"user\",\"content\":[");
+                ember_buf_append(messages, parts.ptr, parts.len);
+                ember_buf_puts(messages, "]}");
+                *comma = true;
+                parts.len = 0;
+                if (parts.ptr) parts.ptr[0] = '\0';
+                parts_comma = false;
             }
             char *result = content_text(ember_json_get(p, "content"));
             message_begin(messages, comma, "tool", result);
@@ -802,11 +867,14 @@ static void append_anthropic_message(ember_buf *messages, bool *comma,
             free(result);
         }
     }
-    if (text.len) {
-        message_begin(messages, comma, "user", text.ptr);
-        message_end(messages);
+    if (parts_comma) {
+        if (*comma) ember_buf_putc(messages, ',');
+        ember_buf_puts(messages, "{\"role\":\"user\",\"content\":[");
+        ember_buf_append(messages, parts.ptr, parts.len);
+        ember_buf_puts(messages, "]}");
+        *comma = true;
     }
-    ember_buf_free(&text);
+    ember_buf_free(&parts);
 }
 
 static bool validate_anthropic_text_blocks(const ember_json *value,
@@ -919,6 +987,27 @@ static bool validate_anthropic_payload(const ember_json *root,
                     !input || input->type != EMBER_JSON_OBJECT) {
                     set_err(err, err_cap,
                             "Anthropic tool_use requires id, name, and object input");
+                    return false;
+                }
+                continue;
+            }
+            if (!strcmp(role, "user") && !strcmp(type, "image")) {
+                const ember_json *source = ember_json_get(block, "source");
+                const char *source_type = ember_json_str(
+                    ember_json_get(source, "type"), "");
+                const char *media_type = ember_json_str(
+                    ember_json_get(source, "media_type"), "");
+                const ember_json *data = ember_json_get(source, "data");
+                const bool media_ok = !strcmp(media_type, "image/png") ||
+                    !strcmp(media_type, "image/jpeg") ||
+                    !strcmp(media_type, "image/webp") ||
+                    !strcmp(media_type, "image/gif");
+                if (!source || source->type != EMBER_JSON_OBJECT ||
+                    strcmp(source_type, "base64") || !media_ok ||
+                    !data || data->type != EMBER_JSON_STRING ||
+                    !ember_json_str(data, "")[0]) {
+                    set_err(err, err_cap,
+                            "Anthropic image blocks require a supported base64 source");
                     return false;
                 }
                 continue;

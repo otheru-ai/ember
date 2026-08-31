@@ -206,8 +206,22 @@ static void test_image_digest_prevents_aliasing(void) {
     ember_kv_free(&c2);
 }
 
+static void test_disk_lengths_clamp_before_image(void) {
+    CHECK(ember_kv_clamp_before_image(90, 40) == 40,
+          "disk lookup result is clamped before image content");
+    CHECK(ember_kv_clamp_before_image(40, 40) == 40,
+          "prefix ending at image boundary remains reusable");
+    CHECK(ember_kv_clamp_before_image(20, 40) == 20,
+          "prefix already before image remains unchanged");
+    CHECK(ember_kv_clamp_before_image(90, -1) == 90,
+          "text-only disk prefix remains unchanged");
+    CHECK(ember_kv_clamp_before_image(-1, 40) == -1,
+          "missing save candidate remains missing");
+}
+
 int main(void) {
     test_image_digest_prevents_aliasing();
+    test_disk_lengths_clamp_before_image();
     printf("ember kv_cache tests\n");
     test_longest_prefix();
     test_anchor_cut();

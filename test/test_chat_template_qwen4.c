@@ -131,7 +131,7 @@ static void test_fail_closed_inputs(void) {
 static void test_image_placeholder_order(void) {
     ember_content_part parts[] = {
         {.kind = EMBER_CONTENT_TEXT, .text = "  before "},
-        {.kind = EMBER_CONTENT_IMAGE_URL, .text = "https://example.invalid/x.png"},
+        {.kind = EMBER_CONTENT_IMAGE, .text = "https://example.invalid/x.png"},
         {.kind = EMBER_CONTENT_TEXT, .text = " after  "},
     };
     ember_chat_msg messages[] = {message("user", "before  after")};

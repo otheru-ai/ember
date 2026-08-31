@@ -55,6 +55,12 @@ void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
     }
 }
 
+int ember_kv_clamp_before_image(int candidate, int img_span_start) {
+    if (img_span_start >= 0 && candidate > img_span_start)
+        return img_span_start;
+    return candidate;
+}
+
 bool ember_kv_pin(ember_kv_cache *c, int slot) {
     if (!c || slot < 0 || slot >= c->cap ||
         c->pins[slot] == UINT_MAX) return false;

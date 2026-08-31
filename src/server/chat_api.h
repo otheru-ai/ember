@@ -1,13 +1,15 @@
 // Extract a normalized chat-completion request from a parsed JSON body.
 // Handles content as a plain string or an ordered content-part array. Text
-// keeps a flattened compatibility view; image URLs are preserved for the lazy
-// Qwen vision provider and fail closed when that backend seam is unavailable.
+// keeps a flattened compatibility view; inline images become request-owned
+// bytes and fail closed when the selected backend seam is unavailable.
 #ifndef EMBER_CHAT_API_H
 #define EMBER_CHAT_API_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "../common/json.h"
+#include "../model/image_input.h"
 #include "../model/continuation.h"
 #include "../model/tool_parser.h"   // ember_tool_calls (assistant history replay)
 
@@ -34,17 +36,18 @@ typedef enum {
 
 // Ordered message content. `content` below remains the flattened text view
 // used by the existing text pipeline, while these parts preserve image
-// placement for Qwen4Exp vision. Exact order is load-bearing for embedding
-// splice offsets and three-axis M-RoPE positions.
+// placement for vision models. Exact order is load-bearing for embedding
+// splice offsets, learned marker layout, and position construction.
 typedef enum {
     EMBER_CONTENT_TEXT,
-    EMBER_CONTENT_IMAGE_URL,
+    EMBER_CONTENT_IMAGE,
 } ember_content_part_kind;
 
 typedef struct {
     ember_content_part_kind kind;
-    char                   *text;       // text bytes or image URL (owned)
+    char                   *text;       // text bytes (owned; NULL for image)
     char                   *detail;     // image detail hint (owned; optional)
+    ember_image_bytes       image;      // decoded request-owned image bytes
 } ember_content_part;
 
 typedef struct {
@@ -79,6 +82,9 @@ typedef struct {
     bool            reasoning_summary_emit;
     bool            background;  // ember_background: defer until foreground idle
     bool            has_images;  // at least one preserved image content part
+    // Order-sensitive digest over normalized image formats and decoded bytes.
+    // Zero is reserved for text-only requests and for the legacy sidecar seam.
+    uint64_t        image_digest;
     int             max_tokens;   // value; see max_tokens_set
     bool            max_tokens_set;
     // Sampler surface (ds4 parity). *_set distinguishes client-supplied from default.
