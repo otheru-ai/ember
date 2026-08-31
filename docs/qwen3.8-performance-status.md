@@ -1534,6 +1534,61 @@ margin rule accepts decision-relevant perturbations, not merely a remote-tail
 outlier. It still does **not** establish which side is closer to truth; the
 full-model F32 reference that was meant to answer that failed its control.
 
+## PREFILL LEAD: the GDN transpose-then-concat, sized (claude, source + GGUF, no GPU)
+
+Filed against the raised goal. **Not measured on hardware** — this is an
+operation count and a byte count from source and the shipped tensor shapes, plus
+an independent fork's measurement of the same pattern. It is a lead, not a
+result.
+
+`qwen4exp_frontier.cpp:973-978`, in the GDN path:
+
+```c
+ggml_tensor * current = ggml_cont(ctx, ggml_transpose(ctx, result->qkv));
+current = ggml_reshape_3d(ctx, current, n_tokens, conv_channels, 1);
+ggml_tensor * conv_input = ggml_concat(ctx, result->conv_history, current, 0);
+```
+
+`ggml_cont` of a transposed tensor materialises a full strided copy; `ggml_concat`
+then copies that result again. Two passes over the same data, back to back.
+
+**Size, from the shipped GGUF.** `blk.N.attn_qkv.weight` is `[2560, 10240]`, so
+`conv_channels = 10240`; `blk.N.ssm_conv1d.weight` is `[4, 10240]`, so the
+history is 3 columns. GDN runs on **36 of 48 layers**. At the production prefill
+chunk of 16 rows:
+
+| | bytes per GDN layer per chunk |
+|---|---:|
+| transpose materialise (strided read + write) | 1.31 MB |
+| concat (history + current in, joined out) | 1.56 MB |
+| **total** | **2.87 MB** |
+
+×36 GDN layers = **103 MB per 16-token chunk**, and a 2074-token prefill is ~130
+chunks ⇒ **~13.4 GB of copy traffic** for this pattern alone.
+
+**Independent corroboration.** `LaurentZuijdwijk/llama.cpp` measures a **tiled
+concat-transpose** as its single largest gate: **+45.1%** on an MoE at pp2048,
++49.3% on a second MoE, and it is most of what turns wide ubatch from a
+regression into their best setting. Different backend (Vulkan), same structural
+pattern.
+
+**It also matches our own earliest evidence.** The copy classification recorded
+1.27M copies dominated by a non-contiguous materialise
+(`ggml-cuda.cu:1965`); a `ggml_cont` over a transpose is exactly that shape.
+Three independent lines — our copy trace, our source, and an external fork's
+ablation — point at the same operation.
+
+**What is not established.** Bytes are not time. The transposed working set is
+655 KB per layer and may sit in cache, so the traffic figure is an upper bound
+on the opportunity, not a predicted saving. **The measurement to run** is an
+A/B of this pattern alone at fixed prefill width, before any kernel work — the
+fork's own methodology (palindrome-ordered arms, discarded warmup, per-cell σ)
+applies.
+
+**Sequencing.** Blocked behind the correctness gate like every other performance
+item; filed now because the raised bar makes it the first prefill candidate
+rather than an optional one.
+
 ## Host-barrier census @ `faa5307` (static, `qwen4exp_frontier.cpp`)
 
 Grouping each run of `ggml_backend_tensor_get_async` / `_set_async` by the
