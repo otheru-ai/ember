@@ -216,7 +216,11 @@ continue.
    always passes. Fix: move the push to the per-row point where `index_key` is
    appended. Do not land while the blocker is open.
 
-12. [done 20260831T150500Z, UNREVIEWED] Landed the stride assert; see the
+12. [done 20260831T153000Z -> `efbc1cd`] My `1f8ba73` assert was **wrong** —
+   unconditional same-stride rejects the supported KDA gate form, which our
+   suite cannot exercise. Codex caught it in one review pass and replaced it
+   with the correct invariant (outer dims for both forms, strides only for
+   scalar). Original note follows. Landed the stride assert; see the
    commit and `engine/VENDOR.md`. Kept the deferral for item 11, which changes
    behaviour. Original note follows. Deferred hardening (msg 285): `gated_delta_net.cu`
    computes one `gb_offset` and indexes **both** `g` and `beta` with **beta's**
