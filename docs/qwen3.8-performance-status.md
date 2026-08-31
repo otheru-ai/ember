@@ -926,6 +926,41 @@ not a trustworthy oracle for this model** — the outcome the 0-of-4924 evidence
 predicted, and the reason the width-2 gate existed. No conclusion about MMQ
 follows from this run.
 
+### Full matrix, all four widths (claude, `0aadac3 --ranks`)
+
+`d_prod` is the reference's distance from the trusted default; the `top-K`
+columns restrict that same statistic to the **default's** own top-ranked
+logits; `rank` locates the single worst deviation in the default's ordering.
+
+| w | row | d_prod | top-1 | top-2 | top-10 | top-50 | rank(worst) | argmax same | margin def→ref |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 | 0 | 12.017 | 0.519 | 7.120 | 7.220 | 11.968 | 247775 | yes | 2.167 → 8.768 |
+| 2 | 1 | 11.805 | 4.827 | 5.813 | 7.557 | 8.689 | 4019 | yes | 3.313 → 4.299 |
+| 3 | 0 | 12.354 | 4.025 | 5.127 | 12.354 | 12.354 | **4** | yes | 2.643 → 3.745 |
+| 3 | 1 | 10.265 | 2.637 | 5.847 | 10.265 | 10.265 | **7** | yes | 0.776 → 3.986 |
+| 6 | 0 | 12.795 | 3.604 | 5.621 | 6.605 | 10.938 | 197 | **no** | 2.306 → 4.323 |
+| 6 | 1 | 10.741 | 1.855 | 3.055 | 4.681 | 7.825 | 246579 | yes | 2.628 → 3.828 |
+| 17 | 0 | 9.029 | 3.781 | 7.345 | 7.345 | 7.892 | 246734 | yes | 3.843 → 7.408 |
+| 17 | 1 | 8.987 | 3.929 | 6.556 | 6.556 | 7.223 | 115266 | **no** | 2.048 → 4.675 |
+
+Three readings:
+
+- **The reference is broken at widths 2 and 3, where the default is
+  trustworthy.** Width 3 is sharpest: its worst deviation sits at rank **4** and
+  rank **7** — not in the tail — against a default that is token-exact with q1.
+  Not a routing-amplification artefact at those widths.
+- **The magnitude is near-constant, 9.0-12.8, at every width.** That is the
+  signature of a systematic decode error, not a discontinuity: amplification
+  would predict width dependence, and there is none.
+- **The reference flips the argmax** at width 6 row 0 and width 17 row 1 — it
+  produces different tokens from the trusted default.
+
+The near-constant magnitude has a consequence beyond this run: **~10-12 is
+simply what this model's logits do when a compute path changes.** The ~11.9
+observed at widths 6/17 in the tranche 1 table above is therefore *not* by
+itself evidence that MMQ is defective, and the earlier reading of it as "strong
+evidence" is withdrawn.
+
 ### `max_abs_logit_delta` is rank-blind — a criterion defect in its own right
 
 Row 0's largest single deviation sits at **rank 247775 of 248320** (logit −8.5
@@ -1007,14 +1042,46 @@ expert matrices.
 | width | `d_q1 = max|B-C|` | `d_prod = max|A-C|` | result |
 |---|---:|---:|---|
 | 2 | 12.0171 | 12.0171 | **reference trust gate failed** |
+| 3 | 12.3842 | 12.3542 | characterization only |
+| 6 | 12.9528 | 12.7954 | characterization only |
+| 17 | 11.1705 | 9.02933 | characterization only |
 
 At width 2 the default production and q1 captures are bit-identical, so the
 equal distances are the reference path's own error. That error is on the same
 scale as the width-6/17 effect the experiment was meant to adjudicate, rather
 than the within-MMVQ width-3 scale. Per the predeclared gate, this run says
 that the newly exercised `sync_fallback`/F32 composite is not a trustworthy
-reference; it says nothing for or against MMQ. Wider captures may characterize
-the invalid reference path, but must not be interpreted as an MMQ verdict.
+reference; it says nothing for or against MMQ. The requested wider captures
+are shown only to characterize the invalid reference path: every distance
+remains on the same large scale, so none may be interpreted as an MMQ verdict.
+
+### Rank-aware default q1-versus-production deltas
+
+Computed offline from the default-build rows in the same evidence bundle; no
+additional GPU run. `top-K delta` is the maximum absolute q1/production delta
+restricted to the K highest logits in the q1 ordering. `worst rank` is the
+one-based position, in that same ordering, of the unrestricted maximum delta.
+Margins are each side's own top-1 minus top-2. An exact row has no meaningful
+worst rank and is shown as `—`.
+
+| width | row | q1 argmax | prod argmax | q1 margin | prod margin | top-1 delta | top-2 delta | top-10 delta | top-50 delta | worst rank | max delta |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 0 | 830 | 830 | 2.16670 | 2.16670 | 0 | 0 | 0 | 0 | — | 0 |
+| 2 | 1 | 830 | 830 | 3.31295 | 3.31295 | 0 | 0 | 0 | 0 | — | 0 |
+| 3 | 0 | 830 | 830 | 2.65555 | 2.64312 | 0.003332 | 0.009094 | 0.029988 | 0.029988 | 172739 | 0.057539 |
+| 3 | 1 | 830 | 830 | 0.776179 | 0.776179 | 0 | 0 | 0 | 0 | — | 0 |
+| 6 | 0 | 17962 | 87 | 0.780951 | 2.30577 | 6.84558 | 6.84558 | 6.84558 | 6.96886 | 247804 | 11.9231 |
+| 6 | 1 | 11966 | 830 | 0.103767 | 2.62778 | 7.07121 | 7.07121 | 7.97384 | 8.71832 | 247935 | 10.3123 |
+| 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
+| 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
+
+The unrestricted statistic is rank-blind: at width 3 its maximum sits deep in
+the tail while the top-ranked logits barely move. That caveat does not rescue
+widths 6 and 17: their q1 argmax changes, and the q1 top-ranked token itself
+moves materially on every divergent row. This establishes that the current
+margin rule accepts decision-relevant perturbations, not merely a remote-tail
+outlier. It still does **not** establish which side is closer to truth; the
+full-model F32 reference that was meant to answer that failed its control.
 
 ## Host-barrier census @ `faa5307` (static, `qwen4exp_frontier.cpp`)
 
