@@ -37,32 +37,42 @@ agent" — take backlog work while waiting.
 
 ## The goal, so you can reconstruct it after compaction
 
-Make Ember's Qwen3.8-Flash-Next inference engine on AMD Strix Halo (gfx1151)
-**exceed `agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF`** (user
-direction, 2026-08-31). The prior bar — DeepSeek-V4-Flash parity at prefill peak
-~345 tok/s, decode 23.6-23.8 tok/s AR — is **superseded and is now a floor**.
-Not met until a valid measurement says so, and no valid Qwen measurement exists
-while the correctness blocker is open.
+**Goal changed 2026-08-31 (user).** The Qwen3.8-Flash-Next work is **shelved,
+not cancelled** — its state is in `docs/qwen3.8-performance-status.md` and
+backlog items 15-18. Do not resume it without new direction.
 
-**This is a true like-for-like comparison, which is rare and worth protecting:**
-same model (Qwen3.8-Flash-Next), same silicon (Strix Halo / 8060S), same quant
-family (ROCmFP4-FAST — GGML type 101, the type our failing dispatches use). It
-runs on `LaurentZuijdwijk/llama.cpp` branch `vulkan/qwen4exp-rocmfpx`, so the
-engine under comparison is Vulkan/RADV against our HIP/ROCm.
+The goal is now `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`, in three parts:
 
-Their published figures and the derived bar are in
-[`docs/reference/llama-cpp-strix-halo-fork.md`](../docs/reference/llama-cpp-strix-halo-fork.md);
-measurements stay in the ledger. Two things to hold on to:
+**A. Requant it** through our own pipeline
+(`git.otheru.ai/akadmin/otheru-quant-pipeline`), for publication to our
+HuggingFace.
 
-- **Match the depth before comparing.** Prefill t/s falls with context, so a
-  headline at one depth is not a bar at another. Their depth-2048 prefill is the
-  cell that lines up with our 2074-token gate.
-- Their generation figures come in two forms — a no-MTP sweep and an
-  MTP-plus-adaptive-drafting headline. Compare like with like, and note that
-  their own text calls the MTP rate content-dependent.
+**B. Update ember to support it.** `main` has **no vision support of any kind**
+today — no tower, no image preprocessing, no image input path on the server.
 
-**Measurements live in [`docs/qwen3.8-performance-status.md`](../docs/qwen3.8-performance-status.md),
-and only there.** Do not copy numbers into this file.
+**C. Benchmark it so the result meets or exceeds our existing quant** —
+production `DeepSeek-V4-Flash-0731` affine, 85.6 GiB at 2.59 BPW. "Meets or
+exceeds" covers both quality and throughput; neither is met until a valid
+measurement says so.
+
+**What the model is.** Our own base architecture plus a ViT: `deepseek_v4`,
+`DeepseekV4ForCausalLM`, 43 layers, 4096 hidden, 256 experts top-6, FP8
+e4m3/ue8m0 block 128x128, 48 shards — and it carries the DSpark and MTP keys we
+already support. Vision is **inline in `config.json`**, not a nested
+`vision_config`: 32-block ViT, dim 1024, 16 heads, patch 14, SwiGLU inter 2816
+with fused gate+up, RMSNorm, and a pixel-shuffle x3 aligner into the 4096-wide
+LM space. Verified tensor inventory and shapes are in the pipeline repo's
+vision doc, not here.
+
+**Read `main`, not this branch.** The Qwen feature branch has 463 commits main
+does not, but `main` already carries every ROCmFPX type the production recipe
+needs (`Q4_0_ROCMFP4_FAST`, `Q2_0_ROCMFP2`, `Q6_0_ROCMFPX`, …); only
+`Q4_0_ROCMI4` is branch-only and the DeepSeek recipe does not use it. So the
+quant foundation is **not** the gap — vision is.
+
+**Measurements live in their ledger, and only there.** Do not copy numbers into
+this file. Qwen's is `docs/qwen3.8-performance-status.md`; the vision quant
+needs its own when the first valid measurement lands.
 
 That rule is the point, not tidiness. This section previously carried its own
 copy of the bottleneck figures and of the correctness root cause. The root
