@@ -1100,12 +1100,25 @@ Both hypotheses predict this table exactly. The alignment is an artefact of
 setting `LUCE_MMVQ_MAX_NCOLS` to 5, which places the family boundary on top of
 the bucket boundary.
 
+3. **Routed-expert dispatch.** `ggml_cuda_mul_mat_id` has its **own** MMVQ/MMQ
+   threshold, `get_mmvq_mmid_max_batch(src0->type, cc)` (`mmvq.cu:298`) with
+   ceiling `MMVQ_MAX_MOE_BATCH_SIZE = 16` (`mmvq.cuh:8`). It does **not** read
+   `LUCE_MMVQ_MAX_NCOLS`, which governs dense `ggml_cuda_mul_mat` only.
+
 **Discriminating run (one env var, no code):** width 4 or 5 with
-`LUCE_MMVQ_MAX_NCOLS=3`. That moves the family boundary to 3/4 while holding the
-MoE bucket at 5. Red ⇒ the matmul family is the cause; green ⇒ the family is
-exonerated at a width where it now differs, and the bucket is implicated.
-Widths 4 and 5 were previously green *as MMVQ*, so this is the single-variable
-version of that check.
+`LUCE_MMVQ_MAX_NCOLS=3`, which moves the **dense** family boundary to 3/4 while
+holding the MoE bucket at 5.
+
+- **Red** ⇒ a dense matmul-family change alone is sufficient; the bucket is not
+  required. Decisive.
+- **Green** ⇒ the *dense* family is exonerated at width 4. It does **not**
+  implicate the bucket on its own, because arm 3 above did not move — two
+  hypotheses remain live (bucket, routed dispatch).
+
+A second knob separates arm 3: `DFLASH_CUDA_MMVQ_MOE_KERNEL`
+(`mmvq.cu:307-310`) lowers the routed ceiling independently. Trace its effect
+on our `cc` before relying on it — the NVIDIA branches above that line do not
+apply to gfx1151. Three runs, one variable each, isolate the cause.
 
 The correlation evidence below favours the bucket: width 3 also crosses a
 reduction shape and is also non-bit-identical, yet r = 0.99999, while widths
