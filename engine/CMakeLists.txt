@@ -114,6 +114,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/deepseek4/deepseek4_backend.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_biases.cpp
+  ${DFLASH}/deepseek4/deepseek4_vision_artifact.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_contract.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_markers.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark_spec.cpp

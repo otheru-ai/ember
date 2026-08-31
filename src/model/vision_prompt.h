@@ -20,6 +20,21 @@ typedef struct {
     int            n_tokens;
 } ember_vision_prompt_image;
 
+// Find exactly one complete tokenizer placeholder sequence. Operator-only
+// prepared-vision gates need its real token offset before assembling learned
+// marker padding; guessing a single ID is not valid for DeepSeek's placeholder.
+bool ember_vision_prompt_find_unique(
+    const int32_t *input_ids, int input_count,
+    const int32_t *placeholder_ids, int placeholder_count,
+    int *offset, char *error, size_t error_cap);
+
+// A recognition-only check can pass when image rows are inert. This three-arm
+// predicate requires mutually exclusive A/B answers and a marker-free no-image
+// control, so output must depend on which artifact was supplied.
+bool ember_vision_outputs_discriminate(
+    const char *output_a, const char *output_b, const char *output_control,
+    const char *marker_a, const char *marker_b);
+
 // Allocates *output_ids on success. `image_offsets` has image_count entries
 // and receives each replacement's offset in the final expanded prompt.
 bool ember_vision_prompt_expand(

@@ -44,6 +44,12 @@ public:
     std::string_view vision_placeholder_text() const override {
         return dflash::DEEPSEEK4_IMAGE_PLACEHOLDER_UTF8;
     }
+    bool prepare_offline_vision_artifact(
+        const std::string & artifact_path,
+        const std::string & mmproj_path,
+        int prompt_offset,
+        EncodedVisionImage & image,
+        std::string & error) override;
 
     void release_idle_graphs() override;
     bool snapshot_save(int slot) override;

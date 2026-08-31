@@ -25,6 +25,49 @@ static int find_sequence(const int32_t *input, int input_count, int start,
     return -1;
 }
 
+bool ember_vision_prompt_find_unique(
+        const int32_t *input_ids, int input_count,
+        const int32_t *placeholder_ids, int placeholder_count,
+        int *offset, char *error, size_t error_cap) {
+    if (offset) *offset = -1;
+    if (!offset || input_count < 0 || placeholder_count <= 0 ||
+        (input_count > 0 && !input_ids) || !placeholder_ids) {
+        set_error(error, error_cap, "invalid vision placeholder search contract");
+        return false;
+    }
+    const int found = find_sequence(input_ids, input_count, 0,
+                                    placeholder_ids, placeholder_count);
+    if (found < 0) {
+        set_error(error, error_cap,
+                  "rendered prompt has no complete image placeholder");
+        return false;
+    }
+    if (find_sequence(input_ids, input_count, found + placeholder_count,
+                      placeholder_ids, placeholder_count) >= 0) {
+        set_error(error, error_cap,
+                  "rendered prompt has more than one image placeholder");
+        return false;
+    }
+    *offset = found;
+    return true;
+}
+
+bool ember_vision_outputs_discriminate(
+        const char *output_a, const char *output_b,
+        const char *output_control,
+        const char *marker_a, const char *marker_b) {
+    if (!output_a || !output_b || !output_control || !marker_a || !marker_b ||
+        !marker_a[0] || !marker_b[0] || strcmp(marker_a, marker_b) == 0) {
+        return false;
+    }
+    return strstr(output_a, marker_a) != NULL &&
+           strstr(output_a, marker_b) == NULL &&
+           strstr(output_b, marker_b) != NULL &&
+           strstr(output_b, marker_a) == NULL &&
+           strstr(output_control, marker_a) == NULL &&
+           strstr(output_control, marker_b) == NULL;
+}
+
 bool ember_vision_prompt_expand(
         const int32_t *input_ids, int input_count,
         const int32_t *placeholder_ids, int placeholder_count,

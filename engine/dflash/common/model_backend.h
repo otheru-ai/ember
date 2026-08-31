@@ -133,6 +133,7 @@ struct VisionEmbeddingRun {
     std::vector<float> embeddings; // [token_ids/merged rows, embedding_width]
     int embedding_width = 0;
     std::vector<int32_t> token_ids;
+    uint64_t source_digest = 0;
 };
 
 struct EncodedVisionImage {
@@ -142,6 +143,7 @@ struct EncodedVisionImage {
     std::vector<float> embeddings;
     int embedding_width = 0;
     std::vector<int32_t> token_ids;
+    uint64_t source_digest = 0;
 };
 
 struct GenerateRequest {
@@ -391,6 +393,15 @@ struct ModelBackend {
                                      EncodedVisionImage &,
                                      std::string & error) {
         error = "vision input is not supported by this backend";
+        return false;
+    }
+    // Default-off operator gate: prepare already-aligned image rows from an
+    // explicit artifact and projector pair at their real prompt position.
+    // This is not a media decoder and must never accept ordinary request bytes.
+    virtual bool prepare_offline_vision_artifact(
+            const std::string &, const std::string &, int,
+            EncodedVisionImage &, std::string & error) {
+        error = "offline vision artifacts are not supported by this backend";
         return false;
     }
     virtual std::string_view vision_placeholder_text() const { return {}; }

@@ -68,6 +68,7 @@ typedef struct {
     // legacy Qwen repeated-image_pad path.
     int      embedding_width;
     int32_t *token_ids;
+    uint64_t source_digest;
 } ember_vision_image;
 
 bool ember_backend_vision_encode(ember_backend *b,
@@ -79,6 +80,14 @@ void ember_backend_vision_image_free(ember_vision_image *image);
 // malloc'd sequence is matched exactly in the already-tokenized full prompt.
 // Returns its positive length, or -1 when vision placeholders are unsupported.
 int ember_backend_vision_placeholder_ids(ember_backend *b, int32_t **ids_out);
+
+// Operator-only offline gate. Paths come from trusted command-line options,
+// never request media. The returned rows still travel through ember_gen_request
+// so this cannot become a parallel generation implementation.
+bool ember_backend_prepare_offline_vision_artifact(
+    ember_backend *b, const char *artifact_path, const char *mmproj_path,
+    int prompt_offset, ember_vision_image *out,
+    char *error, size_t error_cap);
 
 // ── generation ──
 // on_token: called per generated token; return false to cancel (client gone).
@@ -97,6 +106,7 @@ typedef struct {
     // Appended so pre-existing field offsets remain stable.
     int            embedding_width;
     const int32_t *token_ids;
+    uint64_t       source_digest;
 } ember_vision_run;
 
 // These offsets are measured on Ember's supported 64-bit ABI, not chosen.
@@ -121,6 +131,7 @@ EMBER_VISION_ABI_OFFSET(ember_vision_image, n_tokens, 12);
 EMBER_VISION_ABI_OFFSET(ember_vision_image, embeddings, 16);
 EMBER_VISION_ABI_OFFSET(ember_vision_image, embedding_width, 24);
 EMBER_VISION_ABI_OFFSET(ember_vision_image, token_ids, 32);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, source_digest, 40);
 
 EMBER_VISION_ABI_OFFSET(ember_vision_run, prompt_offset, 0);
 EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_t, 4);
@@ -130,6 +141,7 @@ EMBER_VISION_ABI_OFFSET(ember_vision_run, n_tokens, 16);
 EMBER_VISION_ABI_OFFSET(ember_vision_run, embeddings, 24);
 EMBER_VISION_ABI_OFFSET(ember_vision_run, embedding_width, 32);
 EMBER_VISION_ABI_OFFSET(ember_vision_run, token_ids, 40);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, source_digest, 48);
 
 #undef EMBER_VISION_ABI_OFFSET
 

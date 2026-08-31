@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <inttypes.h>
 
 #include "../backend/ember_backend.h"
 #include "../common/buf.h"
@@ -2284,6 +2285,7 @@ static bool prepare_vision_prompt(
         runs[i].embeddings = encoded[i].embeddings;
         runs[i].embedding_width = encoded[i].embedding_width;
         runs[i].token_ids = encoded[i].token_ids;
+        runs[i].source_digest = encoded[i].source_digest;
         encoded[i].embeddings = NULL;
         encoded[i].token_ids = NULL;
     }
@@ -4223,6 +4225,13 @@ static void print_usage(FILE *out, const char *argv0) {
         "                              Qwen recipe; requires --max-ctx 1000000\n"
         "                              and may not fit the 128-GiB UMA budget\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
+        "  --validate-vision-artifact-a PATH\n"
+        "  --validate-vision-artifact-b PATH\n"
+        "  --validate-vision-mmproj PATH\n"
+        "  --validate-vision-expect-a TEXT\n"
+        "  --validate-vision-expect-b TEXT\n"
+        "                              run the three-arm offline vision\n"
+        "                              discriminator with --validate-prompt\n"
         "  --validate-gemm-batch N     sweep HIP strided-batched GEMM counts 2..N\n"
         "                              against the one-row baseline, then exit\n"
         "                              (needs no model; safe alongside serving)\n"
@@ -4298,6 +4307,299 @@ static int run_gemm_batch_sweep(ember_backend *be, int limit) {
     }
     printf("  VERDICT: batched decode may use batchCount <= %d\n", r.max_exact);
     return 0;
+}
+
+typedef struct {
+    ember_backend *be;
+    ember_buf output;
+    ember_gen_result result;
+} vision_gate_arm;
+
+static bool vision_gate_collect_token(int32_t token, void *ud) {
+    vision_gate_arm *arm = (vision_gate_arm *)ud;
+    const char *piece = ember_backend_token_text(arm->be, token);
+    if (piece) ember_buf_puts(&arm->output, piece);
+    return true;
+}
+
+static bool run_vision_gate_arm(
+        ember_backend *be, const int32_t *prompt, int n_prompt,
+        const ember_vision_image *image, int prompt_offset,
+        int n_gen, vision_gate_arm *arm) {
+    memset(arm, 0, sizeof(*arm));
+    arm->be = be;
+    ember_vision_run run = {0};
+    ember_gen_request request = {0};
+    request.prompt = prompt;
+    request.n_prompt = n_prompt;
+    request.max_tokens = n_gen;
+    request.greedy = true;
+    request.force_ar_decode = true;
+    request.top_p = 1.0f;
+    request.rep_pen = 1.0f;
+    request.dry_allowed_length = -1;
+    request.restore_slot = -1;
+    request.snap_slot = -1;
+    request.snap_pos = -1;
+    request.on_token = vision_gate_collect_token;
+    request.ud = arm;
+    if (image) {
+        run.prompt_offset = prompt_offset;
+        run.grid_t = image->grid_t;
+        run.grid_h = image->grid_h;
+        run.grid_w = image->grid_w;
+        run.n_tokens = image->n_tokens;
+        run.embeddings = image->embeddings;
+        run.embedding_width = image->embedding_width;
+        run.token_ids = image->token_ids;
+        run.source_digest = image->source_digest;
+        request.vision = &run;
+        request.n_vision = 1;
+    }
+    arm->result = ember_backend_generate(be, &request);
+    ember_backend_generation_release(be);
+    return arm->result.ok;
+}
+
+static int read_gate_prompt(ember_backend *be, const char *path,
+                            int32_t **ids_out) {
+    *ids_out = NULL;
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "[ember-vision-gate] cannot open prompt %s: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return -1;
+    }
+    const long raw_len = ftell(file);
+    if (raw_len <= 0 || raw_len > 64L * 1024L * 1024L ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        fprintf(stderr,
+                "[ember-vision-gate] prompt must be between 1 byte and 64 MiB\n");
+        fclose(file);
+        return -1;
+    }
+    char *raw = (char *)malloc((size_t)raw_len + 1);
+    if (!raw || fread(raw, 1, (size_t)raw_len, file) != (size_t)raw_len) {
+        fprintf(stderr, "[ember-vision-gate] failed to read prompt\n");
+        free(raw);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    raw[raw_len] = '\0';
+    const int count = ember_backend_encode(be, raw, ids_out);
+    free(raw);
+    if (count <= 0 || !*ids_out) {
+        fprintf(stderr, "[ember-vision-gate] prompt tokenization failed\n");
+        free(*ids_out);
+        *ids_out = NULL;
+        return -1;
+    }
+    return count;
+}
+
+static bool expand_gate_image(
+        const int32_t *prompt, int prompt_count,
+        const int32_t *placeholder, int placeholder_count,
+        const ember_vision_image *image, int expected_offset,
+        int32_t **expanded_out, int *expanded_count_out,
+        char *error, size_t error_cap) {
+    const ember_vision_prompt_image replacement = {
+        image->token_ids, image->n_tokens,
+    };
+    int actual_offset = -1;
+    if (!ember_vision_prompt_expand(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &replacement, 1, expanded_out, expanded_count_out,
+            &actual_offset, error, error_cap)) {
+        return false;
+    }
+    if (actual_offset != expected_offset) {
+        free(*expanded_out);
+        *expanded_out = NULL;
+        *expanded_count_out = 0;
+        snprintf(error, error_cap,
+                 "placeholder offset changed during vision expansion");
+        return false;
+    }
+    return true;
+}
+
+static int run_offline_vision_gate(
+        ember_backend *be, const char *prompt_path,
+        const char *artifact_a, const char *artifact_b,
+        const char *mmproj_path,
+        const char *expect_a, const char *expect_b,
+        int n_gen) {
+    int rc = 2;
+    int32_t *prompt = NULL;
+    int32_t *placeholder = NULL;
+    int32_t *prompt_a = NULL;
+    int32_t *prompt_b = NULL;
+    int32_t *prompt_control = NULL;
+    ember_vision_image image_a = {0};
+    ember_vision_image image_b = {0};
+    vision_gate_arm arm_a = {0};
+    vision_gate_arm arm_b = {0};
+    vision_gate_arm arm_control = {0};
+    char error[512] = {0};
+
+    const int prompt_count = read_gate_prompt(be, prompt_path, &prompt);
+    if (prompt_count <= 0) goto done;
+    const int placeholder_count =
+        ember_backend_vision_placeholder_ids(be, &placeholder);
+    if (placeholder_count <= 0 || !placeholder) {
+        fprintf(stderr,
+                "[ember-vision-gate] backend has no image placeholder contract\n");
+        goto done;
+    }
+    int prompt_offset = -1;
+    if (!ember_vision_prompt_find_unique(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &prompt_offset, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] %s\n", error);
+        goto done;
+    }
+    if (!ember_backend_prepare_offline_vision_artifact(
+            be, artifact_a, mmproj_path, prompt_offset,
+            &image_a, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] artifact A: %s\n", error);
+        goto done;
+    }
+    if (!ember_backend_prepare_offline_vision_artifact(
+            be, artifact_b, mmproj_path, prompt_offset,
+            &image_b, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] artifact B: %s\n", error);
+        goto done;
+    }
+    if (image_a.source_digest == 0 || image_b.source_digest == 0 ||
+        image_a.source_digest == image_b.source_digest) {
+        fprintf(stderr,
+                "[ember-vision-gate] artifacts require distinct nonzero digests\n");
+        goto done;
+    }
+    int prompt_a_count = 0;
+    int prompt_b_count = 0;
+    if (!expand_gate_image(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &image_a, prompt_offset, &prompt_a, &prompt_a_count,
+            error, sizeof(error)) ||
+        !expand_gate_image(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &image_b, prompt_offset, &prompt_b, &prompt_b_count,
+            error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] %s\n", error);
+        goto done;
+    }
+    const int control_count = prompt_count - placeholder_count;
+    if (control_count <= 0 ||
+        (size_t)control_count > SIZE_MAX / sizeof(*prompt_control)) {
+        fprintf(stderr, "[ember-vision-gate] invalid no-image control prompt\n");
+        goto done;
+    }
+    prompt_control = (int32_t *)malloc(
+        (size_t)control_count * sizeof(*prompt_control));
+    if (!prompt_control) abort();
+    if (prompt_offset > 0) {
+        memcpy(prompt_control, prompt,
+               (size_t)prompt_offset * sizeof(*prompt_control));
+    }
+    const int tail_count =
+        prompt_count - prompt_offset - placeholder_count;
+    if (tail_count > 0) {
+        memcpy(prompt_control + prompt_offset,
+               prompt + prompt_offset + placeholder_count,
+               (size_t)tail_count * sizeof(*prompt_control));
+    }
+    const int n_ctx = ember_backend_n_ctx(be);
+    if (prompt_a_count > n_ctx - n_gen ||
+        prompt_b_count > n_ctx - n_gen ||
+        control_count > n_ctx - n_gen) {
+        fprintf(stderr,
+                "[ember-vision-gate] an arm exceeds the model context\n");
+        goto done;
+    }
+
+    const bool generated_a = run_vision_gate_arm(
+        be, prompt_a, prompt_a_count, &image_a, prompt_offset,
+        n_gen, &arm_a);
+    const bool generated_b = run_vision_gate_arm(
+        be, prompt_b, prompt_b_count, &image_b, prompt_offset,
+        n_gen, &arm_b);
+    const bool generated_control = run_vision_gate_arm(
+        be, prompt_control, control_count, NULL, -1,
+        n_gen, &arm_control);
+    const char *visible_a = visible_after_think(
+        arm_a.output.ptr ? arm_a.output.ptr : "");
+    const char *visible_b = visible_after_think(
+        arm_b.output.ptr ? arm_b.output.ptr : "");
+    const char *visible_control = visible_after_think(
+        arm_control.output.ptr ? arm_control.output.ptr : "");
+    const bool arm_a_ok = generated_a && strstr(visible_a, expect_a) != NULL &&
+                          strstr(visible_a, expect_b) == NULL;
+    const bool arm_b_ok = generated_b && strstr(visible_b, expect_b) != NULL &&
+                          strstr(visible_b, expect_a) == NULL;
+    const bool control_ok = generated_control &&
+                            strstr(visible_control, expect_a) == NULL &&
+                            strstr(visible_control, expect_b) == NULL;
+    const bool passed = generated_a && generated_b && generated_control &&
+        ember_vision_outputs_discriminate(
+            visible_a, visible_b, visible_control, expect_a, expect_b);
+
+    ember_buf out = {0};
+    ember_buf_printf(
+        &out,
+        "{\"ok\":%s,\"schema\":\"ember.ds4.vision-language-gate.v1\","
+        "\"model\":",
+        passed ? "true" : "false");
+    ember_json_escape(&out, ember_backend_model_name(be));
+    ember_buf_printf(
+        &out,
+        ","
+        "\"prompt_tokens\":%d,\"placeholder_offset\":%d,"
+        "\"requested_tokens\":%d,\"arms\":{\"a\":{"
+        "\"ok\":%s,\"artifact_digest\":\"%016" PRIx64 "\","
+        "\"grid\":[%d,%d],\"block_tokens\":%d,\"expected\":",
+        prompt_count, prompt_offset, n_gen,
+        arm_a_ok ? "true" : "false", image_a.source_digest,
+        image_a.grid_h, image_a.grid_w, image_a.n_tokens);
+    ember_json_escape(&out, expect_a);
+    ember_buf_puts(&out, ",\"output\":");
+    ember_json_escape(&out, visible_a);
+    ember_buf_printf(
+        &out,
+        "},\"b\":{\"ok\":%s,"
+        "\"artifact_digest\":\"%016" PRIx64 "\","
+        "\"grid\":[%d,%d],\"block_tokens\":%d,\"expected\":",
+        arm_b_ok ? "true" : "false", image_b.source_digest,
+        image_b.grid_h, image_b.grid_w, image_b.n_tokens);
+    ember_json_escape(&out, expect_b);
+    ember_buf_puts(&out, ",\"output\":");
+    ember_json_escape(&out, visible_b);
+    ember_buf_printf(&out, "},\"control\":{\"ok\":%s,\"output\":",
+                     control_ok ? "true" : "false");
+    ember_json_escape(&out, visible_control);
+    ember_buf_puts(&out, "}}}\n");
+    fwrite(out.ptr, 1, out.len, stdout);
+    ember_buf_free(&out);
+    rc = passed ? 0 : 1;
+
+done:
+    ember_buf_free(&arm_a.output);
+    ember_buf_free(&arm_b.output);
+    ember_buf_free(&arm_control.output);
+    ember_backend_vision_image_free(&image_a);
+    ember_backend_vision_image_free(&image_b);
+    free(prompt);
+    free(placeholder);
+    free(prompt_a);
+    free(prompt_b);
+    free(prompt_control);
+    return rc;
 }
 
 static int run_backend_validation(ember_backend *be, const char *path,
@@ -4444,6 +4746,11 @@ int main(int argc, char **argv) {
     // back. EMBER_IDLE_RECLAIM_SECS=0 disables.
     double idle_reclaim_secs = 300.0;
     const char *validate_prompt = NULL;
+    const char *validate_vision_artifact_a = NULL;
+    const char *validate_vision_artifact_b = NULL;
+    const char *validate_vision_mmproj = NULL;
+    const char *validate_vision_expect_a = NULL;
+    const char *validate_vision_expect_b = NULL;
     int validate_tokens = 32;
     int validate_gemm_batch = 0;
     // Preserve the measured lucebox deployment override: its older DSpark
@@ -4603,6 +4910,26 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) validate_prompt = v;
+        } else if (strcmp(opt, "--validate-vision-artifact-a") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_artifact_a = v;
+        } else if (strcmp(opt, "--validate-vision-artifact-b") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_artifact_b = v;
+        } else if (strcmp(opt, "--validate-vision-mmproj") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_mmproj = v;
+        } else if (strcmp(opt, "--validate-vision-expect-a") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_expect_a = v;
+        } else if (strcmp(opt, "--validate-vision-expect-b") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_expect_b = v;
         } else if (strcmp(opt, "--validate-tokens") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
@@ -4613,6 +4940,47 @@ int main(int argc, char **argv) {
         }
         if (!options_ok) {
             print_usage(stderr, argv[0]);
+            return 2;
+        }
+    }
+    const bool vision_gate_requested =
+        validate_vision_artifact_a || validate_vision_artifact_b ||
+        validate_vision_mmproj || validate_vision_expect_a ||
+        validate_vision_expect_b;
+    if (vision_gate_requested) {
+        const struct {
+            const char *name;
+            const char *value;
+        } required[] = {
+            {"--validate-prompt", validate_prompt},
+            {"--validate-vision-artifact-a", validate_vision_artifact_a},
+            {"--validate-vision-artifact-b", validate_vision_artifact_b},
+            {"--validate-vision-mmproj", validate_vision_mmproj},
+            {"--validate-vision-expect-a", validate_vision_expect_a},
+            {"--validate-vision-expect-b", validate_vision_expect_b},
+        };
+        for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+            if (!required[i].value || !required[i].value[0]) {
+                fprintf(stderr,
+                        "[ember] offline vision gate is missing %s\n",
+                        required[i].name);
+                return 2;
+            }
+        }
+        if (strcmp(validate_vision_expect_a,
+                   validate_vision_expect_b) == 0) {
+            fprintf(stderr,
+                    "[ember] offline vision expectations must be distinct\n");
+            return 2;
+        }
+        if (validate_gemm_batch > 0) {
+            fprintf(stderr,
+                    "[ember] offline vision and GEMM validation cannot share a run\n");
+            return 2;
+        }
+        if (batch_sessions != 1) {
+            fprintf(stderr,
+                    "[ember] offline vision gate requires --batch-sessions 1\n");
             return 2;
         }
     }
@@ -4690,6 +5058,16 @@ int main(int argc, char **argv) {
             ember_backend_free(be);
             return rc;
         }
+    }
+    if (vision_gate_requested) {
+        int rc = run_offline_vision_gate(
+            be, validate_prompt,
+            validate_vision_artifact_a, validate_vision_artifact_b,
+            validate_vision_mmproj,
+            validate_vision_expect_a, validate_vision_expect_b,
+            validate_tokens);
+        ember_backend_free(be);
+        return rc;
     }
     if (validate_prompt) {
         int rc =

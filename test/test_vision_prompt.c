@@ -45,6 +45,43 @@ static void test_multi_token_multiple_images(void) {
     free(output);
 }
 
+static void test_unique_placeholder_offset(void) {
+    const int32_t placeholder[] = {700, 701};
+    const int32_t one[] = {10, 700, 701, 11};
+    const int32_t none[] = {10, 700, 9, 701};
+    const int32_t two[] = {700, 701, 10, 700, 701};
+    int offset = -1;
+    char error[160] = {0};
+    CHECK(ember_vision_prompt_find_unique(
+              one, 4, placeholder, 2, &offset, error, sizeof(error)) &&
+              offset == 1,
+          "unique multi-token placeholder reports its exact token offset");
+    CHECK(!ember_vision_prompt_find_unique(
+              none, 4, placeholder, 2, &offset, error, sizeof(error)) &&
+              offset == -1 && strstr(error, "no complete") != NULL,
+          "partial placeholder is not accepted as the operator gate offset");
+    CHECK(!ember_vision_prompt_find_unique(
+              two, 5, placeholder, 2, &offset, error, sizeof(error)) &&
+              offset == -1 && strstr(error, "more than one") != NULL,
+          "operator gate rejects ambiguous duplicate placeholders");
+}
+
+static void test_discriminating_outputs(void) {
+    CHECK(ember_vision_outputs_discriminate(
+              "The crop is carrot.", "The crop is corn.", "I cannot tell.",
+              "carrot", "corn"),
+          "mutually exclusive image answers and empty control discriminate");
+    CHECK(!ember_vision_outputs_discriminate(
+              "carrot", "carrot", "neither", "carrot", "corn"),
+          "same answer for both images fails discrimination");
+    CHECK(!ember_vision_outputs_discriminate(
+              "carrot", "corn", "carrot", "carrot", "corn"),
+          "prompt-only control answer fails discrimination");
+    CHECK(!ember_vision_outputs_discriminate(
+              "carrot corn", "corn", "neither", "carrot", "corn"),
+          "arm containing both mutually exclusive markers fails");
+}
+
 static void test_legacy_single_token_fallback(void) {
     const int32_t input[] = {1, 42, 2};
     const int32_t placeholder[] = {42};
@@ -121,6 +158,8 @@ static void test_text_only_inert(void) {
 
 int main(void) {
     test_multi_token_multiple_images();
+    test_unique_placeholder_offset();
+    test_discriminating_outputs();
     test_legacy_single_token_fallback();
     test_fail_closed_contracts();
     test_text_only_inert();

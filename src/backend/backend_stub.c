@@ -84,6 +84,22 @@ bool ember_backend_vision_encode(ember_backend *b,
     return false;
 }
 
+bool ember_backend_prepare_offline_vision_artifact(
+        ember_backend *b, const char *artifact_path, const char *mmproj_path,
+        int prompt_offset, ember_vision_image *out,
+        char *error, size_t error_cap) {
+    (void)b;
+    (void)artifact_path;
+    (void)mmproj_path;
+    (void)prompt_offset;
+    if (out) memset(out, 0, sizeof(*out));
+    if (error && error_cap) {
+        snprintf(error, error_cap, "%s",
+                 "offline vision artifacts are not supported by the stub backend");
+    }
+    return false;
+}
+
 void ember_backend_vision_image_free(ember_vision_image *image) {
     if (!image) return;
     free(image->embeddings);

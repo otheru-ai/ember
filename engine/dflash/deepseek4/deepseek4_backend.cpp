@@ -6,6 +6,8 @@
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
 #include "deepseek4_dspark_scheduler.h"
+#include "deepseek4_vision_artifact.h"
+#include "deepseek4_vision_markers.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
 
@@ -1011,6 +1013,41 @@ void DeepSeek4Backend::release_spec_drafter() {
     spec_feat_window_.clear();
 }
 
+bool DeepSeek4Backend::prepare_offline_vision_artifact(
+        const std::string & artifact_path,
+        const std::string & mmproj_path,
+        int prompt_offset,
+        EncodedVisionImage & image,
+        std::string & error) {
+    image = {};
+    error.clear();
+    if (prompt_offset < 0) {
+        error = "invalid offline vision placeholder offset";
+        return false;
+    }
+    dflash::Deepseek4VisionArtifact artifact;
+    dflash::Deepseek4ImageMarkers markers;
+    dflash::Deepseek4PreparedImage prepared;
+    if (!dflash::deepseek4_load_vision_artifact(
+            artifact_path, w_.n_embd, artifact, error) ||
+        !dflash::deepseek4_load_image_markers(
+            mmproj_path, w_.n_embd, markers, error) ||
+        !dflash::deepseek4_prepare_image(
+            w_.n_vocab, artifact.n_llm_h, artifact.n_llm_w,
+            prompt_offset, w_.n_embd, artifact.image_embeddings,
+            markers, prepared, &error)) {
+        return false;
+    }
+    image.grid_t = 1;
+    image.grid_h = artifact.n_llm_h;
+    image.grid_w = artifact.n_llm_w;
+    image.embedding_width = w_.n_embd;
+    image.token_ids = std::move(prepared.block.token_ids);
+    image.embeddings = std::move(prepared.embeddings);
+    image.source_digest = artifact.digest;
+    return true;
+}
+
 bool DeepSeek4Backend::init() {
     // The shared MMVQ/MMQ crossover defaults to q=3 for NVIDIA. On gfx1151,
     // DSpark q=4 is faster through MMVQ. Keep AR and other devices unchanged,
@@ -1246,9 +1283,11 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     if (has_request_vision) {
         request_views.reserve(vision_runs->size());
         for (const VisionEmbeddingRun & run : *vision_runs) {
-            if (run.token_ids.size() > static_cast<size_t>(INT_MAX)) {
+            if (run.token_ids.size() > static_cast<size_t>(INT_MAX) ||
+                run.source_digest == 0) {
                 std::fprintf(stderr,
-                             "[deepseek4-vision] image run is too large\n");
+                             "[deepseek4-vision] image run lacks a valid "
+                             "source digest or is too large\n");
                 return -1;
             }
             dflash::Deepseek4VisionRunView view;
