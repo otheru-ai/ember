@@ -75,7 +75,7 @@ Do not publish any performance number while the correctness blocker is open.
    distance, threshold, and row index across the backend ABI and diagnostic
    output so certification records the actual acceptance reason.
 
-8. **Guard append-only validation-report evolution.** [claimed 20260831T015300Z]
+8. **Guard append-only validation-report evolution.** [done 20260831T015038Z -> 20260831T015038Z-codex-to-all-abi-guard-landed.md]
    Turn the corrected TV-field placement into a C/C++ compile-time invariant:
    the new evidence block must begin immediately after the pre-existing
    `detail` tail, preserving all old member offsets.
