@@ -179,6 +179,12 @@ add_executable(test_ds4_vision_contract test/test_ds4_vision_contract.cpp
 target_include_directories(test_ds4_vision_contract PRIVATE engine)
 add_test(NAME ds4_vision_contract COMMAND test_ds4_vision_contract)
 
+add_executable(test_ds4_vision_native_contract
+  test/test_ds4_vision_native_contract.cpp
+  engine/dflash/deepseek4/deepseek4_vision_native_contract.cpp)
+target_include_directories(test_ds4_vision_native_contract PRIVATE engine)
+add_test(NAME ds4_vision_native_contract COMMAND test_ds4_vision_native_contract)
+
 add_executable(test_ds4_vision_artifact test/test_ds4_vision_artifact.cpp
   engine/dflash/deepseek4/deepseek4_vision_artifact.cpp
   engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
@@ -495,7 +501,7 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy ds4_vision_contract ds4_vision_artifact api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
@@ -779,6 +785,20 @@ if(EMBER_ENGINE)
   ember_strict(test_ds4_vision_markers)
   add_test(NAME ds4_vision_markers COMMAND test_ds4_vision_markers)
   set_tests_properties(ds4_vision_markers PROPERTIES TIMEOUT 60)
+
+  # Strict metadata-only gate for the complete 299-tensor native Vision-Exp
+  # projector. Like the marker test, it parses GGUF without creating a backend
+  # or opening a GPU device.
+  add_executable(test_ds4_vision_mmproj
+    test/test_ds4_vision_mmproj.cpp
+    engine/dflash/deepseek4/deepseek4_vision_mmproj.cpp
+    engine/dflash/deepseek4/deepseek4_vision_native_contract.cpp)
+  target_include_directories(test_ds4_vision_mmproj PRIVATE
+    engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_mmproj PRIVATE ggml-base)
+  ember_strict(test_ds4_vision_mmproj)
+  add_test(NAME ds4_vision_mmproj COMMAND test_ds4_vision_mmproj)
+  set_tests_properties(ds4_vision_mmproj PROPERTIES TIMEOUT 60)
 
   # Metadata-only inventory gate for all 43 language-model vision routing
   # biases. An optional real path validates the produced full GGUF without
