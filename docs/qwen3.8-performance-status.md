@@ -10,18 +10,18 @@ gfx1151 host).
 
 ## Where this stands — read this first
 
-This file is 1100 lines and grows by measurement. The state as of
-2026-08-31, with pointers rather than repetition:
+This file grows with every measurement. The state as of 2026-08-31, with
+pointers rather than repetition:
 
-**Correctness.** One cause was fixed; a second remains isolated to a narrow
-full-graph path under an adopted distributional gate.
+**Correctness.** One cause was fixed; the remaining full-graph divergence is
+rejected by the adopted distributional gate, but its root cause is unknown.
 
 - `sum_rows` selected its reduction tree from the row count, so q1 and batched
   could not agree. **Fixed** (`9f1dc33`), twin in `mean.cu` fixed (`86a5ce1`),
   guarded by `test_sum_rows_shape_invariance` (`f021309`), and screened against
   the shared DeepSeek path with an interleaved A/B that came back flat. Widths
-  2, 3, 4 and 5 are now validator-green. → *Open correctness blocker — ROOT
-  CAUSE FOUND*
+  2, 3, 4 and 5 are now validator-green. This does not explain the remaining
+  controlled full-graph divergence. → *Open correctness blocker*
 - The original margin-only rule was falsified by a token-exact control whose
   distribution was not preserved. **Adopted 2026-08-31** (`4cdf5c3`): prefill
   acceptance additionally requires bounded total-variation distance, including
@@ -35,6 +35,12 @@ full-graph path under an adopted distributional gate.
   The implementation takes the worse result at the configured default and at
   T=1; that is conservative only while deployment sampling is bounded by T=1.
   → *ADOPTED CRITERION: total-variation distance at the serving temperature*
+- The type-correct ROCmFP4-fast operator oracle is green on gfx1151, including
+  the live dense MMQ surface at its observed physical width and every live K.
+  Together with the clean full-model activation inventory, this triggers the
+  pre-registered stopping rule: the isolated decoder/activation-quantization/
+  MMVQ/MMQ arithmetic program is exhausted. It does **not** make the rejected
+  full graph correct. → *Type-101 operator result below*
 
 **Performance.** No publishable number exists yet, and none may be published
 while the above is open.
@@ -376,7 +382,7 @@ family boundary exactly, with no exceptions in either direction.
 Width 17 maps to physical **0** — the dense/MoE cache does not serve it — so it
 is a third question again, and it has not been run since the fix.
 
-## Open correctness blocker — ROOT CAUSE FOUND
+## Fixed first cause — row-count-dependent `sum_rows`
 
 **`sum_rows` selects its reduction tree from the row count, so q1 and batched
 cannot agree by construction.**
@@ -1135,7 +1141,7 @@ shape, stride tuple, contiguity result, route, and real activation range in the
 controlled width-4 full-model run. The result below closes it: layout is clean,
 and the value range stays in the predeclared ordinary regime.
 
-#### Full-model MMQ activation inventory @ `5ace0b9` — clean layout and ordinary values; live type arithmetic untested
+#### Full-model MMQ activation inventory @ `5ace0b9` — clean layout and ordinary values; prompted live-type oracle
 
 Evidence:
 `qwen-width4-src1-inventory-q3-5ace0b9-20260831T020122Z`. The attested target is
@@ -1197,19 +1203,11 @@ declared in msg 410. Source inspection independently closes two neighbouring
 stories: MMVQ and MMQ both quantize the same consecutive K32 blocks, and the
 widest shipped integer accumulation stays inside int32.
 
-The pre-registered stopping rule does **not** trigger yet because one of its
-premises was wrong: every existing operator-oracle fixture uses
-`Q4_0_ROCMI4`, while this inventory shows that type on zero live dense-MMQ
-dispatches and `Q4_0_ROCMFP4_FAST` on 1687. Layout and the declared value-domain
-hypothesis are closed, but dense MMQ arithmetic for the dispatched type has
-never been isolated. The sole remaining isolated probe is therefore a
-type-101 operator oracle. It must re-derive its exactness or tolerance budget
-from the ROCmFP4-fast codebook and single UE4M3 scale, include the dominant
-`K=10240` shape explicitly rather than substituting only smaller exact cases,
-and exercise physical width 5 as observed here. If that type-correct oracle is
-green, the stopping rule applies with its premise finally satisfied; the
-full-graph failure remains rejected by the adopted distributional gate either
-way.
+At the time of this inventory the pre-registered stopping rule did **not**
+trigger because one premise was wrong: every existing operator-oracle fixture
+used `Q4_0_ROCMI4`, while this inventory shows that type on zero live
+dense-MMQ dispatches and `Q4_0_ROCMFP4_FAST` on 1687. The type-correct oracle
+required by that finding has now run and is recorded immediately below.
 
 An earlier same-binary pair at
 `qwen-width4-src1-inventory-5ace0b9-20260831T015059Z` used the
@@ -1217,6 +1215,54 @@ An earlier same-binary pair at
 consistent, but its target byte accounting, weight type, q1 vectors, and logits
 do not match the historical Q3-PLE control. It is retained as ancillary
 evidence and must not be used for this comparison.
+
+#### Live type-101 operator oracle @ `b4e55d0` — green; isolated program exhausted
+
+Evidence:
+`rocmfp4-fast-oracle-b4e55d0-20260831T023200Z`. This is a model-free
+correctness diagnostic on gfx1151; it collected no timing. The staged binary
+and its `libggml` closure were verified against the retained SHA-256 manifest
+before execution.
+
+The ROCmFP4-fast fixture derives its zero-error budget from Codebook10 and the
+single UE4M3 scale rather than borrowing the ROCMI4 signed-nibble proof.
+Bounded scale/code pairs make every decoded weight an exact multiple of
+`2^-4`; the exact Q8_1 activations make every product an integer multiple of
+`2^-6`. A compile-time absolute-accumulation proof covers all tested K values,
+and a deliberately unsafe K is compile-time rejected so the guard is known to
+fail for the condition it names. The live K set is covered explicitly:
+`160`, `256`, `320`, `640`, `2560`, `6144`, and `10240`.
+
+The live dense surface is green through the device decoder, activation
+quantization, MMVQ, and MMQ against the independent CPU decoder plus scalar
+F32 matmul with a zero-error budget. The MMQ arm uses physical width `5`, the
+width observed in the failing full-model inventory, and covers the production
+row-tail shapes beside a full-tile control. Dispatch assertions require both
+the `Q4_0_ROCMFP4_FAST` route record and the format-specific inner MMQ kernel
+marker; the parser's negative controls reject a substituted ROCMI4 type and a
+missing inner-kernel record. Raw device bytes immediately following the
+logical MMQ output retain their sentinel, including the potentially unaligned
+width-5 row tail.
+
+The routed type-101 arm is also green, but its forced-wide MMQ case is only a
+regression control: the production inventory contains dense dispatches at the
+failing surface, and the routed selector remains MMVQ at physical width `5`.
+The generalized ROCMI4 decoder, dense/routed MMVQ/MMQ, and write-extent cases
+remain green as a regression check.
+
+This satisfies the stopping rule declared by the inventory. The live type-101
+dense decoder and quantized matmul arithmetic are eliminated on the exact
+fixtures, after layout and the predeclared production value-domain hypotheses
+were independently closed by the full-model inventory. The isolated synthetic
+probe program is therefore exhausted. This is not a claim that arbitrary
+full-model values have been reproduced by a fixed fixture, nor does it weaken
+the adopted gate: the controlled full graph remains rejected and its root
+cause remains unknown. Every isolated component of the dense MMVQ-to-MMQ
+crossover is now exact on production shapes, types, widths, and value ranges,
+while the crossover alone still reproduces a structural logit collapse in the
+full graph. The defect is therefore in the composition, not in an isolated
+component. The next discriminator must come from the full graph or retained
+full-graph evidence, not another synthetic quantized-matmul fixture.
 
 #### ADOPTED CRITERION: total-variation distance at the serving temperature
 
@@ -1361,8 +1407,11 @@ Both rows retain their q1 argmax and the validator reports
 criterion. That criterion therefore certifies token stability for this prompt;
 it does **not** certify that the batched verifier computed the same logit
 function. The accepted result must not be described as kernel-precision noise.
-The isolated operator oracle above remains green only because its fixed
-fixtures omit the production activation/state context that triggers the defect.
+The live-type operator oracle above is green, so the pre-registered stopping
+rule eliminates isolated decoder and quantized-matmul arithmetic. The
+controlled result instead requires an interaction visible only in the full
+graph; the inventory has already closed its layout and declared value-domain
+branches.
 
 **Same-width source consequence.** The controlled run changes only
 `LUCE_MMVQ_MAX_NCOLS`. Its sole Qwen-side consumer is the plain quantized
@@ -1521,10 +1570,11 @@ Two further observations, offered as leads rather than conclusions:
 - Symmetric numerical noise would produce symmetric near-ties. A one-sided
   6-9 logit lead is not a tie-break; something is amplifying one candidate.
 
-This does **not** identify which side is correct — that still requires the
-operator oracle. But it narrows what to look for: not a diffuse precision
-difference, rather a mechanism that inflates a small set of high-prior tokens as
-batch width grows.
+This did **not** identify which side was correct. The later live-type operator
+oracle is green and eliminates isolated decoder and quantized-matmul arithmetic
+under its pre-registered stopping rule. The cross-evaluation still narrows what
+to look for in the full graph: not a diffuse precision difference, rather a
+mechanism that inflates a small set of high-prior tokens as batch width grows.
 
 The unrestricted statistic is rank-blind: at width 3 its maximum sits deep in
 the tail while the top-ranked logits barely move. That caveat does not rescue
