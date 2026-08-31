@@ -1115,6 +1115,50 @@ every shipped partial K rather than merely avoiding a fault.
 The next missing isolated dimensions are the production output-row values and
 the non-contiguous/view activation layouts absent from the current fixture.
 
+#### PROPOSED CRITERION: total-variation distance at the serving temperature
+
+Computed by claude from the already-retained rows; no GPU. `TV` is the total
+variation distance between `softmax(q1/T)` and `softmax(production/T)`.
+
+| case | validator | r | TV @ 0.6 | TV @ 1.0 | argmax |
+|---|---|---|---|---|---|
+| w2 r0/r1 | green | 1.0000 | 0.0000 | 0.0000 | same |
+| w3 r0 | green | 1.0000 | **0.0002** | 0.0009 | same |
+| w3 r1 | green | 1.0000 | 0.0000 | 0.0000 | same |
+| **w4 r0, `NCOLS=3`** | **GREEN** | 0.5558 | **0.5073** | 0.8006 | same |
+| **w4 r1, `NCOLS=3`** | **GREEN** | 0.6014 | **0.1390** | 0.4228 | same |
+| w6 r0 | red | 0.5986 | 0.8236 | 0.7288 | differs |
+| w6 r1 | red | 0.5402 | 0.9412 | 0.8578 | differs |
+| w17 r0 | red | 0.6750 | 0.7070 | 0.7227 | differs |
+| w17 r1 | red | 0.6222 | 0.8943 | 0.8162 | differs |
+
+**TV has an operational meaning the current criterion lacks.** It is the maximum
+probability difference over any event, so `TV = 0.507` says **up to ~51% of
+sampled tokens could differ** on that row — in a run the validator reported as
+token-exact and accepted.
+
+**The separation is not marginal.** Genuinely-good rows sit at 0.0000-0.0002;
+the worst validator-green row sits at 0.5073. That is ~2500×, so any threshold
+in between works and the choice is not a tuning exercise. **0.01 at the serving
+temperature** leaves two orders of magnitude of headroom on both sides.
+
+**Why TV rather than the correlation floor suggested earlier.** Pearson `r` is
+invariant to scale and shift, so a uniformly rescaled logit vector passes it
+while sampling very differently; TV is not. TV is also temperature-aware, and
+`w4 r1` shows why that matters — `r` is essentially the same as `w4 r0` (0.601
+vs 0.556) while TV differs by 3.6× (0.139 vs 0.507), because TV weights the part
+of the distribution that is actually sampled. Evaluate at the **served**
+temperature (`--default-temperature 0.6`); note TV@1.0 is larger for these rows,
+so a criterion fixed at 0.6 is not conservative for hotter sampling and the
+threshold should be checked at the highest temperature the deployment allows.
+
+**Cost: none.** The vectors are already captured by
+`EMBER_VALIDATION_LOGITS_DIR`, and this is arithmetic over them.
+
+**Status: proposed, not adopted.** Criterion B is the user's decision;
+`engine/dflash/common/prefill_validation.h` is codex's file and has not been
+touched.
+
 #### DECISIVE: a token-exact, validator-GREEN run with a destroyed logit distribution
 
 Width 4, `LUCE_MMVQ_MAX_NCOLS=3`, capture-capable runtime (`5b8e368`), evidence
