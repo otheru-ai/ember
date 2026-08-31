@@ -1,3 +1,4 @@
+#include <limits>
 #include <cstdio>
 
 #include "../engine/dflash/common/model_backend.h"
@@ -145,11 +146,16 @@ int main() {
     CHECK(exact.streams_exact && exact.accepted && !exact.margin_checked,
           "token-exact prefill passes without manufacturing a margin");
 
+    // These three fixtures isolate the MARGIN clause. Their two- and
+    // three-element vocabularies make total variation meaningless -- any
+    // visible logit change is most of the distribution -- so they pass a
+    // permissive tv_threshold and the TV clause is covered separately below.
     const PrefillMarginDecision exact_with_noise =
         dflash::common::validate_prefill_margin(
             {3, 4}, {3, 4},
             {{3.0f, 2.0f}, {5.0f, 1.0f}},
-            {{3.1f, 2.0f}, {5.5f, 1.0f}});
+            {{3.1f, 2.0f}, {5.5f, 1.0f}},
+            /*serving_temperature=*/0.6f, /*tv_threshold=*/1.0f);
     CHECK(exact_with_noise.streams_exact && exact_with_noise.accepted &&
               exact_with_noise.margin_checked &&
               exact_with_noise.numerics_index == 1 &&
@@ -158,7 +164,8 @@ int main() {
 
     const PrefillMarginDecision within_delta =
         dflash::common::validate_prefill_margin(
-            {0}, {1}, {{1.0f, 0.9f, 0.0f}}, {{0.8f, 1.0f, 0.0f}});
+            {0}, {1}, {{1.0f, 0.9f, 0.0f}}, {{0.8f, 1.0f, 0.0f}},
+            /*serving_temperature=*/0.6f, /*tv_threshold=*/1.0f);
     CHECK(!within_delta.streams_exact && within_delta.margin_checked &&
               within_delta.accepted && within_delta.mismatch_index == 0 &&
               within_delta.expected_token == 0 &&
@@ -179,11 +186,67 @@ int main() {
 
     const PrefillMarginDecision eos_length_mismatch =
         dflash::common::validate_prefill_margin(
-            {}, {1}, {{1.0f, 0.9f}}, {{0.8f, 1.0f}});
+            {}, {1}, {{1.0f, 0.9f}}, {{0.8f, 1.0f}},
+            /*serving_temperature=*/0.6f, /*tv_threshold=*/1.0f);
     CHECK(eos_length_mismatch.margin_checked &&
               eos_length_mismatch.accepted &&
               eos_length_mismatch.expected_token == -1,
           "immediate q1 stop still compares its seed-logit margin");
+
+    // --- total-variation clause ---------------------------------------
+    // Regression for the measured hole: a token-exact run whose distribution
+    // is badly perturbed must NOT be accepted. Before this clause the observed
+    // width-4 dense-MMQ control returned exact and accepted with TV 0.80.
+    std::vector<float> broad_q1(512, 0.0f), broad_prod(512, 0.0f);
+    for (size_t i = 0; i < broad_q1.size(); ++i) {
+        broad_q1[i] = 0.001f * static_cast<float>(i % 7);
+        broad_prod[i] = broad_q1[i];
+    }
+    broad_q1[3] = 9.0f;   broad_prod[3] = 9.0f;    // same argmax, both sides
+    broad_q1[9] = 1.0f;   broad_prod[9] = 8.5f;    // large distributional move
+    const PrefillMarginDecision exact_but_perturbed =
+        dflash::common::validate_prefill_margin(
+            {3}, {3}, {broad_q1}, {broad_prod});
+    CHECK(exact_but_perturbed.streams_exact &&
+              exact_but_perturbed.tv_checked &&
+              !exact_but_perturbed.tv_within_bound &&
+              !exact_but_perturbed.accepted,
+          "token-exact prefill is rejected when the distribution diverges");
+
+    // The converse: genuinely equivalent distributions stay accepted, so the
+    // clause does not simply reject everything with logits attached.
+    std::vector<float> near_q1(512, 0.0f), near_prod(512, 0.0f);
+    for (size_t i = 0; i < near_q1.size(); ++i) {
+        near_q1[i] = 0.001f * static_cast<float>(i % 7);
+        near_prod[i] = near_q1[i] + 1e-6f;
+    }
+    near_q1[3] = 9.0f; near_prod[3] = 9.0f + 1e-6f;
+    const PrefillMarginDecision exact_and_equivalent =
+        dflash::common::validate_prefill_margin(
+            {3}, {3}, {near_q1}, {near_prod});
+    CHECK(exact_and_equivalent.streams_exact &&
+              exact_and_equivalent.tv_checked &&
+              exact_and_equivalent.tv_within_bound &&
+              exact_and_equivalent.accepted,
+          "token-exact prefill with an equivalent distribution still passes");
+
+    // Non-finite logits must fail closed rather than yielding TV 0.
+    std::vector<float> nan_row(4, 0.0f);
+    nan_row[1] = std::numeric_limits<float>::quiet_NaN();
+    const PrefillMarginDecision nonfinite =
+        dflash::common::validate_prefill_margin(
+            {0}, {0}, {nan_row}, {std::vector<float>(4, 0.0f)});
+    CHECK(!nonfinite.tv_checked && !nonfinite.tv_within_bound &&
+              !nonfinite.accepted,
+          "non-finite logits fail the distributional check closed");
+
+    // With no logits captured at all there is nothing to bound, so the
+    // token-only verdict stands as it did before this clause existed.
+    const PrefillMarginDecision exact_no_logits =
+        dflash::common::validate_prefill_margin({3, 4}, {3, 4}, {}, {});
+    CHECK(exact_no_logits.streams_exact && exact_no_logits.accepted &&
+              !exact_no_logits.tv_checked,
+          "token-exact without captured logits keeps the prior verdict");
 
     const PrefillMarginDecision missing_logits =
         dflash::common::validate_prefill_margin({0}, {1}, {}, {});
