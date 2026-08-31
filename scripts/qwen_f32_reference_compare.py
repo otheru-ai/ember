@@ -59,6 +59,39 @@ def max_abs_delta(left: list[float], right: list[float]) -> float:
     return worst
 
 
+def rank_report(authority: list[float], candidate: list[float],
+                windows: tuple[int, ...] = (1, 2, 10, 50)) -> dict:
+    """Rank-aware view of a single row's disagreement.
+
+    ``authority`` must be the TRUSTED side, because ranking decides which
+    disagreements can matter and only the trusted distribution says which
+    tokens are plausible. Passing the untrusted side inverts the question: it
+    reports whether the broken path's own favourites were preserved, which is
+    not what a decision depends on.
+
+    ``max_abs_delta`` over a full vocabulary is rank-blind: it cannot tell an
+    error on the second-most-likely token from one on a token ranked a quarter
+    million deep, which cannot affect sampling at any temperature we ship.
+    Restricting the same statistic to the reference's own top-ranked logits
+    says whether a disagreement can change the decision or only the noise
+    floor.  ``worst_rank`` locates the global maximum in that ordering.
+    """
+    order = sorted(range(len(authority)), key=lambda i: -authority[i])
+    deltas = [abs(a - b) for a, b in zip(authority, candidate)]
+    worst = max(range(len(deltas)), key=lambda i: deltas[i])
+    top1, top2 = order[0], order[1]
+    return {
+        "windows": {k: max(deltas[i] for i in order[:k]) for k in windows
+                    if k <= len(order)},
+        "worst_rank": order.index(worst),
+        "vocab": len(authority),
+        "argmax_agrees":
+            max(range(len(candidate)), key=lambda i: candidate[i]) == top1,
+        "margin_authority": authority[top1] - authority[top2],
+        "margin_candidate": candidate[top1] - candidate[top2],
+    }
+
+
 def compare(default_dir: pathlib.Path, reference_dir: pathlib.Path) -> tuple[float, float, int]:
     q1 = read_rows(default_dir, "q1")
     production = read_rows(default_dir, "production")
@@ -86,6 +119,11 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--width", action="append", required=True, metavar="W:DEFAULT_DIR:REFERENCE_DIR",
                         help="repeatable, e.g. 2:/ev/w2/default:/ev/w2/reference")
+    parser.add_argument("--ranks", action="store_true",
+                        help="also print the rank-aware breakdown per row: max "
+                             "delta restricted to the top-1/2/10/50 logits, the "
+                             "rank of the worst deviation, argmax agreement, and "
+                             "the top-2 margin on both sides")
     parser.add_argument("--gate-ratio", type=float, default=10.0,
                         help="the reference's own error must be at least this many "
                              "times SMALLER than the smallest effect it has to "
@@ -93,6 +131,7 @@ def main() -> int:
     args = parser.parse_args()
 
     results = {}
+    dirs = {}
     for spec in args.width:
         try:
             width_text, default_text, reference_text = spec.split(":", 2)
@@ -106,12 +145,36 @@ def main() -> int:
             print(f"width {width}: VOID — {error}", file=sys.stderr)
             return 1
         results[width] = (d_q1, d_prod, rows)
+        dirs[width] = (pathlib.Path(default_text), pathlib.Path(reference_text))
 
     print(f"{'width':>6} {'rows':>5} {'d_q1':>14} {'d_prod':>14} {'d_prod/d_q1':>13}")
     for width in sorted(results):
         d_q1, d_prod, rows = results[width]
         ratio = f"{d_prod / d_q1:.4g}" if d_q1 > 0.0 else "n/a"
         print(f"{width:>6} {rows:>5} {d_q1:>14.6g} {d_prod:>14.6g} {ratio:>13}")
+
+    if args.ranks:
+        print(f"\n{'width':>6} {'row':>4} {'top-1':>9} {'top-2':>9} {'top-10':>9} "
+              f"{'top-50':>9} {'worst rank':>11} {'argmax':>7} "
+              f"{'margin trust':>12} {'margin cand':>12}")
+        for width in sorted(results):
+            default_dir, reference_dir = dirs[width]
+            production = read_rows(default_dir, "production")
+            reference = read_rows(reference_dir, "production")
+            # production (default build) is the authority; the F32 reference
+            # build is the candidate under test.
+            for index, (act, ref) in enumerate(zip(production, reference)):
+                r = rank_report(act, ref)
+                w = r["windows"]
+                print(f"{width:>6} {index:>4} "
+                      f"{w.get(1, float('nan')):>9.4f} {w.get(2, float('nan')):>9.4f} "
+                      f"{w.get(10, float('nan')):>9.4f} {w.get(50, float('nan')):>9.4f} "
+                      f"{r['worst_rank']:>11} {str(r['argmax_agrees']):>7} "
+                      f"{r['margin_authority']:>12.4f} "
+                      f"{r['margin_candidate']:>12.4f}")
+        print(f"\n  'worst rank' is the position of the largest deviation in the "
+              f"TRUSTED side's ordering.\n  A rank far from 0 means the headline "
+              f"max delta is set by a token that cannot be sampled.")
 
     if GATE_WIDTH not in results:
         print(f"\nGATE: NOT EVALUATED — width {GATE_WIDTH} absent. The reference's own "
