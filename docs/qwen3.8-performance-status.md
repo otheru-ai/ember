@@ -1130,7 +1130,15 @@ bucket width, not the real token count:
 |---|---|---|---|---|
 | 2-5 | 5 | 5 | ≤ | MMVQ |
 | 6-16 | 16 | 16 | > | MMQ |
-| 17+ | 0 | — | — | no cached graph |
+| 17 | **16 then 1** | 16, then 1 | >, then ≤ | **MMQ then MMVQ** |
+
+Width 17 does not fail the `graph_width == 0` guard in practice:
+`qwen4exp_prefill_chunk_rows` (`qwen4exp_runtime.cpp:2220-2232`) caps a chunk at
+`kQwen4ExpFrontierMoeMaxBatch`, so 17 rows run as **16 + 1** — a bucket-16 chunk
+followed by a bucket-1 chunk. Its red is therefore consistent with bucket 16
+alone being at fault, and it is *not* an independent third case. (An earlier
+line in this document already recorded the 16+1 chunking; the bucket table above
+is the mechanism underneath it.)
 
 The bucket *determines* the routed width, so the routed family flips exactly
 when the bucket does. Arm 3 is a **consequence** of arm 2, not an independent
