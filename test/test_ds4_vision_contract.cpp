@@ -1,6 +1,7 @@
 #include "dflash/deepseek4/deepseek4_vision_contract.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -251,6 +252,97 @@ static void test_trailing_alignment_pad() {
           "odd paired-row width gets two trailing alignment pads");
 }
 
+static Deepseek4VisionRunView run_view(const Deepseek4PreparedRun & run,
+                                       int n_embd) {
+    Deepseek4VisionRunView view;
+    view.prompt_offset = run.prompt_offset;
+    view.n_tokens = static_cast<int>(run.image.block.token_ids.size());
+    view.embedding_width = n_embd;
+    view.token_ids = run.image.block.token_ids.data();
+    view.embeddings = run.image.embeddings.data();
+    view.embedding_values = run.image.embeddings.size();
+    return view;
+}
+
+static void test_vision_prefill_plan() {
+    constexpr int32_t vocab = 3500;
+    constexpr int n_embd = 2;
+    Deepseek4ImageMarkers markers;
+    markers.start = {-1.0f, -2.0f};
+    markers.pad = {-3.0f, -4.0f};
+    markers.newline = {-5.0f, -6.0f};
+    markers.end = {-7.0f, -8.0f};
+    Deepseek4PreparedRun prepared;
+    prepared.prompt_offset = 2;
+    CHECK(deepseek4_prepare_image(
+              vocab, 2, 2, prepared.prompt_offset, n_embd,
+              image_rows(2, 2, n_embd, 10.0f).embeddings, markers,
+              prepared.image),
+          "prefill-plan fixture assembles");
+    std::vector<int32_t> prompt = {10, 11};
+    prompt.insert(prompt.end(), prepared.image.block.token_ids.begin(),
+                  prepared.image.block.token_ids.end());
+    prompt.push_back(12);
+    const Deepseek4VisionRunView view = run_view(prepared, n_embd);
+    Deepseek4EmbedOnlyTokenIds safe_ids;
+    std::string error;
+    CHECK(deepseek4_prepare_vision_prefill(
+              prompt, vocab, n_embd, {view}, safe_ids, &error),
+          "complete request-owned vision run validates before embedding");
+    bool safe = safe_ids.values.size() == prompt.size() &&
+                safe_ids.values[0] == 10 && safe_ids.values[1] == 11 &&
+                safe_ids.values.back() == 12;
+    for (int i = 0; safe && i < view.n_tokens; ++i)
+        safe = safe_ids.values[
+            static_cast<size_t>(view.prompt_offset + i)] == 0;
+    CHECK(safe, "every sentinel becomes an in-vocabulary embedder id");
+
+    std::vector<float> embedded(prompt.size() * n_embd, 99.0f);
+    CHECK(deepseek4_splice_vision_chunk(
+              {view}, n_embd, 0, static_cast<int>(prompt.size()),
+              embedded.data(), &error),
+          "complete image run splices into one prefill chunk");
+    CHECK(std::equal(prepared.image.embeddings.begin(),
+                     prepared.image.embeddings.end(),
+                     embedded.begin() +
+                         static_cast<std::ptrdiff_t>(view.prompt_offset * n_embd)),
+          "splice installs every exact learned replacement row");
+    CHECK(!deepseek4_splice_vision_chunk(
+              {view}, n_embd, 0, view.prompt_offset + 1,
+              embedded.data(), &error),
+          "chunk intersecting only the first image row fails closed");
+
+    std::vector<int32_t> mismatch = prompt;
+    mismatch[static_cast<size_t>(view.prompt_offset)] =
+        vocab + DEEPSEEK4_IMAGE_START;
+    CHECK(!deepseek4_prepare_vision_prefill(
+              mismatch, vocab, n_embd, {view}, safe_ids, &error) &&
+              safe_ids.values.empty(),
+          "prompt/run token mismatch leaves no embedder input");
+    CHECK(!deepseek4_prepare_vision_prefill(
+              prompt, vocab, n_embd, {}, safe_ids, &error) &&
+              safe_ids.values.empty(),
+          "unowned sentinel cannot reach the vocabulary embedder");
+
+    Deepseek4VisionRunView overlap = view;
+    overlap.prompt_offset += 1;
+    CHECK(!deepseek4_prepare_vision_prefill(
+              prompt, vocab, n_embd, {view, overlap}, safe_ids, &error),
+          "overlapping request-owned runs are rejected");
+    Deepseek4VisionRunView wrong_width = view;
+    wrong_width.embedding_width = n_embd + 1;
+    CHECK(!deepseek4_prepare_vision_prefill(
+              prompt, vocab, n_embd, {wrong_width}, safe_ids, &error),
+          "replacement rows must match the language width");
+    std::vector<float> nonfinite = prepared.image.embeddings;
+    nonfinite.front() = NAN;
+    Deepseek4VisionRunView bad_values = view;
+    bad_values.embeddings = nonfinite.data();
+    CHECK(!deepseek4_prepare_vision_prefill(
+              prompt, vocab, n_embd, {bad_values}, safe_ids, &error),
+          "non-finite learned rows fail before graph construction");
+}
+
 static void test_visibility_and_prefill_boundaries() {
     constexpr int32_t vocab = 4000;
     Deepseek4ImageBlock block;
@@ -280,12 +372,14 @@ static void test_visibility_and_prefill_boundaries() {
           "prefill cut cannot split an image block");
     CHECK(deepseek4_prefill_cut_safe(prompt, vocab, static_cast<int>(start)),
           "prefill cut immediately before image is safe");
-    CHECK(deepseek4_chunk_accepts_image_tokens(0, prompt, vocab),
-          "initial prefill chunk accepts learned image ids");
-    CHECK(!deepseek4_chunk_accepts_image_tokens(1, block.token_ids, vocab),
-          "later prefill chunk rejects every learned image span");
-    CHECK(deepseek4_chunk_accepts_image_tokens(1, {1, 2, 3}, vocab),
-          "later text-only chunk remains valid");
+    CHECK(deepseek4_reference_chunk_accepts_image_tokens(0, prompt, vocab),
+          "published initial prefill accepts learned image ids");
+    CHECK(!deepseek4_reference_chunk_accepts_image_tokens(
+              1, block.token_ids, vocab),
+          "published later call rejects every learned image span");
+    CHECK(deepseek4_reference_chunk_accepts_image_tokens(
+              1, {1, 2, 3}, vocab),
+          "published later text-only call remains valid");
 }
 
 static void test_image_aware_prefill_chunks() {
@@ -387,6 +481,7 @@ int main() {
     test_embedding_assembly();
     test_placeholder_expansion();
     test_trailing_alignment_pad();
+    test_vision_prefill_plan();
     test_visibility_and_prefill_boundaries();
     test_image_aware_prefill_chunks();
     test_routing_modes();

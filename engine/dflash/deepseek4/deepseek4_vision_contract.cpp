@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -260,6 +261,143 @@ bool deepseek4_expand_image_placeholders(
     return true;
 }
 
+bool deepseek4_prepare_vision_prefill(
+        const std::vector<int32_t> & input_ids, int32_t vocab_size,
+        int n_embd, const std::vector<Deepseek4VisionRunView> & runs,
+        Deepseek4EmbedOnlyTokenIds & embed_token_ids, std::string * error) {
+    embed_token_ids.values.clear();
+    if (vocab_size <= 0 ||
+        vocab_size > INT32_MAX - DEEPSEEK4_IMAGE_END || n_embd <= 0 ||
+        input_ids.size() > static_cast<size_t>(INT_MAX)) {
+        set_error(error, "invalid DeepSeek4 vision prefill shape");
+        return false;
+    }
+
+    embed_token_ids.values = input_ids;
+    size_t covered_until = 0;
+    for (const Deepseek4VisionRunView & run : runs) {
+        if (run.prompt_offset < 0 || run.n_tokens <= 0 ||
+            run.embedding_width != n_embd || !run.token_ids ||
+            !run.embeddings) {
+            set_error(error, "invalid request-owned DeepSeek4 vision run");
+            embed_token_ids.values.clear();
+            return false;
+        }
+        const size_t start = static_cast<size_t>(run.prompt_offset);
+        const size_t count = static_cast<size_t>(run.n_tokens);
+        if (start < covered_until || start > input_ids.size() ||
+            count > input_ids.size() - start ||
+            count > std::numeric_limits<size_t>::max() /
+                        static_cast<size_t>(n_embd) ||
+            run.embedding_values != count * static_cast<size_t>(n_embd)) {
+            set_error(error, "overlapping or out-of-range DeepSeek4 vision run");
+            embed_token_ids.values.clear();
+            return false;
+        }
+        for (size_t i = covered_until; i < start; ++i) {
+            if (input_ids[i] < 0 || input_ids[i] >= vocab_size) {
+                set_error(error, "learned image token is not covered by a vision run");
+                embed_token_ids.values.clear();
+                return false;
+            }
+        }
+
+        bool saw_start = false;
+        bool saw_image = false;
+        bool saw_end = false;
+        for (size_t row = 0; row < count; ++row) {
+            const int32_t token = run.token_ids[row];
+            if (input_ids[start + row] != token || token < vocab_size ||
+                token > vocab_size + DEEPSEEK4_IMAGE_END) {
+                set_error(error, "vision run token ids do not match the expanded prompt");
+                embed_token_ids.values.clear();
+                return false;
+            }
+            const int32_t type = token - vocab_size;
+            if (type == DEEPSEEK4_IMAGE_START) {
+                if (saw_start || saw_end) {
+                    set_error(error, "vision run has duplicate or misplaced image start");
+                    embed_token_ids.values.clear();
+                    return false;
+                }
+                saw_start = true;
+            } else if (type == DEEPSEEK4_IMAGE_END) {
+                if (!saw_start || saw_end || row + 1 != count) {
+                    set_error(error, "vision run has misplaced image end");
+                    embed_token_ids.values.clear();
+                    return false;
+                }
+                saw_end = true;
+            } else if (!saw_start && type != DEEPSEEK4_IMAGE_PAD) {
+                set_error(error, "vision run has content before image start");
+                embed_token_ids.values.clear();
+                return false;
+            }
+            if (type == DEEPSEEK4_IMAGE) saw_image = true;
+            embed_token_ids.values[start + row] = 0;
+        }
+        if (!saw_start || !saw_image || !saw_end) {
+            set_error(error, "vision run is missing a learned boundary or image row");
+            embed_token_ids.values.clear();
+            return false;
+        }
+        for (size_t value = 0; value < run.embedding_values; ++value) {
+            if (!std::isfinite(run.embeddings[value])) {
+                set_error(error, "vision run contains a non-finite embedding");
+                embed_token_ids.values.clear();
+                return false;
+            }
+        }
+        covered_until = start + count;
+    }
+    for (size_t i = covered_until; i < input_ids.size(); ++i) {
+        if (input_ids[i] < 0 || input_ids[i] >= vocab_size) {
+            set_error(error, "learned image token is not covered by a vision run");
+            embed_token_ids.values.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool deepseek4_splice_vision_chunk(
+        const std::vector<Deepseek4VisionRunView> & runs, int n_embd,
+        int chunk_offset, int chunk_tokens, float * embeddings,
+        std::string * error) {
+    if (n_embd <= 0 || chunk_offset < 0 || chunk_tokens <= 0 || !embeddings ||
+        chunk_offset > INT_MAX - chunk_tokens) {
+        set_error(error, "invalid DeepSeek4 vision splice request");
+        return false;
+    }
+    const int chunk_end = chunk_offset + chunk_tokens;
+    for (const Deepseek4VisionRunView & run : runs) {
+        if (run.prompt_offset < 0 || run.n_tokens <= 0 ||
+            run.prompt_offset > INT_MAX - run.n_tokens ||
+            run.embedding_width != n_embd || !run.embeddings) {
+            set_error(error, "invalid request-owned DeepSeek4 vision run");
+            return false;
+        }
+        const int run_end = run.prompt_offset + run.n_tokens;
+        const size_t values = static_cast<size_t>(run.n_tokens) *
+                              static_cast<size_t>(n_embd);
+        if (run.embedding_values != values) {
+            set_error(error, "vision run embedding length changed after validation");
+            return false;
+        }
+        if (run_end <= chunk_offset || run.prompt_offset >= chunk_end) continue;
+        if (run.prompt_offset < chunk_offset || run_end > chunk_end) {
+            set_error(error, "prefill chunk splits a learned image run");
+            return false;
+        }
+        const size_t destination =
+            static_cast<size_t>(run.prompt_offset - chunk_offset) *
+            static_cast<size_t>(n_embd);
+        std::memcpy(embeddings + destination, run.embeddings,
+                    values * sizeof(float));
+    }
+    return true;
+}
+
 void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              int32_t vocab_size, int max_image_tokens,
                              std::vector<int32_t> & left,
@@ -390,9 +528,9 @@ int deepseek4_image_aware_prefill_chunk(
     return static_cast<int>(chunk_end - chunk_begin);
 }
 
-bool deepseek4_chunk_accepts_image_tokens(int start_pos,
-                                          const std::vector<int32_t> & ids,
-                                          int32_t vocab_size) {
+bool deepseek4_reference_chunk_accepts_image_tokens(
+        int start_pos, const std::vector<int32_t> & ids,
+        int32_t vocab_size) {
     if (start_pos == 0) return true;
     return std::all_of(ids.begin(), ids.end(), [vocab_size](int32_t id) {
         return id < vocab_size;

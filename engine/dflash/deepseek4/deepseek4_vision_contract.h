@@ -14,6 +14,7 @@
 #ifndef DFLASH_DEEPSEEK4_VISION_CONTRACT_H
 #define DFLASH_DEEPSEEK4_VISION_CONTRACT_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -65,6 +66,25 @@ struct Deepseek4PreparedRun {
     Deepseek4PreparedImage image;
 };
 
+// Non-owning request view used at the language prefill seam. The owning
+// GenerateRequest remains architecture-neutral; DeepSeek validates these
+// fields once before any CPU embedding lookup or graph construction.
+struct Deepseek4VisionRunView {
+    int prompt_offset = 0;
+    int n_tokens = 0;
+    int embedding_width = 0;
+    const int32_t * token_ids = nullptr;
+    const float * embeddings = nullptr;
+    size_t embedding_values = 0;
+};
+
+// Deliberately not implicitly convertible to std::vector<int32_t>. These IDs
+// are valid only for CpuEmbedder::embed(); routing must receive the original
+// sentinel-bearing prompt or every image row would silently classify as text.
+struct Deepseek4EmbedOnlyTokenIds {
+    std::vector<int32_t> values;
+};
+
 bool deepseek4_build_image_block(int32_t vocab_size, int n_llm_h, int n_llm_w,
                                  int start_pos, Deepseek4ImageBlock & out,
                                  std::string * error = nullptr);
@@ -97,6 +117,25 @@ bool deepseek4_expand_image_placeholders(
     std::vector<Deepseek4PreparedRun> & runs,
     std::string * error = nullptr);
 
+// Validate that every virtual image token is covered exactly once by an
+// ordered request-owned run, and that every run exactly matches the expanded
+// prompt. `embed_token_ids` substitutes token 0 for learned sentinels so the
+// ordinary vocabulary embedder never indexes out of bounds; callers must then
+// overwrite those rows with the validated embeddings before graph compute.
+bool deepseek4_prepare_vision_prefill(
+    const std::vector<int32_t> & input_ids, int32_t vocab_size, int n_embd,
+    const std::vector<Deepseek4VisionRunView> & runs,
+    Deepseek4EmbedOnlyTokenIds & embed_token_ids,
+    std::string * error = nullptr);
+
+// Install complete request-owned image runs into one prefill chunk. A chunk
+// that intersects only part of a run is rejected: right-visible K/V and every
+// replacement row must enter the same graph invocation.
+bool deepseek4_splice_vision_chunk(
+    const std::vector<Deepseek4VisionRunView> & runs, int n_embd,
+    int chunk_offset, int chunk_tokens, float * embeddings,
+    std::string * error = nullptr);
+
 void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              int32_t vocab_size, int max_image_tokens,
                              std::vector<int32_t> & left,
@@ -115,11 +154,15 @@ int deepseek4_image_aware_prefill_chunk(
     const std::vector<int32_t> & input_ids, int32_t vocab_size,
     int offset, int proposed, int max_chunk, std::string * error = nullptr);
 
-// The published reference merges image embeddings only at start_pos == 0 and
-// asserts that every later chunk contains ordinary vocabulary IDs.
-bool deepseek4_chunk_accepts_image_tokens(int start_pos,
-                                          const std::vector<int32_t> & ids,
-                                          int32_t vocab_size);
+// Published-reference scheduler probe, not Ember's runtime predicate. The
+// reference sends the whole prompt at start_pos==0, then asserts later calls
+// contain no image IDs with the reason "image spans must be prefilled in a
+// single chunk" (model.py:991-999). Ember deliberately generalizes that
+// scheduler: a restored pre-image prefix may place a complete image block at a
+// nonzero KV position, while the entire validated block still shares one graph
+// invocation and receives explicit chunk-local visibility.
+bool deepseek4_reference_chunk_accepts_image_tokens(
+    int start_pos, const std::vector<int32_t> & ids, int32_t vocab_size);
 
 // The converter's exact per-layer tensor suffix. Vision bias weights are an
 // optional all-or-none set: zero keeps text-only checkpoints valid, while a
