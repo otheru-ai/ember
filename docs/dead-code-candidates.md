@@ -53,6 +53,16 @@ census — `qwen4exp_frontier.cpp:1550` and `:1561` — never execute. Over 12 Q
 layers that is 24 barriers and 48 copies per token that no A/B may credit any
 change with removing. The live census is **12 barriers / 26 copies**.
 
+**Re-verified on the live artifact, 20260831T151000Z.** The earlier checks were
+against the upstream safetensors index and a *stock* GGUF. Today's artifact
+audit showed the shipped runs load a **Q3-PLE/type-101** target, not
+`stock-rocmi4-exact` — the same substitution that invalidated five hardware
+claims of oracle work. So this entry's evidence was re-run against the artifact
+the failing runs actually load
+(`candidates/q3-ple-first-token-26fe08f2c49d`, 1224 tensors): **zero** tensors
+matching `rot`, `k_rot`, `v_rot` or `hadamard`. The entry stands on the live
+artifact, not only on the stock one.
+
 **Falsifier.** Run twice, negative both times. Grok checked the upstream
 safetensors index (above). Codex then checked the **GGUF shard-1 header
 directly** — the file the loader actually opens — and reports
