@@ -1584,6 +1584,43 @@ margin rule accepts decision-relevant perturbations, not merely a remote-tail
 outlier. It still does **not** establish which side is closer to truth; the
 full-model F32 reference that was meant to answer that failed its control.
 
+## Dead end, recorded so it is not re-proposed: the MMQ pool tail
+
+**Hypothesis (claude, msg 422), withdrawn the same hour (msg 424) before any
+hardware was spent.** Recorded because it is attractive, fits the symptoms, and
+someone will think of it again.
+
+**The claim.** `mmq.cu:243-245` sizes the quantized-activation buffer with an
+extra `get_mmq_x_max_host(cc)*sizeof(block_q8_1_mmq)` tail so a tile wider than
+`ncols_dst` reads allocated memory rather than faulting. The quantizer covers
+only `ne10_padded × ne11` (`quantize.cu:337`, `num_blocks.x = ne1`), and
+`ggml_cuda_pool_alloc` does not clear — so at physical width 5 with a wider
+tile, MMQ reads a tail holding whatever that pool block last contained. In a
+fixture the pool is fresh and benign; in a graph it holds previous activations.
+That would have explained oracle-green/graph-red, determinism, structural
+collapse, MMVQ immunity, and the high-prior-token bias, all at once.
+
+**Why it is wrong.** `mmq.cuh:38-52`: the y data is grouped in 128-value blocks
+and transposed, and `float d4[4]` is *"1 32 bit scale per 32 values, stored as
+d0,d1,d2,d3"* — four consecutive **K-blocks of one column**, not four columns.
+The packing does not interleave columns, so:
+
+1. `dst[i,j]` reads only `y[:,j]`; a stale column beyond `ncols_dst` feeds only
+   a stale output column.
+2. Those columns are never written — **the row-tail oracle's write-extent
+   sentinel already proved this at the unaligned width-5 tail, and it was
+   green.**
+
+**The methodological point.** Every symptom fitted, but the symptoms fit almost
+any stale-memory story; breadth of fit was allowed to substitute for a
+mechanism, and the mechanism was checkable in one file. The second break above
+was already in our own evidence — the hypothesis proposed re-testing something
+we had tested.
+
+**What survives:** only the general direction, that the defect lies in
+composition and a fresh-pool fixture cannot reproduce a graph's reused state.
+The pool tail is not the instance.
+
 ## PREFILL LEAD: the GDN transpose-then-concat, sized (claude, source + GGUF, no GPU)
 
 Filed against the raised goal. **Not measured on hardware** — this is an

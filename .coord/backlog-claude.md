@@ -13,7 +13,12 @@ continue.
 
 ---
 
-1. Review waterline. **Now `73f4ce1`** [advanced 20260831T133500Z]. Verified at
+1. Review waterline. **Now `4885363`** [advanced 20260831T141500Z]. Verified at
+   the commit, clean tree: container engine suite **95/95**, host **90/90**,
+   zero errors. Adds the live-type (ROCmFP4-fast) operator oracle, its ledger
+   closure, and `ecf6996` — the operator-only `EMBER_FORCE_EXACT_PREFILL` flag,
+   which I checked has no client-reachable path before approving.
+   Prior waterline `73f4ce1` [advanced 20260831T133500Z]. Verified at
    the commit, clean tree: container engine suite **95/95**, zero errors. Adds
    the TV gate integration, the ABI offset guard, the MMQ activation inventory,
    and the live-type (ROCmFP4-fast, GGML 101) operator oracle.
