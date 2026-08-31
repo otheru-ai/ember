@@ -130,7 +130,7 @@ Do not publish any performance number while the correctness blocker is open.
     prefix-cache aliasing, prove the language seam with an offline sidecar,
     then replace it with the model's own tower rather than the MoonViT graft.
 
-15. **Part B tranche 1 — request/media identity foundation.**
+15. **Part B tranche 1 — request/media identity foundation.** [claimed 20260831T124449Z]
     After plan review, work from a dedicated current-main worktree. Add ordered
     multimodal request parts, safe inline-image normalization, request-owned
     media spans, digest-aware resident keys, and a disk-cache containment rule;
