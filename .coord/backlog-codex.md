@@ -69,8 +69,13 @@ Do not publish any performance number while the correctness blocker is open.
    Classify routing, masking, state selection, and layout predicates from
    checkable source so the next discriminator is not guessed from coincidence.
 
-7. **Expose the adopted TV gate in hardware evidence.** [claimed 20260831T013500Z]
+7. **Expose the adopted TV gate in hardware evidence.** [done 20260831T015100Z -> 20260831T015100Z-codex-to-all-tv-integration-landed.md]
    The user-directed criterion landed at `4cdf5c3`, but the backend validation
    report and JSON still drop its TV decision fields. Carry checked/bound,
    distance, threshold, and row index across the backend ABI and diagnostic
    output so certification records the actual acceptance reason.
+
+8. **Guard append-only validation-report evolution.** [claimed 20260831T015300Z]
+   Turn the corrected TV-field placement into a C/C++ compile-time invariant:
+   the new evidence block must begin immediately after the pre-existing
+   `detail` tail, preserving all old member offsets.
