@@ -26,9 +26,12 @@ full-graph path under an adopted distributional gate.
   distribution was not preserved. **Adopted 2026-08-31** (`4cdf5c3`): prefill
   acceptance additionally requires bounded total-variation distance, including
   on the token-exact branch; MTP's q1 replay remains unchanged. Hardware
-  confirmation under the adopted gate is pending. On the first such run,
-  cross-check the reported TV against the retained offline implementation for
-  a comparable case before treating a discrepancy as new engine evidence.
+  confirmation is complete on the controlled width-4 failure: the on-device
+  verdict matches an independent offline recomputation and rejects the case
+  that the prior token/margin rule accepted. A pass-side width-2/3 confirmation
+  under the adopted gate is still pending. On any new artifact, cross-check the
+  first reported TV against an independent offline implementation before
+  treating a discrepancy as new engine evidence.
   The implementation takes the worse result at the configured default and at
   T=1; that is conservative only while deployment sampling is bounded by T=1.
   → *ADOPTED CRITERION: total-variation distance at the serving temperature*
@@ -1127,14 +1130,93 @@ scale and integers). The foreign weight blocks are therefore multiplied by
 zero. The model-free exact oracle confirms that this mechanism is sound at
 every shipped partial K rather than merely avoiding a fault.
 
-The next discriminator is a complete inventory of every dense MMQ activation
+The next discriminator was a complete inventory of every dense MMQ activation
 shape, stride tuple, contiguity result, route, and real activation range in the
-controlled width-4 full-model run. The earlier direct-strided optimization
-removed no dispatches, but that does not prove the failing nodes are contiguous.
-Add a synthetic view fixture only if the inventory identifies a live
-non-contiguous candidate. If layout matches the oracle, use the captured
-dynamic ranges to construct a value-domain fixture rather than reopening the
-already-controlled Qwen runtime branches.
+controlled width-4 full-model run. The result below closes it: layout is clean,
+and the value range stays in the predeclared ordinary regime.
+
+#### Full-model MMQ activation inventory @ `5ace0b9` — clean layout and ordinary values; live type arithmetic untested
+
+Evidence:
+`qwen-width4-src1-inventory-q3-5ace0b9-20260831T020122Z`. The attested target is
+`q3-ple-first-token-b753813605fb`, whose shard content is identical across the
+retained Q3-PLE construction directories; the staged binary SHA-256 is
+`217946e7df88e0b528ea2b582a5a93d16a8da8fe688ea2c3336f295be883d055`.
+Both arms use the same binary, prompt, `LUCE_MMVQ_MAX_NCOLS=3`, and matching
+ROCMFP4-FAST MTP companion. The second arm adds only
+`DFLASH_MMQ_SRC1_INVENTORY=1`.
+
+**The adopted gate works on hardware and agrees with the independent
+calculation.** The current control reproduces all four historical width-4
+logit files byte-for-byte. On-device it is token-exact but rejected, with worst
+TV `0.80058831` at row 0. An independent stdlib calculation over the retained
+F32 rows gives:
+
+| row | TV @ 0.6 | TV @ 1.0 | worst | on-device selected row |
+|---:|---:|---:|---:|---:|
+| 0 | 0.507315969496 | 0.800588299482 | 0.800588299482 | yes |
+| 1 | 0.139025060739 | 0.422825150409 | 0.422825150409 | no |
+
+The on-device float result differs from the independent double calculation
+only at final rounding. This is the first hardware meeting of the two
+implementations requested when the criterion landed; it is evidence for the
+integration, not a new engine divergence.
+
+**The inventory synchronization is neutral.** All q1 and production row files
+are byte-identical between the inventory-off and inventory-on arms, as are the
+prefill decision fields. The synchronous D2H range capture therefore does not
+hide or cure the failure, and this run gives no scheduling/lifetime-race lead.
+
+**Every live activation has the oracle fixture's packed layout.** The inventory
+contains 1689 dense direct-MMQ records and no pair-fused or routed records. Of
+those, 1687 use `Q4_0_ROCMFP4_FAST` weights and two use `Q6_K`. Every record has
+`contiguous=1`, `contiguous_2=1`, `dim0_packed=1`, `range_valid=1`, and
+`finite=1`, with exactly the packed-F32 strides implied by its shape:
+
+| `src1` shape | physical q | stride tuple | records |
+|---|---:|---|---:|
+| `2560,4,1,1` | 4 | `4,10240,40960,40960` | 144 |
+| `6144,4,1,1` | 4 | `4,24576,98304,98304` | 36 |
+| `320,5,1,1` | 5 | `4,1280,6400,6400` | 291 |
+| `640,5,1,1` | 5 | `4,2560,12800,12800` | 144 |
+| `2560,5,1,1` | 5 | `4,10240,51200,51200` | 494 |
+| `10240,5,1,1` | 5 | `4,40960,204800,204800` | 579 |
+| `2560,16,1,1` | 16 | `4,10240,163840,163840` | 1 |
+
+Thirty-eight records report `view_src=1`: the 36 GDN `ssm_out` inputs are the
+zero-offset `ggml_reshape_2d` at `qwen4exp_frontier.cpp:1047`, and the other two
+are the final output projection input. All retain the same packed layout and
+valid finite capture. There is no live non-contiguous or strided-view candidate
+for a synthetic layout fixture.
+
+**The pre-registered conditioning hypothesis is also falsified.** Across all
+records, activation values span `-57.7115822` to `43.0398979`; dispatch absmax
+runs from `0.03125` to `57.7115822`. The production maximum is less than twice
+the exact oracle's `31.75` range, not the greater-than-100x outlier regime
+declared in msg 410. Source inspection independently closes two neighbouring
+stories: MMVQ and MMQ both quantize the same consecutive K32 blocks, and the
+widest shipped integer accumulation stays inside int32.
+
+The pre-registered stopping rule does **not** trigger yet because one of its
+premises was wrong: every existing operator-oracle fixture uses
+`Q4_0_ROCMI4`, while this inventory shows that type on zero live dense-MMQ
+dispatches and `Q4_0_ROCMFP4_FAST` on 1687. Layout and the declared value-domain
+hypothesis are closed, but dense MMQ arithmetic for the dispatched type has
+never been isolated. The sole remaining isolated probe is therefore a
+type-101 operator oracle. It must re-derive its exactness or tolerance budget
+from the ROCmFP4-fast codebook and single UE4M3 scale, include the dominant
+`K=10240` shape explicitly rather than substituting only smaller exact cases,
+and exercise physical width 5 as observed here. If that type-correct oracle is
+green, the stopping rule applies with its premise finally satisfied; the
+full-graph failure remains rejected by the adopted distributional gate either
+way.
+
+An earlier same-binary pair at
+`qwen-width4-src1-inventory-5ace0b9-20260831T015059Z` used the
+`lambda-0.25-band-10-42` ROCMI4 target by mistake. Its two arms are internally
+consistent, but its target byte accounting, weight type, q1 vectors, and logits
+do not match the historical Q3-PLE control. It is retained as ancillary
+evidence and must not be used for this comparison.
 
 #### ADOPTED CRITERION: total-variation distance at the serving temperature
 
