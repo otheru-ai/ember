@@ -51,6 +51,17 @@ struct Deepseek4PreparedImage {
     std::vector<float> embeddings;
 };
 
+struct Deepseek4ImageRows {
+    int n_llm_h = 0;
+    int n_llm_w = 0;
+    std::vector<float> embeddings;
+};
+
+struct Deepseek4PreparedRun {
+    int prompt_offset = 0;
+    Deepseek4PreparedImage image;
+};
+
 bool deepseek4_build_image_block(int32_t vocab_size, int n_llm_h, int n_llm_w,
                                  int start_pos, Deepseek4ImageBlock & out,
                                  std::string * error = nullptr);
@@ -69,6 +80,19 @@ bool deepseek4_prepare_image(int32_t vocab_size, int n_llm_h, int n_llm_w,
                              const Deepseek4ImageMarkers & markers,
                              Deepseek4PreparedImage & out,
                              std::string * error = nullptr);
+
+// Replace each exact tokenizer placeholder sequence in prompt order. The
+// actual expanded offset feeds the learned block's alignment padding, so a
+// second image cannot reuse the first image's pre-expansion position.
+bool deepseek4_expand_image_placeholders(
+    const std::vector<int32_t> & input_ids,
+    const std::vector<int32_t> & placeholder_ids,
+    int32_t vocab_size, int n_embd,
+    const std::vector<Deepseek4ImageRows> & images,
+    const Deepseek4ImageMarkers & markers,
+    std::vector<int32_t> & output_ids,
+    std::vector<Deepseek4PreparedRun> & runs,
+    std::string * error = nullptr);
 
 void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              int32_t vocab_size, int max_image_tokens,

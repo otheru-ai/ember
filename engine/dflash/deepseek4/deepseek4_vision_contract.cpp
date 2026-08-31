@@ -179,6 +179,87 @@ bool deepseek4_prepare_image(int32_t vocab_size, int n_llm_h, int n_llm_w,
     return true;
 }
 
+bool deepseek4_expand_image_placeholders(
+        const std::vector<int32_t> & input_ids,
+        const std::vector<int32_t> & placeholder_ids,
+        int32_t vocab_size, int n_embd,
+        const std::vector<Deepseek4ImageRows> & images,
+        const Deepseek4ImageMarkers & markers,
+        std::vector<int32_t> & output_ids,
+        std::vector<Deepseek4PreparedRun> & runs,
+        std::string * error) {
+    output_ids.clear();
+    runs.clear();
+    if (placeholder_ids.empty() || input_ids.size() >
+            static_cast<size_t>(INT_MAX)) {
+        set_error(error, "invalid DeepSeek4 image placeholder contract");
+        return false;
+    }
+    size_t cursor = 0;
+    for (const Deepseek4ImageRows & source : images) {
+        const auto found = std::search(
+            input_ids.begin() + static_cast<std::ptrdiff_t>(cursor),
+            input_ids.end(), placeholder_ids.begin(), placeholder_ids.end());
+        if (found == input_ids.end()) {
+            set_error(error, "rendered prompt has fewer image placeholders than images");
+            output_ids.clear();
+            runs.clear();
+            return false;
+        }
+        const size_t placeholder = static_cast<size_t>(
+            found - input_ids.begin());
+        output_ids.insert(output_ids.end(),
+                          input_ids.begin() + static_cast<std::ptrdiff_t>(cursor),
+                          found);
+        if (output_ids.size() > static_cast<size_t>(INT_MAX)) {
+            set_error(error, "expanded DeepSeek4 vision prompt is too large");
+            output_ids.clear();
+            runs.clear();
+            return false;
+        }
+        Deepseek4PreparedRun run;
+        run.prompt_offset = static_cast<int>(output_ids.size());
+        if (!deepseek4_prepare_image(
+                vocab_size, source.n_llm_h, source.n_llm_w,
+                run.prompt_offset, n_embd, source.embeddings, markers,
+                run.image, error)) {
+            output_ids.clear();
+            runs.clear();
+            return false;
+        }
+        if (run.image.block.token_ids.size() > static_cast<size_t>(INT_MAX) -
+                output_ids.size()) {
+            set_error(error, "expanded DeepSeek4 vision prompt is too large");
+            output_ids.clear();
+            runs.clear();
+            return false;
+        }
+        output_ids.insert(output_ids.end(), run.image.block.token_ids.begin(),
+                          run.image.block.token_ids.end());
+        runs.push_back(std::move(run));
+        cursor = placeholder + placeholder_ids.size();
+    }
+    const auto extra = std::search(
+        input_ids.begin() + static_cast<std::ptrdiff_t>(cursor),
+        input_ids.end(), placeholder_ids.begin(), placeholder_ids.end());
+    if (extra != input_ids.end()) {
+        set_error(error, "rendered prompt has more image placeholders than images");
+        output_ids.clear();
+        runs.clear();
+        return false;
+    }
+    output_ids.insert(output_ids.end(),
+                      input_ids.begin() + static_cast<std::ptrdiff_t>(cursor),
+                      input_ids.end());
+    if (output_ids.size() > static_cast<size_t>(INT_MAX)) {
+        set_error(error, "expanded DeepSeek4 vision prompt is too large");
+        output_ids.clear();
+        runs.clear();
+        return false;
+    }
+    return true;
+}
+
 void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              int32_t vocab_size, int max_image_tokens,
                              std::vector<int32_t> & left,

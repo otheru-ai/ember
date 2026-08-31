@@ -171,6 +171,73 @@ static void test_embedding_assembly() {
           "learned marker width mismatch fails closed");
 }
 
+static Deepseek4ImageRows image_rows(int h, int w, int n_embd, float base) {
+    Deepseek4ImageRows rows;
+    rows.n_llm_h = h;
+    rows.n_llm_w = w;
+    for (int row = 0; row < h * w; ++row) {
+        for (int column = 0; column < n_embd; ++column) {
+            rows.embeddings.push_back(
+                base + static_cast<float>(row * n_embd + column));
+        }
+    }
+    return rows;
+}
+
+static void test_placeholder_expansion() {
+    constexpr int32_t vocab = 2750;
+    constexpr int n_embd = 2;
+    Deepseek4ImageMarkers markers;
+    markers.start = {-1.0f, -2.0f};
+    markers.pad = {-3.0f, -4.0f};
+    markers.newline = {-5.0f, -6.0f};
+    markers.end = {-7.0f, -8.0f};
+    const std::vector<int32_t> placeholder = {700, 701};
+    const std::vector<int32_t> input = {10, 700, 701, 11, 12, 700, 701, 13};
+    const std::vector<Deepseek4ImageRows> images = {
+        image_rows(1, 2, n_embd, 10.0f),
+        image_rows(2, 1, n_embd, 20.0f),
+    };
+    std::vector<int32_t> output;
+    std::vector<Deepseek4PreparedRun> runs;
+    std::string error;
+    CHECK(deepseek4_expand_image_placeholders(
+              input, placeholder, vocab, n_embd, images, markers,
+              output, runs, &error),
+          "multiple tokenizer placeholders expand in request order");
+    CHECK(runs.size() == 2 && runs[0].prompt_offset == 1 &&
+              runs[1].prompt_offset ==
+                  3 + static_cast<int>(runs[0].image.block.token_ids.size()),
+          "each learned block uses its actual post-expansion prompt offset");
+    bool layout_valid = runs.size() == 2;
+    for (size_t i = 0; layout_valid && i < runs.size(); ++i) {
+        layout_valid = deepseek4_validate_image_block(
+            runs[i].image.block.token_ids, vocab, images[i].n_llm_h,
+            images[i].n_llm_w, runs[i].prompt_offset);
+        const auto start = output.begin() + runs[i].prompt_offset;
+        layout_valid = layout_valid && std::equal(
+            runs[i].image.block.token_ids.begin(),
+            runs[i].image.block.token_ids.end(), start);
+    }
+    CHECK(layout_valid,
+          "expanded token runs retain each image's learned N-layout");
+
+    CHECK(!deepseek4_expand_image_placeholders(
+              {10, 700, 701}, placeholder, vocab, n_embd, images, markers,
+              output, runs, &error) && output.empty() && runs.empty(),
+          "fewer placeholders than images fails without partial output");
+    CHECK(!deepseek4_expand_image_placeholders(
+              input, placeholder, vocab, n_embd,
+              {images.front()}, markers, output, runs, &error) &&
+              output.empty() && runs.empty(),
+          "extra placeholders fail without silently dropping an image slot");
+    CHECK(deepseek4_expand_image_placeholders(
+              {1, 2, 3}, placeholder, vocab, n_embd, {}, markers,
+              output, runs, &error) && output == std::vector<int32_t>({1, 2, 3}) &&
+              runs.empty(),
+          "text-only prompt expansion is inert");
+}
+
 static void test_trailing_alignment_pad() {
     constexpr int32_t vocab = 3000;
     Deepseek4ImageBlock block;
@@ -317,6 +384,7 @@ int main() {
     test_grid_sweep_against_scalar_reference();
     test_padding_and_mutations();
     test_embedding_assembly();
+    test_placeholder_expansion();
     test_trailing_alignment_pad();
     test_visibility_and_prefill_boundaries();
     test_image_aware_prefill_chunks();
