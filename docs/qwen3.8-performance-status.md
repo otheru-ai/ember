@@ -13,7 +13,8 @@ gfx1151 host).
 This file is 1100 lines and grows by measurement. The state as of
 2026-08-31, with pointers rather than repetition:
 
-**Correctness.** Two causes were found, one fixed, one awaiting a decision.
+**Correctness.** One cause was fixed; a second remains isolated to a narrow
+full-graph path under an adopted distributional gate.
 
 - `sum_rows` selected its reduction tree from the row count, so q1 and batched
   could not agree. **Fixed** (`9f1dc33`), twin in `mean.cu` fixed (`86a5ce1`),
@@ -21,12 +22,16 @@ This file is 1100 lines and grows by measurement. The state as of
   the shared DeepSeek path with an interleaved A/B that came back flat. Widths
   2, 3, 4 and 5 are now validator-green. → *Open correctness blocker — ROOT
   CAUSE FOUND*
-- Widths 6 and 17 remain red, and every width that fails contains physical-16
-  **MMQ** work while every width that passes stays on **MMVQ**. Five of five
-  follow that boundary. **Decided 2026-08-31**: prefill is judged by a margin
-  criterion rather than bit-identity, with MTP's q1 replay unchanged. Widths 6
-  and 17 are to be re-run under it. → *DECIDED: prefill uses a margin
-  criterion*
+- The original margin-only rule was falsified by a token-exact control whose
+  distribution was not preserved. **Adopted 2026-08-31** (`4cdf5c3`): prefill
+  acceptance additionally requires bounded total-variation distance, including
+  on the token-exact branch; MTP's q1 replay remains unchanged. Hardware
+  confirmation under the adopted gate is pending. On the first such run,
+  cross-check the reported TV against the retained offline implementation for
+  a comparable case before treating a discrepancy as new engine evidence.
+  The implementation takes the worse result at the configured default and at
+  T=1; that is conservative only while deployment sampling is bounded by T=1.
+  → *ADOPTED CRITERION: total-variation distance at the serving temperature*
 
 **Performance.** No publishable number exists yet, and none may be published
 while the above is open.
@@ -1123,12 +1128,15 @@ zero. The model-free exact oracle confirms that this mechanism is sound at
 every shipped partial K rather than merely avoiding a fault.
 
 The next discriminator is a complete inventory of every dense MMQ activation
-shape, stride tuple, contiguity result, and route in the controlled width-4
-full-model run. The earlier direct-strided optimization removed no dispatches,
-but that does not prove the failing nodes are contiguous. Add a synthetic view
-fixture only if the inventory identifies a live non-contiguous candidate.
+shape, stride tuple, contiguity result, route, and real activation range in the
+controlled width-4 full-model run. The earlier direct-strided optimization
+removed no dispatches, but that does not prove the failing nodes are contiguous.
+Add a synthetic view fixture only if the inventory identifies a live
+non-contiguous candidate. If layout matches the oracle, use the captured
+dynamic ranges to construct a value-domain fixture rather than reopening the
+already-controlled Qwen runtime branches.
 
-#### PROPOSED CRITERION: total-variation distance at the serving temperature
+#### ADOPTED CRITERION: total-variation distance at the serving temperature
 
 Computed by claude from the already-retained rows; no GPU. `TV` is the total
 variation distance between `softmax(q1/T)` and `softmax(production/T)`.
@@ -1168,9 +1176,12 @@ threshold should be checked at the highest temperature the deployment allows.
 **Cost: none.** The vectors are already captured by
 `EMBER_VALIDATION_LOGITS_DIR`, and this is arithmetic over them.
 
-**Status: proposed, not adopted.** Criterion B is the user's decision;
-`engine/dflash/common/prefill_validation.h` is codex's file and has not been
-touched.
+**Status: adopted and implemented at `4cdf5c3`.** Acceptance requires the TV
+bound on every captured row, including token-exact streams, and fails closed
+when a captured row cannot be evaluated. With no captured logits, the previous
+token-only behavior remains for non-capturing callers. The backend/report and
+release-evidence consumers must carry `accepted` plus the explicit TV verdict;
+checking `exact` instead would silently restore the criterion the user replaced.
 
 #### DECISIVE: a token-exact, validator-GREEN run with a destroyed logit distribution
 
@@ -1270,6 +1281,16 @@ it does **not** certify that the batched verifier computed the same logit
 function. The accepted result must not be described as kernel-precision noise.
 The isolated operator oracle above remains green only because its fixed
 fixtures omit the production activation/state context that triggers the defect.
+
+**Same-width source consequence.** The controlled run changes only
+`LUCE_MMVQ_MAX_NCOLS`. Its sole Qwen-side consumer is the plain quantized
+`ggml_cuda_mul_mat` selector; the other references configure the DeepSeek
+backend. Both arms therefore have identical Qwen routing, masking, state
+selection, graph bucket, and topology. Those cannot explain the controlled
+red result. Pair-fused gate/up MMQ is selected independently and is also
+identical between the arms. The residual is specifically the direct dense MMQ
+route with real in-graph activations: layout, production value domain, or a
+graph-arena/lifetime interaction.
 
 #### Historical confound: two mechanisms change at width 5→6
 
@@ -1380,13 +1401,15 @@ do not look like a kernel-precision difference.
 The standard deviations stay comparable on both sides (2.05-2.23), so this is
 not a scale or normalisation factor either; the structure itself differs.
 
-**Consequence for the MMVQ/MMQ hypothesis.** MMQ and MMVQ compute the same
+**Historical inference before the controlled width-4 result.** MMQ and MMVQ compute the same
 matmul over the same int8-quantized activations. Their disagreement should look
 like width 3's 0.059, not like r = 0.5. On this evidence the quantized-matmul
 family boundary is unlikely to be the *cause* of the width-6/17 divergence, even
 though it coincides exactly with the observed threshold. Something that also
 changes at that width — routing, masking, or state selection — is the better
-suspect. This is a lead from an offline measurement, not a proof.
+suspect. This was a lead from an offline measurement, not a proof. The later
+same-width control above supersedes the routing/masking/state-selection branch
+of that inference: those parts do not change between its arms.
 
 #### Cross-evaluation: how each side scores the other's winner
 
@@ -1576,7 +1599,7 @@ the f32 precision wall). So:
   replaces — 1.86e-3 vs 2.75e-3 — on the CPU backend alone, before the fp64
   theta the HIP kernel adds.
 
-## DECIDED: prefill uses a margin criterion, not bit-identity
+## SUPERSEDED DECISION: margin-only prefill criterion
 
 **User decision, 2026-08-31.** Option B of the three put to them. Recorded here
 because it is a release criterion and belongs to the user, not to any agent;
@@ -1625,8 +1648,10 @@ decision was framed to avoid. It is derivable rather than invented: measure
 whatever perturbation they carry is the real floor for this model on this
 hardware.
 
-**This is back with the user**, who decided the criterion partly on the
-assurance that it would still have caught `sum_rows`. That assurance was false.
+**Resolution 2026-08-31:** the user directed the distributional fix recorded
+in the adopted TV section above. The margin clause remains necessary for a
+token flip, but it is no longer sufficient: every captured row must also pass
+the TV bound, including token-exact rows. Implemented at `4cdf5c3`.
 
 Separately, a rewrite I proposed — compare the margin against
 `|delta(expected)| + |delta(actual)|` — was refuted by codex and must not be
