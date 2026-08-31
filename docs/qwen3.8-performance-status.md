@@ -1075,6 +1075,39 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
+#### Cross-evaluation: how each side scores the other's winner
+
+Requested in msg 380 and computed offline from the same retained default-build
+vectors (claude, no GPU). When the argmax changes, the margins above do not say
+whether the two sides are near-tied and flipping on noise or one is confidently
+wrong. Scoring each side's winner under *both* distributions does.
+
+| w | row | q1 argmax | prod argmax | q1's lead over prod's pick | prod's lead over q1's pick |
+|---:|---:|---:|---:|---:|---:|
+| 6 | 0 | 17962 | 87 | 0.786 | **8.926** |
+| 6 | 1 | 11966 | 830 | 1.298 | **6.192** |
+| 17 | 0 | 23295 | 87 | 0.271 | **9.351** |
+| 17 | 1 | 11966 | 830 | 1.165 | **6.221** |
+
+The asymmetry is consistent and large, and it is the same on every divergent
+row: **q1 is nearly tied between the two candidates (0.27-1.30) while production
+prefers its own winner by 6.2-9.4.** Production's winner is, in every case,
+q1's close runner-up.
+
+Two further observations, offered as leads rather than conclusions:
+
+- Production's winners are **87 and 830** on all four divergent rows, across two
+  different widths and two different prompts — and 830 is also the argmax that
+  both paths agree on at widths 2 and 3. q1's winners are varied and
+  prompt-specific (17962, 11966, 23295).
+- Symmetric numerical noise would produce symmetric near-ties. A one-sided
+  6-9 logit lead is not a tie-break; something is amplifying one candidate.
+
+This does **not** identify which side is correct — that still requires the
+operator oracle. But it narrows what to look for: not a diffuse precision
+difference, rather a mechanism that inflates a small set of high-prior tokens as
+batch width grows.
+
 The unrestricted statistic is rank-blind: at width 3 its maximum sits deep in
 the tail while the top-ranked logits barely move. That caveat does not rescue
 widths 6 and 17: their q1 argmax changes, and the q1 top-ranked token itself
