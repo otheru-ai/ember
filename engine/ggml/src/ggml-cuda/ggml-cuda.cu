@@ -72,6 +72,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <cmath>
 #include <cinttypes>
 #include <condition_variable>
 #include <cstddef>
@@ -102,6 +103,112 @@ static bool ggml_cuda_rocmi4_dispatch_evidence_enabled() {
         return value != nullptr && std::strcmp(value, "1") == 0;
     }();
     return enabled;
+}
+
+static bool ggml_cuda_mmq_src1_inventory_enabled() {
+    static const bool enabled = [] {
+        const char * value = std::getenv("DFLASH_MMQ_SRC1_INVENTORY");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+struct ggml_cuda_mmq_src1_stats {
+    bool valid = false;
+    bool finite = true;
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+    float absmax = 0.0f;
+};
+
+static ggml_cuda_mmq_src1_stats ggml_cuda_capture_mmq_src1_stats(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src1) {
+    ggml_cuda_mmq_src1_stats stats;
+    if (!ggml_cuda_mmq_src1_inventory_enabled() || !src1 ||
+        src1->type != GGML_TYPE_F32 || !src1->data) {
+        return stats;
+    }
+    const size_t bytes = ggml_nbytes(src1);
+    if (bytes == 0) return stats;
+    std::vector<uint8_t> physical(bytes);
+    CUDA_CHECK(cudaMemcpyAsync(physical.data(), src1->data, bytes,
+                               cudaMemcpyDeviceToHost, ctx.stream()));
+    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+
+    float minimum = std::numeric_limits<float>::infinity();
+    float maximum = -std::numeric_limits<float>::infinity();
+    float absmax = 0.0f;
+    size_t finite_values = 0;
+    for (int64_t i3 = 0; i3 < src1->ne[3]; ++i3) {
+        for (int64_t i2 = 0; i2 < src1->ne[2]; ++i2) {
+            for (int64_t i1 = 0; i1 < src1->ne[1]; ++i1) {
+                for (int64_t i0 = 0; i0 < src1->ne[0]; ++i0) {
+                    const size_t offset =
+                        static_cast<size_t>(i0) * src1->nb[0] +
+                        static_cast<size_t>(i1) * src1->nb[1] +
+                        static_cast<size_t>(i2) * src1->nb[2] +
+                        static_cast<size_t>(i3) * src1->nb[3];
+                    float value = 0.0f;
+                    std::memcpy(&value, physical.data() + offset,
+                                sizeof(value));
+                    if (!std::isfinite(value)) {
+                        stats.finite = false;
+                        continue;
+                    }
+                    minimum = std::min(minimum, value);
+                    maximum = std::max(maximum, value);
+                    absmax = std::max(absmax, std::fabs(value));
+                    ++finite_values;
+                }
+            }
+        }
+    }
+    stats.valid = finite_values != 0;
+    if (stats.valid) {
+        stats.minimum = minimum;
+        stats.maximum = maximum;
+        stats.absmax = absmax;
+    }
+    return stats;
+}
+
+static void ggml_cuda_log_mmq_src1_inventory(
+        const ggml_tensor * weight, const ggml_tensor * src1,
+        const ggml_tensor * dst, const char * route, const char * site,
+        int64_t physical_q,
+        const ggml_cuda_mmq_src1_stats & stats) {
+    if (!ggml_cuda_mmq_src1_inventory_enabled() || !weight || !src1 || !dst) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[dflash-mmq-src1] event=dispatch path=mmq route=%s "
+                 "site=%s physical_q=%lld type=%s "
+                 "weight=%s dst=%s ne=%lld,%lld,%lld,%lld "
+                 "nb=%zu,%zu,%zu,%zu contiguous=%d contiguous_2=%d "
+                 "dim0_packed=%d view_src=%d range_valid=%d finite=%d "
+                 "src1_min=%.9g src1_max=%.9g src1_absmax=%.9g\n",
+                 route, site, (long long) physical_q,
+                 ggml_type_name(weight->type),
+                 weight->name, dst->name,
+                 (long long) src1->ne[0], (long long) src1->ne[1],
+                 (long long) src1->ne[2], (long long) src1->ne[3],
+                 src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3],
+                 ggml_is_contiguous(src1) ? 1 : 0,
+                 ggml_is_contiguous_2(src1) ? 1 : 0,
+                 src1->nb[0] == sizeof(float) ? 1 : 0,
+                 src1->view_src ? 1 : 0, stats.valid ? 1 : 0,
+                 stats.finite ? 1 : 0, static_cast<double>(stats.minimum),
+                 static_cast<double>(stats.maximum),
+                 static_cast<double>(stats.absmax));
+}
+
+static void ggml_cuda_log_mmq_src1_inventory(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * weight,
+        const ggml_tensor * src1, const ggml_tensor * dst, const char * site) {
+    if (!ggml_cuda_mmq_src1_inventory_enabled()) return;
+    ggml_cuda_log_mmq_src1_inventory(
+        weight, src1, dst, "dense", site, src1->ne[1],
+        ggml_cuda_capture_mmq_src1_stats(ctx, src1));
 }
 
 // Ember diagnostic divergence: FORCE_CUBLAS by itself still lets quantized
@@ -2582,6 +2689,13 @@ static bool ggml_cuda_try_fuse_mul_mat_glu(
         const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
         const int64_t ncols = ids ? src1->ne[2] : src1->ne[1];
         if (ggml_cuda_should_use_mmq(src0->type, cc, ncols, src0->ne[2])) {
+            const ggml_cuda_mmq_src1_stats stats =
+                ggml_cuda_capture_mmq_src1_stats(ctx, src1);
+            const char * route = ids ? "routed" : "dense";
+            ggml_cuda_log_mmq_src1_inventory(
+                up->src[0], src1, up, route, "pair_up", ncols, stats);
+            ggml_cuda_log_mmq_src1_inventory(
+                gate->src[0], src1, gate, route, "pair_gate", ncols, stats);
             ggml_cuda_mul_mat_q_pair(
                 ctx, up->src[0], gate->src[0], src1, ids, up, gate);
             ggml_cuda_op_swiglu_ds4(ctx, glu);
@@ -2683,6 +2797,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         GGML_ASSERT(use_mul_mat_q);
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_mmq_src1_inventory(ctx, src0, src1, dst, "direct");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
@@ -2697,6 +2812,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     } else if (!split && use_mul_mat_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_mmq_src1_inventory(ctx, src0, src1, dst, "direct");
         ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
     } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
@@ -2711,6 +2827,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     } else if (use_mul_mat_q) {
         ggml_cuda_log_rocmi4_route(src0, dst, src1->ne[1], "dense", "mmq");
         ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "mmq");
+        ggml_cuda_log_mmq_src1_inventory(ctx, src0, src1, dst, "direct");
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
         ggml_cuda_log_f32_reference_route(src0, dst, src1->ne[1], "dense", "cublas_f32");

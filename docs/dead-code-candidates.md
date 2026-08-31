@@ -292,3 +292,37 @@ makes the path live and requires removing or narrowing this entry.
 **Recommendation: keep.** This is vendored ggml functionality and is correctly
 available to graphs that request it. Keep the shape-invariant reduction fix;
 do not delete the operator merely because today's shipped graphs do not use it.
+
+---
+
+## 7. MMQ grouped-source activation quantizer — dead for Qwen only
+
+**Scope:** model target / current source call graph. Vendored code. Live for
+DeepSeek4 batched prefill; dead for the shipped Qwen3.8-Flash-Next runtime.
+
+**Evidence.** `ggml_mul_mat_grouped_src` constructs the distinct
+`GGML_OP_MUL_MAT_GROUPED_SRC` operation at
+`engine/ggml/src/ggml.c:3365-3384`. Its only producer in the retained tree is
+`engine/dflash/deepseek4/deepseek4_graph.cpp:2361`, where DeepSeek's batched
+attention output keeps a physical grouped activation layout. There is no call
+under `engine/dflash/qwen4exp/` or `src/`.
+
+On HIP, the op sets `grouped_src` at
+`engine/ggml/src/ggml-cuda/mmq.cu:228-230` and selects
+`quantize_mmq_q8_1_grouped_cuda` at `:249-255`. Ordinary Qwen MMQ therefore
+cannot reach that grouped-only quantizer; it uses the plain strided
+`quantize_mmq_q8_1_cuda` path whose remaining layout inputs are the activation
+stride tuple and contiguity.
+
+**Consequence for measurement.** Do not include the grouped activation
+quantizer in Qwen dispatch accounting or treat it as a possible explanation
+for Qwen's q1-versus-batched divergence. It remains live in DeepSeek and must
+stay in any shared-engine accounting for that model.
+
+**Falsifier.** A new Qwen graph call to `ggml_mul_mat_grouped_src`, or runtime
+telemetry showing `GGML_OP_MUL_MAT_GROUPED_SRC` in a Qwen request, makes the
+path live for that model and requires narrowing or removing this entry.
+
+**Recommendation: keep.** This is a measured DeepSeek prefill optimization in
+shared vendored code. Preserve the gate, but keep Qwen investigation and
+performance counts on the ordinary strided MMQ path until the falsifier fires.

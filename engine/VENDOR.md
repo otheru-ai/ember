@@ -77,6 +77,15 @@ ROCMI4 MMQ dispatch evidence is also an Ember-owned diagnostic extension in
 labels the default q8_1 DP4A kernel as well as the optional W4A8 variants. The
 model-free row-tail oracle requires that inner marker so a selector fallback
 cannot produce a vacuous green result; preserve it across vendor refreshes.
+`DFLASH_MMQ_SRC1_INVENTORY=1` is the companion off-by-default full-model
+diagnostic: each dense MMQ dispatch records its activation dimensions, byte
+strides, contiguity/view predicates, weight identity, and selected MMQ route.
+This includes both ordinary dense dispatches and the pair-fused dense gate/up
+path; a routed pair is labeled separately if encountered. It is
+logging-only; when enabled it synchronously captures the stride-aware activation
+range so production dynamic range can be compared with the synthetic oracle.
+It exists to distinguish a live layout or value-domain difference from a
+fixture that the shipped graph never constructs.
 
 ## Pruned deployment scope
 
