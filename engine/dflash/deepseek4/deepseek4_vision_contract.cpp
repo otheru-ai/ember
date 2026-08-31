@@ -319,7 +319,7 @@ bool deepseek4_chunk_accepts_image_tokens(int start_pos,
 }
 
 bool deepseek4_is_vision_router_bias_suffix(const std::string & suffix) {
-    return suffix == "exp_probs_b_vl.bias";
+    return suffix == DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX;
 }
 
 bool deepseek4_optional_vision_bias_set_valid(int loaded, int layer_count) {

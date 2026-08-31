@@ -97,6 +97,8 @@ bool deepseek4_chunk_accepts_image_tokens(int start_pos,
 // The converter's exact per-layer tensor suffix. Vision bias weights are an
 // optional all-or-none set: zero keeps text-only checkpoints valid, while a
 // partial set would silently route some image rows with the text contract.
+inline constexpr char DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX[] =
+    "exp_probs_b_vl.bias";
 bool deepseek4_is_vision_router_bias_suffix(const std::string & suffix);
 bool deepseek4_optional_vision_bias_set_valid(int loaded, int layer_count);
 

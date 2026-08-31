@@ -42,12 +42,13 @@ bool parse_bias_name(const char * name, int & layer) {
 }
 
 bool has_vision_bias_leaf(const char * name) {
-    constexpr char leaf[] = ".exp_probs_b_vl.bias";
     if (!name) return false;
     const size_t name_len = std::strlen(name);
-    const size_t leaf_len = sizeof(leaf) - 1;
-    return name_len >= leaf_len &&
-           std::strcmp(name + name_len - leaf_len, leaf) == 0;
+    const size_t suffix_len =
+        sizeof(DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX) - 1;
+    return name_len > suffix_len && name[name_len - suffix_len - 1] == '.' &&
+           std::strcmp(name + name_len - suffix_len,
+                       DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX) == 0;
 }
 
 }  // namespace
