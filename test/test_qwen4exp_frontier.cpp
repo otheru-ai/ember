@@ -3,6 +3,7 @@
 #include "qwen4exp_mtp.h"
 
 #include "ggml-cpu.h"
+#include "ggml-cuda/gated_delta_net_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -933,6 +934,44 @@ static void test_sum_rows_shape_invariance() {
               "share the launch");
     }
     ggml_backend_free(backend);
+}
+
+static void test_gdn_gate_layout_contract() {
+    // Layout metadata is the complete input to this predicate; no backend
+    // allocation or tensor data is needed to exercise either gate form.
+    ggml_init_params params{};
+    params.mem_size = 64U * 1024U;
+    params.no_alloc = true;
+    ggml_context * ctx = ggml_init(params);
+    CHECK(ctx != nullptr, "GDN gate-layout metadata context initializes");
+    if (!ctx) return;
+
+    constexpr int64_t s_v = 128;
+    ggml_tensor * beta = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_F32, 1, 4, 3, 2);
+    ggml_tensor * scalar_g = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_F32, 1, 4, 3, 2);
+    ggml_tensor * kda_g = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_F32, s_v, 4, 3, 2);
+    ggml_tensor * wrong_outer = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_F32, s_v, 5, 3, 2);
+    ggml_tensor * wrong_scalar_stride = ggml_dup_tensor(ctx, scalar_g);
+    wrong_scalar_stride->nb[2] += sizeof(float);
+
+    CHECK(ggml_cuda_gated_delta_net_gate_layout_supported(
+              scalar_g, beta, s_v),
+          "GDN scalar gate accepts matching beta strides");
+    CHECK(ggml_cuda_gated_delta_net_gate_layout_supported(
+              kda_g, beta, s_v),
+          "GDN KDA gate accepts its intentional leading-stride difference");
+    CHECK(!ggml_cuda_gated_delta_net_gate_layout_supported(
+              wrong_outer, beta, s_v),
+          "GDN gate rejects mismatched outer dimensions");
+    CHECK(!ggml_cuda_gated_delta_net_gate_layout_supported(
+              wrong_scalar_stride, beta, s_v),
+          "GDN scalar gate rejects mismatched strides");
+
+    ggml_free(ctx);
 }
 
 // The external Q4_K checkpoint puts its expert matrices through MUL_MAT_ID.
@@ -2207,6 +2246,7 @@ int main() {
     test_persistent_hc_mixer();
     test_persistent_gdn_q1();
     test_sum_rows_shape_invariance();
+    test_gdn_gate_layout_contract();
     test_q4k_mul_mat_id_hip();
     test_gdn_recurrent_accumulation_order();
     test_gdn_batch_at_hip_legal_conv_channels();

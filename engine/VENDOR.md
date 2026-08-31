@@ -89,11 +89,12 @@ range so production dynamic range can be compared with the synthetic oracle.
 It exists to distinguish a live layout or value-domain difference from a
 fixture that the shipped graph never constructs.
 
-Ember pins the shape contract between `g` and `beta` in
-`ggml-cuda/gated_delta_net.cu`. Upstream indexes both from one offset built from
-beta's outer strides while asserting only that each is contiguous, which does
-not imply compatible shapes. The added assertions require equal outer
-dimensions and, for a scalar gate, equal strides. KDA gates are intentionally
+Ember pins the shape contract between `g` and `beta` with the host-testable
+predicate in `ggml-cuda/gated_delta_net_layout.h`, asserted by
+`gated_delta_net.cu` and covered in `test_qwen4exp_frontier`. Upstream indexes
+both from one offset built from beta's outer strides while asserting only that
+each is contiguous, which does not imply compatible shapes. The predicate
+requires equal outer dimensions and, for a scalar gate, equal strides. KDA gates are intentionally
 `[S_v, H, T, B]` rather than beta's `[1, H, T, B]`, so their strides differ and
 the kernel's existing `gb_offset * S_v` supplies the required rescaling. The
 Qwen GDN graph uses the scalar form and reshapes both tensors to

@@ -1,4 +1,5 @@
 #include "gated_delta_net.cuh"
+#include "gated_delta_net_layout.h"
 #include <cstdlib>
 
 __device__ __forceinline__ float gdn_subgroup_sum_lane0(float value, int width) {
@@ -510,7 +511,6 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
     GGML_ASSERT(ggml_is_contiguous_rows(src_k));
     GGML_ASSERT(ggml_is_contiguous_rows(src_v));
     GGML_ASSERT(ggml_are_same_stride(src_q, src_k));
-    GGML_ASSERT(src_g->ne[0] == 1 || kda);
     GGML_ASSERT(ggml_is_contiguous(src_g));
     GGML_ASSERT(ggml_is_contiguous(src_beta));
     GGML_ASSERT(ggml_is_contiguous(src_state));
@@ -520,10 +520,8 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
     // dimension 0 and therefore in stride; the kernel accounts for that with
     // `gb_offset * S_v`. The Qwen caller uses the scalar form and reshapes both
     // to [1, n_heads, n_tokens, 1] (`qwen4exp_frontier.cpp`, GDN graph build).
-    GGML_ASSERT(src_g->ne[1] == src_beta->ne[1]);
-    GGML_ASSERT(src_g->ne[2] == src_beta->ne[2]);
-    GGML_ASSERT(src_g->ne[3] == src_beta->ne[3]);
-    GGML_ASSERT(kda || ggml_are_same_stride(src_g, src_beta));
+    GGML_ASSERT(ggml_cuda_gated_delta_net_gate_layout_supported(
+        src_g, src_beta, S_v));
 
     // strides in floats (beta strides used for both g and beta offset computation)
     const int64_t sq1 = nbq1 / sizeof(float);

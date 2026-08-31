@@ -757,7 +757,7 @@ if(EMBER_ENGINE)
   # production dispatches through gfx1151 MMVQ/MMQ.
   add_executable(test_qwen4exp_frontier test/test_qwen4exp_frontier.cpp)
   target_include_directories(test_qwen4exp_frontier PRIVATE
-    engine/dflash/qwen4exp engine/ggml/include)
+    engine/dflash/qwen4exp engine/ggml/include engine/ggml/src)
   target_link_libraries(test_qwen4exp_frontier PRIVATE ember_engine)
   add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
   set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
