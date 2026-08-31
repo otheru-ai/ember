@@ -1075,6 +1075,42 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
+#### CONFOUND: two mechanisms change at width 5→6, and our own setting aligned them
+
+**No experiment run so far distinguishes them.** Recorded before the
+correlation and cross-evaluation tables below so neither is read as evidence
+for the matmul-family hypothesis.
+
+1. **Matmul family.** `LUCE_MMVQ_MAX_NCOLS=5` in every run
+   (`ggml-cuda.cu:2624-2632`): MMVQ at `ne[1] <= 5`, MMQ above. Boundary 5/6.
+   The documented **default is 3** — the 5 is our choice.
+2. **MoE graph bucket.** `qwen4exp_frontier_moe_cached_width`
+   (`qwen4exp_frontier.cpp:325-333`, constants `qwen4exp_frontier.h:115-116`):
+   width 1 → 1; widths 2-5 → 5; widths 6-16 → 16; width 17+ → 0.
+   Boundary **also** 5/6, with width 17 a third case again.
+
+| width | MoE bucket | matmul | result |
+|---|---|---|---|
+| 2 | 5 | MMVQ | green |
+| 3 | 5 | MMVQ | green (δ 0.058) |
+| 6 | **16** | **MMQ** | red |
+| 17 | **0** | **MMQ** | red |
+
+Both hypotheses predict this table exactly. The alignment is an artefact of
+setting `LUCE_MMVQ_MAX_NCOLS` to 5, which places the family boundary on top of
+the bucket boundary.
+
+**Discriminating run (one env var, no code):** width 4 or 5 with
+`LUCE_MMVQ_MAX_NCOLS=3`. That moves the family boundary to 3/4 while holding the
+MoE bucket at 5. Red ⇒ the matmul family is the cause; green ⇒ the family is
+exonerated at a width where it now differs, and the bucket is implicated.
+Widths 4 and 5 were previously green *as MMVQ*, so this is the single-variable
+version of that check.
+
+The correlation evidence below favours the bucket: width 3 also crosses a
+reduction shape and is also non-bit-identical, yet r = 0.99999, while widths
+6/17 fall to 0.54-0.67. A kernel swap should look like width 3.
+
 #### Correlation: widths 6/17 are not a perturbation of q1 at all
 
 Offline from the same retained default-build vectors (claude, no GPU). Pearson
