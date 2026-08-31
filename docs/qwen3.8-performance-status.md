@@ -1653,6 +1653,51 @@ we had tested.
 composition and a fresh-pool fixture cannot reproduce a graph's reused state.
 The pool tail is not the instance.
 
+## FIRST VALID QWEN MEASUREMENT — bare AR decode, depth 512 (`ecf6996`)
+
+Evidence: `bare-ar-exact-prefill-ecf6996-20260831T030532Z/depth-512/`. User
+authorised. **This is the first Qwen performance number in this document that
+is not superseded, and it is deliberately narrow.**
+
+| | value |
+|---|---|
+| decode tok/s, 64 tokens | **median 13.84** (13.615 / 13.844 / 14.019, sd 0.203) |
+| depth | 512 (prompt 508-512 tokens) |
+| speculation | **none** — bare autoregressive |
+| prefill | forced q1 (`EMBER_FORCE_EXACT_PREFILL=1`) |
+| dense MMQ dispatches | **zero** — `inventory_event_count: 0` with
+  `DFLASH_MMQ_SRC1_INVENTORY=1` confirmed staged in `server-environment.json` |
+
+**Why it is trustworthy.** The whole run stayed on the validator-accepted path:
+q1 prefill and width-1 decode, with the dense-MMQ inventory empty *because no
+MMQ ran*, not because telemetry was off — the env is recorded in the staged
+environment. An empty MMQ log is the pass condition here, not a missing check.
+
+**What it is not.** Not the product configuration: Ember ships speculative
+decode, which is blocked above width 3 by the open blocker, so the shipped
+decode path still cannot be measured. Treat this as a **floor**.
+
+### Against the adopted bar
+
+`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-GGUF`, same model, same
+silicon, publishes **27.77 t/s no-MTP at depth 512**.
+
+| | ours | theirs (no-MTP) | ratio |
+|---|---:|---:|---:|
+| decode @ 512 | **13.84** | 27.77 | **0.50x** |
+
+**We are at half their bare-decode rate on the like-for-like cell.** That is a
+real gap, measured rather than inferred, and it is the first number in this
+document that can be compared to the goal at all.
+
+Caveats that keep it honest: theirs is a Vulkan engine and the comparison is
+engine-to-engine, not kernel-to-kernel; their figure carries their own power
+profile and ours is recorded separately; and a single depth is not a curve —
+their decode falls only ~29% from 512 to 128k, and ours is unmeasured at depth.
+
+**Depth 2048 is not yet measured** — that cell stopped on warmup length and is
+being re-run. `27.36` is their matching figure when it lands.
+
 ## PREFILL LEAD: the GDN transpose-then-concat, sized (claude, source + GGUF, no GPU)
 
 Filed against the raised goal. **Not measured on hardware** — this is an
