@@ -30,8 +30,13 @@ struct EmberLayerCaptureBundle {
     int checkpoint_width = 0;
     std::vector<float> checkpoint;
     std::string retained_logits_sha256;
+    std::string retained_bundle_path;
     bool capture_logits_identical = false;
 };
+
+bool ember_read_logits_authority_bundle(
+    const std::string &directory, const std::string &expected_model_sha256,
+    std::string &payload_sha256, std::string &error);
 
 bool ember_parse_logits_probe_token(const char *text, int32_t &token,
                                     std::string &error);

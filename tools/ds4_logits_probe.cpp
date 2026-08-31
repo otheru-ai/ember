@@ -102,8 +102,10 @@ bool current_executable(std::string &path, std::string &error) {
 void usage(const char *program) {
     std::fprintf(stderr,
         "usage: %s {exact-q1|exact-q4|dense-q8|layer0-q1} MODEL.gguf "
-        "/absolute/output-dir TOKEN_ID [TOKEN_ID ...]\n",
-        program);
+        "/absolute/output-dir TOKEN_ID [TOKEN_ID ...]\n"
+        "       %s layer0-q1 MODEL.gguf /absolute/output-dir "
+        "/absolute/retained-q1-bundle TOKEN_ID [TOKEN_ID ...]\n",
+        program, program);
 }
 
 bool reject_numeric_environment(std::string &error) {
@@ -146,6 +148,15 @@ int main(int argc, char **argv) {
     }
     const std::string model_path = argv[2];
     const std::string output_directory = argv[3];
+    const int token_start = mode.layer0_capture ? 5 : 4;
+    const char *retained_bundle_path =
+        mode.layer0_capture ? argv[4] : nullptr;
+    if (mode.layer0_capture &&
+        (argc < 7 || !retained_bundle_path || retained_bundle_path[0] != '/')) {
+        std::fprintf(stderr,
+                     "layer0-q1 requires an absolute retained q1 bundle path\n");
+        return 2;
+    }
     if (model_path.empty() || model_path[0] != '/') {
         std::fprintf(stderr, "model path must be absolute\n");
         return 2;
@@ -157,8 +168,8 @@ int main(int argc, char **argv) {
     }
 
     std::vector<int32_t> token_ids;
-    token_ids.reserve(static_cast<size_t>(argc - 4));
-    for (int i = 4; i < argc; ++i) {
+    token_ids.reserve(static_cast<size_t>(argc - token_start));
+    for (int i = token_start; i < argc; ++i) {
         int32_t token = -1;
         if (!ember_parse_logits_probe_token(argv[i], token, error)) {
             std::fprintf(stderr, "%s\n", error.c_str());
@@ -185,6 +196,13 @@ int main(int argc, char **argv) {
     }
     std::string model_digest;
     if (!ember_sha256_regular_file(model_path, model_digest, error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return 1;
+    }
+    std::string retained_q1_payload_sha256;
+    if (mode.layer0_capture && !ember_read_logits_authority_bundle(
+            retained_bundle_path, model_digest,
+            retained_q1_payload_sha256, error)) {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
     }
@@ -223,8 +241,6 @@ int main(int argc, char **argv) {
     int effective_prefill_chunk = 0;
     std::vector<float> layer0_mean_hc;
     bool capture_logits_identical = false;
-    static constexpr const char *retained_q1_payload_sha256 =
-        "5bc73b8471fd408f322ab95d373a5f57ba4ca6b0fc32d6d9a7747a117990e965";
     if (mode.layer0_capture) {
         std::vector<float> ordinary_logits;
         int ordinary_chunk = 0;
@@ -303,6 +319,7 @@ int main(int argc, char **argv) {
             static_cast<int>(layer0_mean_hc.size());
         capture_bundle.checkpoint = std::move(layer0_mean_hc);
         capture_bundle.retained_logits_sha256 = retained_q1_payload_sha256;
+        capture_bundle.retained_bundle_path = retained_bundle_path;
         capture_bundle.capture_logits_identical = capture_logits_identical;
         if (!ember_write_layer_capture_bundle(
                 output_directory, capture_bundle, error)) {

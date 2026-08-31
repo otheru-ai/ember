@@ -277,7 +277,43 @@ bool valid_capture_contract(const EmberLayerCaptureBundle &bundle) {
            bundle.checkpoint.size() ==
                static_cast<size_t>(bundle.checkpoint_width) &&
            valid_lower_hex(bundle.retained_logits_sha256, 64U) &&
+           !bundle.retained_bundle_path.empty() &&
+           bundle.retained_bundle_path[0] == '/' &&
            bundle.capture_logits_identical;
+}
+
+bool read_small_regular_file(const std::string &path, std::string &text) {
+    text.clear();
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct stat status {};
+    if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
+        status.st_size <= 0 || status.st_size > 65536) {
+        close(fd);
+        return false;
+    }
+    text.resize(static_cast<size_t>(status.st_size));
+    size_t done = 0;
+    while (done < text.size()) {
+        const ssize_t count = read(fd, text.data() + done, text.size() - done);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { close(fd); text.clear(); return false; }
+        done += static_cast<size_t>(count);
+    }
+    return close(fd) == 0;
+}
+
+bool extract_unique_hex_field(const std::string &json, const char *key,
+                              std::string &value) {
+    const std::string prefix = "\"" + std::string(key) + "\":\"";
+    const size_t first = json.find(prefix);
+    if (first == std::string::npos ||
+        json.find(prefix, first + prefix.size()) != std::string::npos) return false;
+    const size_t begin = first + prefix.size();
+    const size_t end = json.find('"', begin);
+    if (end == std::string::npos) return false;
+    value = json.substr(begin, end - begin);
+    return valid_lower_hex(value, 64U);
 }
 
 }  // namespace
@@ -340,6 +376,52 @@ bool ember_sha256_regular_file(const std::string &path, std::string &digest,
         error = "SHA-256 input is too large";
         return false;
     }
+    return true;
+}
+
+bool ember_read_logits_authority_bundle(
+        const std::string &directory,
+        const std::string &expected_model_sha256,
+        std::string &payload_sha256, std::string &error) {
+    payload_sha256.clear();
+    if (directory.empty() || directory[0] != '/' ||
+        !valid_lower_hex(expected_model_sha256, 64U)) {
+        error = "invalid retained authority bundle contract";
+        return false;
+    }
+    struct stat status {};
+    if (lstat(directory.c_str(), &status) != 0 || !S_ISDIR(status.st_mode)) {
+        error = "retained authority path is not a directory";
+        return false;
+    }
+    std::string manifest;
+    if (!read_small_regular_file(directory + "/manifest.json", manifest) ||
+        manifest.find("\"schema\":\"ember-ds4-logits-v1\"") ==
+            std::string::npos) {
+        error = "retained authority manifest is missing or malformed";
+        return false;
+    }
+    std::string manifest_payload;
+    std::string manifest_model;
+    if (!extract_unique_hex_field(
+            manifest, "payload_sha256", manifest_payload) ||
+        !extract_unique_hex_field(
+            manifest, "model_sha256", manifest_model)) {
+        error = "retained authority manifest identity is ambiguous";
+        return false;
+    }
+    if (manifest_model != expected_model_sha256) {
+        error = "retained authority model differs from capture model";
+        return false;
+    }
+    std::string actual_payload;
+    if (!ember_sha256_regular_file(
+            directory + "/logits.f32", actual_payload, error)) return false;
+    if (actual_payload != manifest_payload) {
+        error = "retained authority payload differs from its manifest";
+        return false;
+    }
+    payload_sha256 = actual_payload;
     return true;
 }
 
@@ -510,6 +592,8 @@ bool ember_write_layer_capture_bundle(const std::string &directory,
              << ",\"payload_sha256\":" << json_string(logits_digest)
              << ",\"retained_authority_payload_sha256\":"
              << json_string(bundle.retained_logits_sha256)
+             << ",\"retained_authority_bundle\":"
+             << json_string(bundle.retained_bundle_path)
              << ",\"capture_logits_identical\":true"
              << ",\"checkpoint_name\":" << json_string(bundle.checkpoint_name)
              << ",\"checkpoint_semantics\":\"mean_hc_after_layer_ffn\""

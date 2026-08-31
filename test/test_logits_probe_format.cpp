@@ -118,6 +118,17 @@ int main() {
     CHECK(!ember_write_logits_probe_bundle(output_dir, bundle, error),
           "existing evidence directory fails closed");
 
+    std::string authority_digest;
+    CHECK(ember_read_logits_authority_bundle(
+              output_dir, bundle.model_sha256, authority_digest, error) &&
+              authority_digest ==
+                  "6be7a0225e3fc2f6ad1f1f1827362d7a7d849414c3f116b6d7667f4ff671083e",
+          "retained authority recomputes and binds its payload");
+    CHECK(!ember_read_logits_authority_bundle(
+              output_dir, std::string(64U, '9'), authority_digest, error) &&
+              error.find("model differs") != std::string::npos,
+          "retained authority rejects a different capture model");
+
     std::string retained_digest;
     CHECK(ember_logits_payload_sha256(
               bundle.logits, retained_digest, error),
@@ -134,6 +145,7 @@ int main() {
     capture.checkpoint_width = 3;
     capture.checkpoint = {0.5F, -0.25F, 2.0F};
     capture.retained_logits_sha256 = retained_digest;
+    capture.retained_bundle_path = output_dir;
     capture.capture_logits_identical = true;
     const std::string capture_dir = std::string(root) + "/capture";
     CHECK(ember_write_layer_capture_bundle(capture_dir, capture, error),
@@ -154,6 +166,10 @@ int main() {
               "\"retained_authority_payload_sha256\":\"" +
               retained_digest + "\"") != std::string::npos,
           "capture manifest binds retained authority");
+    CHECK(capture_manifest.find(
+              "\"retained_authority_bundle\":\"" + output_dir + "\"") !=
+              std::string::npos,
+          "capture manifest binds retained authority directory");
     CHECK(capture_manifest.find(
               "\"capture_logits_identical\":true") !=
               std::string::npos,
@@ -191,6 +207,35 @@ int main() {
     CHECK(stat(nan_dir.c_str(), &status) != 0,
           "invalid payload creates no directory");
 
+    CHECK(!ember_read_logits_authority_bundle(
+              std::string(root) + "/missing", bundle.model_sha256,
+              authority_digest, error),
+          "missing retained authority directory rejected");
+    const std::string malformed_dir = std::string(root) + "/malformed";
+    CHECK(mkdir(malformed_dir.c_str(), S_IRWXU) == 0,
+          "create malformed authority directory");
+    const int malformed_fd = open(
+        (malformed_dir + "/manifest.json").c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, S_IRUSR | S_IWUSR);
+    CHECK(malformed_fd >= 0 && write(malformed_fd, "{}\n", 3U) == 3 &&
+              close(malformed_fd) == 0,
+          "write malformed authority manifest");
+    CHECK(!ember_read_logits_authority_bundle(
+              malformed_dir, bundle.model_sha256,
+              authority_digest, error) &&
+              error.find("malformed") != std::string::npos,
+          "malformed retained authority manifest rejected");
+    const int tamper_fd = open((output_dir + "/logits.f32").c_str(),
+                               O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    const unsigned char tamper = 0xffU;
+    CHECK(tamper_fd >= 0 && pwrite(tamper_fd, &tamper, 1U, 0) == 1 &&
+              close(tamper_fd) == 0,
+          "tamper retained authority payload");
+    CHECK(!ember_read_logits_authority_bundle(
+              output_dir, bundle.model_sha256, authority_digest, error) &&
+              error.find("differs from its manifest") != std::string::npos,
+          "retained authority rejects a payload digest mismatch");
+
     (void)unlink((output_dir + "/manifest.json").c_str());
     (void)unlink((output_dir + "/logits.f32").c_str());
     (void)rmdir(output_dir.c_str());
@@ -198,6 +243,8 @@ int main() {
     (void)unlink((capture_dir + "/layer0-mean-hc.f32").c_str());
     (void)unlink((capture_dir + "/logits.f32").c_str());
     (void)rmdir(capture_dir.c_str());
+    (void)unlink((malformed_dir + "/manifest.json").c_str());
+    (void)rmdir(malformed_dir.c_str());
     (void)unlink(abc_path.c_str());
     (void)rmdir(root);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
