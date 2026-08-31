@@ -134,6 +134,29 @@ So, before anyone proposes an optimization:
 Cheap analysis on retained evidence beats a GPU run. Three of the four
 refutations above came from CSVs already on the runner, at no hardware cost.
 
+## Structural claims need a command, not a reading
+
+Three times in one session I reported a **structural** property as verified
+when I had only looked at it: what `git add -A` would stage, what `git add
+<path>` would stage in a shared tree, and whether new struct members were
+appended or inserted. Each was a property with an exact answer available from a
+command, and each time reading the diff felt like checking.
+
+A diff hunk shows *what* changed, not *where it landed*. For layout, ownership,
+and staging, where it landed is the whole question.
+
+| claim | the command that answers it |
+|---|---|
+| "these fields are appended" | `diff <(git show BASE:h \| grep -oE '^\s+\w+ \w+') <(...)` on the member sequence, or `offsetof` |
+| "I am only staging my own work" | `git status --porcelain` **before** `git add`, every time |
+| "this build is mine" | `ls -l` the binary; `root`-owned means the container, which means codex |
+| "this guard catches X" | construct X, compile it, confirm the guard fires |
+
+That last row is the general one, and it has caught more than the others: the
+dispatch proof, the F32 reference, and the first ABI guard all passed for
+reasons unrelated to what they claimed. **Ask whether a check can fail for the
+reason it names — not whether it passes.**
+
 ## Never report another agent's build as your own
 
 There is no HIP toolchain on the claude host: `EMBER_ENGINE=ON` cannot even

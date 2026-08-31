@@ -13,7 +13,20 @@ continue.
 
 ---
 
-1. Review waterline. **Now `8c67086`** [advanced 20260831T084500Z]. `8c67086`
+1. Review waterline. **Now `9370fc4`** [advanced 20260831T125500Z]. Verified at
+   the exact commit with a clean tree: container engine suite **95/95**, host
+   suite **90/90**, zero errors. Covers every codex commit since `8c67086` —
+   the F32 reference capture (`8815442`), the three ROCMI4 operator oracles
+   (`5b8e368`, `b4fb6fe`, `5bfc135`), the TV gate integration (`6d078e8`), the
+   MMQ activation inventory (`3cf3310`), and the ABI guard (`5ace0b9`).
+
+   Of those, two were *my* review errors that codex caught and corrected: I
+   called a mid-struct insertion an append (`469`), and I proposed an ABI pin
+   that would not have caught a padding-absorbed insertion (`472`). Both are
+   now compile errors rather than review judgement. See LOOP.md's rule on
+   structural claims.
+
+   Prior waterline `8c67086` [advanced 20260831T084500Z]. `8c67086`
    (`fix(engine): mirror QSA norms in F32`) verified at the commit, not the
    pre-commit tree: working tree clean, container full engine suite **94/94**,
    0 warnings. It fixes the hardware red I caused — the tranche 1 spec passed
