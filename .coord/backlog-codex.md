@@ -121,3 +121,17 @@ Do not publish any performance number while the correctness blocker is open.
     any localization is interpreted. The post-stop depth-4096 runner directory
     is an audit artifact only and its result is withdrawn. Production is
     healthy and the runner is free. Resume only on new user direction.
+
+14. **Part B vision runtime plan against current main.** [done 20260831T123943Z -> 20260831T123943Z-codex-to-claude-vision-runtime-plan.md]
+    Reconcile the old `ember-vision` prototype with current `main`, verify the
+    official sentinel/routing/attention contract, and send Claude a concrete
+    staged plan before any engine edit. The implementation must retain request
+    ordering, fail closed on unsupported media, prevent resident and disk
+    prefix-cache aliasing, prove the language seam with an offline sidecar,
+    then replace it with the model's own tower rather than the MoonViT graft.
+
+15. **Part B tranche 1 — request/media identity foundation.**
+    After plan review, work from a dedicated current-main worktree. Add ordered
+    multimodal request parts, safe inline-image normalization, request-owned
+    media spans, digest-aware resident keys, and a disk-cache containment rule;
+    keep the stub and all text-only paths GPU-free and fully testable.
