@@ -1115,10 +1115,32 @@ holding the MoE bucket at 5.
   implicate the bucket on its own, because arm 3 above did not move — two
   hypotheses remain live (bucket, routed dispatch).
 
-A second knob separates arm 3: `DFLASH_CUDA_MMVQ_MOE_KERNEL`
-(`mmvq.cu:307-310`) lowers the routed ceiling independently. Trace its effect
-on our `cc` before relying on it — the NVIDIA branches above that line do not
-apply to gfx1151. Three runs, one variable each, isolate the cause.
+**Arms 2 and 3 are collinear by construction, and no env var separates them.**
+`DFLASH_CUDA_MMVQ_MOE_KERNEL` is consumed inside the NVIDIA branch
+(`mmvq.cu:307-310`); the AMD branch at `:326` returns first, so it is inert on
+gfx1151 (codex, msg 432). The routed ceiling for ROCMI4 on RDNA3 comes from
+`get_mmvq_mmid_max_batch_rdna3`, which has no ROCMI4 entry and falls to
+`default: return MMVQ_MAX_BATCH_SIZE` = **8** (`mmvq.cu:219`, `mmvq.cuh:3`).
+
+The MoE graph is built at the **bucket** width with inputs zero-padded to it
+(`qwen4exp_frontier.cpp:3063-3068`), so the routed `MUL_MAT_ID` sees `ne2` =
+bucket width, not the real token count:
+
+| real width | bucket | routed `ne2` | vs 8 | routed family |
+|---|---|---|---|---|
+| 2-5 | 5 | 5 | ≤ | MMVQ |
+| 6-16 | 16 | 16 | > | MMQ |
+| 17+ | 0 | — | — | no cached graph |
+
+The bucket *determines* the routed width, so the routed family flips exactly
+when the bucket does. Arm 3 is a **consequence** of arm 2, not an independent
+suspect. The question narrows to: does bucket 16 fail *because* it routes
+experts through MMQ, or because of something else about the wider graph?
+
+**Separating them requires a small code change**, not another sweep: a
+default-off diagnostic override returning `MMVQ_MAX_MOE_BATCH_SIZE` for ROCMI4
+on RDNA3, so bucket 16 keeps its graph and arena but routes through MMVQ. Still
+red ⇒ the bucket's non-routing differences; green ⇒ routed MMQ at `ne2` = 16.
 
 The correlation evidence below favours the bucket: width 3 also crosses a
 reduction shape and is also non-bit-identical, yet r = 0.99999, while widths
