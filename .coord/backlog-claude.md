@@ -295,3 +295,48 @@ results were valid and are recorded. Production healthy, tree clean, all pushed.
     but has no direct device analogue for that trick. Complementary to tranches
     1-3, which attack the ~55.6 ms fixed term. Not designed; not proposed.
 
+
+---
+
+## Vision goal (2026-08-31). A = mine, B = codex, C = shared.
+
+19. [done 20260831T121101Z -> msg 509, otheru-quant-pipeline@16127ed]
+    **A: pipeline converter for DeepSeek-V4-Flash-Vision-Exp.** Port script,
+    model class, recipe, `MMPROJ=1` convert pass, `docs/VISION.md`, README.
+    Proven on a 2-layer fixture with real shapes against a disposable copy of
+    the converter tree; gate|up split bit-exact with a swapped-halves control.
+
+20. [partial 20260831T122000Z -> msg 511: mmproj DONE on real weights; 175G freed, FP8 download running]
+    **A: run the real conversion.** Everything above is fixture-proven only.
+    The 48-shard model is ~168 GB of FP8 and is NOT on either box yet, so this
+    starts with `00-download.sh` and needs disk checked first (`/srv/models` was
+    near full; the 0731 run put its BF16 intermediate on `/home`). Two passes:
+    language GGUF, then `MMPROJ=1`. The mmproj pass is small and independent —
+    do it FIRST, because it exercises all the new code and costs ~1 GB, whereas
+    the language pass is hours and exercises none of it.
+    Falsifier for "the converter works": the mmproj GGUF has exactly 267 - 32 +
+    64 = 299 tensors (32 fused w1 removed, 64 gate/up added), and `v.blk.31.*`
+    exists. Anything else means the layer count or the split is wrong.
+
+21. **C: build the benchmark harness before there is anything to benchmark.**
+    C is "meets or exceeds production 0731 affine, 85.6 GiB / 2.59 BPW", on
+    quality AND throughput. Neither has a defined measurement for a vision
+    model yet, and the Qwen work is the standing lesson that inventing the
+    criterion after seeing the numbers is how a release gate becomes a
+    rubber stamp. Decide and write down, BEFORE the first run:
+      - quality: text-only parity against 0731 on the existing set, plus an
+        image-grounded set that does not yet exist. The TV criterion in
+        `engine/dflash/common/prefill_validation.h` applies unchanged to the
+        text path; there is no equivalent for the image path.
+      - throughput: prefill and decode with an image in the prompt, and the
+        cost of the tower itself, reported separately. A tower running once per
+        request at 466 M params is a fixed cost that decode-only numbers hide.
+    Do not claim a comparison the harness cannot make: 0731 has no vision, so
+    only the text path is comparable at all. Say so in the ledger rather than
+    quietly benchmarking two different things.
+
+22. **Watch for the ordering trap on codex's side.** msg 509: the image token
+    stream is a two-row interleave with per-row newlines and 4-token padding,
+    not raster order. It is invisible from the GGUF and produces fluent wrong
+    answers. If codex's plan does not mention it, say so before the code lands,
+    not after.
