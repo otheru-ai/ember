@@ -115,6 +115,61 @@ static void test_padding_and_mutations() {
           "missing alignment pad mutation is rejected");
 }
 
+static void test_embedding_assembly() {
+    constexpr int32_t vocab = 2500;
+    constexpr int n_embd = 2;
+    std::vector<float> image_rows;
+    for (int row = 0; row < 6; ++row) {
+        image_rows.push_back(static_cast<float>(row));
+        image_rows.push_back(static_cast<float>(100 + row));
+    }
+    Deepseek4ImageMarkers markers;
+    markers.start = {-10.0f, -11.0f};
+    markers.pad = {-20.0f, -21.0f};
+    markers.newline = {-30.0f, -31.0f};
+    markers.end = {-40.0f, -41.0f};
+    Deepseek4PreparedImage prepared;
+    std::string error;
+    CHECK(deepseek4_prepare_image(vocab, 2, 3, 0, n_embd,
+                                  image_rows, markers, prepared, &error),
+          "row-major aligner output assembles with learned markers");
+    CHECK(prepared.block.image_perm ==
+              std::vector<int32_t>({0, 3, 1, 4, 2, 5}),
+          "prepared image retains the official N-layout permutation");
+    bool rows_match = prepared.embeddings.size() ==
+                      prepared.block.token_ids.size() * n_embd;
+    size_t image_slot = 0;
+    for (size_t row = 0; rows_match && row < prepared.block.token_ids.size(); ++row) {
+        const int32_t type = prepared.block.token_ids[row] - vocab;
+        const float * got = prepared.embeddings.data() + row * n_embd;
+        if (type == DEEPSEEK4_IMAGE) {
+            const int source = prepared.block.image_perm[image_slot++];
+            rows_match = got[0] == static_cast<float>(source) &&
+                         got[1] == static_cast<float>(100 + source);
+        } else {
+            const std::vector<float> * want = nullptr;
+            if (type == DEEPSEEK4_IMAGE_START) want = &markers.start;
+            if (type == DEEPSEEK4_IMAGE_PAD) want = &markers.pad;
+            if (type == DEEPSEEK4_IMAGE_NEWLINE) want = &markers.newline;
+            if (type == DEEPSEEK4_IMAGE_END) want = &markers.end;
+            rows_match = want && got[0] == (*want)[0] && got[1] == (*want)[1];
+        }
+    }
+    CHECK(rows_match && image_slot == 6,
+          "every prepared row comes from its exact marker or permuted IMAGE source");
+
+    std::vector<float> short_rows = image_rows;
+    short_rows.pop_back();
+    CHECK(!deepseek4_prepare_image(vocab, 2, 3, 0, n_embd,
+                                   short_rows, markers, prepared, &error),
+          "aligner row-count mismatch fails closed");
+    Deepseek4ImageMarkers missing_marker = markers;
+    missing_marker.newline.pop_back();
+    CHECK(!deepseek4_prepare_image(vocab, 2, 3, 0, n_embd,
+                                   image_rows, missing_marker, prepared, &error),
+          "learned marker width mismatch fails closed");
+}
+
 static void test_trailing_alignment_pad() {
     constexpr int32_t vocab = 3000;
     Deepseek4ImageBlock block;
@@ -192,6 +247,7 @@ int main() {
     test_two_row_n_layout();
     test_grid_sweep_against_scalar_reference();
     test_padding_and_mutations();
+    test_embedding_assembly();
     test_trailing_alignment_pad();
     test_visibility_and_prefill_boundaries();
     test_routing_modes();

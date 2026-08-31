@@ -34,6 +34,23 @@ struct Deepseek4ImageBlock {
     std::vector<int32_t> image_perm;
 };
 
+// The tower/aligner produces IMAGE rows only. The four other image token
+// types have learned vectors in the vision projector artifact. Keeping them
+// explicit here makes the offline sidecar and the eventual native tower feed
+// exactly the same language-side assembly path.
+struct Deepseek4ImageMarkers {
+    std::vector<float> start;
+    std::vector<float> pad;
+    std::vector<float> newline;
+    std::vector<float> end;
+};
+
+struct Deepseek4PreparedImage {
+    Deepseek4ImageBlock block;
+    // block.token_ids.size() rows, n_embd floats per row.
+    std::vector<float> embeddings;
+};
+
 bool deepseek4_build_image_block(int32_t vocab_size, int n_llm_h, int n_llm_w,
                                  int start_pos, Deepseek4ImageBlock & out,
                                  std::string * error = nullptr);
@@ -42,6 +59,16 @@ bool deepseek4_validate_image_block(const std::vector<int32_t> & token_ids,
                                     int32_t vocab_size, int n_llm_h,
                                     int n_llm_w, int start_pos,
                                     std::string * error = nullptr);
+
+// Assemble row-major aligner IMAGE rows and learned marker rows into the
+// official N-layout at the actual prompt position. image_embeddings contains
+// n_llm_h*n_llm_w rows and never carries learned marker vectors itself.
+bool deepseek4_prepare_image(int32_t vocab_size, int n_llm_h, int n_llm_w,
+                             int start_pos, int n_embd,
+                             const std::vector<float> & image_embeddings,
+                             const Deepseek4ImageMarkers & markers,
+                             Deepseek4PreparedImage & out,
+                             std::string * error = nullptr);
 
 void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              int32_t vocab_size, int max_image_tokens,

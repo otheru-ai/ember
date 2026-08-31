@@ -4,6 +4,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace dflash {
@@ -89,6 +90,92 @@ bool deepseek4_validate_image_block(const std::vector<int32_t> & token_ids,
         set_error(error, "image block does not match the learned N-layout");
         return false;
     }
+    return true;
+}
+
+bool deepseek4_prepare_image(int32_t vocab_size, int n_llm_h, int n_llm_w,
+                             int start_pos, int n_embd,
+                             const std::vector<float> & image_embeddings,
+                             const Deepseek4ImageMarkers & markers,
+                             Deepseek4PreparedImage & out,
+                             std::string * error) {
+    out = {};
+    if (n_embd <= 0) {
+        set_error(error, "invalid image embedding width");
+        return false;
+    }
+    Deepseek4ImageBlock block;
+    if (!deepseek4_build_image_block(vocab_size, n_llm_h, n_llm_w,
+                                     start_pos, block, error)) {
+        return false;
+    }
+    const size_t width = static_cast<size_t>(n_embd);
+    const size_t image_rows = block.image_perm.size();
+    if (image_rows > std::numeric_limits<size_t>::max() / width ||
+        image_embeddings.size() != image_rows * width) {
+        set_error(error, "aligner image rows do not match the required grid");
+        return false;
+    }
+    if (markers.start.size() != width || markers.pad.size() != width ||
+        markers.newline.size() != width || markers.end.size() != width) {
+        set_error(error, "learned image marker width mismatch");
+        return false;
+    }
+    if (block.token_ids.size() >
+        std::numeric_limits<size_t>::max() / width) {
+        set_error(error, "prepared image embedding matrix is too large");
+        return false;
+    }
+
+    out.embeddings.resize(block.token_ids.size() * width);
+    size_t image_slot = 0;
+    for (size_t row = 0; row < block.token_ids.size(); ++row) {
+        const int32_t type = block.token_ids[row] - vocab_size;
+        const float * source = nullptr;
+        switch (type) {
+            case DEEPSEEK4_IMAGE_START:
+                source = markers.start.data();
+                break;
+            case DEEPSEEK4_IMAGE_PAD:
+                source = markers.pad.data();
+                break;
+            case DEEPSEEK4_IMAGE: {
+                if (image_slot >= block.image_perm.size()) {
+                    set_error(error, "image permutation underflow");
+                    out = {};
+                    return false;
+                }
+                const int32_t source_row = block.image_perm[image_slot++];
+                if (source_row < 0 ||
+                    static_cast<size_t>(source_row) >= image_rows) {
+                    set_error(error, "image permutation is out of range");
+                    out = {};
+                    return false;
+                }
+                source = image_embeddings.data() +
+                         static_cast<size_t>(source_row) * width;
+                break;
+            }
+            case DEEPSEEK4_IMAGE_NEWLINE:
+                source = markers.newline.data();
+                break;
+            case DEEPSEEK4_IMAGE_END:
+                source = markers.end.data();
+                break;
+            default:
+                set_error(error, "unknown learned image token type");
+                out = {};
+                return false;
+        }
+        std::memcpy(out.embeddings.data() + row * width, source,
+                    width * sizeof(float));
+    }
+    if (image_slot != image_rows) {
+        set_error(error, "image permutation did not consume every aligner row");
+        out = {};
+        return false;
+    }
+    out.block = std::move(block);
     return true;
 }
 
