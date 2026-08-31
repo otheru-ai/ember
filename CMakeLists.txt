@@ -183,6 +183,12 @@ add_executable(test_ds4_vision_contract test/test_ds4_vision_contract.cpp
 target_include_directories(test_ds4_vision_contract PRIVATE engine)
 add_test(NAME ds4_vision_contract COMMAND test_ds4_vision_contract)
 
+add_executable(test_ds4_vision_artifact test/test_ds4_vision_artifact.cpp
+  engine/dflash/deepseek4/deepseek4_vision_artifact.cpp
+  engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
+target_include_directories(test_ds4_vision_artifact PRIVATE engine)
+add_test(NAME ds4_vision_artifact COMMAND test_ds4_vision_artifact)
+
 add_executable(test_api_adapters test/test_api_adapters.c)
 target_link_libraries(test_api_adapters ember_core m)
 add_test(NAME api_adapters COMMAND test_api_adapters)
@@ -489,7 +495,7 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy ds4_image_span ds4_vision_contract api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_image_span ds4_vision_contract ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
   compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
