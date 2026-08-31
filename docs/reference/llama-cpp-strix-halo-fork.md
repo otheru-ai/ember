@@ -86,6 +86,62 @@ models, different context depths, different backend. **Do not quote their
 figures as a benchmark for ours** — the transferable content is the mechanisms
 and the methodology, not the numbers.
 
+## The bar, after the 2026-08-31 goal change
+
+The user directed that Ember must **exceed** this fork. Their published figures,
+with conditions, from `bench/RESULTS.md` (generated from JSONL by script, not
+hand-edited):
+
+| model | test | depth | fork t/s | mainline t/s |
+|---|---|---:|---:|---:|
+| **ornith-35b-a3b-q4km** (MoE, ~3B active) | pp2048 `-ub 512` | 0 | **964.7 ± 4.2** | 856.8 |
+| | pp2048 | 4096 | 845.5 | 768.6 |
+| | pp2048 | 65536 | 376.5 | 379.9 (noise) |
+| | tg64 | 0 | **65.8 ± 0.0** | 65.5 |
+| | tg64 | 65536 | 45.0 | 45.2 (noise) |
+| qwen38-27b-q4kxl (dense 27B) | pp2048 | 0 | 288.7 | 255.6 |
+| | tg64 | 0 | 11.6 | 11.7 |
+| ornith-35b-a3b-q4km | pp2048 `-ub 2048` | 0 | **1648.5** | 870.5 |
+
+**The comparable row is the MoE one.** Qwen3.8-Flash-Next is MoE with roughly
+3B active parameters (512 experts, top-10, `n_embd` 2560, expert intermediate
+640), which is the same activation scale as Ornith-1.5-35B-A3B. The dense 27B
+row is not our shape.
+
+### Against our current gates
+
+| | our gate | fork, nearest comparable | ratio |
+|---|---:|---:|---:|
+| prefill | `prefill_2074_peak_tps` **412.0** | 964.7 (pp2048, depth 0, ub 512) | **2.34x** |
+| prefill (wide ubatch) | — | 1648.5 (ub 2048) | **4.0x** |
+| decode | `decode_256_median_tps` **39.49** | 65.8 (tg64, depth 0) | **1.67x** |
+
+The superseded DeepSeek-parity target (prefill ~345, decode 23.6-23.8 AR) sits
+**below our own gates**, so it is now a floor rather than a goal.
+
+### What this comparison does and does not license
+
+**Does not**: their numbers are on *different models*. Beating 964.7 on
+Qwen3.8-Flash-Next would not prove we beat their engine — it would prove our
+model is cheaper, or that we measured differently. Their absolute t/s are also
+power-profile dependent by their own statement, and their MoE prefill win is
+concentrated at wide ubatch where mainline *regresses*.
+
+**Does**: set a defensible bar in the absence of a head-to-head. Until one
+exists, treat **prefill ≥ 965 t/s at pp2048 depth 0** and **decode ≥ 66 t/s
+tg64 depth 0** as the target on our own model, measured the way they measure —
+palindrome-ordered arms, discarded warmup, per-cell σ, depth attached to every
+generation figure, and the power profile recorded.
+
+**What would settle it**: the same model on both engines on the same box. That
+fork has `qwen4exp/*` and `vulkan/qwen4exp-rocmfpx` branches in flight, so a
+head-to-head on Qwen3.8-Flash-Next may become possible. That, not a number
+comparison across models, is the measurement to want.
+
+**Precondition**: no valid Qwen performance number exists on our side while the
+correctness blocker is open, so the gap above is a target, not a measured
+deficit.
+
 ## Licensing / provenance
 
 MIT (llama.cpp), and their ROCmFPX port is from the MIT `ciru-ai/ROCmFPX` —

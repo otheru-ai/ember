@@ -38,8 +38,24 @@ agent" — take backlog work while waiting.
 ## The goal, so you can reconstruct it after compaction
 
 Make Ember's Qwen3.8-Flash-Next inference engine on AMD Strix Halo (gfx1151)
-meet or exceed DeepSeek-V4-Flash: **prefill peak ~345 tok/s, decode 23.6-23.8
-tok/s AR**. It is not met until a valid measurement says so.
+**exceed `LaurentZuijdwijk/llama.cpp`**, the fastest published engine on this
+silicon (user direction, 2026-08-31). The prior bar — DeepSeek-V4-Flash parity
+at prefill peak ~345 tok/s, decode 23.6-23.8 tok/s AR — is **superseded and is
+now a floor, not the target**. Neither is met until a valid measurement says so,
+and no valid Qwen measurement exists while the correctness blocker is open.
+
+**That fork's numbers are higher than our own gates.** Its figures, conditions
+and the comparability problem are in
+[`docs/reference/llama-cpp-strix-halo-fork.md`](../docs/reference/llama-cpp-strix-halo-fork.md)
+and the derived bar is in the ledger. Two things to hold on to here:
+
+- **It is a different backend (Vulkan/RADV, no ROCm) and its published results
+  are on different models.** Beating a number measured on another model is not
+  beating the engine. The comparison that settles it is **the same model on
+  both engines, same box, interleaved** — and that fork has `qwen4exp` branches
+  in flight, so a head-to-head on our own model may become possible.
+- Their absolute t/s are power-profile dependent and they say so. Compare
+  deltas and same-session absolutes, never a headline across tables.
 
 **Measurements live in [`docs/qwen3.8-performance-status.md`](../docs/qwen3.8-performance-status.md),
 and only there.** Do not copy numbers into this file.
