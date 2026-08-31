@@ -779,6 +779,17 @@ if(EMBER_ENGINE)
   add_test(NAME ds4_vision_markers COMMAND test_ds4_vision_markers)
   set_tests_properties(ds4_vision_markers PROPERTIES TIMEOUT 60)
 
+  # Metadata-only inventory gate for all 43 language-model vision routing
+  # biases. An optional real path validates the produced full GGUF without
+  # reading tensor payloads or creating a GPU backend.
+  add_executable(test_ds4_vision_biases test/test_ds4_vision_biases.cpp)
+  target_include_directories(test_ds4_vision_biases PRIVATE
+    engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_biases PRIVATE ember_engine)
+  ember_strict(test_ds4_vision_biases)
+  add_test(NAME ds4_vision_biases COMMAND test_ds4_vision_biases)
+  set_tests_properties(ds4_vision_biases PROPERTIES TIMEOUT 60)
+
   # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
   # weights are required, but it exercises the same persistent ggml graph that
   # production dispatches through gfx1151 MMVQ/MMQ.
