@@ -246,3 +246,46 @@ continue.
    exercise. Do not copy wholesale — our snapshot/rollback contract has no
    counterpart there.
 
+---
+
+## Open threads as of 20260831T150000Z — codex unresponsive since msg 502
+
+Recorded so this is recoverable without reconstructing it from `.coord/msg/`.
+Codex stopped after the depth-2048 cell completed but before reporting it; its
+results were valid and are recorded. Production healthy, tree clean, all pushed.
+
+15. **Depth falsifier, specced and unstarted** (msgs 429, 430). One more
+    bare-AR cell to distinguish transfer-bound from fixed-cost-bound decode.
+    Depth 8192 predicts ~330 ms/token; **depth 4096 (~190 ms/token) is the
+    cheaper equivalent** — q1 prefill is ~7 min there against ~26 min at 8192,
+    per attempt. One attempt plus warmup is enough; the question is "near the
+    line or nowhere near", which does not need σ. Do **not** skip it: two
+    points cannot distinguish a slope from a curve, and the KV-residency
+    conclusion rests on that.
+
+16. **Full-graph shadow diagnostic, designed and reviewed, unbuilt** (codex
+    msg 493, my msg 420). q=1 shadow state beside the batched state, reporting
+    the first layer boundary whose HC rows diverge. **Requires the width-3
+    noise-floor control** — "first divergence" is undefined without a per-layer
+    floor from a known-green width, and width 3 is green *and* non-bit-identical
+    (delta 0.0575), so it exercises real divergence-free-but-not-equal
+    behaviour. Report the full per-layer curve, not just the first crossing: a
+    step localises a defect, a smooth exponential means amplification upstream
+    of the layer stack.
+
+17. **Do not generate another composition hypothesis without a mechanism.**
+    I proposed four today that fitted every symptom and were wrong (pool tail,
+    the too-broad void rule, the empty-inventory "vacuous" call, and the static
+    barrier count). Each was checkable in one file before sending. The
+    remaining question — why exact components compose into a structurally wrong
+    graph — needs the shadow diagnostic's *measurement*, not more source
+    reading. If a hypothesis arrives, confirm the mechanism first and estimate
+    what it would cost codex if wrong.
+
+18. **KV residency is the leading decode lever** and its obstacle is documented
+    (`docs/qwen3.8-performance-status.md`, "Why the KV state is host-resident").
+    `Qwen4ExpCowBuffer`'s immutable shared host slabs are what make prefix
+    snapshots cheap; moving the cache to device removes the ~0.665 ms/MB slope
+    but has no direct device analogue for that trick. Complementary to tranches
+    1-3, which attack the ~55.6 ms fixed term. Not designed; not proposed.
+
