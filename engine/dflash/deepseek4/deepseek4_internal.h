@@ -169,6 +169,7 @@ struct DeepSeek4Layer {
     // Router
     ggml_tensor * ffn_gate_inp       = nullptr;  // [n_embd, n_expert] router weights F16
     ggml_tensor * ffn_exp_probs_b    = nullptr;  // [n_expert] optional routing bias
+    ggml_tensor * ffn_exp_probs_b_vl = nullptr;  // [n_expert] optional vision routing bias F32
 
     // Hash routing table (first n_hash_layer layers only)
     ggml_tensor * ffn_gate_tid2eid   = nullptr;  // [n_expert_used, n_vocab] I32

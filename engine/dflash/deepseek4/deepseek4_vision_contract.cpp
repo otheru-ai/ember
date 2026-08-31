@@ -318,6 +318,15 @@ bool deepseek4_chunk_accepts_image_tokens(int start_pos,
     });
 }
 
+bool deepseek4_is_vision_router_bias_suffix(const std::string & suffix) {
+    return suffix == "exp_probs_b_vl";
+}
+
+bool deepseek4_optional_vision_bias_set_valid(int loaded, int layer_count) {
+    return layer_count >= 0 &&
+           (loaded == 0 || loaded == layer_count);
+}
+
 Deepseek4RouteMode deepseek4_route_mode(bool hash_layer,
                                         bool vision_weights_loaded,
                                         int32_t token_id,

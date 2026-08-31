@@ -94,6 +94,12 @@ bool deepseek4_chunk_accepts_image_tokens(int start_pos,
                                           const std::vector<int32_t> & ids,
                                           int32_t vocab_size);
 
+// The converter's exact per-layer tensor suffix. Vision bias weights are an
+// optional all-or-none set: zero keeps text-only checkpoints valid, while a
+// partial set would silently route some image rows with the text contract.
+bool deepseek4_is_vision_router_bias_suffix(const std::string & suffix);
+bool deepseek4_optional_vision_bias_set_valid(int loaded, int layer_count);
+
 enum class Deepseek4RouteMode {
     HASH_TEXT,
     SCORE_TEXT,
