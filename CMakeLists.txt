@@ -762,6 +762,23 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
   set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
 
+  # HIP-only, opt-in fixed-input correctness oracle for ROCMI4. It compares
+  # convert.cu, dense/routed MMVQ, and dense/routed MMQ against the CPU decoder
+  # and an exact scalar matmul without loading model weights.
+  add_executable(test_rocmi4_operator_oracle
+    test/test_rocmi4_operator_oracle.hip)
+  target_include_directories(test_rocmi4_operator_oracle PRIVATE
+    engine/ggml/include
+    engine/ggml/rocmfpx
+    engine/ggml/src
+    engine/ggml/src/ggml-cuda)
+  target_link_libraries(test_rocmi4_operator_oracle PRIVATE
+    ember_engine hip::host)
+  # Deliberately not ember_strict: convert.cuh includes vendored CUDA internals
+  # with translation-unit-local unused helpers, as do the frontier oracles.
+  add_test(NAME rocmi4_operator_oracle COMMAND test_rocmi4_operator_oracle)
+  set_tests_properties(rocmi4_operator_oracle PROPERTIES TIMEOUT 60)
+
   # GPU-free oracle for the graph RoPE path. Tranche 1 moves QSA rotary
   # embedding off the host scalar `ember_qwen_yarn_apply` and into an in-graph
   # `ggml_rope_multi`; that swap has five parameters (n_dims, the interleaved
