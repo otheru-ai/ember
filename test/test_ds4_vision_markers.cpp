@@ -166,7 +166,40 @@ void test_truncation_and_special_file_fail_closed() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char ** argv) {
+    if (argc == 2) {
+        Deepseek4ImageMarkers markers;
+        std::string error;
+        if (!deepseek4_load_image_markers(argv[1], 4096, markers, error)) {
+            std::fprintf(stderr, "real marker load failed: %s\n", error.c_str());
+            return 1;
+        }
+        const struct Probe {
+            const char * name;
+            const std::vector<float> * values;
+        } probes[] = {
+            {"begin", &markers.start},
+            {"pad", &markers.pad},
+            {"newline", &markers.newline},
+            {"end", &markers.end},
+        };
+        for (const Probe & probe : probes) {
+            std::printf("%s %.9g %.9g %.9g %.9g\n", probe.name,
+                        (*probe.values)[0], (*probe.values)[1],
+                        (*probe.values)[2], (*probe.values)[3]);
+        }
+        Deepseek4ImageMarkers wrong;
+        if (deepseek4_load_image_markers(argv[1], 4095, wrong, error)) {
+            std::fprintf(stderr, "wrong-width control unexpectedly loaded\n");
+            return 1;
+        }
+        std::printf("wrong_width rejected: %s\n", error.c_str());
+        return 0;
+    }
+    if (argc != 1) {
+        std::fprintf(stderr, "usage: %s [real-mmproj.gguf]\n", argv[0]);
+        return 2;
+    }
     test_exact_markers();
     test_contract_mutations_fail_closed();
     test_truncation_and_special_file_fail_closed();
