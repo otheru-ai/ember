@@ -281,6 +281,12 @@ typedef struct {
     double spec_accept_rate;
     double batch_spec_accept_rate;
     char   detail[192];
+    // Appended evidence fields preserve every pre-existing member offset.
+    bool   prefill_tv_checked;
+    bool   prefill_tv_within_bound;
+    int    prefill_tv_index;
+    double prefill_tv_distance;
+    double prefill_tv_threshold;
 } ember_validation_report;
 
 bool ember_backend_validate(ember_backend *b, const int32_t *prompt,

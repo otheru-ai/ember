@@ -287,6 +287,7 @@ bool ember_backend_validate(ember_backend *b, const int32_t *prompt,
         report->batch_checked ? report->batch_rows * n_gen : 0;
     report->mismatch_index = -1;
     report->prefill_numerics_index = -1;
+    report->prefill_tv_index = -1;
     report->expected_token = -1;
     report->actual_token = -1;
     snprintf(report->detail, sizeof(report->detail),

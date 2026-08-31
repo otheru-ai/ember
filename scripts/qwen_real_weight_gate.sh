@@ -481,7 +481,8 @@ report = json.load(open(sys.argv[1], encoding="utf-8"))
 prefill = report.get("prefill") or {}
 spec = report.get("spec") or {}
 if not (report.get("ok") and report.get("snapshot_ok") and
-        prefill.get("checked") and prefill.get("exact") and
+        prefill.get("checked") and prefill.get("accepted") and
+        prefill.get("tv_checked") and prefill.get("tv_within_bound") and
         spec.get("checked") and spec.get("exact")):
     raise SystemExit(f"q=1/native MTP differential failed: {report}")
 rate = spec.get("accept_rate")

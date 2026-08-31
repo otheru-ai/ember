@@ -1465,6 +1465,7 @@ static bool backend_validate_impl(
     std::memset(report, 0, sizeof(*report));
     report->mismatch_index = -1;
     report->prefill_numerics_index = -1;
+    report->prefill_tv_index = -1;
     report->expected_token = -1;
     report->actual_token = -1;
 
@@ -1546,6 +1547,8 @@ static bool backend_validate_impl(
             report->prefill_exact = decision.streams_exact;
             report->prefill_accepted = decision.accepted;
             report->prefill_margin_checked = decision.margin_checked;
+            report->prefill_tv_checked = decision.tv_checked;
+            report->prefill_tv_within_bound = decision.tv_within_bound;
             if (decision.margin_checked) {
                 report->prefill_numerics_index =
                     static_cast<int>(decision.numerics_index);
@@ -1553,6 +1556,12 @@ static bool backend_validate_impl(
             report->prefill_q1_top2_margin = decision.q1_top2_margin;
             report->prefill_max_abs_logit_delta =
                 decision.max_abs_logit_delta;
+            report->prefill_tv_distance = decision.tv_distance;
+            report->prefill_tv_threshold = decision.tv_threshold;
+            if (decision.tv_index != std::numeric_limits<size_t>::max()) {
+                report->prefill_tv_index =
+                    static_cast<int>(decision.tv_index);
+            }
             if (!decision.streams_exact) {
                 report->mismatch_index =
                     static_cast<int>(decision.mismatch_index);
@@ -1562,13 +1571,20 @@ static bool backend_validate_impl(
             std::fprintf(stderr,
                          "[ember-validate-prefill] exact=%s "
                          "margin_checked=%s q1_top2_margin=%.9g "
-                         "max_abs_logit_delta=%.9g accepted=%s "
+                         "max_abs_logit_delta=%.9g tv_checked=%s "
+                         "tv_within_bound=%s tv_distance=%.9g "
+                         "tv_threshold=%.9g tv_index=%d accepted=%s "
                          "numerics_index=%d mismatch_index=%d expected=%d "
                          "actual=%d\n",
                          decision.streams_exact ? "true" : "false",
                          decision.margin_checked ? "true" : "false",
                          static_cast<double>(decision.q1_top2_margin),
                          static_cast<double>(decision.max_abs_logit_delta),
+                         decision.tv_checked ? "true" : "false",
+                         decision.tv_within_bound ? "true" : "false",
+                         static_cast<double>(decision.tv_distance),
+                         static_cast<double>(decision.tv_threshold),
+                         report->prefill_tv_index,
                          decision.accepted ? "true" : "false",
                          report->prefill_numerics_index,
                          report->mismatch_index, report->expected_token,
@@ -1720,11 +1736,16 @@ static bool backend_validate_impl(
     } else if (!report->prefill_accepted) {
         std::snprintf(report->detail, sizeof(report->detail),
                       "production prefill rejected at %d: margin=%.9g "
-                      "max_abs_logit_delta=%.9g checked=%s",
+                      "max_abs_logit_delta=%.9g checked=%s tv=%.9g "
+                      "tv_threshold=%.9g tv_checked=%s tv_row=%d",
                       report->mismatch_index,
                       report->prefill_q1_top2_margin,
                       report->prefill_max_abs_logit_delta,
-                      report->prefill_margin_checked ? "true" : "false");
+                      report->prefill_margin_checked ? "true" : "false",
+                      report->prefill_tv_distance,
+                      report->prefill_tv_threshold,
+                      report->prefill_tv_checked ? "true" : "false",
+                      report->prefill_tv_index);
     } else if (!report->spec_exact || !report->disk_exact ||
                !report->batch_exact) {
         std::snprintf(report->detail, sizeof(report->detail),
@@ -1737,11 +1758,12 @@ static bool backend_validate_impl(
     } else if (report->prefill_checked && !report->prefill_exact) {
         std::snprintf(report->detail, sizeof(report->detail),
                       "production prefill accepted at %d: margin=%.9g "
-                      "max_abs_logit_delta=%.9g; snapshot/DSpark/disk/batch "
-                      "checks passed",
+                      "max_abs_logit_delta=%.9g tv=%.9g; "
+                      "snapshot/DSpark/disk/batch checks passed",
                       report->mismatch_index,
                       report->prefill_q1_top2_margin,
-                      report->prefill_max_abs_logit_delta);
+                      report->prefill_max_abs_logit_delta,
+                      report->prefill_tv_distance);
     } else {
         std::snprintf(report->detail, sizeof(report->detail),
                       "AR, production prefill, restored/fresh DSpark, disk, "

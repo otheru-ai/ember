@@ -190,7 +190,8 @@ class QwenRealWeightGateTest(unittest.TestCase):
         self.assertIn("--require-gate", body)
         self.assertNotIn("--prefix-cache-slots 0", body)
         self.assertIn('row.get("spec_ran") is True', body)
-        self.assertIn('prefill.get("checked") and prefill.get("exact")', body)
+        self.assertIn('prefill.get("checked") and prefill.get("accepted")', body)
+        self.assertIn('prefill.get("tv_checked") and prefill.get("tv_within_bound")', body)
         self.assertIn("0.0 <= rate < 1.0", body)
         self.assertIn('report.get("baseline_tokens") != 64', body)
         self.assertIn('positive_finite(ar, "decode_seconds")', body)
@@ -259,7 +260,10 @@ class QwenRealWeightGateTest(unittest.TestCase):
             "baseline_tokens": 64,
             "ar": {"tokens": 64, "decode_seconds": 4.0,
                    "decode_tokens_per_second": 16.0},
-            "prefill": {"checked": True, "exact": True},
+            "prefill": {
+                "checked": True, "exact": True, "accepted": True,
+                "tv_checked": True, "tv_within_bound": True,
+            },
             "spec": {"checked": True, "exact": True, "tokens": 64,
                      "accept_rate": 0.75,
                      "restored_decode_seconds": 3.0,
@@ -287,7 +291,10 @@ class QwenRealWeightGateTest(unittest.TestCase):
             "baseline_tokens": 64,
             "ar": {"tokens": 64, "decode_seconds": 4.0,
                    "decode_tokens_per_second": 16.0},
-            "prefill": {"checked": True, "exact": True},
+            "prefill": {
+                "checked": True, "exact": True, "accepted": True,
+                "tv_checked": True, "tv_within_bound": True,
+            },
             "spec": {"checked": True, "exact": True, "tokens": 64,
                      "accept_rate": 0.75,
                      "restored_decode_seconds": 3.0,

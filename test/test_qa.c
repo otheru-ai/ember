@@ -188,7 +188,8 @@ static void qa_validation_timing_contract(void) {
           "validation timing report crosses the backend ABI");
     CHECK(report.baseline_tokens == 8 && report.baseline_decode_s == 0.0 &&
               report.restored_spec_decode_s == 0.0 &&
-              report.spec_decode_s == 0.0 && report.prefill_accepted,
+              report.spec_decode_s == 0.0 && report.prefill_accepted &&
+              !report.prefill_tv_checked && report.prefill_tv_index == -1,
           "GPU-free validation never fabricates AR or MTP timing evidence");
     ember_backend_free(backend);
 }

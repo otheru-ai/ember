@@ -935,9 +935,10 @@ jobs:
           prefill = differential.get("prefill") or {}
           spec = differential.get("spec") or {}
           if not (differential.get("ok") and differential.get("snapshot_ok")
-                  and prefill.get("checked") and prefill.get("exact")
+                  and prefill.get("checked") and prefill.get("accepted")
+                  and prefill.get("tv_checked") and prefill.get("tv_within_bound")
                   and spec.get("checked") and spec.get("exact")):
-              raise SystemExit("retained 64-token differential is not exact")
+              raise SystemExit("retained differential does not satisfy the prefill TV gate")
           summaries = [row for row in rows if row.get("kind") == "summary"]
           requests = [row for row in rows if row.get("kind") == "request"]
           if (len(summaries) != 1 or not requests
@@ -1196,9 +1197,10 @@ jobs:
           prefill = differential.get("prefill") or {}
           spec = differential.get("spec") or {}
           if not (differential.get("ok") and differential.get("snapshot_ok")
-                  and prefill.get("checked") and prefill.get("exact")
+                  and prefill.get("checked") and prefill.get("accepted")
+                  and prefill.get("tv_checked") and prefill.get("tv_within_bound")
                   and spec.get("checked") and spec.get("exact")):
-              raise SystemExit("retained 64-token differential is not exact")
+              raise SystemExit("retained differential does not satisfy the prefill TV gate")
           summaries = [row for row in rows if row.get("kind") == "summary"]
           if (len(summaries) != 1
                   or (summaries[0].get("memory_gate") or {}).get("passed") is not True):

@@ -44,11 +44,18 @@ def first_token_fixture(root: Path, mutation: str = "") -> list[str]:
     report = {
         "ok": True, "snapshot_ok": True, "requested_tokens": 64,
         "baseline_tokens": n_tokens,
-        "prefill": {"checked": True, "exact": True, "tokens": n_tokens},
+        "prefill": {
+            "checked": True, "exact": True, "accepted": True,
+            "tv_checked": True, "tv_within_bound": True,
+            "tv_distance": 0.0, "tv_threshold": 0.01, "tv_index": 0,
+            "tokens": n_tokens,
+        },
         "spec": {"checked": True, "exact": True, "tokens": n_tokens,
                  "accept_rate": 0.5},
         "disk": {"checked": True, "exact": True, "tokens": n_tokens},
     }
+    if mutation == "accepted-prefill":
+        report["prefill"]["exact"] = False
     (full / "differential.json").write_text(
         json.dumps(report) + "\n", encoding="utf-8")
     lines = ["unrelated retained engine diagnostic"]
@@ -58,6 +65,9 @@ def first_token_fixture(root: Path, mutation: str = "") -> list[str]:
                 continue
             token = 32000 + index
             if mutation == "divergent" and name == "fresh" and index == 10:
+                token += 1
+            if (mutation == "accepted-prefill" and name == "prefill" and
+                    index == 10):
                 token += 1
             lines.append(
                 f"[ember-validate-token] path={name} index={index} id={token}")
@@ -203,10 +213,10 @@ class QwenConstructWorkflowTest(unittest.TestCase):
 
     def test_q3_first_token_evidence_rejects_incomplete_or_divergent_paths(self) -> None:
         expected = {
-            "short": "64-token differential did not prove every serial path",
+            "short": "64-token differential did not prove accepted prefill",
             "missing": "token trace paths or indices differ",
             "duplicate": "duplicate token trace",
-            "divergent": "token traces differ across exact paths",
+            "divergent": "token traces differ across exact authority paths",
         }
         for mutation, message in expected.items():
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
@@ -216,6 +226,24 @@ class QwenConstructWorkflowTest(unittest.TestCase):
                     text=True, capture_output=True)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
+
+    def test_q3_first_token_evidence_retains_accepted_nonexact_prefill(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            args = first_token_fixture(root, "accepted-prefill")
+            result = subprocess.run(
+                [sys.executable, str(Q3_FIRST_TOKEN_EVIDENCE), *args],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads((root / "first-token-evidence.json").read_text(
+                encoding="utf-8"))
+        generation = evidence["generation"]
+        self.assertFalse(generation["production_prefill_exact"])
+        self.assertTrue(generation["production_prefill_accepted"])
+        self.assertTrue(generation["production_prefill_tv"]["within_bound"])
+        self.assertNotEqual(
+            generation["token_ids_by_path"]["prefill"],
+            generation["token_ids_by_path"]["baseline"])
 
     def test_q3_gpu_proof_phases_have_cleanup_aware_timeouts(self) -> None:
         proof = Q3_FIRST_TOKEN.read_text(encoding="utf-8")
@@ -1183,7 +1211,8 @@ class QwenConstructWorkflowTest(unittest.TestCase):
         self.assertIn('"baseline", "prefill", "restored", "fresh", "disk"',
                       derivation)
         self.assertIn('"first_token_id": first', derivation)
-        self.assertIn('"production_prefill_exact": True', derivation)
+        self.assertIn('"production_prefill_exact": prefill["exact"]', derivation)
+        self.assertIn('"production_prefill_accepted": True', derivation)
         self.assertNotIn("ember-gpu-lock acquire", proof)
         self.assertNotIn("ember-cert-production stop", proof)
         self.assertNotIn("ember-cert-production mask", proof)

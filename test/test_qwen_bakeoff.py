@@ -1219,7 +1219,10 @@ class BakeoffTest(unittest.TestCase):
             hardware_timing = put_jsonl("hardware-timing.jsonl", timing_rows(True))
             differential = put("differential.json", {
                 "ok": True, "snapshot_ok": True,
-                "prefill": {"checked": True, "exact": True},
+                "prefill": {
+                    "checked": True, "exact": True, "accepted": True,
+                    "tv_checked": True, "tv_within_bound": True,
+                },
                 "spec": {"checked": True, "exact": True, "accept_rate": 0.5},
             })
             differential_decode_value = {

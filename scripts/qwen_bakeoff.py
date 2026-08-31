@@ -721,11 +721,15 @@ def validate_measurement_evidence(row: dict[str, Any]) -> dict[str, Any]:
     if (differential.get("ok") is not True or
             differential.get("snapshot_ok") is not True or
             prefill.get("checked") is not True or
-            prefill.get("exact") is not True
+            prefill.get("accepted") is not True or
+            prefill.get("tv_checked") is not True or
+            prefill.get("tv_within_bound") is not True
             or spec.get("checked") is not True or spec.get("exact") is not True
             or isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not 0.0 < float(rate) < 1.0):
-        raise BakeoffError("matching-MTP differential is not exact or did not exercise accept/reject")
+        raise BakeoffError(
+            "matching-MTP differential did not satisfy the prefill TV gate "
+            "or did not exercise MTP accept/reject")
     differential_decode_record, _, _ = pinned_evidence(
         hardware_path.parent, hardware_files.get("differential_decode"),
         "matching-MTP differential decode")

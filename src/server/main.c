@@ -4306,7 +4306,9 @@ static int run_backend_validation(ember_backend *be, const char *path,
         "\"prefill\":{\"checked\":%s,\"exact\":%s,\"accepted\":%s,"
         "\"margin_checked\":%s,\"numerics_index\":%d,"
         "\"q1_top2_margin\":%.9g,"
-        "\"max_abs_logit_delta\":%.9g,\"tokens\":%d},"
+        "\"max_abs_logit_delta\":%.9g,\"tv_checked\":%s,"
+        "\"tv_within_bound\":%s,\"tv_distance\":%.9g,"
+        "\"tv_threshold\":%.9g,\"tv_index\":%d,\"tokens\":%d},"
         "\"spec\":{\"checked\":%s,\"exact\":%s,\"tokens\":%d,"
         "\"accept_rate\":%.6f,\"restored_decode_seconds\":%.9f,"
         "\"fresh_decode_seconds\":%.9f,"
@@ -4326,7 +4328,11 @@ static int run_backend_validation(ember_backend *be, const char *path,
         report.prefill_margin_checked ? "true" : "false",
         report.prefill_numerics_index,
         report.prefill_q1_top2_margin,
-        report.prefill_max_abs_logit_delta, report.prefill_tokens,
+        report.prefill_max_abs_logit_delta,
+        report.prefill_tv_checked ? "true" : "false",
+        report.prefill_tv_within_bound ? "true" : "false",
+        report.prefill_tv_distance, report.prefill_tv_threshold,
+        report.prefill_tv_index, report.prefill_tokens,
         report.spec_checked ? "true" : "false",
         report.spec_exact ? "true" : "false", report.spec_tokens,
         report.spec_accept_rate, report.restored_spec_decode_s,

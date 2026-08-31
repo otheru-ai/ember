@@ -14,6 +14,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -103,14 +104,29 @@ def _validate_differential(value: dict[str, Any]) -> int:
             or type(n_tokens) is not int or n_tokens != EXPECTED_TOKENS
             or not isinstance(prefill, dict)
             or prefill.get("checked") is not True
-            or prefill.get("exact") is not True
+            or type(prefill.get("exact")) is not bool
+            or prefill.get("accepted") is not True
+            or prefill.get("tv_checked") is not True
+            or prefill.get("tv_within_bound") is not True
             or prefill.get("tokens") != n_tokens
             or not isinstance(spec, dict) or spec.get("checked") is not True
             or spec.get("exact") is not True or spec.get("tokens") != n_tokens
             or not isinstance(disk, dict) or disk.get("checked") is not True
             or disk.get("exact") is not True or disk.get("tokens") != n_tokens):
         raise EvidenceError(
-            f"64-token differential did not prove every serial path: {value}")
+            "64-token differential did not prove accepted prefill plus exact "
+            f"authority paths: {value}")
+    tv_distance = prefill.get("tv_distance")
+    tv_threshold = prefill.get("tv_threshold")
+    if (isinstance(tv_distance, bool) or
+            not isinstance(tv_distance, (int, float)) or
+            not math.isfinite(float(tv_distance)) or
+            isinstance(tv_threshold, bool) or
+            not isinstance(tv_threshold, (int, float)) or
+            not math.isfinite(float(tv_threshold)) or
+            float(tv_distance) > float(tv_threshold)):
+        raise EvidenceError(
+            f"prefill TV evidence is missing or inconsistent: {prefill}")
     return n_tokens
 
 
@@ -155,8 +171,10 @@ def _load_traces(
         for name in sorted(REQUIRED_PATHS)
     }
     baseline = traces["baseline"]
-    if any(tokens != baseline for tokens in traces.values()):
-        raise EvidenceError(f"token traces differ across exact paths: {traces}")
+    authority_paths = ("restored", "fresh", "disk")
+    if any(traces[name] != baseline for name in authority_paths):
+        raise EvidenceError(
+            f"token traces differ across exact authority paths: {traces}")
     if baseline[0] < 0:
         raise EvidenceError(f"first token is invalid: {baseline[0]}")
     return traces, digest.hexdigest()
@@ -171,6 +189,11 @@ def derive(args: argparse.Namespace, *, created_at: str | None = None) -> dict[s
     differential_value, differential_sha = _load_differential(differential)
     n_tokens = _validate_differential(differential_value)
     traces, engine_log_sha = _load_traces(engine_log, n_tokens)
+    prefill = differential_value["prefill"]
+    trace_exact = traces["prefill"] == traces["baseline"]
+    if trace_exact != prefill["exact"]:
+        raise EvidenceError(
+            "prefill exact verdict disagrees with the retained token trace")
 
     revision = _hex(args.ember_revision, HEX40, "Ember revision")
     descriptor_sha = _hex(
@@ -232,7 +255,15 @@ def derive(args: argparse.Namespace, *, created_at: str | None = None) -> dict[s
             "first_token_id": first,
             "token_ids_by_path": traces,
             "snapshot_exact": True,
-            "production_prefill_exact": True,
+            "production_prefill_exact": prefill["exact"],
+            "production_prefill_accepted": True,
+            "production_prefill_tv": {
+                "checked": True,
+                "within_bound": True,
+                "distance": prefill["tv_distance"],
+                "threshold": prefill["tv_threshold"],
+                "row": prefill.get("tv_index", -1),
+            },
             "speculative_exact": True,
             "disk_restore_exact": True,
         },
