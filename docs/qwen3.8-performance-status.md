@@ -1695,8 +1695,50 @@ engine-to-engine, not kernel-to-kernel; their figure carries their own power
 profile and ours is recorded separately; and a single depth is not a curve —
 their decode falls only ~29% from 512 to 128k, and ours is unmeasured at depth.
 
-**Depth 2048 is not yet measured** — that cell stopped on warmup length and is
-being re-run. `27.36` is their matching figure when it lands.
+### Depth 2048 (`bare-ar-exact-prefill-deep-ecf6996-20260831T032805Z`)
+
+Same construction, same proof: `inventory_event_count: 0` with
+`DFLASH_MMQ_SRC1_INVENTORY=1` staged, so zero dense MMQ dispatches again.
+
+| depth | ours | agention (no-MTP) | ratio | ms/token ours | ms/token theirs |
+|---:|---:|---:|---:|---:|---:|
+| 512 | **13.84** | 27.77 | **0.50x** | 72.2 | 36.0 |
+| 2048 | **8.14** (7.603 / 8.144 / 8.192, sd 0.327) | 27.36 | **0.30x** | 122.8 | 36.5 |
+
+### The finding is the slope, not the ratio
+
+**Our decode falls 41.2% from depth 512 to 2048. Theirs falls 1.5%.**
+
+That is a different diagnosis from "uniformly half speed". We have a
+**depth-dependent per-token cost that they do not have**, and it is what turns a
+2x deficit into a 3.4x one over two kilotokens of context.
+
+**It points at the host-resident KV state, which this document had already sized
+and explicitly declined to promote.** The standing figure is ~101 MB uploaded
+per decode token at ctx 2048 (`qsa_transfer_bytes_k2050 = 8.59 MB` per QSA
+layer, 12 layers), and roughly a quarter of that at 512. Fitting the two
+measured points against those volumes:
+
+    marginal cost   0.665 ms per MB   ->  ~1.50 GB/s effective
+    implied fixed   55.6 ms per token
+
+Two points fit two parameters exactly, so the *fit* proves nothing. What is
+informative is the **structure**: a large fixed cost plus a term proportional to
+transferred bytes, at a rate consistent with host-device traffic. Their flat
+curve is what a device-resident cache looks like.
+
+**This promotes the KV-residency item from "sized, not a lever" to the leading
+decode candidate.** It also explains why the gap widens exactly where it matters
+— agentic and long-context use, which is the workload the target model is sold
+on.
+
+**What would confirm it**, and it is cheap: a third depth (8192). The model
+predicts ~0.665 ms/MB continuing, i.e. roughly 4x the 2048 upload and ~330
+ms/token, against their published 26.67. A measured point far off that line
+falsifies the transfer explanation and moves suspicion back to fixed per-token
+work.
+
+
 
 ## What the 13.84 figure implies for where decode time goes (arithmetic, not measurement)
 
