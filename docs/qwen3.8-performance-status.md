@@ -1075,7 +1075,36 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
-#### RESOLVED: the dense MMVQ→MMQ crossover alone is sufficient (codex 435)
+#### Isolated ROCMI4 operator oracle @ `5b8e368` — green, narrow
+
+Evidence:
+`rocmi4-operator-oracle-5b8e368-20260831T003000Z`. This is a model-free
+correctness diagnostic; it collected no timing.
+
+All eight predeclared cases passed on gfx1151. The exact fixture independently
+covered the production `convert.cu` decoder, dense MMVQ/MMQ, routed-expert
+MMVQ/MMQ, and a CPU ROCMI4 decode plus scalar F32 matmul with a zero-error
+budget. Dispatch logs prove that both dense and routed cases reached both
+kernel families. The non-grid fixture also kept the direct and routed
+MMVQ/MMQ outputs within the predeclared per-output bound of one Q8_1
+activation-quantization step per K32, weighted by the row L1 norm.
+
+This eliminates an isolated ROCMI4 device decoder or accumulation failure on
+these fixed fixtures. It does **not** validate the full-model activation,
+routing, masking, or state-selection context, so it remains compatible with
+the controlled full-model red result below.
+
+#### RESOLVED: the dense MMVQ→MMQ crossover alone is sufficient (codex 435/437)
+
+Evidence:
+`qwen-width4-ncols3-86a5ce1-20260831T003501Z` and the literal one-variable
+confirmation
+`qwen-width4-ncols3-silent-86a5ce1-20260831T003800Z`. The first retained run
+enabled passive MMID logging; the confirmation omitted it and reproduced the
+same result, leaving `LUCE_MMVQ_MAX_NCOLS` as the sole environment change from
+the earlier green width-4 run. The discarded setup attempt failed during an
+optional dispatch-control preflight before validation and contributes no
+correctness evidence.
 
 Width 4, `LUCE_MMVQ_MAX_NCOLS=3`, same binary (`86a5ce1`) and prompt as the
 prior green: **validator-red**, `token mismatch at 0: expected=198 actual=87`.
@@ -1095,24 +1124,39 @@ bucket 5, and also at width 6 row 0 and width 17 row 0 at bucket 16
 same token appears. That is the signature of one mechanism keyed to dense MMQ,
 not two mechanisms that happen to coincide.
 
-**What is still unmeasured.** `86a5ce1` predates both the margin criterion
-(`01b8218`) and logits capture (`8815442`), so this run yields no
-`max_abs_logit_delta` and no vectors. We therefore do not know whether width 4's
-red is a hairline argmax flip or the same structural collapse (r ≈ 0.5) seen at
-widths 6/17 — and those are very different failures. **Re-run width 4 with
-`NCOLS=3` at current HEAD with `EMBER_VALIDATION_LOGITS_DIR` set** and compute
-the correlation:
+##### Current-runtime magnitude capture @ `5b8e368` — structural collapse confirmed
 
-- r ≈ 0.5 ⇒ a dense kernel swap alone produces the structural collapse, and the
-  earlier "a kernel swap should look like width 3" reasoning was wrong;
-- r ≈ 0.99 with a token flip ⇒ width 4 is a near-tie flip, qualitatively milder
-  than widths 6/17, and those still need an additional explanation.
+Evidence:
+`qwen-width4-ncols3-correlation-5b8e368-20260831T004201Z`. The reviewed Release
+binary SHA-256 is
+`4b97987aa5299aa3ca1ec726ec8416e605da44d87be13c038b2ccc5e21cd487c`.
+Raw q1 and production rows were written by `EMBER_VALIDATION_LOGITS_DIR`; the
+offline calculation verified equal finite row shapes before correlation. This
+is correctness evidence only; no timing from the run is interpreted.
 
-#### CONFOUND: two mechanisms change at width 5→6, and our own setting aligned them
+| row | r (all) | r (q1 top 1000) | r (q1 top 100) | slope | residual max | q1 argmax | prod argmax | q1 margin | prod margin | max delta |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0.555806 | 0.332564 | 0.488637 | 0.537101 | 11.7434 | 87 | 87 | 0.712470 | 2.34581 | 11.7083 |
+| 1 | 0.601413 | 0.494935 | 0.566995 | 0.589904 | 8.92388 | 830 | 830 | 2.04495 | 1.60067 | 10.1805 |
 
-**No experiment run so far distinguishes them.** Recorded before the
-correlation and cross-evaluation tables below so neither is read as evidence
-for the matmul-family hypothesis.
+This is the same structural failure class as widths 6/17, not a near-tie
+argmax flip. The dense crossover is independently movable at width 4 while the
+MoE bucket and routed-expert family stay fixed, so dense MMQ alone is
+sufficient to collapse the logit structure.
+
+Both rows retain their q1 argmax and the validator reports
+`prefill.exact=true`, `accepted=true` under the user-decided token/margin
+criterion. That criterion therefore certifies token stability for this prompt;
+it does **not** certify that the batched verifier computed the same logit
+function. The accepted result must not be described as kernel-precision noise.
+The isolated operator oracle above remains green only because its fixed
+fixtures omit the production activation/state context that triggers the defect.
+
+#### Historical confound: two mechanisms change at width 5→6
+
+This was the confound before the controlled width-4 run above. It is retained
+to document why the earlier table could not distinguish the mechanisms; the
+one-variable result now proves that the dense crossover alone is sufficient.
 
 1. **Matmul family.** `LUCE_MMVQ_MAX_NCOLS=5` in every run
    (`ggml-cuda.cu:2624-2632`): MMVQ at `ne[1] <= 5`, MMQ above. Boundary 5/6.
