@@ -89,15 +89,17 @@ range so production dynamic range can be compared with the synthetic oracle.
 It exists to distinguish a live layout or value-domain difference from a
 fixture that the shipped graph never constructs.
 
-Ember adds one assertion to `ggml-cuda/gated_delta_net.cu`:
-`GGML_ASSERT(ggml_are_same_stride(src_g, src_beta))`. Upstream indexes both `g`
-and `beta` with one offset built from beta's strides while asserting only that
-each is contiguous, which does not imply the two agree. It is sound in this
-tree because the GDN graph reshapes both to `[1, n_heads, n_tokens, 1]`; the
-assertion pins that caller contract so a future reshape fails loudly instead of
-silently misreading `g` at beta's spacing — a failure that would appear only
-above n=1, since the `t * sb2` term vanishes at q1. Behaviour is unchanged while
-the invariant holds. Preserve it across vendor refreshes.
+Ember pins the shape contract between `g` and `beta` in
+`ggml-cuda/gated_delta_net.cu`. Upstream indexes both from one offset built from
+beta's outer strides while asserting only that each is contiguous, which does
+not imply compatible shapes. The added assertions require equal outer
+dimensions and, for a scalar gate, equal strides. KDA gates are intentionally
+`[S_v, H, T, B]` rather than beta's `[1, H, T, B]`, so their strides differ and
+the kernel's existing `gb_offset * S_v` supplies the required rescaling. The
+Qwen GDN graph uses the scalar form and reshapes both tensors to
+`[1, n_heads, n_tokens, 1]`; the assertions pin that caller contract so a
+future reshape fails loudly instead of silently misreading `g` at beta's
+spacing. Preserve them across vendor refreshes.
 
 ## Pruned deployment scope
 

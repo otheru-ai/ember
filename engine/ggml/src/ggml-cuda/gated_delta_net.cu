@@ -514,15 +514,16 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
     GGML_ASSERT(ggml_is_contiguous(src_g));
     GGML_ASSERT(ggml_is_contiguous(src_beta));
     GGML_ASSERT(ggml_is_contiguous(src_state));
-    // Ember: `g` and `beta` are indexed with a single offset computed from
-    // BETA's strides (`sb1`/`sb2`/`sb3` below), so the two must agree. Each
-    // being contiguous is not sufficient -- two contiguous tensors of different
-    // shape have different strides, and `g` would then be read at beta's
-    // spacing. Sound today only because the caller reshapes both to
-    // [1, n_heads, n_tokens, 1] (`qwen4exp_frontier.cpp`, GDN graph build);
-    // reshape them differently and this breaks silently, and only above n=1
-    // because the `t * sb2` term vanishes at q1.
-    GGML_ASSERT(ggml_are_same_stride(src_g, src_beta));
+    // Ember: `g` and `beta` share an offset computed from BETA's strides
+    // (`sb1`/`sb2`/`sb3` below), so their outer dimensions must agree. Scalar
+    // gates also need identical strides. KDA gates deliberately differ in
+    // dimension 0 and therefore in stride; the kernel accounts for that with
+    // `gb_offset * S_v`. The Qwen caller uses the scalar form and reshapes both
+    // to [1, n_heads, n_tokens, 1] (`qwen4exp_frontier.cpp`, GDN graph build).
+    GGML_ASSERT(src_g->ne[1] == src_beta->ne[1]);
+    GGML_ASSERT(src_g->ne[2] == src_beta->ne[2]);
+    GGML_ASSERT(src_g->ne[3] == src_beta->ne[3]);
+    GGML_ASSERT(kda || ggml_are_same_stride(src_g, src_beta));
 
     // strides in floats (beta strides used for both g and beta offset computation)
     const int64_t sq1 = nbq1 / sizeof(float);
