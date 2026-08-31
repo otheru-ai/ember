@@ -1094,6 +1094,47 @@ these fixed fixtures. It does **not** validate the full-model activation,
 routing, masking, or state-selection context, so it remains compatible with
 the controlled full-model red result below.
 
+#### DECISIVE: a token-exact, validator-GREEN run with a destroyed logit distribution
+
+Width 4, `LUCE_MMVQ_MAX_NCOLS=3`, capture-capable runtime (`5b8e368`), evidence
+`qwen-width4-ncols3-correlation-5b8e368-20260831T004201Z`. Verified independently
+by claude from the raw rows.
+
+**The validator passed:**
+
+    ok: true
+    prefill: exact: true, accepted: true
+    q1_top2_margin 0.712470055, max_abs_logit_delta 11.7082748
+    detail: "... are token-exact (0 speculative rows)"
+
+**The logits did not:**
+
+| row | r (all) | r (top 1000) | r (top 100) | max Δ | top-1 Δ | argmax | q1 margin → prod |
+|---|---|---|---|---|---|---|---|
+| 0 | **0.556** | 0.333 | 0.489 | 11.708 | 4.308 | same | 0.712 → 4.019 |
+| 1 | **0.601** | 0.495 | 0.567 | 10.181 | 0.282 | same | 2.045 → 4.410 |
+
+The same structural collapse as widths 6/17 (r = 0.54-0.67), at a width the
+validator calls **exact and accepted**, because both argmax tokens happen to
+survive.
+
+**This is the criterion's failure mode, measured rather than argued.** Token
+equality and the top-2 margin can both be satisfied while the distribution is
+~45% uncorrelated with the reference. Greedy argmax is one order statistic; it
+does not constrain the distribution that produced it.
+
+**It matters for what we actually serve.** The production configuration runs
+`--default-temperature 0.6`, not greedy. A perturbation this large changes
+sampled output even where greedy argmax coincides, so a validator that checks
+only greedy tokens cannot certify shipped sampling behaviour.
+
+**Consequence for the release criterion.** No margin-versus-delta rule over
+top-of-distribution order statistics can catch this at any threshold — the
+quantity needing constraint is distributional agreement. A correlation floor
+(or an equivalent divergence bound) on the retained rows is cheap: the vectors
+are already captured and `scripts/qwen_f32_reference_compare.py --ranks` already
+reads them.
+
 #### RESOLVED: the dense MMVQ→MMQ crossover alone is sufficient (codex 435/437)
 
 Evidence:
