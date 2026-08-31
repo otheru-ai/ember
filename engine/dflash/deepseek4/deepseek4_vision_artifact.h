@@ -36,6 +36,10 @@ bool deepseek4_parse_vision_artifact(
     const std::vector<uint8_t> & bytes, int32_t model_n_embd,
     Deepseek4VisionArtifact & out, std::string & error);
 
+bool deepseek4_load_vision_artifact(
+    const std::string & path, int32_t model_n_embd,
+    Deepseek4VisionArtifact & out, std::string & error);
+
 }  // namespace dflash
 
 #endif  // DFLASH_DEEPSEEK4_VISION_ARTIFACT_H

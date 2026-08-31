@@ -1,6 +1,7 @@
 #include "deepseek4_vision_artifact.h"
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -113,6 +114,59 @@ bool deepseek4_parse_vision_artifact(
     }
     out.digest = semantic_digest(out);
     return true;
+}
+
+bool deepseek4_load_vision_artifact(
+        const std::string & path, int32_t model_n_embd,
+        Deepseek4VisionArtifact & out, std::string & error) {
+    out = {};
+    error.clear();
+    if (path.empty() || model_n_embd <= 0) {
+        error = "invalid DeepSeek4 vision artifact path or model width";
+        return false;
+    }
+    const size_t width = static_cast<size_t>(model_n_embd);
+    if (width > (std::numeric_limits<size_t>::max() - kHeaderBytes) /
+                    (kMaxImageRows * sizeof(float))) {
+        error = "DeepSeek4 vision artifact size bound overflows";
+        return false;
+    }
+    const size_t max_bytes = kHeaderBytes +
+                             kMaxImageRows * width * sizeof(float);
+    std::FILE * file = std::fopen(path.c_str(), "rb");
+    if (!file) {
+        error = "cannot open DeepSeek4 vision artifact";
+        return false;
+    }
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::fclose(file);
+        error = "cannot size DeepSeek4 vision artifact";
+        return false;
+    }
+    const long end = std::ftell(file);
+    if (end < 0 || static_cast<unsigned long>(end) > max_bytes) {
+        std::fclose(file);
+        error = "DeepSeek4 vision artifact file is too large";
+        return false;
+    }
+    if (std::fseek(file, 0, SEEK_SET) != 0) {
+        std::fclose(file);
+        error = "cannot rewind DeepSeek4 vision artifact";
+        return false;
+    }
+    std::vector<uint8_t> bytes(static_cast<size_t>(end));
+    if (!bytes.empty() &&
+        std::fread(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
+        std::fclose(file);
+        error = "cannot read complete DeepSeek4 vision artifact";
+        return false;
+    }
+    if (std::fclose(file) != 0) {
+        error = "cannot close DeepSeek4 vision artifact";
+        return false;
+    }
+    return deepseek4_parse_vision_artifact(
+        bytes, model_n_embd, out, error);
 }
 
 }  // namespace dflash

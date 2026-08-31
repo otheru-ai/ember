@@ -2,10 +2,13 @@
 #include "dflash/deepseek4/deepseek4_vision_contract.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 using namespace dflash;
 
@@ -129,10 +132,43 @@ static void test_exact_length_and_header_contract() {
           "nonzero reserved fields are rejected");
 }
 
+static void test_bounded_file_loader() {
+    std::vector<uint8_t> bytes = artifact_bytes();
+    char path[] = "/tmp/ember-ds4-vision-artifact-XXXXXX";
+    const int fd = mkstemp(path);
+    CHECK(fd >= 0, "artifact fixture temporary file opens");
+    bool wrote = fd >= 0;
+    size_t offset = 0;
+    while (wrote && offset < bytes.size()) {
+        const ssize_t n = write(fd, bytes.data() + offset,
+                                bytes.size() - offset);
+        if (n <= 0) {
+            wrote = false;
+        } else {
+            offset += static_cast<size_t>(n);
+        }
+    }
+    if (fd >= 0) close(fd);
+    CHECK(wrote && offset == bytes.size(),
+          "artifact fixture bytes reach the filesystem exactly");
+
+    Deepseek4VisionArtifact artifact;
+    std::string error;
+    CHECK(wrote && deepseek4_load_vision_artifact(
+                       path, 2, artifact, error),
+          "bounded file loader delegates to the versioned parser");
+    CHECK(artifact.n_llm_h == 2 && artifact.n_llm_w == 3,
+          "file-loaded artifact retains its required grid");
+    unlink(path);
+    CHECK(!deepseek4_load_vision_artifact(path, 2, artifact, error),
+          "missing artifact path fails closed");
+}
+
 int main() {
     test_valid_artifact();
     test_version_and_grid_fail_closed();
     test_exact_length_and_header_contract();
+    test_bounded_file_loader();
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }
