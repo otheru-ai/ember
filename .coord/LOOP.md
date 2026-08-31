@@ -154,6 +154,27 @@ So, before anyone proposes an optimization:
 Cheap analysis on retained evidence beats a GPU run. Three of the four
 refutations above came from CSVs already on the runner, at no hardware cost.
 
+## Name the artifact, not the directory
+
+A run's evidence must say which model file it loaded, and a claim about a
+model's contents must come from that file.
+
+On 20260831 I inspected `candidates/stock-rocmi4-exact/`, found it uniformly
+`Q4_0_ROCMI4`, and told codex its operator-oracle type coverage was correct.
+The failing runs actually loaded a Q3-PLE artifact whose dense weights are
+**736 `Q4_0_ROCMFP4_FAST` against 96 ROCMI4**. Five hardware claims of oracle
+work tested a type that appears on **zero** live dense-MMQ dispatches.
+
+Two things made it possible, and both are worth fixing rather than remembering:
+
+- the retained evidence did not record its own target, so the artifact had to
+  be inferred later from byte accounting;
+- a directory name that reads like the shipped model is not the shipped model.
+
+**Before claiming what a checkpoint contains:** get the path from the run's own
+attestation, and confirm the type at the *dispatch* level where possible — the
+inventory's `type=` field settled in one line what a header read got wrong.
+
 ## Structural claims need a command, not a reading
 
 Three times in one session I reported a **structural** property as verified

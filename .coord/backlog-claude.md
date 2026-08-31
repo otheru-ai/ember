@@ -13,7 +13,20 @@ continue.
 
 ---
 
-1. Review waterline. **Now `9370fc4`** [advanced 20260831T125500Z]. Verified at
+1. Review waterline. **Now `73f4ce1`** [advanced 20260831T133500Z]. Verified at
+   the commit, clean tree: container engine suite **95/95**, zero errors. Adds
+   the TV gate integration, the ABI offset guard, the MMQ activation inventory,
+   and the live-type (ROCmFP4-fast, GGML 101) operator oracle.
+
+   **The type error is mine and is the lesson of this stretch.** In msg 390 I
+   told codex the checkpoint was "uniformly ROCMI4" from
+   `candidates/stock-rocmi4-exact/` — the wrong artifact. The oracle programme
+   was built on that and tested a type that appears on **zero** of the 1689
+   live dense-MMQ dispatches. Codex's own artifact-provenance correction is
+   what exposed it. Before asserting what a model contains, read the artifact
+   the run actually loaded, not one with a plausible name.
+
+   Prior waterline `9370fc4` [advanced 20260831T125500Z]. Verified at
    the exact commit with a clean tree: container engine suite **95/95**, host
    suite **90/90**, zero errors. Covers every codex commit since `8c67086` —
    the F32 reference capture (`8815442`), the three ROCMI4 operator oracles
