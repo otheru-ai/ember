@@ -11,6 +11,7 @@
 #include "deepseek4_internal.h"
 #include "deepseek4_attention_shape.h"
 #include "deepseek4_hc_cuda.h"
+#include "deepseek4_vision_contract.h"
 #include "../common/step_graph.h"
 #include "../common/crash_breadcrumb.h"
 #include "../common/moe_hybrid_ffn_eval.h"
@@ -67,6 +68,13 @@ static int ds4_effective_expert_count(const DeepSeek4Weights & w) {
         return requested;
     }
     return w.n_expert_used;
+}
+
+static bool ds4_has_vision_tokens(const int32_t * token_ids, int n_tokens,
+                                  int n_vocab) {
+    if (!token_ids || n_tokens <= 0) return false;
+    return std::any_of(token_ids, token_ids + n_tokens,
+                       [n_vocab](int32_t token) { return token >= n_vocab; });
 }
 
 static size_t ds4_attn_step_meta_size(int n_tokens) {
@@ -1582,7 +1590,17 @@ static ggml_tensor * build_mla_attention(
         std::vector<DeepSeek4I32ArrayBinding> & i32_array_inputs,
         std::vector<DeepSeek4I64ArrayBinding> & i64_array_inputs,
         std::vector<DeepSeek4F32ArrayBinding> * f32_array_inputs = nullptr,
-        DeepSeek4AttentionImpl attention_impl = DeepSeek4AttentionImpl::Explicit) {
+        DeepSeek4AttentionImpl attention_impl = DeepSeek4AttentionImpl::Explicit,
+        const std::vector<int32_t> * vision_left = nullptr,
+        const std::vector<int32_t> * vision_right = nullptr) {
+
+    const bool vision_attention = vision_left && vision_right;
+    if ((vision_left == nullptr) != (vision_right == nullptr) ||
+        (vision_attention &&
+         (vision_left->size() != static_cast<size_t>(n_tokens) ||
+          vision_right->size() != static_cast<size_t>(n_tokens)))) {
+        return nullptr;
+    }
 
     // Crash breadcrumb (see common/crash_breadcrumb.h): recorded BEFORE the
     // compress_ratios[layer_idx] load below, which is an unchecked indexed
@@ -1994,6 +2012,7 @@ static ggml_tensor * build_mla_attention(
     const bool exact_two_band =
         attention_impl == DeepSeek4AttentionImpl::DenseFlash &&
         causal_batch &&
+        !vision_attention &&
         n_tokens > DS4_NUMERICAL_PREFILL_BAND &&
         n_tokens <= 2 * DS4_NUMERICAL_PREFILL_BAND;
     if (!exact_two_band) {
@@ -2011,14 +2030,23 @@ static ggml_tensor * build_mla_attention(
             for (int i = 0; i < n_tokens; i++) {
                 const int pos_i = kv_start + i;
                 float * col = mvals.data() + (size_t) i * n_attn;
-                const int min_pos = pos_i - w.n_swa + 1;
+                const int visible_left = vision_attention
+                    ? (*vision_left)[static_cast<size_t>(i)] : 0;
+                const int visible_right = vision_attention
+                    ? (*vision_right)[static_cast<size_t>(i)] : 0;
                 for (int r = 0; r < n_prior_rows; ++r) {
                     const int prior_pos = kv_start - n_prior_rows + r;
-                    if (prior_pos < min_pos) col[r] = -1e30f;
+                    if (!dflash::deepseek4_raw_attention_visible(
+                            pos_i, prior_pos, w.n_swa,
+                            visible_left, visible_right)) {
+                        col[r] = -1e30f;
+                    }
                 }
                 for (int t = 0; t < n_tokens; ++t) {
                     const int current_pos = kv_start + t;
-                    if (t > i || current_pos < min_pos) {
+                    if (!dflash::deepseek4_raw_attention_visible(
+                            pos_i, current_pos, w.n_swa,
+                            visible_left, visible_right)) {
                         col[n_prior_rows + t] = -1e30f;
                     }
                 }
@@ -3069,7 +3097,8 @@ static Ds4MoeRouting build_moe_routing(
         ggml_tensor * cur,
         const DeepSeek4Weights & w,
         const DeepSeek4Layer & L,
-        int n_tokens) {
+        int n_tokens,
+        ggml_tensor * selection_bias) {
     Ds4MoeRouting out;
     ggml_tensor * logits = ggml_mul_mat(ctx, L.ffn_gate_inp, cur);
 
@@ -3078,8 +3107,8 @@ static Ds4MoeRouting build_moe_routing(
     // router probabilities and are normalized after selection.
     ggml_tensor * probs = ggml_sqrt(ctx, ggml_softplus(ctx, logits));
     ggml_tensor * selection = probs;
-    if (L.ffn_exp_probs_b) {
-        selection = ggml_add(ctx, selection, L.ffn_exp_probs_b);
+    if (selection_bias) {
+        selection = ggml_add(ctx, selection, selection_bias);
     }
     out.selection = selection;
 
@@ -3107,6 +3136,8 @@ static ggml_tensor * build_moe_ffn_parts(
         int n_tokens,
         bool include_shared,
         bool include_routed,
+        ggml_tensor * selection_bias,
+        bool external_hash_routing,
         ggml_tensor ** debug_selected = nullptr,
         ggml_tensor ** debug_selection = nullptr) {
 
@@ -3119,10 +3150,12 @@ static ggml_tensor * build_moe_ffn_parts(
 
     if (!include_routed) {
         routed_out = nullptr;
-    } else if (layer_idx < w.n_hash_layer && L.ffn_gate_tid2eid) {
+    } else if (external_hash_routing && layer_idx < w.n_hash_layer &&
+               L.ffn_gate_tid2eid) {
         routed_out = ggml_scale(ctx, cur, 0.0f);
     } else {
-        Ds4MoeRouting routing = build_moe_routing(ctx, cur, w, L, n_tokens);
+        Ds4MoeRouting routing = build_moe_routing(
+            ctx, cur, w, L, n_tokens, selection_bias);
         if (debug_selected) *debug_selected = routing.selected;
         if (debug_selection) *debug_selection = routing.selection;
         n_used = (int) routing.selected->ne[0];
@@ -3159,6 +3192,7 @@ static ggml_tensor * build_moe_ffn(
         ggml_tensor ** debug_selection) {
     return build_moe_ffn_parts(
         ctx, cur, w, L, layer_idx, n_tokens, true, true,
+        L.ffn_exp_probs_b, true,
         debug_selected, debug_selection);
 }
 
@@ -4377,6 +4411,12 @@ bool deepseek4_step(
         MoeHybridStreamEngine * stream_engine,
         DeepSeek4StepTelemetry * telemetry,
         Ds4VerifyHooks * verify_hooks) {
+    if (w.moe_hybrid &&
+        ds4_has_vision_tokens(token_ids, n_tokens, w.n_vocab)) {
+        std::fprintf(stderr,
+                     "[deepseek4-vision] hybrid MoE does not support learned image rows\n");
+        return false;
+    }
     if (w.moe_hybrid && moe_hybrid != nullptr) {
         if (!deepseek4_cuda_hc_set_device(device)) {
             std::fprintf(stderr,
@@ -4655,6 +4695,99 @@ static ggml_tensor * ds4_build_hash_routed_ffn(
         int n_tokens) {
     return ds4_build_hash_routed_ffn_parts(
         ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true);
+}
+
+// DeepSeek-V4-Flash-Vision-Exp inference/model.py:620-639 routes every learned
+// image sentinel through the ordinary router scores plus exp_probs_b_vl. Text
+// rows retain hash routing in the first three layers and exp_probs_b later.
+// Gather/scatter keeps those contracts separate without changing the
+// text-only graph or indexing a vocabulary-sized hash table with sentinels.
+static ggml_tensor * ds4_build_vision_moe_ffn(
+        ggml_context * ctx,
+        const DeepSeek4Weights & w,
+        const DeepSeek4Layer & L,
+        int layer_idx,
+        ggml_tensor * ffn_normed,
+        const int32_t * token_ids,
+        int n_tokens,
+        const HashRoutingTableCpu & hash_table,
+        std::vector<DeepSeek4I32ArrayBinding> & i32_array_inputs) {
+    if (!token_ids || n_tokens <= 0 || !L.ffn_exp_probs_b_vl) return nullptr;
+
+    std::vector<int32_t> text_rows;
+    std::vector<int32_t> vision_rows;
+    text_rows.reserve(static_cast<size_t>(n_tokens));
+    vision_rows.reserve(static_cast<size_t>(n_tokens));
+    for (int t = 0; t < n_tokens; ++t) {
+        if (token_ids[t] < w.n_vocab) {
+            text_rows.push_back(t);
+        } else {
+            vision_rows.push_back(t);
+        }
+    }
+    if (vision_rows.empty()) return nullptr;
+
+    auto row_input = [&](std::vector<int32_t> values) {
+        ggml_tensor * rows = ggml_new_tensor_1d(
+            ctx, GGML_TYPE_I32, static_cast<int64_t>(values.size()));
+        ggml_set_input(rows);
+        i32_array_inputs.push_back({rows, std::move(values)});
+        return rows;
+    };
+    auto scatter = [&](ggml_tensor * subset, ggml_tensor * rows) {
+        return ggml_get_rows_back(
+            ctx, ggml_cont(ctx, subset), rows, ffn_normed);
+    };
+
+    ggml_tensor * shared = build_shared_ffn(ctx, ffn_normed, w, L);
+    ggml_tensor * routed = nullptr;
+
+    ggml_tensor * vision_idx = row_input(std::move(vision_rows));
+    ggml_tensor * vision_in = ggml_get_rows(ctx, ffn_normed, vision_idx);
+    const int n_vision = static_cast<int>(vision_idx->ne[0]);
+    ggml_tensor * vision_out = build_moe_ffn_parts(
+        ctx, vision_in, w, L, layer_idx, n_vision,
+        false, true, L.ffn_exp_probs_b_vl, false);
+    if (!vision_out) return nullptr;
+    routed = scatter(vision_out, vision_idx);
+
+    if (!text_rows.empty()) {
+        const int n_text = static_cast<int>(text_rows.size());
+        ggml_tensor * text_idx = row_input(std::move(text_rows));
+        ggml_tensor * text_in = ggml_get_rows(ctx, ffn_normed, text_idx);
+        ggml_tensor * text_out = nullptr;
+        if (layer_idx < w.n_hash_layer && L.ffn_gate_tid2eid) {
+            if (!hash_table.loaded) return nullptr;
+            const int n_used = w.n_expert_used;
+            std::vector<int32_t> hash_values(
+                static_cast<size_t>(n_used) * static_cast<size_t>(n_text));
+            const std::vector<int32_t> & rows =
+                i32_array_inputs.back().values;
+            for (int i = 0; i < n_text; ++i) {
+                const int prompt_row = rows[static_cast<size_t>(i)];
+                const int32_t * ids = hash_routing_row(
+                    hash_table, token_ids[prompt_row], n_used);
+                if (!ids) return nullptr;
+                std::memcpy(
+                    hash_values.data() + static_cast<size_t>(i) * n_used,
+                    ids, sizeof(int32_t) * static_cast<size_t>(n_used));
+            }
+            ggml_tensor * hash_ids = ggml_new_tensor_2d(
+                ctx, GGML_TYPE_I32, n_used, n_text);
+            ggml_set_input(hash_ids);
+            i32_array_inputs.push_back({hash_ids, std::move(hash_values)});
+            text_out = ds4_build_hash_routed_ffn_parts(
+                ctx, w, L, text_in, hash_ids, n_text, false, true);
+        } else {
+            text_out = build_moe_ffn_parts(
+                ctx, text_in, w, L, layer_idx, n_text,
+                false, true, L.ffn_exp_probs_b, false);
+        }
+        if (!text_out) return nullptr;
+        routed = ggml_add(ctx, routed, scatter(text_out, text_idx));
+    }
+
+    return ggml_add(ctx, shared, routed);
 }
 
 static bool ds4_fused_ensure_fn_mirrors(
@@ -5556,6 +5689,43 @@ static int ds4_try_layer_major_prefill(
         }
     }
 
+    bool has_vision_tokens = false;
+    std::vector<int32_t> vision_ids;
+    std::vector<int32_t> vision_left;
+    std::vector<int32_t> vision_right;
+    if (token_ids) {
+        vision_ids.assign(token_ids, token_ids + n_tokens);
+        for (int32_t token : vision_ids) {
+            if (token >= w.n_vocab) {
+                has_vision_tokens = true;
+                break;
+            }
+        }
+    }
+    if (has_vision_tokens) {
+        std::string vision_error;
+        if (w.vision_max_tokens <= 0 ||
+            !dflash::deepseek4_validate_vision_chunk_ids(
+                vision_ids, w.n_vocab, &vision_error)) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] rejected prefill chunk: %s\n",
+                         vision_error.empty() ? "invalid vision metadata"
+                                              : vision_error.c_str());
+            return -1;
+        }
+        for (int il = 0; il < w.n_layer; ++il) {
+            if (!w.layers[static_cast<size_t>(il)].ffn_exp_probs_b_vl) {
+                std::fprintf(stderr,
+                             "[deepseek4-vision] missing vision router bias at layer %d\n",
+                             il);
+                return -1;
+            }
+        }
+        dflash::deepseek4_image_visible(
+            vision_ids, w.n_vocab, w.vision_max_tokens,
+            vision_left, vision_right);
+    }
+
     if (fc.owner_ctx != w.ctx || fc.backend != backend) {
         fc.destroy();
         fc.owner_ctx = w.ctx;
@@ -5577,7 +5747,8 @@ static int ds4_try_layer_major_prefill(
     Ds4LayerMajorGraphCache * graph_cache = nullptr;
     bool cache_hit = false;
     bool cache_build = false;
-    if (token_ids) {
+    if (token_ids && dflash::deepseek4_vision_graph_cache_safe(
+                         vision_ids, w.n_vocab)) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
             if (candidate.matches(w, cache, backend, cache.prefill_mode,
                                   n_tokens, kv_start, capture_ids)) {
@@ -5884,7 +6055,9 @@ static int ds4_try_layer_major_prefill(
         ggml_tensor * attn_out = build_mla_attention(
             ctx, gf, attn_normed, w, L, lc, il, kv_start, n_tokens,
             nullptr, i32_inputs, i32_array_inputs, i64_array_inputs,
-            &f32_array_inputs, attention_impl);
+            &f32_array_inputs, attention_impl,
+            has_vision_tokens ? &vision_left : nullptr,
+            has_vision_tokens ? &vision_right : nullptr);
         if (!attn_out) {
             if (!cached_layer) ggml_free(ctx);
             return fail("attention graph build failed", il);
@@ -5911,9 +6084,14 @@ static int ds4_try_layer_major_prefill(
                                                   L.ffn_norm, w.rms_eps);
         ggml_tensor * hash_ids = nullptr;
         ggml_tensor * ffn_out = nullptr;
-        const bool hash_routed = il < w.n_hash_layer && L.ffn_gate_tid2eid &&
+        const bool hash_routed = !has_vision_tokens &&
+                                 il < w.n_hash_layer && L.ffn_gate_tid2eid &&
                                  token_ids && hash_tables[(size_t) il].loaded;
-        if (hash_routed) {
+        if (has_vision_tokens) {
+            ffn_out = ds4_build_vision_moe_ffn(
+                ctx, w, L, il, ffn_normed, token_ids, n_tokens,
+                hash_tables[static_cast<size_t>(il)], i32_array_inputs);
+        } else if (hash_routed) {
             hash_ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32,
                                           w.n_expert_used, n_tokens);
             ggml_set_input(hash_ids);
@@ -6288,6 +6466,16 @@ bool deepseek4_step_layer_range(
             ds4_backend_is_gpu(backend), w.moe_hybrid,
             incompatible_layer_major_hooks,
             cache.prefill_mode);
+    const bool has_vision_tokens =
+        ds4_has_vision_tokens(token_ids, n_tokens, w.n_vocab);
+    if (has_vision_tokens && !layer_major_candidate) {
+        // The published reference requires every complete image block to be
+        // present in one forward. Exact q=1 and compressor-boundary fallback
+        // cannot expose a future image K/V row to an earlier image query.
+        std::fprintf(stderr,
+                     "[deepseek4-vision] learned image rows require one full-model layer-major prefill\n");
+        return false;
+    }
     // The fused q2..q4 verifier models a learned-compressor boundary inside
     // its graph. Decide whether that graph is eligible before applying the
     // generic boundary splitter; otherwise a boundary crossing silently turns
@@ -6475,6 +6663,11 @@ bool deepseek4_step_layer_range(
                     step_t0, Ds4TimingClock::now());
             }
             return true;
+        }
+        if (has_vision_tokens) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] layer-major prefill declined an image chunk\n");
+            return false;
         }
     }
 

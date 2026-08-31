@@ -437,6 +437,98 @@ void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
     }
 }
 
+bool deepseek4_raw_attention_visible(int query_pos, int key_pos,
+                                     int window_size, int visible_left,
+                                     int visible_right) {
+    if (query_pos < 0 || key_pos < 0 || window_size <= 0 ||
+        visible_left < 0 || visible_right < 0) {
+        return false;
+    }
+    const int64_t ordinary_start =
+        static_cast<int64_t>(query_pos) - window_size + 1;
+    const int64_t image_start =
+        static_cast<int64_t>(query_pos) - visible_left;
+    const int64_t start = std::min(ordinary_start, image_start);
+    const int64_t end =
+        static_cast<int64_t>(query_pos) + visible_right;
+    return static_cast<int64_t>(key_pos) >= std::max<int64_t>(0, start) &&
+           static_cast<int64_t>(key_pos) <= end;
+}
+
+bool deepseek4_validate_vision_chunk_ids(
+        const std::vector<int32_t> & input_ids, int32_t vocab_size,
+        std::string * error) {
+    if (vocab_size <= 0 ||
+        vocab_size > INT32_MAX - DEEPSEEK4_IMAGE_END) {
+        set_error(error, "invalid vision-chunk vocabulary");
+        return false;
+    }
+    bool inside = false;
+    bool pending_pad = false;
+    bool saw_image = false;
+    bool saw_block = false;
+    for (int32_t token : input_ids) {
+        if (token >= 0 && token < vocab_size) {
+            if (inside || pending_pad) {
+                set_error(error, "text token interrupts a learned image block");
+                return false;
+            }
+            continue;
+        }
+        if (token < vocab_size || token > vocab_size + DEEPSEEK4_IMAGE_END) {
+            set_error(error, "unknown token id in vision prefill chunk");
+            return false;
+        }
+        const int32_t type = token - vocab_size;
+        if (!inside) {
+            if (type == DEEPSEEK4_IMAGE_PAD) {
+                pending_pad = true;
+                continue;
+            }
+            if (type != DEEPSEEK4_IMAGE_START) {
+                set_error(error, "learned image content appears outside a block");
+                return false;
+            }
+            pending_pad = false;
+            inside = true;
+            saw_image = false;
+            continue;
+        }
+        if (type == DEEPSEEK4_IMAGE_START) {
+            set_error(error, "nested learned image block");
+            return false;
+        }
+        if (type == DEEPSEEK4_IMAGE_END) {
+            if (!saw_image) {
+                set_error(error, "learned image block has no image row");
+                return false;
+            }
+            inside = false;
+            saw_block = true;
+            continue;
+        }
+        if (type == DEEPSEEK4_IMAGE) saw_image = true;
+    }
+    if (inside || pending_pad) {
+        set_error(error, "prefill chunk ends inside a learned image block");
+        return false;
+    }
+    if (!saw_block) {
+        set_error(error, "vision prefill chunk contains no complete image block");
+        return false;
+    }
+    return true;
+}
+
+bool deepseek4_vision_graph_cache_safe(
+        const std::vector<int32_t> & input_ids, int32_t vocab_size) {
+    return vocab_size > 0 &&
+           std::all_of(input_ids.begin(), input_ids.end(),
+                       [vocab_size](int32_t token) {
+                           return token >= 0 && token < vocab_size;
+                       });
+}
+
 bool deepseek4_prefill_cut_safe(const std::vector<int32_t> & input_ids,
                                 int32_t vocab_size, int cut) {
     if (cut < 0 || static_cast<size_t>(cut) > input_ids.size()) return false;

@@ -796,6 +796,17 @@ if(EMBER_ENGINE)
   add_test(NAME ds4_vision_biases COMMAND test_ds4_vision_biases)
   set_tests_properties(ds4_vision_biases PROPERTIES TIMEOUT 60)
 
+  # CPU execution proof for the mixed text/vision row partition used by the
+  # layer-major MoE graph. It catches wrong ggml gather/scatter shapes and
+  # row-index input lifetime mistakes without a GPU or model weights.
+  add_executable(test_ds4_vision_graph_rows
+    test/test_ds4_vision_graph_rows.cpp)
+  target_include_directories(test_ds4_vision_graph_rows PRIVATE
+    engine/ggml/include)
+  target_link_libraries(test_ds4_vision_graph_rows PRIVATE ember_engine)
+  add_test(NAME ds4_vision_graph_rows COMMAND test_ds4_vision_graph_rows)
+  set_tests_properties(ds4_vision_graph_rows PROPERTIES TIMEOUT 60)
+
   # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
   # weights are required, but it exercises the same persistent ggml graph that
   # production dispatches through gfx1151 MMVQ/MMQ.

@@ -141,6 +141,26 @@ void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
                              std::vector<int32_t> & left,
                              std::vector<int32_t> & right);
 
+// Raw-window visibility for one query/key pair. The ordinary causal SWA
+// window is widened only by the query's learned image-span counts. This is
+// the scalar form of inference/model.py:get_window_topk_idxs_visible and is
+// shared by GPU-free contract tests and the ggml attention-mask builder.
+bool deepseek4_raw_attention_visible(int query_pos, int key_pos,
+                                     int window_size, int visible_left,
+                                     int visible_right);
+
+// Validate the sentinel grammar visible to one graph invocation. Complete
+// blocks may be surrounded by ordinary text, but no learned block may be
+// partial, nested, empty, or interrupted by a vocabulary token.
+bool deepseek4_validate_vision_chunk_ids(
+    const std::vector<int32_t> & input_ids, int32_t vocab_size,
+    std::string * error = nullptr);
+
+// Layer-major graph-cache keys do not carry per-request row partitions or
+// visibility counts. Only an all-vocabulary-token chunk may reuse a graph.
+bool deepseek4_vision_graph_cache_safe(
+    const std::vector<int32_t> & input_ids, int32_t vocab_size);
+
 // A cut is a prefix length. It is unsafe only when it would divide a learned
 // [IMAGE_START, IMAGE_END] block.
 bool deepseek4_prefill_cut_safe(const std::vector<int32_t> & input_ids,

@@ -235,6 +235,7 @@ struct DeepSeek4Weights {
 
     // Compression
     int n_swa             = 128;   // raw SWA window size
+    int vision_max_tokens = 384;   // config.json vision_max_n_token
     int n_indexer_head    = 64;
     int n_indexer_head_dim = 128;
     int n_indexer_top_k   = 512;

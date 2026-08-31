@@ -367,6 +367,31 @@ static void test_visibility_and_prefill_boundaries() {
     CHECK(left[start - 1] == 0 && right[start - 1] == 0 &&
           left[end + 1] == 0 && right[end + 1] == 0,
           "tokens outside learned boundaries keep ordinary visibility");
+    CHECK(deepseek4_raw_attention_visible(200, 73, 128, 0, 0) &&
+          !deepseek4_raw_attention_visible(200, 72, 128, 0, 0) &&
+          !deepseek4_raw_attention_visible(200, 201, 128, 0, 0),
+          "ordinary rows retain causal 128-token sliding visibility");
+    CHECK(deepseek4_raw_attention_visible(200, 60, 128, 140, 20) &&
+          deepseek4_raw_attention_visible(200, 220, 128, 140, 20) &&
+          !deepseek4_raw_attention_visible(200, 59, 128, 140, 20) &&
+          !deepseek4_raw_attention_visible(200, 221, 128, 140, 20),
+          "learned counts widen the raw window through both image boundaries");
+    CHECK(!deepseek4_raw_attention_visible(-1, 0, 128, 0, 0) &&
+          !deepseek4_raw_attention_visible(0, 0, 0, 0, 0) &&
+          !deepseek4_raw_attention_visible(0, 0, 128, -1, 0),
+          "invalid raw-attention shapes fail closed");
+    CHECK(deepseek4_validate_vision_chunk_ids(prompt, vocab),
+          "complete learned image blocks are valid graph inputs");
+    CHECK(!deepseek4_vision_graph_cache_safe(prompt, vocab) &&
+          deepseek4_vision_graph_cache_safe({10, 11, 12}, vocab),
+          "image visibility and row partitions disable graph-cache reuse");
+    std::vector<int32_t> partial(prompt.begin(), prompt.end() - 2);
+    CHECK(!deepseek4_validate_vision_chunk_ids(partial, vocab),
+          "a graph chunk ending before the image boundary is rejected");
+    std::vector<int32_t> interrupted = prompt;
+    interrupted[start + 1] = 99;
+    CHECK(!deepseek4_validate_vision_chunk_ids(interrupted, vocab),
+          "ordinary text cannot interrupt a learned image block");
     CHECK(!deepseek4_prefill_cut_safe(prompt, vocab,
                                       static_cast<int>(start + 1)),
           "prefill cut cannot split an image block");
