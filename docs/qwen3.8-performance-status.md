@@ -1740,6 +1740,49 @@ work.
 
 
 
+## Why the KV state is host-resident, and what the lever would actually cost
+
+Source reading, no measurement. Filed because the depth result promotes KV
+residency to the leading decode candidate, and the next person should know it
+was a **decision**, not an oversight.
+
+`Qwen4ExpCowBuffer` (`qwen4exp_internal.h:106-124`) is a copy-on-write,
+append-only slab cache whose slabs are
+`std::vector<std::shared_ptr<std::vector<float>>>` — **host** memory. Its
+contract:
+
+> "Completed slabs are immutable and shared by every prefix snapshot. Appending
+> after a snapshot copies only the current partial slab, never the full prefix."
+
+That is what makes prefix snapshots cheap — the shipped server runs
+`--prefix-cache-slots 6`. Host residency buys O(partial slab) snapshotting and
+free sharing between prefixes via `shared_ptr`. It is paid for with the
+per-token upload the depth-2048 cell just measured.
+
+**The upload is not redundant re-sending.** QSA attends over a *selected* subset
+that changes every token (`selected_tokens` in the `graph_ready` records varies
+per call), so the device needs a different gather each step. Keeping a device
+mirror and appending one row would not help: the problem is the **gather**, not
+the append.
+
+So the lever is not "stop re-uploading". It is **hold the full cache on device
+and gather there**, which collides directly with the COW slab design:
+immutable-shared-slab snapshotting is a host-pointer trick with no direct
+device analogue.
+
+**What that implies for sequencing.** This is a larger change than the tranche
+programme — tranches 1-3 remove host barriers around a host-resident cache,
+whereas this moves the cache. They are complementary, not alternatives: the
+tranche work attacks the ~55.6 ms fixed term, KV residency attacks the
+~0.665 ms/MB slope. **The depth measurement says the slope is what makes us
+0.30x rather than 0.50x**, so at long context the residency work dominates —
+but the fixed term is what we would still be left with.
+
+**Not proposed here.** Recorded so that whoever picks it up starts from the
+constraint rather than rediscovering it, and so the "sized, deliberately not a
+lever" line elsewhere in this document is read as the trade it was, not an
+omission.
+
 ## What the 13.84 figure implies for where decode time goes (arithmetic, not measurement)
 
 **Corrected 20260831T144500Z.** The first version of this section divided the
