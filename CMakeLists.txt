@@ -768,6 +768,17 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_shards COMMAND test_qwen4exp_shards)
   set_tests_properties(qwen4exp_shards PROPERTIES TIMEOUT 60)
 
+  # Metadata/data-slice coverage for the four learned DeepSeek vision marker
+  # rows. This uses the real GGUF reader but neither creates a GPU backend nor
+  # needs model weights.
+  add_executable(test_ds4_vision_markers test/test_ds4_vision_markers.cpp)
+  target_include_directories(test_ds4_vision_markers PRIVATE
+    engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_markers PRIVATE ember_engine)
+  ember_strict(test_ds4_vision_markers)
+  add_test(NAME ds4_vision_markers COMMAND test_ds4_vision_markers)
+  set_tests_properties(ds4_vision_markers PROPERTIES TIMEOUT 60)
+
   # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
   # weights are required, but it exercises the same persistent ggml graph that
   # production dispatches through gfx1151 MMVQ/MMQ.
