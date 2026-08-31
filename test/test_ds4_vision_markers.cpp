@@ -177,16 +177,35 @@ int main(int argc, char ** argv) {
         const struct Probe {
             const char * name;
             const std::vector<float> * values;
+            std::array<uint32_t, 4> expected_bits;
         } probes[] = {
-            {"begin", &markers.start},
-            {"pad", &markers.pad},
-            {"newline", &markers.newline},
-            {"end", &markers.end},
+            {"begin", &markers.start,
+             {0xbc170000, 0xbc3c0000, 0x3c970000, 0x3b540000}},
+            {"pad", &markers.pad,
+             {0xbc310000, 0xbd070000, 0x3c240000, 0xbb9b0000}},
+            {"newline", &markers.newline,
+             {0xbb120000, 0xbc910000, 0x3c290000, 0xbbef0000}},
+            {"end", &markers.end,
+             {0x3c300000, 0xbcf70000, 0x3c6a0000, 0x3cc90000}},
         };
+        // Expected prefixes were extracted independently from the source
+        // safetensors before the GGUF loader probe ran. They therefore test
+        // source -> converter -> GGUF -> loader, not merely file self-consistency.
         for (const Probe & probe : probes) {
             std::printf("%s %.9g %.9g %.9g %.9g\n", probe.name,
                         (*probe.values)[0], (*probe.values)[1],
                         (*probe.values)[2], (*probe.values)[3]);
+            for (size_t i = 0; i < probe.expected_bits.size(); ++i) {
+                uint32_t actual_bits = 0;
+                std::memcpy(&actual_bits, &(*probe.values)[i],
+                            sizeof(actual_bits));
+                if (actual_bits != probe.expected_bits[i]) {
+                    std::fprintf(stderr,
+                                 "%s marker differs from source at column %zu\n",
+                                 probe.name, i);
+                    return 1;
+                }
+            }
         }
         Deepseek4ImageMarkers wrong;
         if (deepseek4_load_image_markers(argv[1], 4095, wrong, error)) {
