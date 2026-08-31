@@ -1700,42 +1700,54 @@ being re-run. `27.36` is their matching figure when it lands.
 
 ## What the 13.84 figure implies for where decode time goes (arithmetic, not measurement)
 
-Derived from the measured depth-512 cell above and the existing static census.
-**No profiling was run**; this is a budget, and it says what would have to be
-true, not what is.
+**Corrected 20260831T144500Z.** The first version of this section divided the
+token time by **12** and reported ~6.0 ms per barrier. That was wrong: the
+host-barrier census above is explicitly **static** — 12 barrier *sites* in
+`qwen4exp_frontier.cpp` — not the number executed per token. The same section
+already says "over 12 QSA layers that is 24 barriers", which is the dynamic
+reading, and I used the static one anyway.
 
     measured            13.84 tok/s  ->  72.2 ms per token
     agention no-MTP     27.77 tok/s  ->  36.0 ms per token
     gap to close                          36.2 ms per token
 
-The live host-barrier census is **12 barriers per token**. If barriers dominate
-decode, that is **~6.0 ms per barrier** — and closing the gap means removing
-about **36 ms**, i.e. the equivalent of six of the twelve.
+**Dynamic barrier count.** From the startup log's own graph counts —
+`gdn_graphs=36`, `qsa_graphs=12`, MoE 48 — and the census's per-stage barrier
+pairs:
 
-**Why this is the interesting reading.** The tranche programme already targets
-exactly these barriers, and tranche 1 (resident QSA preparation, `1ee72b8`)
-moved one group from depth 5 to depth 1 without changing the count. Tranches 2
-and 3 are mapped onto the reference implementation. If the barrier budget above
-is roughly right, that programme is sized to the gap rather than being a
-marginal optimisation.
+| stage | layers | barriers/layer | per token |
+|---|---:|---:|---:|
+| GDN | 36 | 2 | 72 |
+| QSA (project + attend) | 12 | 4 | 48 |
+| MoE | 48 | 2 | 96 |
+| **subtotal** | | | **216** |
 
-**Why it may be wrong.** Decode at depth 512 also uploads selected KV state
-each token — the startup log records `qsa_transfer_bytes_k2050 = 8.59 MB` per
-QSA layer at ctx 2050, and the ledger's standing figure is ~101 MB per decode
-token at ctx 2048. At depth 512 that is roughly a quarter, ~25 MB/token, or
-~350 MB/s at the measured rate. That traffic and the barriers are not
-independent: the barriers exist *because* the state is host-resident.
+Dense and HC stages are additional, so **216 is a lower bound**. That gives
+**≤ 0.334 ms per barrier**, not 6 ms — an order of magnitude different, and a
+figure consistent with ordinary device-synchronisation cost rather than
+implausible.
 
-**What would settle it**, and it is one profiling run rather than a redesign:
-per-token wall-clock split across barrier wait, transfer, and kernel time at
-depth 512. Until then the 6 ms/barrier figure is a consequence of an assumption,
-not a measurement, and should not be quoted as one.
+**The conclusion survives the correction, and is now better supported.** At
+~0.33 ms and ≥216 barriers, host synchronisation alone accounts for the whole
+72 ms budget if barriers dominate — so removing barriers remains the lever, and
+the tranche programme is still sized to the gap. What changed is that the
+per-barrier cost is now a plausible number rather than an absurd one, which
+makes the hypothesis more credible, not less.
 
-**The reason this matters now.** The 0.50x gap is on *bare* decode — no
-speculation, no batching, the simplest path in the engine. It cannot be
-explained by the width-dependent correctness defect, by prefill chunking, or by
-speculation being blocked. Whatever costs us the other half is present in the
-plainest possible configuration.
+**Why it may still be wrong.** Decode also uploads host-resident KV state each
+token: `qsa_transfer_bytes_k2050 = 8.59 MB` per QSA layer at ctx 2050, ~101 MB
+per token at ctx 2048 per the standing figure, so roughly 25 MB/token at depth
+512. Transfers and barriers are not independent — the barriers exist *because*
+the state is host-resident — so a split is needed, not a choice between them.
+
+**What would settle it:** one profiling run giving per-token wall-clock split
+across barrier wait, transfer, and kernel time at depth 512. Until then every
+figure in this section is a consequence of assumptions.
+
+**Why it matters.** The 0.50x gap is on *bare* decode — no speculation, no
+batching. It cannot be attributed to the width-dependent correctness defect, to
+prefill chunking, or to speculation being blocked. Whatever costs the other half
+is present in the plainest configuration the engine has.
 
 ## PREFILL LEAD: the GDN transpose-then-concat, sized (claude, source + GGUF, no GPU)
 
