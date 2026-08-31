@@ -1075,6 +1075,39 @@ worst rank and is shown as `—`.
 | 17 | 0 | 23295 | 87 | 0.270742 | 3.84308 | 4.60085 | 5.02064 | 5.02064 | 6.43461 | 247767 | 11.7909 |
 | 17 | 1 | 11966 | 830 | 1.16483 | 2.04813 | 1.44372 | 5.94212 | 6.66708 | 7.81858 | 16995 | 9.99369 |
 
+#### RESOLVED: the dense MMVQ→MMQ crossover alone is sufficient (codex 435)
+
+Width 4, `LUCE_MMVQ_MAX_NCOLS=3`, same binary (`86a5ce1`) and prompt as the
+prior green: **validator-red**, `token mismatch at 0: expected=198 actual=87`.
+
+That moves dense quantized matmuls from MMVQ to MMQ while holding the MoE
+bucket at 5 and — per the collinearity below — the routed-expert family at MMVQ.
+**The dense crossover alone reproduces the divergence; the bucket transition is
+not required.**
+
+The bucket hypothesis recorded below is therefore **refuted as necessary**. It
+is not excluded as an additional contributor at widths 6/17, but it is no longer
+needed to explain them.
+
+**The token is the corroborating detail.** Production picks **87** here at
+bucket 5, and also at width 6 row 0 and width 17 row 0 at bucket 16
+(cross-evaluation table above). Bucket varies, dense MMQ is constant, and the
+same token appears. That is the signature of one mechanism keyed to dense MMQ,
+not two mechanisms that happen to coincide.
+
+**What is still unmeasured.** `86a5ce1` predates both the margin criterion
+(`01b8218`) and logits capture (`8815442`), so this run yields no
+`max_abs_logit_delta` and no vectors. We therefore do not know whether width 4's
+red is a hairline argmax flip or the same structural collapse (r ≈ 0.5) seen at
+widths 6/17 — and those are very different failures. **Re-run width 4 with
+`NCOLS=3` at current HEAD with `EMBER_VALIDATION_LOGITS_DIR` set** and compute
+the correlation:
+
+- r ≈ 0.5 ⇒ a dense kernel swap alone produces the structural collapse, and the
+  earlier "a kernel swap should look like width 3" reasoning was wrong;
+- r ≈ 0.99 with a token flip ⇒ width 4 is a near-tie flip, qualitatively milder
+  than widths 6/17, and those still need an additional explanation.
+
 #### CONFOUND: two mechanisms change at width 5→6, and our own setting aligned them
 
 **No experiment run so far distinguishes them.** Recorded before the
