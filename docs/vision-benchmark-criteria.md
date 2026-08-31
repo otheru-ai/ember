@@ -69,6 +69,79 @@ The gate is a differential against the official Python reference
 not against our own intuition about what looks right. Codex owns this; the
 mutation tests in its part-B plan cover exactly the five failures above.
 
+### AMENDED 2026-08-31 (user decision): the numeric differential holds only through block 0
+
+The differential above was written before we could measure how far it carries.
+It carries through **block 0 and no further**, and this is the one revision this
+document permits: not a loosened threshold after an inconvenient result, but the
+replacement of a criterion that **measurement showed cannot discriminate at
+all**.
+
+**The measurement.** The reference's own BF16 and F32 lanes diverge as the tower
+deepens:
+
+    post_patch_projection   0.0016
+    post_block_0            0.0039
+    post_vit                0.1017      <- 10.2%
+    post_aligner            0.0717      <-  7.2%
+
+Two independent producers agree to four or five significant figures
+(`72-emit-vision-oracle.py` and `77-emit-tower-budget-curve.py`). This is the
+reference disagreeing with **itself** across dtypes, not an engine error.
+
+So at tower depth the BF16 lane is **not a numerical authority**. A gate there
+would require the engine to reproduce rounding noise the reference does not
+reproduce itself, and any implementation difference below ~10% at the output is
+indistinguishable from that noise. Adding checkpoints does not rescue it: an
+anchor-sized residual at `post_patch_projection` is already 140x larger by
+`post_block_0`, and by block 12 the perturbation response saturates and the
+anchor stops mattering.
+
+**What gates what, now:**
+
+| depth | gate |
+|---|---|
+| block 0 | the 13-record numeric oracle, compounding budget, anchor 3e-5, first-red. Unchanged and discriminating. |
+| blocks 1-31 | **no numeric gate.** Not "a looser one" — none is possible. |
+| tower output | behavioural, below |
+
+### The behavioural gate, and the control that makes it a gate
+
+Accuracy on an image set is **not** sufficient on its own, because the failure
+mode we most need to catch is a model that silently ignores the image and
+answers from text priors. That failure has already occurred here once, and it
+passed every gate it was shown.
+
+So the gate is **two-armed**, and the control is not optional:
+
+- **Arm A** — image + question, over a held-out set.
+- **Arm B** — the identical questions with the image withheld.
+
+Every item must be chosen so that **Arm B cannot be answered above chance from
+the question text alone**. An item a language model can guess is not evidence
+about the vision path and must be cut from the set, not scored.
+
+**Pass requires all three:**
+
+1. Arm B accuracy is at chance, confirming the set actually requires the image.
+2. Arm A accuracy is far enough above Arm B that the gap cannot be sampling
+   noise, at a threshold and set size **pre-registered before the first run**.
+3. Failures are inspected, not just counted: a set that passes on aggregate
+   while failing every OCR item is reported as such.
+
+Item classes should include counting, colour or attribute binding, spatial
+relation, and text-in-image, so that a single systematic defect cannot hide
+inside an aggregate score.
+
+**Known dependency, stated rather than discovered later:** no such set exists on
+disk today. `/srv/models/vision-gate/` holds two images, and their source JPEGs
+are gone — only the bound patch payloads survive. Assembling and ground-truthing
+the set is real work and it is on the critical path for C2; it is not a detail
+to be improvised at benchmark time.
+
+**This gate replaces the numeric differential at tower depth only.** It does not
+relax C1, and it does not relax block 0.
+
 ### Quantization quality, once correct
 
 Same instrument as C1 — TV distance — but the reference is our own model at
