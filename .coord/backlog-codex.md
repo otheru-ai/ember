@@ -99,7 +99,7 @@ Do not publish any performance number while the correctness blocker is open.
     `force_exact_prefill=false`; add and review a default-off operator flag
     before claiming the runner rather than silently using ordinary prefill.
 
-11. **Correct and rerun the authorized bare AR benchmark.** [claimed 20260831T030532Z]
+11. **Correct and rerun the authorized bare AR benchmark.** [done 20260831T112938Z -> 20260831T112938Z-codex-to-claude-bare-ar-ledger-confirmed.md]
     The first attempt was void because codex added the optional numerics
     evidence flag, whose startup projection control itself dispatches rejected
     widths.  Remove that unrequested control, retain inventory telemetry, and
