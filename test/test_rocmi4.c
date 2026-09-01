@@ -1,5 +1,6 @@
-// GPU-free format contracts for ROCmFPX Q4_0_ROCMI4 (upstream 16d05b8) and
-// the Q3_0_ROCMFPX PLE recipe reviewed at ciru-ai/ROCmFPX 112629f1.
+// GPU-free format contracts for Ember's published affine Q2_0_ROCMFP2,
+// ROCmFPX Q4_0_ROCMI4 (upstream 16d05b8), and the Q3_0_ROCMFPX PLE recipe
+// reviewed at ciru-ai/ROCmFPX 112629f1.
 #include "rocmfpx.h"
 
 #include <math.h>
@@ -17,6 +18,29 @@ int main(void) {
     CHECK(GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2 == 119 &&
           GGML_FTYPE_MOSTLY_Q2_0_ROCMFP2_STRIX == 120,
           "legacy Ember Q2 recipe IDs no longer collide with canonical ROCMI4");
+
+    CHECK(GGML_TYPE_Q2_0_ROCMFP2 == 107,
+          "published affine ROCMFP2 keeps GGUF tensor type 107");
+    CHECK(sizeof(block_rocmfp2) == 10 && rocmfpx_row_size_fp2(32) == 10,
+          "affine ROCMFP2 stores 32 weights in one 10-byte block");
+    block_rocmfp2 q2 = {
+        .qs = {0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4, 0xe4},
+        .e = {0x38, 0x40},
+    };
+    float fp2[32];
+    rocmfpx_dequantize_row_fp2(&q2, fp2, 32);
+    const float fp2_codes[4] = {-1.0f, -0.5f, 0.0f, 0.5f};
+    bool fp2_layout = true;
+    for (int i = 0; i < 32; ++i) {
+        fp2_layout = fp2_layout && fp2[i] == fp2_codes[i % 4];
+    }
+    CHECK(fp2_layout,
+          "type 107 decodes e[0] as scale and e[1] as whole-block offset");
+    CHECK(rocmfpx_validate_row_data_fp2(&q2, sizeof q2),
+          "finite affine ROCMFP2 block validates");
+    CHECK(!rocmfpx_validate_row_data_fp2(&q2, sizeof q2 - 1),
+          "truncated affine ROCMFP2 block is rejected");
+
     CHECK(sizeof(block_rocmi4) == 17, "ROCMI4 block is exactly 17 bytes");
     CHECK(rocmfpx_row_size_i4(32) == 17, "32 values occupy one block");
     CHECK(rocmfpx_row_size_i4(64) == 34, "row size scales by whole blocks");
