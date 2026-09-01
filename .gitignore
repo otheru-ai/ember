@@ -15,3 +15,9 @@ __pycache__/
 # local benchmark submission credential (never commit)
 *.key
 localmaxxing.key
+
+# Coordination is a separate repository at /home/mythos/Projects/.coord and
+# must never live inside a project repo: it spans ember, ember-vision,
+# otheru-quant-pipeline and ds4-vision, and when it was tracked on one branch a
+# checkout of main deleted the whole channel out from under whoever was mid-task.
+.coord/
