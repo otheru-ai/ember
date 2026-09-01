@@ -180,15 +180,32 @@ class BenchmarkGateTest(unittest.TestCase):
     def test_model_provenance_binds_mmproj_when_present(self) -> None:
         model = assemble.model_provenance({
             "TARGET": "/srv/models/vision.gguf", "TARGET_SHA": "target-sha",
+            "TARGET_SHA_SOURCE": "computed",
             "DRAFT": "/srv/models/draft.gguf", "DRAFT_SHA": "draft-sha",
+            "DRAFT_SHA_SOURCE": "asserted",
+            "DRAFT_SHA_ASSERTED_BY": "run-123",
             "MMPROJ": "/srv/models/mmproj.gguf", "MMPROJ_SHA": "mmproj-sha",
+            "MMPROJ_SHA_SOURCE": "asserted",
+            "MMPROJ_SHA_ASSERTED_BY": "run-456",
         })
         self.assertEqual(model["target"], "vision.gguf")
         self.assertEqual(model["target_sha256"], "target-sha")
         self.assertEqual(model["mmproj"], "mmproj.gguf")
         self.assertEqual(model["mmproj_sha256"], "mmproj-sha")
+        self.assertEqual(model["target_sha256_source"], "computed")
+        self.assertEqual(model["drafter_sha256_source"], "asserted")
+        self.assertEqual(model["drafter_sha256_asserted_by"], "run-123")
         with self.assertRaisesRegex(SystemExit, "SHA-256 is missing"):
-            assemble.model_provenance({"MMPROJ": "/srv/models/mmproj.gguf"})
+            assemble.model_provenance({
+                "TARGET_SHA": "target-sha", "TARGET_SHA_SOURCE": "computed",
+                "DRAFT_SHA": "draft-sha", "DRAFT_SHA_SOURCE": "computed",
+                "MMPROJ": "/srv/models/mmproj.gguf"})
+
+    def test_model_provenance_rejects_unbound_asserted_digest(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "missing its evidence reference"):
+            assemble.model_provenance({
+                "TARGET_SHA": "target-sha", "TARGET_SHA_SOURCE": "asserted",
+                "DRAFT_SHA": "draft-sha", "DRAFT_SHA_SOURCE": "computed"})
 
     def test_qwen_shape_calibration_uses_prompt_tokens(self) -> None:
         class FakeSuite:

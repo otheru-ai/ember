@@ -104,9 +104,21 @@ echo "=== model integrity ==="
 if [ -z "${TARGET_SHA:-}" ]; then
   echo "  hashing target (85 GiB, this takes a while)..."
   TARGET_SHA=$(sha256sum "$TARGET" | cut -d' ' -f1)
+  TARGET_SHA_SOURCE=computed
+  TARGET_SHA_ASSERTED_BY=""
+else
+  TARGET_SHA_SOURCE=asserted
+  [ -n "${TARGET_SHA_ASSERTED_BY:-}" ] \
+    || { echo "  TARGET_SHA_ASSERTED_BY is required with TARGET_SHA" >&2; exit 1; }
 fi
 if [ -z "${DRAFT_SHA:-}" ]; then
   DRAFT_SHA=$(sha256sum "$DRAFT" | cut -d' ' -f1)
+  DRAFT_SHA_SOURCE=computed
+  DRAFT_SHA_ASSERTED_BY=""
+else
+  DRAFT_SHA_SOURCE=asserted
+  [ -n "${DRAFT_SHA_ASSERTED_BY:-}" ] \
+    || { echo "  DRAFT_SHA_ASSERTED_BY is required with DRAFT_SHA" >&2; exit 1; }
 fi
 [ -n "$TARGET_SHA" ] && [ -n "$DRAFT_SHA" ] || { echo "  model digests unavailable" >&2; exit 1; }
 echo "  target $TARGET_SHA"
@@ -114,14 +126,21 @@ echo "  draft  $DRAFT_SHA"
 if [ -n "$MMPROJ" ]; then
   if [ -z "${MMPROJ_SHA:-}" ]; then
     MMPROJ_SHA=$(sha256sum "$MMPROJ" | cut -d' ' -f1)
+    MMPROJ_SHA_SOURCE=computed
+    MMPROJ_SHA_ASSERTED_BY=""
+  else
+    MMPROJ_SHA_SOURCE=asserted
+    [ -n "${MMPROJ_SHA_ASSERTED_BY:-}" ] \
+      || { echo "  MMPROJ_SHA_ASSERTED_BY is required with MMPROJ_SHA" >&2; exit 1; }
   fi
   [ -n "$MMPROJ_SHA" ] || { echo "  mmproj digest unavailable" >&2; exit 1; }
   echo "  mmproj $MMPROJ_SHA"
 fi
 
-COMMON_ENV=""
+EMBER_VERIFY_EXISTING_SHA256=${EMBER_VERIFY_EXISTING_SHA256:-1}
+COMMON_ENV="-e EMBER_VERIFY_EXISTING_SHA256=$EMBER_VERIFY_EXISTING_SHA256"
 [ -n "$SERVER_LD_LIBRARY_PATH" ] \
-  && COMMON_ENV="-e LD_LIBRARY_PATH=$SERVER_LD_LIBRARY_PATH"
+  && COMMON_ENV="$COMMON_ENV -e LD_LIBRARY_PATH=$SERVER_LD_LIBRARY_PATH"
 VISION_ARGS=""
 [ -n "$MMPROJ" ] && VISION_ARGS="--vision-mmproj $MMPROJ"
 PREFILL_ARGS=""
@@ -236,9 +255,16 @@ echo "=== assembling bundle ==="
 cp "$HERE/scripts/bench/benchmark.py" "$HERE/scripts/bench/accept_sweep.py" \
    "$HERE/scripts/bench/sweep_probe.py" "$BUNDLE/" 2>/dev/null
 TARGET_SHA="$TARGET_SHA" DRAFT_SHA="$DRAFT_SHA" RELEASE="$RELEASE" \
+TARGET_SHA_SOURCE="$TARGET_SHA_SOURCE" \
+TARGET_SHA_ASSERTED_BY="${TARGET_SHA_ASSERTED_BY:-}" \
+DRAFT_SHA_SOURCE="$DRAFT_SHA_SOURCE" \
+DRAFT_SHA_ASSERTED_BY="${DRAFT_SHA_ASSERTED_BY:-}" \
 MMPROJ_SHA="${MMPROJ_SHA:-}" MMPROJ="$MMPROJ" \
+MMPROJ_SHA_SOURCE="${MMPROJ_SHA_SOURCE:-}" \
+MMPROJ_SHA_ASSERTED_BY="${MMPROJ_SHA_ASSERTED_BY:-}" \
 MODEL_NAME="$MODEL_NAME" EXPERT_TOP_K="$EXPERT_TOP_K" DS4_PREFILL="$DS4_PREFILL" \
 SERVER_LD_LIBRARY_PATH="$SERVER_LD_LIBRARY_PATH" \
+EMBER_VERIFY_EXISTING_SHA256="$EMBER_VERIFY_EXISTING_SHA256" \
 EXPECTED_WORKLOADS="$([ "${EMBER_BENCH_VISION:-}" = 1 ] && echo 12 || echo 10)" \
 IMAGE="$IMAGE" BIN="$BIN" TARGET="$TARGET" DRAFT="$DRAFT" PORT="$PORT" \
   python3 "$HERE/scripts/bench/assemble_bundle.py" "$BUNDLE"

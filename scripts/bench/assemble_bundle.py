@@ -160,17 +160,36 @@ def validate_workload_rows(on_rows, off_rows, expected_count):
 
 
 def model_provenance(env):
+    def digest(env_name, output_name):
+        prefix = env_name.upper()
+        value = env.get(f"{prefix}_SHA")
+        if not value:
+            raise SystemExit(f"{output_name} SHA-256 is missing")
+        source = env.get(f"{prefix}_SHA_SOURCE")
+        if source not in {"computed", "asserted"}:
+            raise SystemExit(
+                f"{output_name} SHA-256 source must be computed or asserted")
+        result = {f"{output_name}_sha256": value,
+                  f"{output_name}_sha256_source": source}
+        if source == "asserted":
+            asserted_by = env.get(f"{prefix}_SHA_ASSERTED_BY")
+            if not asserted_by:
+                raise SystemExit(
+                    f"{output_name} asserted SHA-256 is missing its evidence reference")
+            result[f"{output_name}_sha256_asserted_by"] = asserted_by
+        return result
+
     model = {
         "target": Path(env.get("TARGET", "")).name,
-        "target_sha256": env.get("TARGET_SHA"),
         "drafter": Path(env.get("DRAFT", "")).name,
-        "drafter_sha256": env.get("DRAFT_SHA"),
     }
+    model.update(digest("target", "target"))
+    model.update(digest("draft", "drafter"))
     if env.get("MMPROJ"):
         if not env.get("MMPROJ_SHA"):
             raise SystemExit("mmproj path is present but its SHA-256 is missing")
         model["mmproj"] = Path(env["MMPROJ"]).name
-        model["mmproj_sha256"] = env.get("MMPROJ_SHA")
+        model.update(digest("mmproj", "mmproj"))
     return model
 
 
@@ -252,6 +271,7 @@ def main():
             "container_image": env.get("IMAGE"),
             "binary": env.get("BIN"),
             "server_ld_library_path": env.get("SERVER_LD_LIBRARY_PATH") or None,
+            "verify_existing_sha256": env.get("EMBER_VERIFY_EXISTING_SHA256") != "0",
         },
         "server_args": (
             f"ember-dflash -m <target> "
