@@ -15,6 +15,7 @@
 #define DFLASH_DEEPSEEK4_VISION_NATIVE_CONTRACT_H
 
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,38 @@ struct Deepseek4VisionResizePlan {
     bool panoramic_direct_resize = false;
 };
 
+struct Deepseek4VisionPngInfo {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    // Exact bytes expected after zlib expansion, including one filter byte per
+    // row. A decoder must require this size rather than accept partial output.
+    size_t filtered_bytes = 0;
+};
+
 const Deepseek4VisionNativeConfig & deepseek4_vision_native_config();
+
+// Fail-closed request-byte preflight for the initial native PNG-only path.
+// This walks the complete chunk stream, checks every CRC, requires a terminal
+// IEND with no trailing bytes, rejects APNG animation chunks, and applies the
+// allocation ceilings before a decoder sees the payload. The initial decoder
+// intentionally accepts only non-interlaced RGB/RGBA8; JPEG/WebP/GIF remain
+// explicit unsupported formats rather than inheriting permissive defaults.
+bool deepseek4_vision_validate_still_png(
+    const uint8_t * encoded, size_t encoded_size,
+    int max_dimension, uint64_t max_pixels,
+    Deepseek4VisionPngInfo & out, std::string * error = nullptr);
+
+// Decode the validated PNG subset to tightly packed RGB8. zlib must consume
+// every IDAT byte, produce exactly `filtered_bytes`, and reach STREAM_END;
+// truncated, overlong, or partially decodable streams therefore fail rather
+// than yielding plausible pixels. RGBA is converted like Pillow's RGB mode by
+// dropping alpha, without compositing against an implicit background.
+bool deepseek4_vision_decode_still_png_rgb8(
+    const uint8_t * encoded, size_t encoded_size,
+    int max_dimension, uint64_t max_pixels,
+    std::vector<uint8_t> & rgb, Deepseek4VisionPngInfo & info,
+    std::string * error = nullptr);
 
 // Exact 299-name contract emitted by the Vision-Exp converter. Matrix shapes
 // are expressed in GGML ne[] order and the expected F16/F32 partition is part

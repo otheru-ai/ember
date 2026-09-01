@@ -3,9 +3,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
+
+#include <zlib.h>
 
 using namespace dflash;
 
@@ -24,6 +27,189 @@ static const Deepseek4VisionTensorSpec * find_spec(
         if (spec.name == name) return &spec;
     }
     return nullptr;
+}
+
+static uint32_t test_png_crc32(const uint8_t * data, size_t size) {
+    uint32_t crc = 0xffffffffu;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint32_t mask = 0u - (crc & 1u);
+            crc = (crc >> 1) ^ (0xedb88320u & mask);
+        }
+    }
+    return crc ^ 0xffffffffu;
+}
+
+static void write_be32(uint8_t * value, uint32_t number) {
+    value[0] = static_cast<uint8_t>(number >> 24);
+    value[1] = static_cast<uint8_t>(number >> 16);
+    value[2] = static_cast<uint8_t>(number >> 8);
+    value[3] = static_cast<uint8_t>(number);
+}
+
+static void repair_ihdr_crc(std::vector<uint8_t> & png) {
+    write_be32(png.data() + 29, test_png_crc32(png.data() + 12, 17));
+}
+
+static std::vector<uint8_t> valid_rgb_png() {
+    return {
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0x7b, 0x40, 0xe8, 0xdd,
+        0x00, 0x00, 0x00, 0x0f, 0x49, 0x44, 0x41, 0x54,
+        0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xc0, 0xf0, 0x9f,
+        0x01, 0x00, 0x07, 0xff, 0x01, 0xff, 0x01, 0x7f, 0x89, 0xa7,
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+        0xae, 0x42, 0x60, 0x82,
+    };
+}
+
+static std::vector<uint8_t> png_with_scanline(
+        const std::vector<uint8_t> & scanline) {
+    const auto base = valid_rgb_png();
+    uLongf compressed_size = compressBound(scanline.size());
+    std::vector<uint8_t> compressed(static_cast<size_t>(compressed_size));
+    if (compress2(compressed.data(), &compressed_size,
+                  scanline.data(), scanline.size(), Z_BEST_COMPRESSION) != Z_OK) {
+        std::abort();
+    }
+    compressed.resize(static_cast<size_t>(compressed_size));
+    std::vector<uint8_t> png(base.begin(), base.begin() + 33);
+    const size_t chunk = png.size();
+    png.resize(chunk + 12u + compressed.size());
+    write_be32(png.data() + chunk, static_cast<uint32_t>(compressed.size()));
+    std::memcpy(png.data() + chunk + 4u, "IDAT", 4);
+    std::memcpy(png.data() + chunk + 8u,
+                compressed.data(), compressed.size());
+    write_be32(png.data() + chunk + 8u + compressed.size(),
+               test_png_crc32(png.data() + chunk + 4u,
+                              compressed.size() + 4u));
+    png.insert(png.end(), base.end() - 12, base.end());
+    return png;
+}
+
+static void test_png_preflight() {
+    const auto valid = valid_rgb_png();
+    Deepseek4VisionPngInfo info;
+    std::string error;
+    CHECK(deepseek4_vision_validate_still_png(
+              valid.data(), valid.size(), 8192, 64u * 1024u * 1024u,
+              info, &error) && info.width == 2 && info.height == 1 &&
+              info.channels == 3 && info.filtered_bytes == 7,
+          "complete RGB8 PNG passes bounded still-image preflight");
+
+    auto malformed = valid;
+    malformed[0] = 0;
+    CHECK(!deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("PNG only") != std::string::npos && info.width == 0,
+          "wrong PNG magic fails closed");
+    error.clear();
+    CHECK(!deepseek4_vision_validate_still_png(
+              valid.data(), valid.size() - 1, 8192,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("truncated") != std::string::npos,
+          "truncated PNG fails closed instead of partially decoding");
+
+    malformed = valid;
+    std::memset(malformed.data() + 16, 0, 4);
+    repair_ihdr_crc(malformed);
+    CHECK(!deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("dimensions") != std::string::npos,
+          "zero-dimension PNG fails before allocation");
+    malformed = valid;
+    write_be32(malformed.data() + 16, 10000);
+    write_be32(malformed.data() + 20, 10000);
+    repair_ihdr_crc(malformed);
+    CHECK(!deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 20000,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("dimensions") != std::string::npos,
+          "dimension-lying PNG exceeds the pixel ceiling before allocation");
+
+    malformed = valid;
+    malformed[29] ^= 1u;
+    CHECK(!deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("CRC") != std::string::npos,
+          "PNG with a bad chunk CRC fails closed");
+
+    malformed = valid;
+    const uint8_t actl[] = {
+        0x00, 0x00, 0x00, 0x08, 0x61, 0x63, 0x54, 0x4c,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+        0, 0, 0, 0,
+    };
+    std::vector<uint8_t> animation(
+        malformed.begin(), malformed.begin() + 33);
+    animation.insert(animation.end(), std::begin(actl), std::end(actl));
+    write_be32(animation.data() + 49,
+               test_png_crc32(animation.data() + 37, 12));
+    animation.insert(animation.end(), malformed.begin() + 33, malformed.end());
+    CHECK(!deepseek4_vision_validate_still_png(
+              animation.data(), animation.size(), 8192,
+              64u * 1024u * 1024u, info, &error) &&
+              error.find("animated") != std::string::npos,
+          "animated PNG is rejected instead of inheriting a first-frame default");
+}
+
+static void test_png_decode() {
+    const auto valid = valid_rgb_png();
+    Deepseek4VisionPngInfo info;
+    std::vector<uint8_t> rgb;
+    std::string error;
+    CHECK(deepseek4_vision_decode_still_png_rgb8(
+              valid.data(), valid.size(), 8192, 64u * 1024u * 1024u,
+              rgb, info, &error) &&
+              rgb == std::vector<uint8_t>({255, 0, 0, 0, 255, 0}),
+          "validated PNG decodes to its exact RGB8 pixels");
+
+    const std::vector<std::vector<uint8_t>> filtered_rows = {
+        {1, 255, 0, 0, 1, 255, 0},
+        {2, 255, 0, 0, 0, 255, 0},
+        {3, 255, 0, 0, 129, 255, 0},
+        {4, 255, 0, 0, 1, 255, 0},
+    };
+    bool every_filter = true;
+    for (const auto & row : filtered_rows) {
+        const auto filtered_png = png_with_scanline(row);
+        every_filter = every_filter && deepseek4_vision_decode_still_png_rgb8(
+            filtered_png.data(), filtered_png.size(), 8192,
+            64u * 1024u * 1024u, rgb, info, &error) &&
+            rgb == std::vector<uint8_t>({255, 0, 0, 0, 255, 0});
+    }
+    CHECK(every_filter,
+          "Sub, Up, Average, and Paeth filters reconstruct the same RGB row");
+
+    auto malformed = valid;
+    malformed[45] ^= 0x80u;
+    write_be32(malformed.data() + 56,
+               test_png_crc32(malformed.data() + 37, 19));
+    CHECK(!deepseek4_vision_decode_still_png_rgb8(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, rgb, info, &error) && rgb.empty() &&
+              info.width == 0 && error.find("zlib") != std::string::npos,
+          "CRC-valid corrupt compression stream cannot partially decode");
+
+    malformed = png_with_scanline({5, 255, 0, 0, 0, 255, 0});
+    CHECK(!deepseek4_vision_decode_still_png_rgb8(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, rgb, info, &error) && rgb.empty() &&
+              error.find("filter") != std::string::npos,
+          "invalid PNG filter fails after exact decompression");
+
+    malformed = png_with_scanline({0, 255, 0});
+    CHECK(!deepseek4_vision_decode_still_png_rgb8(
+              malformed.data(), malformed.size(), 8192,
+              64u * 1024u * 1024u, rgb, info, &error) && rgb.empty() &&
+              error.find("partial") != std::string::npos,
+          "short decoded payload cannot be accepted as a partial image");
 }
 
 static void test_exact_tensor_inventory() {
@@ -128,7 +314,10 @@ static void test_patch_packing() {
             const uint8_t right[] = {255, 0, 127};
             const uint8_t * value = x < 14 ? left : right;
             for (int c = 0; c < 3; ++c) {
-                rgb[(static_cast<size_t>(y) * width + x) * 3 + c] = value[c];
+                rgb[(static_cast<size_t>(y) *
+                         static_cast<size_t>(width) +
+                     static_cast<size_t>(x)) * 3u +
+                    static_cast<size_t>(c)] = value[c];
             }
         }
     }
@@ -158,7 +347,8 @@ static void test_rope_positions() {
     CHECK(angles.size() == 2 * 3 * 32,
           "2D RoPE retains head-dimension-half width");
     bool first_zero = true;
-    for (int i = 0; i < 32; ++i) first_zero &= angles[i] == 0.0f;
+    for (int i = 0; i < 32; ++i)
+        first_zero &= angles[static_cast<size_t>(i)] == 0.0f;
     CHECK(first_zero, "top-left patch has zero row and column phase");
     CHECK(angles[32] == 0.0f && angles[32 + 16] == 1.0f,
           "top-middle patch advances only the column phase");
@@ -196,6 +386,8 @@ static void test_pixel_shuffle_indices() {
 
 int main() {
     test_exact_tensor_inventory();
+    test_png_preflight();
+    test_png_decode();
     test_resize_policy();
     test_patch_packing();
     test_rope_positions();

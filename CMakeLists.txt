@@ -44,6 +44,7 @@ function(ember_strict target)
 endfunction()
 
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 
 if(EMBER_XDNA_XRT_PROVIDER)
   find_path(EMBER_XRT_INCLUDE_DIR xrt/xrt_bo.h
@@ -183,6 +184,8 @@ add_executable(test_ds4_vision_native_contract
   test/test_ds4_vision_native_contract.cpp
   engine/dflash/deepseek4/deepseek4_vision_native_contract.cpp)
 target_include_directories(test_ds4_vision_native_contract PRIVATE engine)
+target_link_libraries(test_ds4_vision_native_contract PRIVATE ZLIB::ZLIB)
+ember_strict(test_ds4_vision_native_contract)
 add_test(NAME ds4_vision_native_contract COMMAND test_ds4_vision_native_contract)
 
 add_executable(test_ds4_vision_oracle
@@ -812,6 +815,7 @@ if(EMBER_ENGINE)
   target_include_directories(test_ds4_vision_mmproj PRIVATE
     engine/dflash engine/dflash/deepseek4 engine/ggml/include)
   target_link_libraries(test_ds4_vision_mmproj PRIVATE ggml-base)
+  target_link_libraries(test_ds4_vision_mmproj PRIVATE ZLIB::ZLIB)
   ember_strict(test_ds4_vision_mmproj)
   add_test(NAME ds4_vision_mmproj COMMAND test_ds4_vision_mmproj)
   set_tests_properties(ds4_vision_mmproj PROPERTIES TIMEOUT 60)
