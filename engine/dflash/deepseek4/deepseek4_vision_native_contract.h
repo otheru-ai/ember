@@ -47,6 +47,12 @@ struct Deepseek4VisionNativeConfig {
     float rope_theta = 10000.0f;
     int nominal_image_size = 798;
     int output_embedding_length = 4096;
+    // Request-facing decode ceilings. The pixel cap is the actual work/memory
+    // bound. The larger per-axis cap rejects degenerate strips while still
+    // admitting ordinary panoramas and tall scans within that pixel budget.
+    size_t max_encoded_bytes = 64u * 1024u * 1024u;
+    int max_decode_dimension = 16384;
+    uint64_t max_decode_pixels = UINT64_C(4096) * UINT64_C(4096);
 };
 
 struct Deepseek4VisionResizePlan {
@@ -98,6 +104,28 @@ bool deepseek4_vision_decode_still_png_rgb8(
     const uint8_t * encoded, size_t encoded_size,
     int max_dimension, uint64_t max_pixels,
     std::vector<uint8_t> & rgb, Deepseek4VisionPngInfo & info,
+    std::string * error = nullptr);
+
+// Apply the exact Pillow RGB/BICUBIC pipeline selected by
+// image_processor.py. Non-panoramic inputs use ImageOps.pad with a 127 fill;
+// panoramas use a direct resize. The implementation follows Pillow 12.3's
+// 22-bit coefficient quantization and horizontal-then-vertical uint8 rounding,
+// so the result is an executable compatibility contract rather than a generic
+// cubic approximation.
+bool deepseek4_vision_resize_rgb8(
+    const uint8_t * source_rgb,
+    const Deepseek4VisionResizePlan & plan,
+    std::vector<uint8_t> & resized_rgb,
+    std::string * error = nullptr);
+
+// Complete bounded request-byte preprocessing. The decode ceilings above are
+// fixed by the model contract rather than caller-supplied. source_digest is a
+// stable nonzero FNV-1a binding of the normalized encoded bytes.
+bool deepseek4_vision_preprocess_still_png(
+    const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+    Deepseek4VisionResizePlan & plan,
+    std::vector<uint16_t> & bf16_patches,
+    uint64_t & source_digest,
     std::string * error = nullptr);
 
 // Exact 299-name contract emitted by the Vision-Exp converter. Matrix shapes

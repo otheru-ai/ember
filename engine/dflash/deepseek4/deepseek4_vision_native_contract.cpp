@@ -11,12 +11,26 @@ namespace dflash {
 namespace {
 
 constexpr int kCompressPadTo = 4;
+constexpr int kPillowPrecisionBits = 22;
+constexpr int64_t kPillowRounding =
+    INT64_C(1) << (kPillowPrecisionBits - 1);
 constexpr uint8_t kPngSignature[] = {
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 };
 
 void set_error(std::string * error, const char * text) {
     if (error) *error = text;
+}
+
+void set_dimension_error(
+        std::string * error, uint32_t width, uint32_t height,
+        int max_dimension, uint64_t max_pixels) {
+    if (!error) return;
+    *error = "DeepSeek4 PNG dimensions " + std::to_string(width) + "x" +
+        std::to_string(height) + " exceed decode limits " +
+        std::to_string(max_dimension) + "x" +
+        std::to_string(max_dimension) + " and " +
+        std::to_string(max_pixels) + " pixels";
 }
 
 uint32_t read_be32(const uint8_t * value) {
@@ -49,6 +63,203 @@ uint8_t paeth_predictor(uint8_t left, uint8_t up, uint8_t upper_left) {
     const int pb = std::abs(p - static_cast<int>(up));
     const int pc = std::abs(p - static_cast<int>(upper_left));
     return pa <= pb && pa <= pc ? left : pb <= pc ? up : upper_left;
+}
+
+struct PillowAxisCoefficients {
+    int kernel_size = 0;
+    std::vector<int> bounds;
+    std::vector<int32_t> coefficients;
+};
+
+// Ported narrowly from Pillow 12.3.0 Resample.c at
+// bb1d8e8ab8d29048624d96e3ee53cecf7c13d13d. The source-of-record model calls
+// Pillow's RGB BICUBIC resize, so changing the cubic parameter, coefficient
+// precision, pass order, or intermediate rounding changes the ViT input.
+double pillow_bicubic(double value) {
+    value = std::abs(value);
+    if (value < 1.0) {
+        return ((1.5 * value - 2.5) * value) * value + 1.0;
+    }
+    if (value < 2.0) {
+        return (((-0.5 * value + 2.5) * value) - 4.0) * value + 2.0;
+    }
+    return 0.0;
+}
+
+int round_ties_to_even_nonnegative(double value) {
+    const double integral = std::floor(value);
+    const double fraction = value - integral;
+    int result = static_cast<int>(integral);
+    if (fraction > 0.5 || (fraction == 0.5 && result % 2 != 0)) ++result;
+    return result;
+}
+
+bool pillow_precompute_axis(
+        int input_size, int output_size, PillowAxisCoefficients & out) {
+    out = {};
+    if (input_size <= 0 || output_size <= 0) return false;
+    const double scale = static_cast<double>(input_size) / output_size;
+    const double filter_scale = std::max(scale, 1.0);
+    const double support = 2.0 * filter_scale;
+    const int kernel_size = static_cast<int>(std::ceil(support)) * 2 + 1;
+    if (kernel_size <= 0 ||
+        static_cast<uint64_t>(output_size) *
+                static_cast<uint64_t>(kernel_size) >
+            static_cast<uint64_t>(SIZE_MAX / sizeof(int32_t))) {
+        return false;
+    }
+    out.kernel_size = kernel_size;
+    out.bounds.resize(static_cast<size_t>(output_size) * 2u);
+    out.coefficients.assign(
+        static_cast<size_t>(output_size) * static_cast<size_t>(kernel_size), 0);
+    for (int destination = 0; destination < output_size; ++destination) {
+        const double center =
+            (static_cast<double>(destination) + 0.5) * scale;
+        int xmin = static_cast<int>(center - support + 0.5);
+        if (xmin < 0) xmin = 0;
+        int xmax = static_cast<int>(center + support + 0.5);
+        if (xmax > input_size) xmax = input_size;
+        const int count = xmax - xmin;
+        if (count <= 0 || count > kernel_size) return false;
+        out.bounds[static_cast<size_t>(destination) * 2u] = xmin;
+        out.bounds[static_cast<size_t>(destination) * 2u + 1u] = count;
+        double total = 0.0;
+        std::vector<double> weights(static_cast<size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            const double sample =
+                (static_cast<double>(index + xmin) - center + 0.5) /
+                filter_scale;
+            const double weight = pillow_bicubic(sample);
+            weights[static_cast<size_t>(index)] = weight;
+            total += weight;
+        }
+        if (total == 0.0) return false;
+        int32_t * coefficients = out.coefficients.data() +
+            static_cast<size_t>(destination) *
+                static_cast<size_t>(kernel_size);
+        for (int index = 0; index < count; ++index) {
+            const double scaled = weights[static_cast<size_t>(index)] / total *
+                static_cast<double>(UINT32_C(1) << kPillowPrecisionBits);
+            coefficients[index] = static_cast<int32_t>(
+                scaled < 0.0 ? scaled - 0.5 : scaled + 0.5);
+        }
+    }
+    return true;
+}
+
+uint8_t pillow_clip_resample(int64_t sum) {
+    if (sum <= 0) return 0;
+    const int64_t value = sum >> kPillowPrecisionBits;
+    return value >= 255 ? 255 : static_cast<uint8_t>(value);
+}
+
+bool pillow_resize_rgb8(
+        const uint8_t * source, int source_height, int source_width,
+        int destination_height, int destination_width,
+        std::vector<uint8_t> & destination) {
+    destination.clear();
+    if (!source || source_height <= 0 || source_width <= 0 ||
+        destination_height <= 0 || destination_width <= 0) {
+        return false;
+    }
+    const uint64_t output_values =
+        static_cast<uint64_t>(destination_height) *
+        static_cast<uint64_t>(destination_width) * 3u;
+    if (output_values > static_cast<uint64_t>(SIZE_MAX)) return false;
+
+    std::vector<uint8_t> horizontal;
+    const uint8_t * vertical_source = source;
+    int vertical_source_width = source_width;
+    if (source_width != destination_width) {
+        PillowAxisCoefficients axis;
+        if (!pillow_precompute_axis(source_width, destination_width, axis))
+            return false;
+        const uint64_t intermediate_values =
+            static_cast<uint64_t>(source_height) *
+            static_cast<uint64_t>(destination_width) * 3u;
+        if (intermediate_values > static_cast<uint64_t>(SIZE_MAX)) return false;
+        horizontal.resize(static_cast<size_t>(intermediate_values));
+        for (int y = 0; y < source_height; ++y) {
+            for (int x = 0; x < destination_width; ++x) {
+                const int xmin = axis.bounds[static_cast<size_t>(x) * 2u];
+                const int count = axis.bounds[static_cast<size_t>(x) * 2u + 1u];
+                const int32_t * coefficients = axis.coefficients.data() +
+                    static_cast<size_t>(x) *
+                        static_cast<size_t>(axis.kernel_size);
+                for (int channel = 0; channel < 3; ++channel) {
+                    int64_t sum = kPillowRounding;
+                    for (int index = 0; index < count; ++index) {
+                        const size_t source_index =
+                            (static_cast<size_t>(y) *
+                                 static_cast<size_t>(source_width) +
+                             static_cast<size_t>(xmin + index)) * 3u +
+                            static_cast<size_t>(channel);
+                        sum += static_cast<int64_t>(source[source_index]) *
+                               coefficients[index];
+                    }
+                    const size_t output_index =
+                        (static_cast<size_t>(y) *
+                             static_cast<size_t>(destination_width) +
+                         static_cast<size_t>(x)) * 3u +
+                        static_cast<size_t>(channel);
+                    horizontal[output_index] = pillow_clip_resample(sum);
+                }
+            }
+        }
+        vertical_source = horizontal.data();
+        vertical_source_width = destination_width;
+    }
+
+    if (source_height == destination_height) {
+        if (source_width == destination_width) {
+            const size_t bytes = static_cast<size_t>(output_values);
+            destination.assign(source, source + bytes);
+        } else {
+            destination = std::move(horizontal);
+        }
+        return true;
+    }
+
+    PillowAxisCoefficients axis;
+    if (!pillow_precompute_axis(source_height, destination_height, axis))
+        return false;
+    destination.resize(static_cast<size_t>(output_values));
+    for (int y = 0; y < destination_height; ++y) {
+        const int ymin = axis.bounds[static_cast<size_t>(y) * 2u];
+        const int count = axis.bounds[static_cast<size_t>(y) * 2u + 1u];
+        const int32_t * coefficients = axis.coefficients.data() +
+            static_cast<size_t>(y) * static_cast<size_t>(axis.kernel_size);
+        for (int x = 0; x < destination_width; ++x) {
+            for (int channel = 0; channel < 3; ++channel) {
+                int64_t sum = kPillowRounding;
+                for (int index = 0; index < count; ++index) {
+                    const size_t source_index =
+                        (static_cast<size_t>(ymin + index) *
+                             static_cast<size_t>(vertical_source_width) +
+                         static_cast<size_t>(x)) * 3u +
+                        static_cast<size_t>(channel);
+                    sum += static_cast<int64_t>(vertical_source[source_index]) *
+                           coefficients[index];
+                }
+                const size_t output_index =
+                    (static_cast<size_t>(y) *
+                         static_cast<size_t>(destination_width) +
+                     static_cast<size_t>(x)) * 3u +
+                    static_cast<size_t>(channel);
+                destination[output_index] = pillow_clip_resample(sum);
+            }
+        }
+    }
+    return true;
+}
+
+uint64_t fnv1a(const uint8_t * data, size_t size) {
+    uint64_t digest = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < size; ++i) {
+        digest ^= data[i];
+        digest *= UINT64_C(1099511628211);
+    }
+    return digest ? digest : UINT64_C(1);
 }
 
 bool checked_grid_tokens(int best_height, int best_width,
@@ -197,7 +408,8 @@ bool deepseek4_vision_validate_still_png(
                 width > static_cast<uint32_t>(max_dimension) ||
                 height > static_cast<uint32_t>(max_dimension) ||
                 static_cast<uint64_t>(width) * height > max_pixels) {
-                set_error(error, "DeepSeek4 PNG dimensions exceed the decode ceiling");
+                set_dimension_error(
+                    error, width, height, max_dimension, max_pixels);
                 return false;
             }
             if (bit_depth != 8u || (color_type != 2u && color_type != 6u) ||
@@ -486,6 +698,85 @@ bool deepseek4_vision_resize_plan(
     return true;
 }
 
+bool deepseek4_vision_resize_rgb8(
+        const uint8_t * source_rgb,
+        const Deepseek4VisionResizePlan & plan,
+        std::vector<uint8_t> & resized_rgb,
+        std::string * error) {
+    resized_rgb.clear();
+    if (!source_rgb || plan.source_height <= 0 || plan.source_width <= 0 ||
+        plan.resized_height <= 0 || plan.resized_width <= 0) {
+        set_error(error, "invalid DeepSeek4 RGB resize request");
+        return false;
+    }
+    const uint64_t destination_values =
+        static_cast<uint64_t>(plan.resized_height) *
+        static_cast<uint64_t>(plan.resized_width) * 3u;
+    if (destination_values > static_cast<uint64_t>(SIZE_MAX)) {
+        set_error(error, "DeepSeek4 resized RGB image is too large");
+        return false;
+    }
+    if (plan.panoramic_direct_resize) {
+        if (!pillow_resize_rgb8(
+                source_rgb, plan.source_height, plan.source_width,
+                plan.resized_height, plan.resized_width, resized_rgb)) {
+            set_error(error, "cannot bicubic-resize DeepSeek4 panorama");
+            return false;
+        }
+        return true;
+    }
+
+    // Pillow ImageOps.contain computes one dimension with Python's round(),
+    // hence ties-to-even rather than C/C++ round-away-from-zero. The aspect
+    // comparison is written as exact integer products so an equal-ratio image
+    // stays on the equality branch without a floating-point coincidence.
+    int contained_height = plan.resized_height;
+    int contained_width = plan.resized_width;
+    const int64_t source_cross =
+        static_cast<int64_t>(plan.source_width) * plan.resized_height;
+    const int64_t target_cross =
+        static_cast<int64_t>(plan.resized_width) * plan.source_height;
+    if (source_cross > target_cross) {
+        contained_height = round_ties_to_even_nonnegative(
+            static_cast<double>(plan.source_height) / plan.source_width *
+            plan.resized_width);
+    } else if (source_cross < target_cross) {
+        contained_width = round_ties_to_even_nonnegative(
+            static_cast<double>(plan.source_width) / plan.source_height *
+            plan.resized_height);
+    }
+    if (contained_height <= 0 || contained_width <= 0 ||
+        contained_height > plan.resized_height ||
+        contained_width > plan.resized_width) {
+        set_error(error, "DeepSeek4 aspect-preserving resize is invalid");
+        return false;
+    }
+    std::vector<uint8_t> contained;
+    if (!pillow_resize_rgb8(
+            source_rgb, plan.source_height, plan.source_width,
+            contained_height, contained_width, contained)) {
+        set_error(error, "cannot bicubic-resize DeepSeek4 image");
+        return false;
+    }
+    resized_rgb.assign(static_cast<size_t>(destination_values), 127u);
+    const int offset_y = round_ties_to_even_nonnegative(
+        static_cast<double>(plan.resized_height - contained_height) * 0.5);
+    const int offset_x = round_ties_to_even_nonnegative(
+        static_cast<double>(plan.resized_width - contained_width) * 0.5);
+    const size_t copy_bytes = static_cast<size_t>(contained_width) * 3u;
+    for (int y = 0; y < contained_height; ++y) {
+        const size_t source =
+            static_cast<size_t>(y) * static_cast<size_t>(contained_width) * 3u;
+        const size_t destination =
+            (static_cast<size_t>(y + offset_y) *
+                 static_cast<size_t>(plan.resized_width) +
+             static_cast<size_t>(offset_x)) * 3u;
+        std::memcpy(resized_rgb.data() + destination,
+                    contained.data() + source, copy_bytes);
+    }
+    return true;
+}
+
 bool deepseek4_vision_pack_rgb8_patches(
         const uint8_t * rgb, int height, int width,
         std::vector<uint16_t> & bf16_patches, std::string * error) {
@@ -522,6 +813,46 @@ bool deepseek4_vision_pack_rgb8_patches(
             }
         }
     }
+    return true;
+}
+
+bool deepseek4_vision_preprocess_still_png(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        Deepseek4VisionResizePlan & plan,
+        std::vector<uint16_t> & bf16_patches,
+        uint64_t & source_digest,
+        std::string * error) {
+    plan = {};
+    bf16_patches.clear();
+    source_digest = 0;
+    const auto & config = deepseek4_vision_native_config();
+    if (!encoded || encoded_size == 0 ||
+        encoded_size > config.max_encoded_bytes || prompt_offset < 0) {
+        set_error(error, "DeepSeek4 PNG exceeds the encoded input ceiling");
+        return false;
+    }
+    Deepseek4VisionPngInfo info;
+    std::vector<uint8_t> source_rgb;
+    if (!deepseek4_vision_decode_still_png_rgb8(
+            encoded, encoded_size,
+            config.max_decode_dimension, config.max_decode_pixels,
+            source_rgb, info, error) ||
+        !deepseek4_vision_resize_plan(
+            info.height, info.width, prompt_offset, plan, error)) {
+        plan = {};
+        return false;
+    }
+    std::vector<uint8_t> resized_rgb;
+    if (!deepseek4_vision_resize_rgb8(
+            source_rgb.data(), plan, resized_rgb, error) ||
+        !deepseek4_vision_pack_rgb8_patches(
+            resized_rgb.data(), plan.resized_height, plan.resized_width,
+            bf16_patches, error)) {
+        plan = {};
+        bf16_patches.clear();
+        return false;
+    }
+    source_digest = fnv1a(encoded, encoded_size);
     return true;
 }
 

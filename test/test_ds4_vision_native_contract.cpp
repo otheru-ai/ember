@@ -129,8 +129,27 @@ static void test_png_preflight() {
     CHECK(!deepseek4_vision_validate_still_png(
               malformed.data(), malformed.size(), 20000,
               64u * 1024u * 1024u, info, &error) &&
-              error.find("dimensions") != std::string::npos,
+              error.find("10000x10000") != std::string::npos &&
+              error.find("67108864") != std::string::npos,
           "dimension-lying PNG exceeds the pixel ceiling before allocation");
+
+    malformed = valid;
+    write_be32(malformed.data() + 16, 16000);
+    repair_ihdr_crc(malformed);
+    CHECK(deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 16384,
+              UINT64_C(4096) * UINT64_C(4096), info, &error) &&
+              info.width == 16000 && info.height == 1,
+          "wide scan inside the pixel budget passes structural preflight");
+    malformed = valid;
+    write_be32(malformed.data() + 16, 16385);
+    repair_ihdr_crc(malformed);
+    CHECK(!deepseek4_vision_validate_still_png(
+              malformed.data(), malformed.size(), 16384,
+              UINT64_C(4096) * UINT64_C(4096), info, &error) &&
+              error.find("16385x1") != std::string::npos &&
+              error.find("16384x16384") != std::string::npos,
+          "degenerate strip rejection reports actual and accepted dimensions");
 
     malformed = valid;
     malformed[29] ^= 1u;
@@ -210,6 +229,122 @@ static void test_png_decode() {
               64u * 1024u * 1024u, rgb, info, &error) && rgb.empty() &&
               error.find("partial") != std::string::npos,
           "short decoded payload cannot be accepted as a partial image");
+}
+
+static void test_bounded_png_preprocess() {
+    const uint8_t uniform[] = {10, 20, 30, 10, 20, 30};
+    Deepseek4VisionResizePlan plan;
+    plan.source_height = 1;
+    plan.source_width = 2;
+    plan.resized_height = 4;
+    plan.resized_width = 4;
+    std::vector<uint8_t> resized;
+    std::string error;
+    CHECK(deepseek4_vision_resize_rgb8(uniform, plan, resized, &error) &&
+              resized.size() == 4u * 4u * 3u &&
+              resized[0] == 127u && resized[3u * 4u * 3u] == 127u &&
+              resized[1u * 4u * 3u] == 10u &&
+              resized[1u * 4u * 3u + 1u] == 20u &&
+              resized[1u * 4u * 3u + 2u] == 30u,
+          "aspect-preserving resize uses Pillow pad geometry and fill");
+
+    plan.panoramic_direct_resize = true;
+    CHECK(deepseek4_vision_resize_rgb8(uniform, plan, resized, &error) &&
+              resized.size() == 4u * 4u * 3u && resized[0] == 10u &&
+              resized[1] == 20u && resized[2] == 30u &&
+              resized.back() == 30u,
+          "panorama boundary uses direct bicubic resize without padding");
+
+    const auto png = valid_rgb_png();
+    std::vector<uint16_t> patches;
+    uint64_t source_digest = 0;
+    CHECK(deepseek4_vision_preprocess_still_png(
+              png.data(), png.size(), 0, plan, patches,
+              source_digest, &error) && source_digest != 0 &&
+              plan.source_height == 1 && plan.source_width == 2 &&
+              plan.n_vit_h > 0 && plan.n_vit_w > 0 &&
+              patches.size() ==
+                  static_cast<size_t>(plan.n_vit_h) *
+                  static_cast<size_t>(plan.n_vit_w) * 588u,
+          "complete PNG preprocessing binds bytes and emits whole BF16 patches");
+
+    const auto & config = deepseek4_vision_native_config();
+    CHECK(config.max_decode_dimension == 16384 &&
+              config.max_decode_pixels == UINT64_C(4096) * UINT64_C(4096) &&
+              !deepseek4_vision_preprocess_still_png(
+                  png.data(), config.max_encoded_bytes + 1u, 0,
+                  plan, patches, source_digest, &error) &&
+              plan.source_height == 0 && patches.empty() &&
+              source_digest == 0,
+          "complete preprocessor owns fixed encoded and decoded ceilings");
+}
+
+static bool read_fixture_file(
+        const std::string & path, std::vector<uint8_t> & bytes) {
+    bytes.clear();
+    std::FILE * file = std::fopen(path.c_str(), "rb");
+    if (!file) return false;
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::fclose(file);
+        return false;
+    }
+    const long length = std::ftell(file);
+    if (length < 0 || std::fseek(file, 0, SEEK_SET) != 0) {
+        std::fclose(file);
+        return false;
+    }
+    bytes.resize(static_cast<size_t>(length));
+    const bool read = bytes.empty() ||
+        std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size();
+    const bool closed = std::fclose(file) == 0;
+    if (!read || !closed) bytes.clear();
+    return read && closed;
+}
+
+static void test_real_preprocess_fixture(const char * directory) {
+    struct FixtureCase {
+        const char * name;
+        int source_height;
+        int source_width;
+        int n_vit_h;
+        int n_vit_w;
+        int n_llm_h;
+        int n_llm_w;
+    };
+    static const FixtureCase cases[] = {
+        {"odd-pad", 301, 509, 22, 37, 8, 13},
+        {"small-odd-pad", 17, 23, 24, 32, 8, 11},
+        {"panorama-direct", 17, 136, 10, 78, 4, 26},
+    };
+    for (const FixtureCase & fixture : cases) {
+        const std::string prefix =
+            std::string(directory) + "/" + fixture.name;
+        std::vector<uint8_t> png;
+        std::vector<uint8_t> expected;
+        std::vector<uint16_t> patches;
+        Deepseek4VisionResizePlan plan;
+        uint64_t source_digest = 0;
+        std::string error;
+        bool exact = read_fixture_file(prefix + ".png", png) &&
+            read_fixture_file(prefix + ".patches.bf16", expected) &&
+            deepseek4_vision_preprocess_still_png(
+                png.data(), png.size(), 0, plan, patches,
+                source_digest, &error) &&
+            plan.source_height == fixture.source_height &&
+            plan.source_width == fixture.source_width &&
+            plan.n_vit_h == fixture.n_vit_h &&
+            plan.n_vit_w == fixture.n_vit_w &&
+            plan.n_llm_h == fixture.n_llm_h &&
+            plan.n_llm_w == fixture.n_llm_w &&
+            expected.size() == patches.size() * 2u;
+        for (size_t i = 0; exact && i < patches.size(); ++i) {
+            exact = expected[i * 2u] ==
+                        static_cast<uint8_t>(patches[i]) &&
+                    expected[i * 2u + 1u] ==
+                        static_cast<uint8_t>(patches[i] >> 8);
+        }
+        CHECK(exact, fixture.name);
+    }
 }
 
 static void test_exact_tensor_inventory() {
@@ -384,14 +519,22 @@ static void test_pixel_shuffle_indices() {
           "pixel-shuffle grid exceeding int32 indices is rejected");
 }
 
-int main() {
+int main(int argc, char ** argv) {
     test_exact_tensor_inventory();
     test_png_preflight();
     test_png_decode();
+    test_bounded_png_preprocess();
     test_resize_policy();
     test_patch_packing();
     test_rope_positions();
     test_pixel_shuffle_indices();
+    if (argc == 2) test_real_preprocess_fixture(argv[1]);
+    if (argc > 2) {
+        std::fprintf(stderr,
+                     "usage: %s [real-image-processor-fixture-dir]\n",
+                     argv[0]);
+        return 2;
+    }
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }
