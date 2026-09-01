@@ -1,4 +1,5 @@
 /build/
+/build-*/
 /providers/xdna2/kernel/build/
 *.o
 *.a
