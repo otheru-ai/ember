@@ -568,6 +568,16 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_quant_behavior_eval.py)
   add_test(
+    NAME ds4_vision_behavior_gate
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_ds4_vision_behavior_gate.py)
+  add_test(
+    NAME build_revision_guard
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_build_revision_guard.py
+            ${CMAKE_COMMAND}
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_git_head.cmake)
+  add_test(
     NAME gguf_tensor_error
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_gguf_tensor_error.py)
@@ -582,7 +592,8 @@ if(Python3_Interpreter_FOUND)
   # Offline analysis scripts — no server, no network. Same 60s ceiling as the
   # C tests; server-spawning tests below keep their tighter 20s.
   set_tests_properties(
-    quant_quality_report quant_behavior_eval gguf_tensor_error
+    quant_quality_report quant_behavior_eval ds4_vision_behavior_gate
+    build_revision_guard gguf_tensor_error
     quant_manifest_corpus resident_benchmark
     PROPERTIES TIMEOUT 60)
   add_test(
@@ -946,8 +957,8 @@ if(EMBER_ENGINE)
   # linked or initialized even though it ships from the full engine build.
   set(EMBER_CONFIGURED_GIT_HEAD "" CACHE STRING
     "40-hex Ember revision embedded in release tools")
+  find_package(Git QUIET)
   if(NOT EMBER_CONFIGURED_GIT_HEAD)
-    find_package(Git QUIET)
     if(Git_FOUND)
       execute_process(
         COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse HEAD
@@ -986,9 +997,23 @@ if(EMBER_ENGINE)
       "ember-gguf-quantize disabled: configure with a 40-hex "
       "EMBER_CONFIGURED_GIT_HEAD to build release tools")
   else()
+    # This is intentionally a phony build target, not a configure-time check.
+    # A reused CMake directory must not keep emitting tools branded with the
+    # revision that happened to be checked out when it was first configured.
+    # Source archives have no .git entry and retain the explicit revision
+    # supplied by release tooling; live checkouts are checked on every build.
+    add_custom_target(ember_release_tool_revision_check
+      COMMAND ${CMAKE_COMMAND}
+        -DEMBER_EXPECTED_GIT_HEAD=${EMBER_CONFIGURED_GIT_HEAD}
+        -DEMBER_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DEMBER_GIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/verify_git_head.cmake
+      VERBATIM)
+
     add_executable(ember-gguf-quantize
       tools/gguf_quantize.cpp
       tools/gguf_quantize_common.cpp)
+    add_dependencies(ember-gguf-quantize ember_release_tool_revision_check)
     target_include_directories(ember-gguf-quantize PRIVATE
       tools
       engine/third_party)
@@ -1007,6 +1032,7 @@ if(EMBER_ENGINE)
     add_executable(ds4_logits_probe
       tools/ds4_logits_probe.cpp
       tools/logits_probe_format.cpp)
+    add_dependencies(ds4_logits_probe ember_release_tool_revision_check)
     target_include_directories(ds4_logits_probe PRIVATE
       tools engine/dflash engine/dflash/deepseek4 engine/ggml/include)
     target_compile_definitions(ds4_logits_probe PRIVATE
