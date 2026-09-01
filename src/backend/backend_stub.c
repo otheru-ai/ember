@@ -75,9 +75,10 @@ const char *ember_backend_token_text(ember_backend *b, int32_t id) {
 
 bool ember_backend_vision_encode(ember_backend *b,
                                  const uint8_t *encoded, size_t encoded_size,
+                                 int prompt_offset,
                                  ember_vision_image *out,
                                  char *error, size_t error_cap) {
-    (void)b; (void)encoded; (void)encoded_size;
+    (void)b; (void)encoded; (void)encoded_size; (void)prompt_offset;
     if (out) memset(out, 0, sizeof(*out));
     if (error && error_cap)
         snprintf(error, error_cap, "%s", "vision input is not supported by the stub backend");

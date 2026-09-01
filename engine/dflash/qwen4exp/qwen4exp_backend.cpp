@@ -280,7 +280,9 @@ bool Qwen4ExpBackend::init() {
 
 bool Qwen4ExpBackend::encode_vision_image(
         const uint8_t * encoded, size_t encoded_size,
+        int prompt_offset,
         EncodedVisionImage & out, std::string & error) {
+    (void)prompt_offset;
     // The released text and BF16 mmproj artifacts are separate. Constructing
     // this only for an image request preserves text-only residency on 128-GiB
     // UMA instead of eagerly consuming the tower's allocation.

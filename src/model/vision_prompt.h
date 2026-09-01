@@ -20,6 +20,14 @@ typedef struct {
     int            n_tokens;
 } ember_vision_prompt_image;
 
+// Locate every complete placeholder in source-prompt order. Offsets refer to
+// the unexpanded prompt; callers add the cumulative replacement-length delta
+// before passing a position-dependent image to its encoder.
+bool ember_vision_prompt_find_all(
+    const int32_t *input_ids, int input_count,
+    const int32_t *placeholder_ids, int placeholder_count,
+    int expected_count, int *offsets, char *error, size_t error_cap);
+
 // Find exactly one complete tokenizer placeholder sequence. Operator-only
 // prepared-vision gates need its real token offset before assembling learned
 // marker padding; guessing a single ID is not valid for DeepSeek's placeholder.

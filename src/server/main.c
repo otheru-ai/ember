@@ -2219,8 +2219,31 @@ static bool prepare_vision_prompt(
     }
     ember_vision_image *encoded = calloc((size_t)images, sizeof(*encoded));
     ember_vision_run *runs = calloc((size_t)images, sizeof(*runs));
-    if (!encoded || !runs) abort();
+    int *planned_offsets = calloc((size_t)images, sizeof(*planned_offsets));
+    if (!encoded || !runs || !planned_offsets) abort();
+    int32_t *placeholder_ids = NULL;
+    const int placeholder_count =
+        ember_backend_vision_placeholder_ids(be, &placeholder_ids);
+    if (placeholder_count <= 0 || !placeholder_ids) {
+        free(placeholder_ids);
+        free(planned_offsets);
+        free(encoded);
+        free(runs);
+        snprintf(error, error_cap,
+                 "vision backend has no image placeholder contract");
+        return false;
+    }
+    if (!ember_vision_prompt_find_all(
+            *ids_io, *count_io, placeholder_ids, placeholder_count,
+            images, planned_offsets, error, error_cap)) {
+        free(placeholder_ids);
+        free(planned_offsets);
+        free(encoded);
+        free(runs);
+        return false;
+    }
     int image_index = 0;
+    int expansion_delta = 0;
     bool ok = true;
     for (int m = 0; m < req->n_messages && ok; ++m) {
         for (int p = 0; p < req->messages[m].n_parts && ok; ++p) {
@@ -2231,9 +2254,19 @@ static bool prepare_vision_prompt(
                          "image content was not normalized at request intake");
                 ok = false;
             }
-            if (ok) ok = ember_backend_vision_encode(
-                be, part->image.data, part->image.size, &encoded[image_index],
-                error, error_cap);
+            if (ok && (planned_offsets[image_index] >
+                       INT_MAX - expansion_delta)) {
+                snprintf(error, error_cap,
+                         "expanded image position exceeds the prompt limit");
+                ok = false;
+            }
+            if (ok) {
+                planned_offsets[image_index] += expansion_delta;
+                ok = ember_backend_vision_encode(
+                    be, part->image.data, part->image.size,
+                    planned_offsets[image_index], &encoded[image_index],
+                    error, error_cap);
+            }
             if (ok && (encoded[image_index].grid_t != 1 ||
                        encoded[image_index].n_tokens <= 0 ||
                        encoded[image_index].embedding_width <= 0 ||
@@ -2241,21 +2274,23 @@ static bool prepare_vision_prompt(
                 snprintf(error, error_cap, "vision provider returned an invalid still-image result");
                 ok = false;
             }
+            if (ok) {
+                const int delta = encoded[image_index].n_tokens -
+                                  placeholder_count;
+                if ((delta > 0 && expansion_delta > INT_MAX - delta) ||
+                    (delta < 0 && expansion_delta < INT_MIN - delta)) {
+                    snprintf(error, error_cap,
+                             "expanded image positions exceed the prompt limit");
+                    ok = false;
+                } else {
+                    expansion_delta += delta;
+                }
+            }
             ++image_index;
         }
     }
     if (!ok) goto cleanup;
 
-    int32_t *placeholder_ids = NULL;
-    const int placeholder_count =
-        ember_backend_vision_placeholder_ids(be, &placeholder_ids);
-    if (placeholder_count <= 0 || !placeholder_ids) {
-        free(placeholder_ids);
-        snprintf(error, error_cap,
-                 "vision backend has no image placeholder contract");
-        ok = false;
-        goto cleanup;
-    }
     ember_vision_prompt_image *replacement = calloc(
         (size_t)images, sizeof(*replacement));
     int *offsets = calloc((size_t)images, sizeof(*offsets));
@@ -2271,12 +2306,19 @@ static bool prepare_vision_prompt(
         replacement, images, &expanded, &expanded_count, offsets,
         error, error_cap);
     free(placeholder_ids);
+    placeholder_ids = NULL;
     free(replacement);
     if (!ok) {
         free(offsets);
         goto cleanup;
     }
     for (int i = 0; i < images; ++i) {
+        if (offsets[i] != planned_offsets[i]) {
+            snprintf(error, error_cap,
+                     "planned image position differs after prompt expansion");
+            ok = false;
+            break;
+        }
         runs[i].prompt_offset = offsets[i];
         runs[i].grid_t = encoded[i].grid_t;
         runs[i].grid_h = encoded[i].grid_h;
@@ -2290,6 +2332,10 @@ static bool prepare_vision_prompt(
         encoded[i].token_ids = NULL;
     }
     free(offsets);
+    if (!ok) {
+        free(expanded);
+        goto cleanup;
+    }
     free(*ids_io);
     *ids_io = expanded;
     *count_io = expanded_count;
@@ -2298,6 +2344,8 @@ static bool prepare_vision_prompt(
     runs = NULL;
 
 cleanup:
+    free(placeholder_ids);
+    free(planned_offsets);
     for (int i = 0; i < images; ++i)
         ember_backend_vision_image_free(&encoded[i]);
     free(encoded);

@@ -34,6 +34,7 @@ public:
         return true;
     }
     bool encode_vision_image(const uint8_t * encoded, size_t encoded_size,
+                             int prompt_offset,
                              EncodedVisionImage & out,
                              std::string & error) override;
     std::string_view vision_placeholder_text() const override {

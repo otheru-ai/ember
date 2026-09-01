@@ -66,6 +66,29 @@ static void test_unique_placeholder_offset(void) {
           "operator gate rejects ambiguous duplicate placeholders");
 }
 
+static void test_all_placeholder_offsets(void) {
+    const int32_t placeholder[] = {700, 701};
+    const int32_t input[] = {10, 700, 701, 11, 700, 9, 700, 701, 12};
+    int offsets[2] = {-2, -2};
+    char error[160] = {0};
+    CHECK(ember_vision_prompt_find_all(
+              input, 9, placeholder, 2, 2, offsets,
+              error, sizeof(error)) && offsets[0] == 1 && offsets[1] == 6,
+          "all complete placeholders report unexpanded source offsets");
+    CHECK(!ember_vision_prompt_find_all(
+              input, 9, placeholder, 2, 1, offsets,
+              error, sizeof(error)) && offsets[0] == -1 &&
+              strstr(error, "more than one") != NULL,
+          "placeholder planning rejects fewer images than placeholders");
+    offsets[0] = 4;
+    offsets[1] = 4;
+    CHECK(!ember_vision_prompt_find_all(
+              input, 9, placeholder, 2, 3, offsets,
+              error, sizeof(error)) && offsets[0] == -1 &&
+              offsets[1] == -1,
+          "placeholder planning rejects more images than placeholders");
+}
+
 static void test_discriminating_outputs(void) {
     CHECK(ember_vision_outputs_discriminate(
               "The crop is carrot.", "The crop is corn.", "I cannot tell.",
@@ -159,6 +182,7 @@ static void test_text_only_inert(void) {
 int main(void) {
     test_multi_token_multiple_images();
     test_unique_placeholder_offset();
+    test_all_placeholder_offsets();
     test_discriminating_outputs();
     test_legacy_single_token_fallback();
     test_fail_closed_contracts();

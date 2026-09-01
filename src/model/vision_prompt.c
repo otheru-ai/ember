@@ -30,25 +30,54 @@ bool ember_vision_prompt_find_unique(
         const int32_t *placeholder_ids, int placeholder_count,
         int *offset, char *error, size_t error_cap) {
     if (offset) *offset = -1;
-    if (!offset || input_count < 0 || placeholder_count <= 0 ||
-        (input_count > 0 && !input_ids) || !placeholder_ids) {
+    if (!offset) {
         set_error(error, error_cap, "invalid vision placeholder search contract");
         return false;
     }
-    const int found = find_sequence(input_ids, input_count, 0,
-                                    placeholder_ids, placeholder_count);
-    if (found < 0) {
-        set_error(error, error_cap,
-                  "rendered prompt has no complete image placeholder");
+    return ember_vision_prompt_find_all(
+        input_ids, input_count, placeholder_ids, placeholder_count,
+        1, offset, error, error_cap);
+}
+
+bool ember_vision_prompt_find_all(
+        const int32_t *input_ids, int input_count,
+        const int32_t *placeholder_ids, int placeholder_count,
+        int expected_count, int *offsets,
+        char *error, size_t error_cap) {
+    if (offsets && expected_count > 0)
+        for (int i = 0; i < expected_count; ++i) offsets[i] = -1;
+    if (input_count < 0 || placeholder_count <= 0 || expected_count < 0 ||
+        (input_count > 0 && !input_ids) || !placeholder_ids ||
+        (expected_count > 0 && !offsets)) {
+        set_error(error, error_cap, "invalid vision placeholder search contract");
         return false;
     }
-    if (find_sequence(input_ids, input_count, found + placeholder_count,
+    int cursor = 0;
+    for (int i = 0; i < expected_count; ++i) {
+        const int found = find_sequence(
+            input_ids, input_count, cursor, placeholder_ids, placeholder_count);
+        if (found < 0) {
+            for (int clear = 0; clear < expected_count; ++clear)
+                offsets[clear] = -1;
+            set_error(error, error_cap,
+                      expected_count == 1
+                          ? "rendered prompt has no complete image placeholder"
+                          : "rendered prompt has fewer image placeholders than images");
+            return false;
+        }
+        offsets[i] = found;
+        cursor = found + placeholder_count;
+    }
+    if (find_sequence(input_ids, input_count, cursor,
                       placeholder_ids, placeholder_count) >= 0) {
+        for (int clear = 0; clear < expected_count; ++clear)
+            offsets[clear] = -1;
         set_error(error, error_cap,
-                  "rendered prompt has more than one image placeholder");
+                  expected_count == 1
+                      ? "rendered prompt has more than one image placeholder"
+                      : "rendered prompt has more image placeholders than images");
         return false;
     }
-    *offset = found;
     return true;
 }
 

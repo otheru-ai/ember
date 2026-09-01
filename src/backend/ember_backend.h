@@ -73,6 +73,7 @@ typedef struct {
 
 bool ember_backend_vision_encode(ember_backend *b,
                                  const uint8_t *encoded, size_t encoded_size,
+                                 int prompt_offset,
                                  ember_vision_image *out,
                                  char *error, size_t error_cap);
 void ember_backend_vision_image_free(ember_vision_image *image);

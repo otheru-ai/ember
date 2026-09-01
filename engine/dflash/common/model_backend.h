@@ -389,7 +389,7 @@ struct ModelBackend {
     // Decode, preprocess, and project one encoded still image. Architectures
     // without a vision tower fail closed. Qwen loads its separate BF16 mmproj
     // provider on the first call, so text-only startup/residency is unchanged.
-    virtual bool encode_vision_image(const uint8_t *, size_t,
+    virtual bool encode_vision_image(const uint8_t *, size_t, int,
                                      EncodedVisionImage &,
                                      std::string & error) {
         error = "vision input is not supported by this backend";

@@ -193,15 +193,17 @@ static bool copy_encoded_vision_image(
 
 extern "C" bool ember_backend_vision_encode(
         ember_backend *b, const uint8_t *encoded, size_t encoded_size,
+        int prompt_offset,
         ember_vision_image *out, char *error, size_t error_cap) {
     if (out) *out = {};
-    if (!b || !out || !encoded || encoded_size == 0) {
+    if (!b || !out || !encoded || encoded_size == 0 || prompt_offset < 0) {
         if (error && error_cap) std::snprintf(error, error_cap, "%s", "invalid vision encode request");
         return false;
     }
     dflash::common::EncodedVisionImage image;
     std::string detail;
-    if (!b->be->encode_vision_image(encoded, encoded_size, image, detail)) {
+    if (!b->be->encode_vision_image(
+            encoded, encoded_size, prompt_offset, image, detail)) {
         if (error && error_cap)
             std::snprintf(error, error_cap, "%s", detail.c_str());
         return false;
