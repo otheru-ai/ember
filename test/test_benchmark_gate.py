@@ -143,8 +143,12 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(row["autoregressive_prefill_tok_s"], 30.8)
 
     def test_workload_baseline_rejects_partial_or_error_rows(self) -> None:
-        on = [{"label": f"w{i}", "decode_tps": 20.0} for i in range(12)]
-        off = [{"label": f"w{i}", "decode_tps": 18.0} for i in range(12)]
+        on = [{"label": f"w{i}", "decode_tps": 20.0,
+               "accept_rate": 0.5, "spec_ran": True, "spec_cycles": 32}
+              for i in range(12)]
+        off = [{"label": f"w{i}", "decode_tps": 18.0,
+                "accept_rate": 0.0, "spec_ran": False, "spec_cycles": 0}
+               for i in range(12)]
         assemble.validate_workload_rows(on, off, 12)
         with self.assertRaisesRegex(SystemExit, "requires 12 unique rows"):
             assemble.validate_workload_rows(on[:-1], off, 12)
@@ -154,6 +158,24 @@ class BenchmarkGateTest(unittest.TestCase):
             assemble.validate_workload_rows(broken, off, 12)
         with self.assertRaisesRegex(SystemExit, "requires 12 unique rows"):
             assemble.validate_workload_rows([], [], 12)
+
+    def test_workload_baseline_requires_complete_speculative_evidence(self) -> None:
+        on = [{"label": f"w{i}", "decode_tps": 20.0,
+               "accept_rate": 0.5, "spec_ran": True, "spec_cycles": 32}
+              for i in range(12)]
+        off = [{"label": f"w{i}", "decode_tps": 18.0,
+                "accept_rate": 0.0, "spec_ran": False, "spec_cycles": 0}
+               for i in range(12)]
+        for field, value in (("accept_rate", None), ("accept_rate", True),
+                             ("accept_rate", float("nan")), ("spec_ran", None),
+                             ("spec_ran", 0), ("spec_cycles", None),
+                             ("spec_cycles", False),
+                             ("spec_cycles", float("inf"))):
+            broken = [dict(row) for row in on]
+            broken[3][field] = value
+            with self.subTest(field=field, value=value), \
+                    self.assertRaisesRegex(SystemExit, "invalid speculative evidence"):
+                assemble.validate_workload_rows(broken, off, 12)
 
     def test_model_provenance_binds_mmproj_when_present(self) -> None:
         model = assemble.model_provenance({

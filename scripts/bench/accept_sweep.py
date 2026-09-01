@@ -91,11 +91,14 @@ def run(label, prompt, max_tokens=256, image=None):
     with urllib.request.urlopen(req, timeout=600) as r:
         b = json.load(r)
     u = b.get("usage") or {}; t = u.get("timings") or {}
+    backend = u.get("backend") or {}
     return {"label":label, "prompt_tokens":u.get("prompt_tokens"),
             "completion_tokens":u.get("completion_tokens"),
             "decode_tps":t.get("decode_tokens_per_sec"),
             "prefill_tps":t.get("prefill_tokens_per_sec"),
-            "accept_rate":b.get("accept_rate")}
+            "accept_rate":u.get("accept_rate"),
+            "spec_ran":backend.get("spec_ran"),
+            "spec_cycles":t.get("spec_cycles")}
 
 out = sys.argv[2] if len(sys.argv) > 2 else sys.argv[1]
 with open(out,"w") as f:

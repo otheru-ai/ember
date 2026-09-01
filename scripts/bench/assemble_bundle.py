@@ -12,6 +12,7 @@ than a long argv, because the orchestrator already holds those values.
 """
 
 import json
+import math
 import os
 import platform
 import statistics
@@ -134,6 +135,26 @@ def validate_workload_rows(on_rows, off_rows, expected_count):
             raise SystemExit(
                 f"{name} workload sweep has {len(bad)} unusable rows; "
                 f"first={bad[0].get('label')}: {bad[0].get('error', 'missing decode_tps')}")
+        bad_evidence = []
+        for row in rows:
+            accept_rate = row.get("accept_rate")
+            spec_cycles = row.get("spec_cycles")
+            if (not isinstance(accept_rate, (int, float))
+                    or isinstance(accept_rate, bool)
+                    or not math.isfinite(float(accept_rate))
+                    or not isinstance(row.get("spec_ran"), bool)
+                    or not isinstance(spec_cycles, (int, float))
+                    or isinstance(spec_cycles, bool)
+                    or not math.isfinite(float(spec_cycles))):
+                bad_evidence.append(row)
+        if bad_evidence:
+            row = bad_evidence[0]
+            raise SystemExit(
+                f"{name} workload sweep has {len(bad_evidence)} rows with "
+                f"invalid speculative evidence; first={row.get('label')}: "
+                f"accept_rate={row.get('accept_rate')!r}, "
+                f"spec_ran={row.get('spec_ran')!r}, "
+                f"spec_cycles={row.get('spec_cycles')!r}")
     if {row["label"] for row in on_rows} != {row["label"] for row in off_rows}:
         raise SystemExit("spec-on and spec-off workload identities differ")
 
