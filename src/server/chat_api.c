@@ -44,7 +44,8 @@ static char *dup_or(const char *s, const char *dflt) {
 
 static void content_part_push(ember_chat_msg *msg,
                               ember_content_part_kind kind,
-                              const char *text, const char *detail) {
+                              const char *text, const char *detail,
+                              ember_content_part **part_out) {
     if (msg->n_parts == INT_MAX ||
         (size_t)(msg->n_parts + 1) > SIZE_MAX / sizeof(*msg->parts))
         ember_buf_fatal("too many message content parts");
@@ -54,20 +55,41 @@ static void content_part_push(ember_chat_msg *msg,
     msg->parts = grown;
     ember_content_part *part = &msg->parts[msg->n_parts++];
     part->kind = kind;
-    part->text = dup_or(text, "");
+    part->text = text ? dup_or(text, "") : NULL;
     part->detail = dup_or(detail, NULL);
+    part->image = (ember_image_bytes){0};
+    if (part_out) *part_out = part;
+}
+
+static uint64_t image_digest_byte(uint64_t digest, uint8_t byte) {
+    return (digest ^ byte) * UINT64_C(1099511628211);
+}
+
+static void image_digest_add(ember_chat_request *req,
+                             const ember_image_bytes *image) {
+    uint64_t digest = req->image_digest;
+    if (digest == 0) digest = UINT64_C(1469598103934665603);
+    digest = image_digest_byte(digest, UINT8_C(0xff));
+    digest = image_digest_byte(digest, (uint8_t)image->format);
+    uint64_t size = (uint64_t)image->size;
+    for (unsigned int shift = 0; shift < 64; shift += 8)
+        digest = image_digest_byte(digest, (uint8_t)(size >> shift));
+    for (size_t i = 0; i < image->size; ++i)
+        digest = image_digest_byte(digest, image->data[i]);
+    req->image_digest = digest ? digest : UINT64_C(1);
 }
 
 // Content is either a string or an ordered array of parts. Keep the historical
 // flattened text view for the text pipeline, but do not discard image parts:
-// Qwen's M-RoPE positions depend on their exact placement.
+// Vision position construction depends on their exact placement.
 static char *flatten_content(const ember_json *content, const char *role,
-                             ember_chat_msg *msg, bool *has_images, bool *ok) {
+                             ember_chat_msg *msg, ember_chat_request *req,
+                             bool *ok) {
     *ok = true;
     if (!content) return dup_or("", NULL);
     if (content->type == EMBER_JSON_NULL) return dup_or("", NULL);
     if (content->type == EMBER_JSON_STRING) {
-        content_part_push(msg, EMBER_CONTENT_TEXT, content->u.str, NULL);
+        content_part_push(msg, EMBER_CONTENT_TEXT, content->u.str, NULL, NULL);
         return dup_or(ember_json_str(content, ""), NULL);
     }
     if (content->type == EMBER_JSON_ARRAY) {
@@ -82,8 +104,10 @@ static char *flatten_content(const ember_json *content, const char *role,
                 const ember_json *text = ember_json_get(part, "text");
                 if (!text || text->type != EMBER_JSON_STRING) goto invalid;
                 ember_buf_puts(&b, text->u.str);
-                content_part_push(msg, EMBER_CONTENT_TEXT, text->u.str, NULL);
-            } else if (strcmp(type, "image_url") == 0) {
+                content_part_push(msg, EMBER_CONTENT_TEXT, text->u.str, NULL,
+                                  NULL);
+            } else if (strcmp(type, "image_url") == 0 ||
+                       strcmp(type, "input_image") == 0) {
                 const ember_json *image = ember_json_get(part, "image_url");
                 const char *url = NULL;
                 const char *detail = NULL;
@@ -101,15 +125,23 @@ static char *flatten_content(const ember_json *content, const char *role,
                     goto invalid;
                 }
                 if (!url || !url[0]) goto invalid;
-                content_part_push(msg, EMBER_CONTENT_IMAGE_URL, url, detail);
-                *has_images = true;
+                ember_content_part *stored = NULL;
+                content_part_push(msg, EMBER_CONTENT_IMAGE, NULL, detail,
+                                  &stored);
+                char image_error[160] = {0};
+                if (!ember_image_data_url_decode(
+                        url, &stored->image, image_error,
+                        sizeof(image_error)))
+                    goto invalid;
+                req->has_images = true;
+                image_digest_add(req, &stored->image);
             } else if (strcmp(type, "refusal") == 0 &&
                        role && strcmp(role, "assistant") == 0) {
                 const ember_json *refusal = ember_json_get(part, "refusal");
                 if (!refusal || refusal->type != EMBER_JSON_STRING) goto invalid;
                 ember_buf_puts(&b, refusal->u.str);
                 content_part_push(msg, EMBER_CONTENT_TEXT,
-                                  refusal->u.str, NULL);
+                                  refusal->u.str, NULL, NULL);
             } else {
                 // Unknown blocks must not disappear from the model-visible
                 // request. Add explicit support or reject them at the adapter.
@@ -567,7 +599,7 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
         bool content_ok = false;
         out->messages[i].content =
             flatten_content(ember_json_get(m, "content"), role->u.str,
-                            &out->messages[i], &out->has_images, &content_ok);
+                            &out->messages[i], out, &content_ok);
         if (!content_ok) goto invalid;
         const ember_json *top_refusal = ember_json_get(m, "refusal");
         if (top_refusal) {
@@ -583,7 +615,7 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
             memcpy(joined + old_len, top_refusal->u.str, refusal_len + 1);
             out->messages[i].content = joined;
             content_part_push(&out->messages[i], EMBER_CONTENT_TEXT,
-                              top_refusal->u.str, NULL);
+                              top_refusal->u.str, NULL, NULL);
         }
         out->messages[i].name =
             dup_or(ember_json_str(name, NULL), NULL);
@@ -960,6 +992,7 @@ void ember_chat_request_free(ember_chat_request *r) {
         for (int j = 0; j < r->messages[i].n_parts; ++j) {
             free(r->messages[i].parts[j].text);
             free(r->messages[i].parts[j].detail);
+            ember_image_bytes_free(&r->messages[i].parts[j].image);
         }
         free(r->messages[i].parts);
         ember_tool_calls_free(&r->messages[i].calls);

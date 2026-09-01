@@ -41,6 +41,12 @@ typedef struct {
     int         batch_sessions; // resident continuous-batch slots (1 = legacy)
     ember_ds4_prefill_mode ds4_prefill_mode; // sparse default; exact for quality reference
     bool        qwen_yarn; // explicit static factor-4 1M Qwen recipe; off by default
+    // Operator-owned native DeepSeek vision tower. Text-only startup never
+    // opens this path; request bytes cannot select or override it.
+    const char *vision_mmproj_path;
+    // Diagnostic-only loader exception. The engine still admits exactly a
+    // 1-layer/1-hash-layer DeepSeek control and rejects every other truncation.
+    bool        allow_single_layer_control;
 } ember_backend_config;
 
 // Load a model. Returns NULL on failure and sets *err (caller frees) if non-NULL.
@@ -63,14 +69,32 @@ typedef struct {
     int    grid_h;
     int    grid_w;
     int    n_tokens;
-    float *embeddings; // row-major [n_tokens,EMBER_QWEN_VISION_EMBEDDING_WIDTH]
+    float *embeddings; // row-major [n_tokens,embedding_width]
+    // Appended model-neutral contract. token_ids may be NULL only for the
+    // legacy Qwen repeated-image_pad path.
+    int      embedding_width;
+    int32_t *token_ids;
+    uint64_t source_digest;
 } ember_vision_image;
 
 bool ember_backend_vision_encode(ember_backend *b,
                                  const uint8_t *encoded, size_t encoded_size,
+                                 int prompt_offset,
                                  ember_vision_image *out,
                                  char *error, size_t error_cap);
 void ember_backend_vision_image_free(ember_vision_image *image);
+// Tokenize the loaded architecture's private image placeholder. The returned
+// malloc'd sequence is matched exactly in the already-tokenized full prompt.
+// Returns its positive length, or -1 when vision placeholders are unsupported.
+int ember_backend_vision_placeholder_ids(ember_backend *b, int32_t **ids_out);
+
+// Operator-only offline gate. Paths come from trusted command-line options,
+// never request media. The returned rows still travel through ember_gen_request
+// so this cannot become a parallel generation implementation.
+bool ember_backend_prepare_offline_vision_artifact(
+    ember_backend *b, const char *artifact_path, const char *mmproj_path,
+    int prompt_offset, ember_vision_image *out,
+    char *error, size_t error_cap);
 
 // ── generation ──
 // on_token: called per generated token; return false to cancel (client gone).
@@ -86,7 +110,47 @@ typedef struct {
     int          grid_w;
     int          n_tokens;
     const float *embeddings;
+    // Appended so pre-existing field offsets remain stable.
+    int            embedding_width;
+    const int32_t *token_ids;
+    uint64_t       source_digest;
 } ember_vision_run;
+
+// These offsets are measured on Ember's supported 64-bit ABI, not chosen.
+// A legitimate extension appends members and leaves every value below intact.
+// If an assertion fires, move the new member to the end; do not re-pin an
+// existing offset. Pinning every member catches insertions and reordering even
+// when the new layout preserves the relationship between the final fields.
+#if defined(__cplusplus)
+#define EMBER_VISION_ABI_OFFSET(type, member, expected)                     \
+    static_assert(offsetof(type, member) == (expected),                     \
+                  "vision ABI changed; append members instead")
+#else
+#define EMBER_VISION_ABI_OFFSET(type, member, expected)                     \
+    _Static_assert(offsetof(type, member) == (expected),                    \
+                   "vision ABI changed; append members instead")
+#endif
+
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_t, 0);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_h, 4);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, grid_w, 8);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, n_tokens, 12);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, embeddings, 16);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, embedding_width, 24);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, token_ids, 32);
+EMBER_VISION_ABI_OFFSET(ember_vision_image, source_digest, 40);
+
+EMBER_VISION_ABI_OFFSET(ember_vision_run, prompt_offset, 0);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_t, 4);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_h, 8);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, grid_w, 12);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, n_tokens, 16);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, embeddings, 24);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, embedding_width, 32);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, token_ids, 40);
+EMBER_VISION_ABI_OFFSET(ember_vision_run, source_digest, 48);
+
+#undef EMBER_VISION_ABI_OFFSET
 
 typedef struct {
     const int32_t     *prompt;

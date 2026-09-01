@@ -6,6 +6,7 @@
 // DSpark-specific tensors (dflash.fc / hidden_norm / dspark.*) bind separately.
 
 #include "deepseek4_dspark.h"
+#include "deepseek4_vision_contract.h"
 
 #include "common/gguf_bounds.h"
 #include "common/dspark_head.h"
@@ -103,6 +104,7 @@ bool recognized_block_suffix(const std::string & suffix) {
         "attn_sinks.weight", "attn_output_a.weight", "attn_output_b.weight",
         "hc_attn_fn.weight", "hc_attn_scale.weight", "hc_attn_base.weight",
         "ffn_norm.weight", "ffn_gate_inp.weight", "exp_probs_b.bias",
+        dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX,
         "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
         "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight",
         "hc_ffn_fn.weight", "hc_ffn_scale.weight", "hc_ffn_base.weight",
@@ -398,6 +400,8 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
         else if (suffix == "ffn_norm.weight")        L.ffn_norm        = t;
         else if (suffix == "ffn_gate_inp.weight")    L.ffn_gate_inp    = t;
         else if (suffix == "exp_probs_b.bias")       L.ffn_exp_probs_b = t;
+        else if (deepseek4_is_vision_router_bias_suffix(suffix))
+                                                       L.ffn_exp_probs_b_vl = t;
         else if (suffix == "ffn_gate_exps.weight")   L.ffn_gate_exps   = t;
         else if (suffix == "ffn_up_exps.weight")     L.ffn_up_exps     = t;
         else if (suffix == "ffn_down_exps.weight")   L.ffn_down_exps   = t;
@@ -425,6 +429,7 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
     need(w.output_hc_fn, "output_hc_fn.weight");
     need(w.output_hc_scale, "output_hc_scale.weight");
     need(w.output_hc_base, "output_hc_base.weight");
+    int vision_biases_loaded = 0;
     for (int il = 0; il < w.n_layer; ++il) {
         const DeepSeek4Layer & L = w.layers[(size_t) il];
         const std::string p = "blk." + std::to_string(il) + ".";
@@ -504,6 +509,18 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
         if (L.ffn_exp_probs_b) {
             expect_shape(L.ffn_exp_probs_b, p + "exp_probs_b.bias", {w.n_expert});
         }
+        if (L.ffn_exp_probs_b_vl) {
+            ++vision_biases_loaded;
+            expect_shape(L.ffn_exp_probs_b_vl,
+                         p + dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX,
+                         {w.n_expert});
+            if (shape_error.empty() &&
+                L.ffn_exp_probs_b_vl->type != GGML_TYPE_F32) {
+                shape_error = p +
+                    dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX +
+                    " must be F32";
+            }
+        }
         expect_shape(L.ffn_gate_exps, p + "ffn_gate_exps.weight",
                      {n_embd, w.n_ff_exp, w.n_expert});
         expect_shape(L.ffn_up_exps, p + "ffn_up_exps.weight",
@@ -527,6 +544,11 @@ bool load_deepseek4_dspark_drafter(const std::string & path,
         contract_error = "incomplete DSpark confidence tensor pair";
     } else if (out.confidence_w && out.confidence_dim <= 0) {
         contract_error = "DSpark confidence metadata is invalid";
+    } else if (!deepseek4_optional_vision_bias_set_valid(
+                   vision_biases_loaded, w.n_layer)) {
+        contract_error =
+            std::string(dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX) +
+            " must be present on every drafter layer or none";
     } else if (!shape_error.empty()) {
         contract_error = shape_error;
     }

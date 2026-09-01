@@ -46,6 +46,51 @@ static void test_basic_turns(void) {
     ember_chat_request_free(&req);
 }
 
+static void test_deepseek_ordered_image_placeholder(void) {
+    ember_chat_request req = parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"before \"},"
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"data:image/png;base64,iVBORw==\"}},"
+        "{\"type\":\"text\",\"text\":\" after\"}]}]}" );
+    char *p = ember_render_prompt(&req, false, EMBER_THINK_NONE, true);
+    CHECK(p && strstr(p, USER "before <" PIPE "deepseek_image" PIPE
+                         "> after" ASST "</think>") != NULL,
+          "DeepSeek preserves ordered text/image parts with its exact marker");
+    CHECK(p && strstr(p, "<|vision_start|>") == NULL,
+          "DeepSeek never renders the Qwen image wrapper");
+    free(p);
+    ember_chat_request_free(&req);
+
+    ember_chat_request plain = parse(
+        "{\"messages\":[{\"role\":\"user\","
+        "\"content\":\"alpha beta\"}]}" );
+    ember_chat_request parted = parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"alpha \"},"
+        "{\"type\":\"text\",\"text\":\"beta\"}]}]}" );
+    char *plain_prompt = ember_render_prompt(
+        &plain, false, EMBER_THINK_NONE, true);
+    char *parted_prompt = ember_render_prompt(
+        &parted, false, EMBER_THINK_NONE, true);
+    CHECK(plain_prompt && parted_prompt &&
+              strcmp(plain_prompt, parted_prompt) == 0,
+          "text-only ordered parts remain byte-identical to plain content");
+    free(plain_prompt);
+    free(parted_prompt);
+    ember_chat_request_free(&plain);
+    ember_chat_request_free(&parted);
+
+    req = parse(
+        "{\"messages\":[{\"role\":\"assistant\",\"content\":["
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"data:image/png;base64,iVBORw==\"}}]}]}" );
+    p = ember_render_prompt(&req, false, EMBER_THINK_NONE, false);
+    CHECK(p == NULL, "DeepSeek rejects image parts outside user turns");
+    free(p);
+    ember_chat_request_free(&req);
+}
+
 static void test_thinking_opens_think(void) {
     ember_chat_request req = parse(
         "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}");
@@ -191,6 +236,7 @@ static void test_attr_escape_covers_gt(void) {
 int main(void) {
     printf("ember chat_template tests\n");
     test_basic_turns();
+    test_deepseek_ordered_image_placeholder();
     test_thinking_opens_think();
     test_tool_preamble_and_result();
     test_reference_system_then_tools_order();

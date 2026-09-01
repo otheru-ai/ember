@@ -27,6 +27,7 @@
 #include "common/cpu_embedder.h"
 #include "placement/placement_config.h"
 #include "common/prefill_attention_mode.h"
+#include "deepseek4_model_contract.h"
 
 namespace dflash::common {
 
@@ -39,6 +40,9 @@ struct TargetLoadPlan {
     bool skip_expert_tensors = false;
     bool metadata_only = false;
     bool expert_metadata_only = false;
+    // The standalone full-logit control uses a deliberately sliced layer-0
+    // GGUF. Ordinary target loads must retain the production 43/3 contract.
+    bool allow_single_layer_control = false;
 };
 
 // Layer-major prefill may schedule two 2K numerical bands while preserving
@@ -169,6 +173,7 @@ struct DeepSeek4Layer {
     // Router
     ggml_tensor * ffn_gate_inp       = nullptr;  // [n_embd, n_expert] router weights F16
     ggml_tensor * ffn_exp_probs_b    = nullptr;  // [n_expert] optional routing bias
+    ggml_tensor * ffn_exp_probs_b_vl = nullptr;  // [n_expert] optional vision routing bias F32
 
     // Hash routing table (first n_hash_layer layers only)
     ggml_tensor * ffn_gate_tid2eid   = nullptr;  // [n_expert_used, n_vocab] I32
@@ -234,6 +239,7 @@ struct DeepSeek4Weights {
 
     // Compression
     int n_swa             = 128;   // raw SWA window size
+    int vision_max_tokens = 384;   // config.json vision_max_n_token
     int n_indexer_head    = 64;
     int n_indexer_head_dim = 128;
     int n_indexer_top_k   = 512;
@@ -341,12 +347,16 @@ struct DeepSeek4RawRingSpan {
 
 struct DeepSeek4BackendConfig {
     const char * model_path   = nullptr;
+    std::string  vision_mmproj_path;
     DevicePlacement device;
     int          chunk        = 512;   // prefill chunk size
     PrefillAttentionMode prefill_mode = PrefillAttentionMode::Exact;
     int          max_ctx      = 0;     // 0 = auto from SWA + compression capacity
     int          expert_top_k = 0;     // 0 = use all model-routed experts
     bool         fused_decode = false; // single-graph GPU decode
+    // Standalone diagnostic only: accept exactly the layer-0/hash-layer-0
+    // control slice. No server option or environment variable sets this.
+    bool         allow_single_layer_control = false;
 };
 
 // ─── Function declarations ──────────────────────────────────────────────

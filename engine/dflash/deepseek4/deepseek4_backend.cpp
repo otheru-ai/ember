@@ -6,6 +6,8 @@
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
 #include "deepseek4_dspark_scheduler.h"
+#include "deepseek4_vision_artifact.h"
+#include "deepseek4_vision_markers.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
 
@@ -829,6 +831,9 @@ bool DeepSeek4Backend::validate_prefill_mode() const {
 }
 
 bool DeepSeek4Backend::load_model() {
+    TargetLoadPlan load_plan;
+    load_plan.allow_single_layer_control =
+        cfg_.allow_single_layer_control;
     // Fused decode and layer-major prefill reference every expert directly.
     // Make their residency requirement explicit instead of silently falling
     // back to tokenwise hybrid execution.
@@ -838,7 +843,8 @@ bool DeepSeek4Backend::load_model() {
                      "(fused_decode=%s, prefill=%s)\n",
                      cfg_.fused_decode ? "on" : "off",
                      prefill_attention_mode_name(cfg_.prefill_mode));
-        if (!load_deepseek4_gguf(cfg_.model_path, backend_, w_)) {
+        if (!load_deepseek4_gguf_partial(
+                cfg_.model_path, backend_, load_plan, w_)) {
             if (prefill_attention_mode_is_approximate(cfg_.prefill_mode)) {
                 std::fprintf(stderr,
                     "[deepseek4] monolithic HIP load required for %s prefill: %s\n",
@@ -847,7 +853,9 @@ bool DeepSeek4Backend::load_model() {
                 return false;
             }
             std::fprintf(stderr,
-                         "[deepseek4] monolithic HIP load failed; trying hybrid mode\n");
+                         "[deepseek4] monolithic HIP load failed (%s); "
+                         "trying hybrid mode\n",
+                         last_error());
             if (!init_hybrid_model()) {
                 std::fprintf(stderr, "[deepseek4] hybrid mode also failed: %s\n",
                              cfg_.model_path);
@@ -1011,6 +1019,119 @@ void DeepSeek4Backend::release_spec_drafter() {
     spec_feat_window_.clear();
 }
 
+bool DeepSeek4Backend::encode_vision_image(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        EncodedVisionImage & image, std::string & error) {
+    image = {};
+    error.clear();
+    if (cfg_.vision_mmproj_path.empty()) {
+        error = "DeepSeek4 image input requires operator-configured --vision-mmproj";
+        return false;
+    }
+
+    dflash::Deepseek4VisionResizePlan plan;
+    std::vector<uint16_t> patches;
+    uint64_t source_digest = 0;
+    // Decode and validate request bytes before taking the tower lock or loading
+    // its ~900 MiB payload. Malformed media therefore cannot force residency.
+    if (!dflash::deepseek4_vision_preprocess_still_png(
+            encoded, encoded_size, prompt_offset,
+            plan, patches, source_digest, &error)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(vision_tower_mu_);
+    if (!vision_tower_) {
+        auto candidate = std::make_unique<dflash::Deepseek4VisionTower>();
+        std::string load_error;
+        if (!dflash::deepseek4_load_vision_tower(
+                cfg_.vision_mmproj_path, w_.n_embd, backend_,
+                *candidate, load_error)) {
+            error = "cannot load DeepSeek4 vision mmproj '" +
+                cfg_.vision_mmproj_path + "': " + load_error;
+            return false;
+        }
+        vision_tower_ = std::move(candidate);
+    }
+
+    dflash::Deepseek4VisionTowerCheckpoints checkpoints;
+    dflash::Deepseek4PreparedImage prepared;
+    const bool timing = env_flag_enabled("DFLASH_DS4_TIMING");
+    const Clock::time_point tower_start = Clock::now();
+    const bool tower_ok = dflash::deepseek4_run_vision_tower(
+            *vision_tower_, patches, plan.n_vit_h, plan.n_vit_w,
+            w_.n_vocab, prompt_offset, checkpoints,
+            nullptr, &prepared, error);
+    const uint64_t tower_us = elapsed_us(tower_start, Clock::now());
+    if (timing) {
+        std::fprintf(stderr,
+                     "[deepseek4-vision] tower encode: time_us=%" PRIu64
+                     " vit=%dx%d llm=%dx%d ok=%s\n",
+                     tower_us, plan.n_vit_h, plan.n_vit_w,
+                     plan.n_llm_h, plan.n_llm_w,
+                     tower_ok ? "yes" : "no");
+    }
+    if (!tower_ok) {
+        return false;
+    }
+    if (checkpoints.n_llm_h != plan.n_llm_h ||
+        checkpoints.n_llm_w != plan.n_llm_w ||
+        prepared.block.token_ids.size() !=
+            static_cast<size_t>(plan.block_tokens) ||
+        w_.n_embd <= 0 ||
+        prepared.block.token_ids.size() >
+            SIZE_MAX / static_cast<size_t>(w_.n_embd) ||
+        prepared.embeddings.size() != prepared.block.token_ids.size() *
+            static_cast<size_t>(w_.n_embd)) {
+        error = "DeepSeek4 tower output differs from its preprocessing grid";
+        return false;
+    }
+
+    image.grid_t = 1;
+    image.grid_h = plan.n_llm_h;
+    image.grid_w = plan.n_llm_w;
+    image.embedding_width = w_.n_embd;
+    image.token_ids = std::move(prepared.block.token_ids);
+    image.embeddings = std::move(prepared.embeddings);
+    image.source_digest = source_digest;
+    return true;
+}
+
+bool DeepSeek4Backend::prepare_offline_vision_artifact(
+        const std::string & artifact_path,
+        const std::string & mmproj_path,
+        int prompt_offset,
+        EncodedVisionImage & image,
+        std::string & error) {
+    image = {};
+    error.clear();
+    if (prompt_offset < 0) {
+        error = "invalid offline vision placeholder offset";
+        return false;
+    }
+    dflash::Deepseek4VisionArtifact artifact;
+    dflash::Deepseek4ImageMarkers markers;
+    dflash::Deepseek4PreparedImage prepared;
+    if (!dflash::deepseek4_load_vision_artifact(
+            artifact_path, w_.n_embd, artifact, error) ||
+        !dflash::deepseek4_load_image_markers(
+            mmproj_path, w_.n_embd, markers, error) ||
+        !dflash::deepseek4_prepare_image(
+            w_.n_vocab, artifact.n_llm_h, artifact.n_llm_w,
+            prompt_offset, w_.n_embd, artifact.image_embeddings,
+            markers, prepared, &error)) {
+        return false;
+    }
+    image.grid_t = 1;
+    image.grid_h = artifact.n_llm_h;
+    image.grid_w = artifact.n_llm_w;
+    image.embedding_width = w_.n_embd;
+    image.token_ids = std::move(prepared.block.token_ids);
+    image.embeddings = std::move(prepared.embeddings);
+    image.source_digest = artifact.digest;
+    return true;
+}
+
 bool DeepSeek4Backend::init() {
     // The shared MMVQ/MMQ crossover defaults to q=3 for NVIDIA. On gfx1151,
     // DSpark q=4 is faster through MMVQ. Keep AR and other devices unchanged,
@@ -1078,6 +1199,80 @@ bool DeepSeek4Backend::init() {
     return true;
 }
 
+bool DeepSeek4Backend::diagnostic_next_logits(
+        const std::vector<int32_t> &token_ids, bool force_exact_prefill,
+        std::vector<float> &logits, int &effective_prefill_chunk,
+        std::string &error, std::vector<float> *layer0_mean_hc) {
+    logits.clear();
+    if (layer0_mean_hc) layer0_mean_hc->clear();
+    effective_prefill_chunk = 0;
+    error.clear();
+    if (!backend_ || !cache_.ctx || token_ids.empty()) {
+        error = "logit diagnostic requires an initialized backend and tokens";
+        return false;
+    }
+    if (moe_hybrid_) {
+        error = "logit diagnostic requires monolithic GPU model placement";
+        return false;
+    }
+    if (layer0_mean_hc && !force_exact_prefill) {
+        error = "layer capture requires exact q1 prefill";
+        return false;
+    }
+    const int max_ctx = cfg_.max_ctx > 0 ? cfg_.max_ctx : 8192;
+    if (token_ids.size() > static_cast<size_t>(max_ctx)) {
+        error = "logit diagnostic token sequence exceeds configured context";
+        return false;
+    }
+    for (int32_t token : token_ids) {
+        if (token < 0 || token >= w_.n_vocab) {
+            error = "logit diagnostic token id is outside the model vocabulary";
+            return false;
+        }
+    }
+
+    // This executable constructs a fresh backend, but reset explicitly so the
+    // evidence contract cannot start from a stale cache if the seam is reused.
+    reset_deepseek4_cache(cache_);
+    last_logits_.clear();
+    spec_feat_window_.clear();
+    inline_snapshot_saved_ = false;
+    DaemonIO io;
+    const std::vector<int> capture_layers = {0};
+    const int committed = do_prefill(
+        token_ids, io, 0, -1, -1, false, force_exact_prefill, nullptr,
+        &effective_prefill_chunk,
+        layer0_mean_hc ? &capture_layers : nullptr, layer0_mean_hc);
+    if (committed != static_cast<int>(token_ids.size())) {
+        error = "diagnostic prefill did not commit the complete token sequence";
+        return false;
+    }
+    if (last_logits_.size() != static_cast<size_t>(w_.n_vocab)) {
+        error = "diagnostic prefill did not produce one complete vocabulary row";
+        return false;
+    }
+    for (float value : last_logits_) {
+        if (!std::isfinite(value)) {
+            error = "diagnostic prefill produced a non-finite logit";
+            return false;
+        }
+    }
+    if (layer0_mean_hc) {
+        if (layer0_mean_hc->size() != static_cast<size_t>(w_.n_embd)) {
+            error = "layer capture did not produce one embedding-width row";
+            return false;
+        }
+        for (float value : *layer0_mean_hc) {
+            if (!std::isfinite(value)) {
+                error = "layer capture produced a non-finite value";
+                return false;
+            }
+        }
+    }
+    logits = last_logits_;
+    return true;
+}
+
 bool DeepSeek4Backend::compute_uniform_hybrid_placement(const DeepSeek4Weights & w,
                                                        int max_ctx,
                                                        MoeHybridPlacement & out,
@@ -1112,6 +1307,7 @@ bool DeepSeek4Backend::compute_uniform_hybrid_placement(const DeepSeek4Weights &
 bool DeepSeek4Backend::init_hybrid_model() {
     TargetLoadPlan plan;
     plan.skip_expert_tensors = true;
+    plan.allow_single_layer_control = cfg_.allow_single_layer_control;
     if (!load_deepseek4_gguf_partial(cfg_.model_path, backend_, plan, w_)) {
         std::fprintf(stderr, "[deepseek4] failed to partially load model for hybrid mode: %s\n",
                      cfg_.model_path);
@@ -1127,7 +1323,11 @@ bool DeepSeek4Backend::init_hybrid_model() {
 
     if (moe_placement_.total_hot >= w_.n_layer * w_.n_expert) {
         free_deepseek4_weights(w_);
-        if (!load_deepseek4_gguf(cfg_.model_path, backend_, w_)) {
+        TargetLoadPlan full_plan;
+        full_plan.allow_single_layer_control =
+            cfg_.allow_single_layer_control;
+        if (!load_deepseek4_gguf_partial(
+                cfg_.model_path, backend_, full_plan, w_)) {
             std::fprintf(stderr, "[deepseek4] failed to reload full model after placement: %s\n",
                          cfg_.model_path);
             return false;
@@ -1223,7 +1423,11 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                                   int snap_pos,
                                   int snap_slot,
                                   bool allow_spec_capture,
-                                  bool force_exact_prefill) {
+                                  bool force_exact_prefill,
+                                  const std::vector<VisionEmbeddingRun> * vision_runs,
+                                  int * max_dispatched_chunk,
+                                  const std::vector<int> * diagnostic_capture_layer_ids,
+                                  std::vector<float> * diagnostic_capture_out) {
     // The all-hot layer-range path supports causal chunked prefill. The
     // optimized graph snapshots the previous raw SWA window, attends over
     // that snapshot plus the current ubatch, and commits only the final SWA
@@ -1236,6 +1440,68 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         : cfg_.prefill_mode;
     const int requested_chunk = cfg_.chunk > 0 ? cfg_.chunk : w_.n_swa;
     const int n_total = (int)tokens.size();
+    if (max_dispatched_chunk) *max_dispatched_chunk = 0;
+    if ((diagnostic_capture_layer_ids == nullptr) !=
+        (diagnostic_capture_out == nullptr)) {
+        std::fprintf(stderr,
+                     "[deepseek4] diagnostic capture contract is incomplete\n");
+        return -1;
+    }
+    if (diagnostic_capture_out) diagnostic_capture_out->clear();
+    const bool has_request_vision = vision_runs && !vision_runs->empty();
+    std::vector<dflash::Deepseek4VisionRunView> request_views;
+    // Intentionally the sole writer of graph-bound run views: every fresh or
+    // restored span must pass through absolute-to-local rebasing below.
+    std::vector<dflash::Deepseek4VisionRunView> local_vision;
+    dflash::Deepseek4EmbedOnlyTokenIds safe_embed_ids;
+    if (has_request_vision) {
+        request_views.reserve(vision_runs->size());
+        for (const VisionEmbeddingRun & run : *vision_runs) {
+            if (run.token_ids.size() > static_cast<size_t>(INT_MAX) ||
+                run.source_digest == 0) {
+                std::fprintf(stderr,
+                             "[deepseek4-vision] image run lacks a valid "
+                             "source digest or is too large\n");
+                return -1;
+            }
+            dflash::Deepseek4VisionRunView view;
+            view.prompt_offset = run.prompt_offset;
+            view.n_tokens = static_cast<int>(run.token_ids.size());
+            view.embedding_width = run.embedding_width;
+            view.token_ids = run.token_ids.data();
+            view.embeddings = run.embeddings.data();
+            view.embedding_values = run.embeddings.size();
+            request_views.push_back(view);
+        }
+        std::string vision_error;
+        if (!dflash::deepseek4_rebase_vision_runs(
+                request_views, kv_offset, n_total, local_vision,
+                &vision_error) ||
+            !dflash::deepseek4_prepare_vision_prefill(
+                tokens, w_.n_vocab, w_.n_embd, local_vision,
+                safe_embed_ids, &vision_error)) {
+            std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                         vision_error.c_str());
+            return -1;
+        }
+        if (!local_vision.empty() &&
+            (force_exact_prefill || moe_hybrid_ ||
+             !prefill_attention_mode_is_approximate(base_prefill_mode))) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] learned image prefill requires "
+                         "the approximate layer-major graph\n");
+            return -1;
+        }
+        if (snap_slot >= 0 && snap_pos > kv_offset &&
+            snap_pos < kv_offset + n_total &&
+            !dflash::deepseek4_prefill_cut_safe(
+                tokens, w_.n_vocab, snap_pos - kv_offset)) {
+            std::fprintf(stderr,
+                         "[deepseek4-vision] snapshot boundary bisects a "
+                         "learned image run\n");
+            return -1;
+        }
+    }
     // Bound the layer-major graph to the topology validated by the prefill
     // kernels. Smaller tail chunks use the same scheduler or its reference
     // fallback.
@@ -1278,7 +1544,8 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
     last_logits_.clear();
     int spec_capture_from = n_total;
     const bool capture_spec_features =
-        allow_spec_capture && spec_enabled_ && spec_drafter_;
+        allow_spec_capture && !has_request_vision &&
+        spec_enabled_ && spec_drafter_;
     // The layer-major HIP graph can publish mean-over-HC capture rows while it
     // performs the configured dense/sparse prefill. Resident XDNA decode may
     // replace these with an isolated exact shadow suffix after authoritative
@@ -1366,11 +1633,38 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             proposed, i, pos,
             snap_slot >= 0 ? snap_pos : -1,
             capture_spec_features ? spec_capture_from : -1);
+        if (!local_vision.empty()) {
+            std::string vision_error;
+            n_tok = dflash::deepseek4_image_aware_prefill_chunk(
+                tokens, w_.n_vocab, i, n_tok, layer_major_cap,
+                &vision_error);
+            if (n_tok < 0) {
+                std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                             vision_error.c_str());
+                return -1;
+            }
+        }
+        if (max_dispatched_chunk) {
+            *max_dispatched_chunk = std::max(*max_dispatched_chunk, n_tok);
+        }
 
         // Embed tokens
         std::vector<float> embed(w_.n_embd * n_tok);
         const auto embed_t0 = Clock::now();
-        w_.embedder.embed(tokens.data() + i, n_tok, embed.data());
+        const int32_t * embed_ids = has_request_vision
+            ? safe_embed_ids.values.data() + i
+            : tokens.data() + i;
+        w_.embedder.embed(embed_ids, n_tok, embed.data());
+        if (!local_vision.empty()) {
+            std::string vision_error;
+            if (!dflash::deepseek4_splice_vision_chunk(
+                    local_vision, w_.n_embd, i, n_tok, embed.data(),
+                    &vision_error)) {
+                std::fprintf(stderr, "[deepseek4-vision] %s\n",
+                             vision_error.c_str());
+                return -1;
+            }
+        }
         DeepSeek4StepTelemetry step_tel;
         if (timing) step_tel.embed_us = elapsed_us(embed_t0, Clock::now());
 
@@ -1383,6 +1677,22 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             spec_hooks.capture_out = &spec_cap;
             spec_hooks.require_fused_q1 = !layer_major_spec_capture;
             hp = &spec_hooks;
+        }
+        const bool diagnostic_capture_step =
+            diagnostic_capture_layer_ids && i + n_tok == n_total;
+        Ds4VerifyHooks diagnostic_hooks;
+        if (diagnostic_capture_step) {
+            if (hp || !step_exact || n_tok != 1) {
+                std::fprintf(stderr,
+                             "[deepseek4] diagnostic capture requires an "
+                             "unshared exact q1 final step\n");
+                return -1;
+            }
+            diagnostic_hooks.capture_layer_ids =
+                diagnostic_capture_layer_ids;
+            diagnostic_hooks.capture_out = diagnostic_capture_out;
+            diagnostic_hooks.require_fused_q1 = true;
+            hp = &diagnostic_hooks;
         }
         const bool need_step_logits =
             i + n_tok == n_total ||
@@ -1955,6 +2265,12 @@ static void describe_prefill(GenerateResult &result,
 GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                                                 const DaemonIO & io) {
     GenerateResult result;
+    if (!req.vision.empty() && req.force_exact_prefill) {
+        result.fail(
+            GenerateErrorCode::PrefillFailed,
+            "vision_exact_prefill_unsupported: learned image blocks are indivisible");
+        return result;
+    }
     DaemonIO out_io = io.with_token_callback(req.on_token);
     auto t0 = Clock::now();
     sampler_ = req.sampler;
@@ -1975,7 +2291,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = eligible_without_gate && profitability_allowed;
+    const bool prepare_spec = req.vision.empty() &&
+        eligible_without_gate && profitability_allowed;
     describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
                      prepare_spec, req.force_ar_decode,
                      (int)req.prompt.size());
@@ -1984,7 +2301,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     int committed = do_prefill(req.prompt, out_io, /*kv_offset=*/0,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill);
+                               req.force_exact_prefill,
+                               &req.vision);
     if (committed < 0) {
         result.fail(GenerateErrorCode::PrefillFailed);
         return result;
@@ -2019,7 +2337,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     ProgressCycleDetector spec_progress(
         req.budget_hook.natural_close_token_ids, req.prompt,
         req.tool_region_open_ids, req.tool_region_close_ids);
-    if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
+    if (req.vision.empty() &&
+        ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
                             profitability_allowed)) {
         if (last_logits_.empty()) {
@@ -2359,7 +2678,8 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = eligible_without_gate && profitability_allowed;
+    const bool prepare_spec = req.vision.empty() &&
+        eligible_without_gate && profitability_allowed;
     if (!prepare_spec) {
         // An exact snapshot hit does not call do_prefill(), so clear restored
         // features here as well when this request cannot enter DSpark.
@@ -2378,7 +2698,8 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         committed = do_prefill(delta, out_io, snap_pos,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill);
+                               req.force_exact_prefill,
+                               &req.vision);
         if (committed < 0) {
             result.fail(GenerateErrorCode::PrefillFailed);
             return result;
@@ -2522,6 +2843,13 @@ bool DeepSeek4Backend::resident_session_create(
     if (error) error->clear();
     if (id == 0 || resident_sessions_.count(id) != 0) {
         if (error) *error = "invalid or duplicate resident session";
+        return false;
+    }
+    if (!request.vision.empty()) {
+        if (error) {
+            *error = "vision_resident_prefill_unsupported: learned image "
+                     "blocks require an indivisible prefill quantum";
+        }
         return false;
     }
     if (request.n_gen < 0 ||
@@ -2751,7 +3079,8 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
                                session.request.snap_pos,
                                session.request.snap_slot,
                                session.spec_eligible && !shadow_spec_capture,
-                               session.request.force_exact_prefill);
+                               session.request.force_exact_prefill,
+                               &session.request.vision);
     } catch (...) {
         swap_resident_state(session);
         session.failed = true;
@@ -3090,6 +3419,9 @@ ContinuousBatchMixedCompletion DeepSeek4Backend::execute_mixed(
 }
 
 void DeepSeek4Backend::shutdown() {
+    // The tower's device buffer belongs to backend_; release it before the
+    // backend handle and language weights it was validated against.
+    vision_tower_.reset();
     release_spec_drafter();
     free_resident_sessions();
     for (int i = 0; i < PREFIX_SLOTS; i++) {

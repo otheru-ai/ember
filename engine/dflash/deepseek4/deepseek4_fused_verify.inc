@@ -270,7 +270,8 @@ static bool ds4_build_fused_verify_graph(
         } else {
             ffn_out = build_moe_ffn_parts(
                 ctx, ffn_normed, w, L, il, q,
-                include_shared, include_routed);
+                include_shared, include_routed,
+                L.ffn_exp_probs_b, true);
         }
         if (!ffn_out) return false;
 

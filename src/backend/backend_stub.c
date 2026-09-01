@@ -75,19 +75,44 @@ const char *ember_backend_token_text(ember_backend *b, int32_t id) {
 
 bool ember_backend_vision_encode(ember_backend *b,
                                  const uint8_t *encoded, size_t encoded_size,
+                                 int prompt_offset,
                                  ember_vision_image *out,
                                  char *error, size_t error_cap) {
-    (void)b; (void)encoded; (void)encoded_size;
+    (void)b; (void)encoded; (void)encoded_size; (void)prompt_offset;
     if (out) memset(out, 0, sizeof(*out));
     if (error && error_cap)
         snprintf(error, error_cap, "%s", "vision input is not supported by the stub backend");
     return false;
 }
 
+bool ember_backend_prepare_offline_vision_artifact(
+        ember_backend *b, const char *artifact_path, const char *mmproj_path,
+        int prompt_offset, ember_vision_image *out,
+        char *error, size_t error_cap) {
+    (void)b;
+    (void)artifact_path;
+    (void)mmproj_path;
+    (void)prompt_offset;
+    if (out) memset(out, 0, sizeof(*out));
+    if (error && error_cap) {
+        snprintf(error, error_cap, "%s",
+                 "offline vision artifacts are not supported by the stub backend");
+    }
+    return false;
+}
+
 void ember_backend_vision_image_free(ember_vision_image *image) {
     if (!image) return;
     free(image->embeddings);
+    free(image->token_ids);
     memset(image, 0, sizeof(*image));
+}
+
+int ember_backend_vision_placeholder_ids(ember_backend *b,
+                                         int32_t **ids_out) {
+    (void)b;
+    if (ids_out) *ids_out = NULL;
+    return -1;
 }
 
 static bool prompt_contains(const ember_gen_request *req, const char *needle) {

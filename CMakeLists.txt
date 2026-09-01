@@ -44,6 +44,7 @@ function(ember_strict target)
 endfunction()
 
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 
 if(EMBER_XDNA_XRT_PROVIDER)
   find_path(EMBER_XRT_INCLUDE_DIR xrt/xrt_bo.h
@@ -111,6 +112,7 @@ add_library(ember_core STATIC
   src/model/chat_template.c
   src/model/chat_template_qwen4.c
   src/model/image_input.c
+  src/model/vision_prompt.c
   src/model/gguf.c
   src/model/model_profile.c
   src/backend/backend_stub.c
@@ -173,6 +175,32 @@ target_include_directories(test_prefill_policy PRIVATE
   engine/ggml/src)
 add_test(NAME prefill_policy COMMAND test_prefill_policy)
 
+add_executable(test_ds4_vision_contract test/test_ds4_vision_contract.cpp
+  engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
+target_include_directories(test_ds4_vision_contract PRIVATE engine)
+add_test(NAME ds4_vision_contract COMMAND test_ds4_vision_contract)
+
+add_executable(test_ds4_vision_native_contract
+  test/test_ds4_vision_native_contract.cpp
+  engine/dflash/deepseek4/deepseek4_vision_native_contract.cpp)
+target_include_directories(test_ds4_vision_native_contract PRIVATE engine)
+target_link_libraries(test_ds4_vision_native_contract PRIVATE ZLIB::ZLIB)
+ember_strict(test_ds4_vision_native_contract)
+add_test(NAME ds4_vision_native_contract COMMAND test_ds4_vision_native_contract)
+
+add_executable(test_ds4_vision_oracle
+  test/test_ds4_vision_oracle.cpp
+  engine/dflash/deepseek4/deepseek4_vision_oracle.cpp)
+target_include_directories(test_ds4_vision_oracle PRIVATE engine)
+target_include_directories(test_ds4_vision_oracle PRIVATE engine/third_party)
+add_test(NAME ds4_vision_oracle COMMAND test_ds4_vision_oracle)
+
+add_executable(test_ds4_vision_artifact test/test_ds4_vision_artifact.cpp
+  engine/dflash/deepseek4/deepseek4_vision_artifact.cpp
+  engine/dflash/deepseek4/deepseek4_vision_contract.cpp)
+target_include_directories(test_ds4_vision_artifact PRIVATE engine)
+add_test(NAME ds4_vision_artifact COMMAND test_ds4_vision_artifact)
+
 add_executable(test_api_adapters test/test_api_adapters.c)
 target_link_libraries(test_api_adapters ember_core m)
 add_test(NAME api_adapters COMMAND test_api_adapters)
@@ -200,6 +228,10 @@ add_test(NAME model_profile COMMAND test_model_profile)
 add_executable(test_image_input test/test_image_input.c)
 target_link_libraries(test_image_input ember_core)
 add_test(NAME image_input COMMAND test_image_input)
+
+add_executable(test_vision_prompt test/test_vision_prompt.c)
+target_link_libraries(test_vision_prompt ember_core)
+add_test(NAME vision_prompt COMMAND test_vision_prompt)
 
 add_executable(test_compaction test/test_compaction.c)
 target_link_libraries(test_compaction ember_core m)
@@ -360,6 +392,14 @@ target_include_directories(test_gguf_quantize_common PRIVATE tools)
 ember_strict(test_gguf_quantize_common)
 add_test(NAME gguf_quantize_common COMMAND test_gguf_quantize_common)
 
+add_executable(test_logits_probe_format
+  test/test_logits_probe_format.cpp
+  tools/logits_probe_format.cpp)
+target_include_directories(test_logits_probe_format PRIVATE
+  tools engine/dflash/deepseek4)
+ember_strict(test_logits_probe_format)
+add_test(NAME logits_probe_format COMMAND test_logits_probe_format)
+
 add_executable(test_continuous_batch_scheduler
   test/test_continuous_batch_scheduler.cpp
   engine/dflash/common/continuous_batch_scheduler.cpp)
@@ -479,13 +519,14 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
-  compaction gguf model_card model_profile image_input kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
+  compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
   qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
   gguf_quantize_common
+  logits_probe_format
   continuous_batch_scheduler
   continuous_batch_executor resident_batch_coordinator
   xdna_dspark_provider xdna_dspark_cpu_ops
@@ -510,7 +551,8 @@ set(EMBER_STRICT_TARGETS
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
   test_chat_template_qwen4
-  test_compaction test_gguf test_model_card test_model_profile test_image_input test_kv_cache test_qa)
+  test_compaction test_gguf test_model_card test_model_profile test_image_input
+  test_vision_prompt test_kv_cache test_qa)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
 endforeach()
@@ -752,6 +794,64 @@ if(EMBER_ENGINE)
   add_test(NAME qwen4exp_shards COMMAND test_qwen4exp_shards)
   set_tests_properties(qwen4exp_shards PROPERTIES TIMEOUT 60)
 
+  # Metadata/data-slice coverage for the four learned DeepSeek vision marker
+  # rows. This uses the real GGUF reader but neither creates a GPU backend nor
+  # needs model weights.
+  add_executable(test_ds4_vision_markers test/test_ds4_vision_markers.cpp)
+  target_include_directories(test_ds4_vision_markers PRIVATE
+    engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_markers PRIVATE ember_engine)
+  ember_strict(test_ds4_vision_markers)
+  add_test(NAME ds4_vision_markers COMMAND test_ds4_vision_markers)
+  set_tests_properties(ds4_vision_markers PROPERTIES TIMEOUT 60)
+
+  # Strict metadata-only gate for the complete 299-tensor native Vision-Exp
+  # projector. Like the marker test, it parses GGUF without creating a backend
+  # or opening a GPU device.
+  add_executable(test_ds4_vision_mmproj
+    test/test_ds4_vision_mmproj.cpp
+    engine/dflash/deepseek4/deepseek4_vision_mmproj.cpp
+    engine/dflash/deepseek4/deepseek4_vision_native_contract.cpp)
+  target_include_directories(test_ds4_vision_mmproj PRIVATE
+    engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_mmproj PRIVATE ggml-base)
+  target_link_libraries(test_ds4_vision_mmproj PRIVATE ZLIB::ZLIB)
+  ember_strict(test_ds4_vision_mmproj)
+  add_test(NAME ds4_vision_mmproj COMMAND test_ds4_vision_mmproj)
+  set_tests_properties(ds4_vision_mmproj PROPERTIES TIMEOUT 60)
+
+  # Hardware oracle driver for the native tower. It is intentionally not a
+  # ctest: meaningful execution requires the real mmproj, paired BF16/F32
+  # authority files, their bound raw patch payload, and a target GPU.
+  add_executable(ds4_vision_tower_oracle
+    tools/ds4_vision_tower_oracle.cpp)
+  target_include_directories(ds4_vision_tower_oracle PRIVATE
+    engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(ds4_vision_tower_oracle PRIVATE ember_engine ggml)
+  ember_strict(ds4_vision_tower_oracle)
+
+  # Metadata-only inventory gate for all 43 language-model vision routing
+  # biases. An optional real path validates the produced full GGUF without
+  # reading tensor payloads or creating a GPU backend.
+  add_executable(test_ds4_vision_biases test/test_ds4_vision_biases.cpp)
+  target_include_directories(test_ds4_vision_biases PRIVATE
+    engine/dflash/deepseek4 engine/ggml/include)
+  target_link_libraries(test_ds4_vision_biases PRIVATE ember_engine)
+  ember_strict(test_ds4_vision_biases)
+  add_test(NAME ds4_vision_biases COMMAND test_ds4_vision_biases)
+  set_tests_properties(ds4_vision_biases PROPERTIES TIMEOUT 60)
+
+  # CPU execution proof for the mixed text/vision row partition used by the
+  # layer-major MoE graph. It catches wrong ggml gather/scatter shapes and
+  # row-index input lifetime mistakes without a GPU or model weights.
+  add_executable(test_ds4_vision_graph_rows
+    test/test_ds4_vision_graph_rows.cpp)
+  target_include_directories(test_ds4_vision_graph_rows PRIVATE
+    engine/ggml/include)
+  target_link_libraries(test_ds4_vision_graph_rows PRIVATE ember_engine)
+  add_test(NAME ds4_vision_graph_rows COMMAND test_ds4_vision_graph_rows)
+  set_tests_properties(ds4_vision_graph_rows PROPERTIES TIMEOUT 60)
+
   # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
   # weights are required, but it exercises the same persistent ggml graph that
   # production dispatches through gfx1151 MMVQ/MMQ.
@@ -899,6 +999,21 @@ if(EMBER_ENGINE)
     set_target_properties(ember-gguf-quantize PROPERTIES
       BUILD_RPATH "$ORIGIN/engine/ggml/src"
       BUILD_RPATH_USE_ORIGIN TRUE)
+
+    # Default-off full-vocabulary control probe. It is intentionally a
+    # separate executable: no server request or environment option can make
+    # ordinary serving retain or emit this diagnostic payload. Like the
+    # quantizer above, it is omitted rather than built without provenance.
+    add_executable(ds4_logits_probe
+      tools/ds4_logits_probe.cpp
+      tools/logits_probe_format.cpp)
+    target_include_directories(ds4_logits_probe PRIVATE
+      tools engine/dflash engine/dflash/deepseek4 engine/ggml/include)
+    target_compile_definitions(ds4_logits_probe PRIVATE
+      EMBER_CONFIGURED_GIT_HEAD="${EMBER_CONFIGURED_GIT_HEAD}")
+    target_link_libraries(ds4_logits_probe PRIVATE ember_engine ggml)
+    ember_strict(ds4_logits_probe)
+
     if(Python3_Interpreter_FOUND)
       add_test(
         NAME gguf_quantize_tool
@@ -931,6 +1046,7 @@ if(EMBER_ENGINE)
     src/model/chat_template.c
     src/model/chat_template_qwen4.c
     src/model/image_input.c
+    src/model/vision_prompt.c
     src/model/gguf.c
     src/model/model_profile.c
     src/model/model_card.c

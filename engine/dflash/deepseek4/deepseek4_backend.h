@@ -15,11 +15,15 @@
 #include "../common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
+#include "deepseek4_vision_contract.h"
+#include "deepseek4_vision_native_contract.h"
+#include "deepseek4_vision_tower.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
 
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -37,9 +41,33 @@ public:
 
     bool init();
 
+    // Default-off evidence seam used only by ds4_logits_probe. It clears the
+    // private runtime frontier, evaluates the supplied ids through the named
+    // configured prefill topology, and returns the full row predicting the
+    // token after the final id. Ordinary generation and protocol output cannot
+    // reach this method.
+    bool diagnostic_next_logits(const std::vector<int32_t> &token_ids,
+                                bool force_exact_prefill,
+                                std::vector<float> &logits,
+                                int &effective_prefill_chunk,
+                                std::string &error,
+                                std::vector<float> *layer0_mean_hc = nullptr);
+
     // ModelBackend interface
     GenerateResult generate_impl(const GenerateRequest & req,
                                  const DaemonIO & io) override;
+    std::string_view vision_placeholder_text() const override {
+        return dflash::DEEPSEEK4_IMAGE_PLACEHOLDER_UTF8;
+    }
+    bool encode_vision_image(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        EncodedVisionImage & image, std::string & error) override;
+    bool prepare_offline_vision_artifact(
+        const std::string & artifact_path,
+        const std::string & mmproj_path,
+        int prompt_offset,
+        EncodedVisionImage & image,
+        std::string & error) override;
 
     void release_idle_graphs() override;
     bool snapshot_save(int slot) override;
@@ -118,6 +146,12 @@ private:
     std::vector<ember_xdna_dspark_tensor_view_v1> spec_xdna_weight_views_;
     std::vector<float>             spec_feat_window_;
 
+    // The native tower is operator-configured and request-lazy. Guard both
+    // first load and execution so internal/direct callers cannot concurrently
+    // mutate the tower's single backend workspace.
+    std::mutex                              vision_tower_mu_;
+    std::unique_ptr<dflash::Deepseek4VisionTower> vision_tower_;
+
     bool load_spec_drafter();
     void release_spec_drafter();
 
@@ -149,7 +183,13 @@ private:
                    int kv_offset = 0,
                    int snap_pos = -1, int snap_slot = -1,
                    bool allow_spec_capture = true,
-                   bool force_exact_prefill = false);
+                   bool force_exact_prefill = false,
+                   const std::vector<VisionEmbeddingRun> * vision_runs =
+                       nullptr,
+                   int * max_dispatched_chunk = nullptr,
+                   const std::vector<int> * diagnostic_capture_layer_ids =
+                       nullptr,
+                   std::vector<float> * diagnostic_capture_out = nullptr);
 
     // Autoregressive decode loop.
     // resume_from: number of tokens already present in `out_tokens` (and

@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import urllib.request
+import urllib.error
 
 
 def free_port():
@@ -24,8 +25,11 @@ def request_json(url, body=None):
         url, data=data,
         headers={"Content-Type": "application/json"} if data else {},
     )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        return response.status, json.loads(response.read())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
 
 
 def main():
@@ -58,6 +62,27 @@ def main():
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.03)
+
+        # Learned image blocks are larger than the resident prefill quantum.
+        # The server must reject before calling the stub encoder, whose generic
+        # failure would otherwise hide whether resident admission was reached.
+        image_request = {
+            "model": "stub",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image: "},
+                    {"type": "image_url", "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo="
+                    }},
+                ],
+            }],
+        }
+        image_status, image_error = request_json(
+            base + "/v1/chat/completions", image_request)
+        assert image_status == 400, image_error
+        assert image_error["error"]["code"] == \
+            "vision_resident_prefill_unsupported", image_error
 
         barrier = threading.Barrier(3)
         results = []

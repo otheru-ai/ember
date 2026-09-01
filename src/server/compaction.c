@@ -326,6 +326,7 @@ static void free_msg(ember_chat_msg *m) {
     for (int i = 0; i < m->n_parts; ++i) {
         free(m->parts[i].text);
         free(m->parts[i].detail);
+        ember_image_bytes_free(&m->parts[i].image);
     }
     free(m->parts);
     ember_tool_calls_free(&m->calls);

@@ -30,6 +30,15 @@ typedef struct {
     int      len;
     int      slot;     // backend snapshot slot holding this prefix's KV
     int64_t  lru;      // higher = more recently used
+    // Content digest of the image whose embeddings are spliced INSIDE this
+    // stored prefix, or 0 when the prefix stops before any image token.
+    //
+    // Token IDs alone cannot distinguish two images: the vision graft emits a
+    // fixed 64-entry palette cycle at image positions, so every picture yields
+    // the SAME ids. Without this field, a request carrying image B matches the
+    // prefix cached for image A, restores A's KV, prefills nothing, and answers
+    // about A -- fluently, and with nothing in the logs to say so.
+    uint64_t img_digest;
 } ember_kv_entry;
 
 typedef struct {
@@ -53,8 +62,29 @@ void ember_kv_free(ember_kv_cache *c);
 
 // Longest stored prefix of `prompt` → *slot,*len (or -1,0 if no hit). Marks the
 // hit entry most-recently-used.
+//
+// `img_digest` is the content digest of the image in THIS prompt (0 = none). An
+// entry that stored image content is only a legal hit when its digest matches:
+// the slot holds KV for exactly entry->len tokens, so a mismatched entry cannot
+// be salvaged by shortening the match -- restoring it would hand back more KV
+// than the returned length claims. Reject, do not truncate.
+//
+// Entries that stop before any image (digest 0) are unaffected, which is the
+// common and valuable case: the long shared system prefix is still reused.
 void ember_kv_lookup(ember_kv_cache *c, const int32_t *prompt, int n,
-                     int *slot_out, int *len_out);
+                     uint64_t img_digest, int *slot_out, int *len_out);
+
+// Token-only disk keys cannot identify image content. Clamp any candidate
+// lookup/save length to the first image row; -1 means no image is present.
+// Kept as a pure policy helper so both doors are pinned by GPU-free tests.
+int ember_kv_clamp_before_image(int candidate, int img_span_start);
+
+// A post-tool snapshot physically contains the full current frontier and
+// cannot be relabeled as a shorter pre-image prefix. Until the disk format is
+// media-aware, skip this snapshot entirely when either request metadata or the
+// legacy token span says that frontier contains image state.
+bool ember_kv_post_tool_snapshot_safe(bool request_has_images,
+                                      int img_span_start);
 
 // Prevent a selected snapshot slot from being evicted/overwritten while a
 // concurrent backend request restores it.
@@ -81,7 +111,12 @@ void ember_kv_release(ember_kv_cache *c, int slot);
 // the same slot.
 // Record the logical token prefix for a backend snapshot. Returns false for an
 // invalid entry or allocation failure; the slot remains uncached logically.
+// `img_digest` is the image in this prompt and `img_span_start` the index of
+// its first token (-1 when there is no image). The entry records the digest
+// only when the cut actually reaches into the image span -- a prefix that stops
+// short of it contains no image content and must stay reusable across images.
 bool ember_kv_commit(ember_kv_cache *c, int slot,
-                     const int32_t *prompt, int cut);
+                     const int32_t *prompt, int cut,
+                     uint64_t img_digest, int img_span_start);
 
 #endif  // EMBER_KV_CACHE_H

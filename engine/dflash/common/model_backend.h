@@ -122,14 +122,18 @@ struct BudgetHook {
 
 // Optional image rows already projected to the language-model width.  The
 // projector remains a separate, lazily loaded mmproj artifact; generation owns
-// only these request-scoped rows.  `prompt_offset` points at the first repeated
-// image placeholder token, which remains in `prompt` for PLE hashing.
+// only these request-scoped rows. `prompt_offset` points at the first row in
+// `prompt`. token_ids is empty for legacy Qwen repeated-image_pad runs and
+// otherwise carries the learned sentinel id for every embedding row.
 struct VisionEmbeddingRun {
     int prompt_offset = 0;
     int grid_t = 0;
     int grid_h = 0;
     int grid_w = 0;
-    std::vector<float> embeddings; // [merged image tokens, model embedding]
+    std::vector<float> embeddings; // [token_ids/merged rows, embedding_width]
+    int embedding_width = 0;
+    std::vector<int32_t> token_ids;
+    uint64_t source_digest = 0;
 };
 
 struct EncodedVisionImage {
@@ -137,6 +141,9 @@ struct EncodedVisionImage {
     int grid_h = 0;
     int grid_w = 0;
     std::vector<float> embeddings;
+    int embedding_width = 0;
+    std::vector<int32_t> token_ids;
+    uint64_t source_digest = 0;
 };
 
 struct GenerateRequest {
@@ -382,12 +389,22 @@ struct ModelBackend {
     // Decode, preprocess, and project one encoded still image. Architectures
     // without a vision tower fail closed. Qwen loads its separate BF16 mmproj
     // provider on the first call, so text-only startup/residency is unchanged.
-    virtual bool encode_vision_image(const uint8_t *, size_t,
+    virtual bool encode_vision_image(const uint8_t *, size_t, int,
                                      EncodedVisionImage &,
                                      std::string & error) {
         error = "vision input is not supported by this backend";
         return false;
     }
+    // Default-off operator gate: prepare already-aligned image rows from an
+    // explicit artifact and projector pair at their real prompt position.
+    // This is not a media decoder and must never accept ordinary request bytes.
+    virtual bool prepare_offline_vision_artifact(
+            const std::string &, const std::string &, int,
+            EncodedVisionImage &, std::string & error) {
+        error = "offline vision artifacts are not supported by this backend";
+        return false;
+    }
+    virtual std::string_view vision_placeholder_text() const { return {}; }
 
     // ── Snapshots ────────────────────────────────────────────────────
     // With right-sized CPU-resident snapshots, each slot costs only

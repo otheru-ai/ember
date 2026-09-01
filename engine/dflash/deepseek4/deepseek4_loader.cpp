@@ -8,12 +8,14 @@
 //   attn_compressor_{ape,kv,gate,norm}, indexer.{attn_q_b, proj},
 //   indexer_compressor_{ape,kv,gate,norm},
 //   hc_attn_fn, hc_attn_scale, hc_attn_base,
-//   ffn_norm, ffn_gate_inp, exp_probs_b (bias), ffn_gate_tid2eid,
+//   ffn_norm, ffn_gate_inp, exp_probs_b (bias), exp_probs_b_vl (bias),
+//   ffn_gate_tid2eid,
 //   ffn_gate_exps, ffn_up_exps, ffn_down_exps,
 //   ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp,
 //   hc_ffn_fn, hc_ffn_scale, hc_ffn_base
 
 #include "deepseek4_internal.h"
+#include "deepseek4_vision_contract.h"
 #include "common/errors.h"
 #include "common/gguf_bounds.h"
 #include "../common/moe_hybrid_storage.h"
@@ -396,6 +398,21 @@ bool load_deepseek4_gguf_partial(const std::string & path,
     const uint32_t n_hc_sinkhorn  = get_u32_or(gctx, "deepseek4.hyper_connection.sinkhorn_iterations", 20);
     const uint32_t n_value_dim    = get_u32_or(
         gctx, "deepseek4.attention.value_length", head_dim);
+    const bool single_layer_control =
+        plan_in.allow_single_layer_control && n_layer == 1U &&
+        n_hash_layer == 1U;
+
+    if (!deepseek4_layer_contract_supported(
+            n_layer, n_hash_layer,
+            plan_in.allow_single_layer_control)) {
+        set_last_error(
+            "unsupported DeepSeek V4 Flash layer contract: block_count=" +
+            std::to_string(n_layer) + " hash_layer_count=" +
+            std::to_string(n_hash_layer));
+        gguf_free(gctx);
+        if (meta_ctx) ggml_free(meta_ctx);
+        return false;
+    }
 
     // RoPE parameters
     const float rope_freq_base    = get_f32_or(gctx, "deepseek4.rope.freq_base", 10000.0f);
@@ -468,7 +485,7 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         uint32_t expected;
     };
     const ExpectedU32 expected_shape[] = {
-        {"block_count", n_layer, 43},
+        {"block_count", n_layer, single_layer_control ? 1U : 43U},
         {"embedding_length", n_embd, 4096},
         {"vocab_size", n_vocab, 129280},
         {"attention.head_count", n_head, 64},
@@ -483,7 +500,8 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         {"expert_used_count", n_expert_used, 6},
         {"expert_shared_count", n_expert_shared, 1},
         {"expert_feed_forward_length", n_ff_exp, 2048},
-        {"hash_layer_count", n_hash_layer, 3},
+        {"hash_layer_count", n_hash_layer,
+         single_layer_control ? 1U : 3U},
         {"attention.sliding_window", n_swa, 128},
         {"attention.indexer.head_count", n_indexer_head, 64},
         {"attention.indexer.key_length", n_indexer_head_dim, 128},
@@ -870,6 +888,10 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         if (suffix == "ffn_norm.weight")           { L.ffn_norm = a.tensor; continue; }
         if (suffix == "ffn_gate_inp.weight")       { L.ffn_gate_inp = a.tensor; continue; }
         if (suffix == "exp_probs_b.bias")          { L.ffn_exp_probs_b = a.tensor; continue; }
+        if (dflash::deepseek4_is_vision_router_bias_suffix(suffix)) {
+            L.ffn_exp_probs_b_vl = a.tensor;
+            continue;
+        }
         if (suffix == "ffn_gate_tid2eid.weight")   { L.ffn_gate_tid2eid = a.tensor; continue; }
         if (suffix == "ffn_gate_exps.weight")      { L.ffn_gate_exps = a.tensor; continue; }
         if (suffix == "ffn_up_exps.weight")        { L.ffn_up_exps = a.tensor; continue; }
@@ -888,6 +910,8 @@ bool load_deepseek4_gguf_partial(const std::string & path,
     // unconditionally dereferences. Reject incomplete load plans now instead
     // of crashing during the first prefill after a multi-minute model load.
     std::string missing;
+    std::string invalid_vision_bias;
+    int vision_biases_loaded = 0;
     auto require_tensor = [&](ggml_tensor * tensor, const std::string & name) {
         if (!tensor && missing.empty()) missing = name;
     };
@@ -922,6 +946,18 @@ bool load_deepseek4_gguf_partial(const std::string & path,
         require_tensor(layer.hc_attn_base, prefix + "hc_attn_base.weight");
         require_tensor(layer.ffn_norm, prefix + "ffn_norm.weight");
         require_tensor(layer.ffn_gate_inp, prefix + "ffn_gate_inp.weight");
+        if (layer.ffn_exp_probs_b_vl) {
+            ++vision_biases_loaded;
+            if (invalid_vision_bias.empty() &&
+                (layer.ffn_exp_probs_b_vl->type != GGML_TYPE_F32 ||
+                 ggml_n_dims(layer.ffn_exp_probs_b_vl) != 1 ||
+                 layer.ffn_exp_probs_b_vl->ne[0] !=
+                     static_cast<int64_t>(n_expert))) {
+                invalid_vision_bias = prefix +
+                    dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX +
+                    " must be one F32 expert row";
+            }
+        }
         require_tensor(layer.ffn_gate_exps, prefix + "ffn_gate_exps.weight");
         require_tensor(layer.ffn_up_exps, prefix + "ffn_up_exps.weight");
         require_tensor(layer.ffn_down_exps, prefix + "ffn_down_exps.weight");
@@ -960,6 +996,22 @@ bool load_deepseek4_gguf_partial(const std::string & path,
             require_tensor(layer.indexer_compressor_norm,
                            prefix + "indexer_compressor_norm.weight");
         }
+    }
+    const int loaded_layer_count = plan.layer_end - plan.layer_begin;
+    if (invalid_vision_bias.empty() &&
+        !dflash::deepseek4_optional_vision_bias_set_valid(
+            vision_biases_loaded, loaded_layer_count)) {
+        invalid_vision_bias =
+            std::string(dflash::DEEPSEEK4_VISION_ROUTER_BIAS_SUFFIX) +
+            " must be present on every loaded layer or none";
+    }
+    if (!invalid_vision_bias.empty()) {
+        set_last_error("invalid DeepSeek4 vision routing bias: " +
+                       invalid_vision_bias);
+        if (buf) ggml_backend_buffer_free(buf);
+        gguf_free(gctx);
+        ggml_free(meta_ctx);
+        return false;
     }
     if (!missing.empty()) {
         set_last_error("missing required DeepSeek4 tensor: " + missing);

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -125,51 +126,169 @@ static std::vector<int32_t> vec(const int32_t *p, int n) {
     return std::vector<int32_t>(p, p + n);
 }
 
-extern "C" bool ember_backend_vision_encode(
-        ember_backend *b, const uint8_t *encoded, size_t encoded_size,
+static bool copy_encoded_vision_image(
+        const dflash::common::EncodedVisionImage &image,
         ember_vision_image *out, char *error, size_t error_cap) {
-    if (out) *out = {};
-    if (!b || !out || !encoded || encoded_size == 0) {
-        if (error && error_cap) std::snprintf(error, error_cap, "%s", "invalid vision encode request");
-        return false;
-    }
-    dflash::common::EncodedVisionImage image;
-    std::string detail;
-    if (!b->be->encode_vision_image(encoded, encoded_size, image, detail)) {
-        if (error && error_cap)
-            std::snprintf(error, error_cap, "%s", detail.c_str());
-        return false;
-    }
     const size_t count = image.embeddings.size();
-    if (count % EMBER_QWEN_VISION_EMBEDDING_WIDTH != 0) {
+    if (image.embedding_width <= 0 ||
+        count % static_cast<size_t>(image.embedding_width) != 0) {
         if (error && error_cap)
             std::snprintf(error, error_cap, "%s",
                           "vision embedding size is not a whole number of rows");
         return false;
     }
-    if (count > SIZE_MAX / sizeof(float)) {
-        if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding size overflow");
+    const size_t rows = count / static_cast<size_t>(image.embedding_width);
+    if (count > SIZE_MAX / sizeof(float) || rows > INT_MAX) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "vision embedding size overflow");
+        return false;
+    }
+    if (!image.token_ids.empty() && image.token_ids.size() != rows) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "vision token ids do not match embedding rows");
         return false;
     }
     float *copy = static_cast<float *>(std::malloc(count * sizeof(float)));
     if (!copy && count != 0) {
-        if (error && error_cap) std::snprintf(error, error_cap, "%s", "vision embedding allocation failed");
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "vision embedding allocation failed");
         return false;
     }
-    if (count) std::memcpy(copy, image.embeddings.data(), count * sizeof(float));
+    if (count)
+        std::memcpy(copy, image.embeddings.data(), count * sizeof(float));
+    int32_t *token_ids = nullptr;
+    if (!image.token_ids.empty()) {
+        if (rows > SIZE_MAX / sizeof(int32_t)) {
+            std::free(copy);
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s",
+                              "vision token-id allocation overflow");
+            return false;
+        }
+        token_ids = static_cast<int32_t *>(
+            std::malloc(rows * sizeof(int32_t)));
+        if (!token_ids && rows != 0) {
+            std::free(copy);
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s",
+                              "vision token-id allocation failed");
+            return false;
+        }
+        std::memcpy(token_ids, image.token_ids.data(),
+                    rows * sizeof(int32_t));
+    }
     out->grid_t = image.grid_t;
     out->grid_h = image.grid_h;
     out->grid_w = image.grid_w;
-    out->n_tokens = static_cast<int>(count /
-                                     EMBER_QWEN_VISION_EMBEDDING_WIDTH);
+    out->n_tokens = static_cast<int>(rows);
     out->embeddings = copy;
+    out->embedding_width = image.embedding_width;
+    out->token_ids = token_ids;
+    out->source_digest = image.source_digest;
     return true;
+}
+
+extern "C" bool ember_backend_vision_encode(
+        ember_backend *b, const uint8_t *encoded, size_t encoded_size,
+        int prompt_offset,
+        ember_vision_image *out, char *error, size_t error_cap) {
+    if (out) *out = {};
+    if (!b || !out || !encoded || encoded_size == 0 || prompt_offset < 0) {
+        if (error && error_cap) std::snprintf(error, error_cap, "%s", "invalid vision encode request");
+        return false;
+    }
+    try {
+        dflash::common::EncodedVisionImage image;
+        std::string detail;
+        if (!b->be->encode_vision_image(
+                encoded, encoded_size, prompt_offset, image, detail)) {
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s", detail.c_str());
+            return false;
+        }
+        return copy_encoded_vision_image(image, out, error, error_cap);
+    } catch (const std::exception &ex) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap,
+                          "vision encode exception: %s", ex.what());
+        return false;
+    } catch (...) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "unknown vision encode exception");
+        return false;
+    }
+}
+
+extern "C" bool ember_backend_prepare_offline_vision_artifact(
+        ember_backend *b, const char *artifact_path, const char *mmproj_path,
+        int prompt_offset, ember_vision_image *out,
+        char *error, size_t error_cap) {
+    if (out) *out = {};
+    if (!b || !b->be || !artifact_path || !artifact_path[0] ||
+        !mmproj_path || !mmproj_path[0] || prompt_offset < 0 || !out) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "invalid offline vision artifact request");
+        return false;
+    }
+    try {
+        dflash::common::EncodedVisionImage image;
+        std::string detail;
+        if (!b->be->prepare_offline_vision_artifact(
+                artifact_path, mmproj_path, prompt_offset, image, detail)) {
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s", detail.c_str());
+            return false;
+        }
+        return copy_encoded_vision_image(image, out, error, error_cap);
+    } catch (const std::exception &ex) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap,
+                          "offline vision artifact exception: %s", ex.what());
+        return false;
+    } catch (...) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "unknown offline vision artifact exception");
+        return false;
+    }
 }
 
 extern "C" void ember_backend_vision_image_free(ember_vision_image *image) {
     if (!image) return;
     std::free(image->embeddings);
+    std::free(image->token_ids);
     *image = {};
+}
+
+extern "C" int ember_backend_vision_placeholder_ids(
+        ember_backend *b, int32_t **ids_out) {
+    if (!ids_out) return -1;
+    *ids_out = nullptr;
+    if (!b || !b->be) return -1;
+    try {
+        const std::string_view placeholder =
+            b->be->vision_placeholder_text();
+        if (placeholder.empty()) return -1;
+        const std::vector<int32_t> ids = b->tok.encode(
+            std::string(placeholder));
+        if (ids.empty() || ids.size() > static_cast<size_t>(INT_MAX) ||
+            ids.size() > SIZE_MAX / sizeof(int32_t)) {
+            return -1;
+        }
+        int32_t *copy = static_cast<int32_t *>(
+            std::malloc(ids.size() * sizeof(int32_t)));
+        if (!copy) return -1;
+        std::memcpy(copy, ids.data(), ids.size() * sizeof(int32_t));
+        *ids_out = copy;
+        return static_cast<int>(ids.size());
+    } catch (...) {
+        return -1;
+    }
 }
 
 static char *c_err(const char *m) { return m ? strdup(m) : nullptr; }
@@ -480,6 +599,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
 
     BackendArgs args;
     args.model_path = cfg->model_path;
+    args.vision_mmproj_path = cfg->vision_mmproj_path;
     args.device.gpu = 0;
     args.device.max_ctx = b->n_ctx;  // KV cache context; default 8192 is too small
     args.chunk = 2048;
@@ -497,6 +617,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
     }
     args.ds4_prefill_mode_set = true;
     args.ds4_fused_decode = true;
+    args.allow_single_layer_control = cfg->allow_single_layer_control;
     args.qwen_yarn = cfg->qwen_yarn;
     args.ds4_expert_top_k = cfg->expert_top_k;  // 0 = model default
 
@@ -682,11 +803,21 @@ static void build_generate_request(const ember_gen_request *req,
             dst.grid_t = src.grid_t;
             dst.grid_h = src.grid_h;
             dst.grid_w = src.grid_w;
-            const size_t count = src.n_tokens > 0
-                ? static_cast<size_t>(src.n_tokens) *
-                  EMBER_QWEN_VISION_EMBEDDING_WIDTH : 0;
+            dst.embedding_width = src.embedding_width;
+            size_t count = 0;
+            if (src.n_tokens > 0 && src.embedding_width > 0 &&
+                static_cast<size_t>(src.n_tokens) <=
+                    SIZE_MAX / static_cast<size_t>(src.embedding_width)) {
+                count = static_cast<size_t>(src.n_tokens) *
+                    static_cast<size_t>(src.embedding_width);
+            }
             if (src.embeddings && count)
                 dst.embeddings.assign(src.embeddings, src.embeddings + count);
+            if (src.token_ids && src.n_tokens > 0) {
+                dst.token_ids.assign(src.token_ids,
+                                     src.token_ids + src.n_tokens);
+            }
+            dst.source_digest = src.source_digest;
             greq.vision.push_back(std::move(dst));
         }
     }

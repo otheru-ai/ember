@@ -96,6 +96,9 @@ bool prepare_prompt_positions(
             const VisionEmbeddingRun & run = request.vision[run_index++];
             if (run.grid_t != 1 || run.grid_h <= 0 || run.grid_w <= 0 ||
                 run.grid_h % 2 != 0 || run.grid_w % 2 != 0 ||
+                run.embedding_width !=
+                    Qwen4ExpVisionContract::output_hidden_size ||
+                !run.token_ids.empty() ||
                 run.embeddings.size() % Qwen4ExpVisionContract::output_hidden_size != 0) {
                 error = "invalid Qwen4Exp vision run contract";
                 return false;
@@ -277,7 +280,9 @@ bool Qwen4ExpBackend::init() {
 
 bool Qwen4ExpBackend::encode_vision_image(
         const uint8_t * encoded, size_t encoded_size,
+        int prompt_offset,
         EncodedVisionImage & out, std::string & error) {
+    (void)prompt_offset;
     // The released text and BF16 mmproj artifacts are separate. Constructing
     // this only for an image request preserves text-only residency on 128-GiB
     // UMA instead of eagerly consuming the tower's allocation.

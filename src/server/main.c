@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <inttypes.h>
 
 #include "../backend/ember_backend.h"
 #include "../common/buf.h"
@@ -25,6 +26,7 @@
 #include "../model/model_profile.h"
 #include "../model/kv_cache.h"
 #include "../model/image_input.h"
+#include "../model/vision_prompt.h"
 #include "../model/tool_memory.h"
 #include "../model/continuation.h"
 #include "../model/dsml_decode.h"
@@ -151,6 +153,7 @@ typedef struct ember_server {
     int               n_natural_close_ids;
     double            default_temp;  // card value unless CLI-overridden
     bool              auto_compact;  // --auto-compact: ds4-style context compaction
+    int               batch_sessions; // image blocks require legacy nonresident prefill
     gen_worker        worker;     // persistent generation thread (see above)
 } ember_server;
 
@@ -179,6 +182,10 @@ static struct timespec monotonic_deadline(double when) {
     if (ts.tv_nsec < 0) ts.tv_nsec = 0;
     if (ts.tv_nsec > 999999999L) ts.tv_nsec = 999999999L;
     return ts;
+}
+
+static uint64_t request_image_digest(const ember_chat_request *req) {
+    return req ? req->image_digest : 0;
 }
 
 // JSON-escape `s` into `b` (no surrounding quotes).
@@ -811,14 +818,11 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
                                    const int32_t *prompt_ids, int n_prompt,
                                    gen_ctx *g) {
     if (!g->has_tools || !g->acc.ptr || g->n_gen_ids <= 0) return;
-    // Image regions are represented by repeated image_pad ids, so prompt ids
-    // do not distinguish two different images. Never publish a tool-turn KV
-    // snapshot (or its disk checkpoint) that a later text/vision request could
-    // mistake for the same prefix.
-    // The GPU-free stub rejects vision before this point, so the regression is
-    // intentionally uncovered by the host gauntlet; real-weight validation
-    // exercises this guard on the Qwen vision deployment path.
+    // Until the durable snapshot format binds request media identity, an image
+    // tool turn is deliberately cold. Its physical KV contains the complete
+    // image frontier and cannot be safely relabelled as a shorter text prefix.
     if (req && req->has_images) return;
+    const int image_span_start = -1;
     if (!generated_frontier_matches_text(be, g)) {
         fprintf(stderr,
                 "[ember] post-tool snapshot skipped: sampled token frontier "
@@ -915,7 +919,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
         }
     }
     pthread_mutex_lock(&srv->state_lock);
-    bool committed = ember_kv_commit(&srv->kv, slot, seq, total);
+    bool committed = ember_kv_commit(&srv->kv, slot, seq, total,
+                                     request_image_digest(req),
+                                     image_span_start);
     if (!committed)
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
@@ -935,7 +941,9 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
 
 static void finish_prompt_snapshot(ember_server *srv, ember_backend *be,
                                    int slot, const int32_t *ids, int cut,
-                                   bool saved, int reason) {
+                                   bool saved, int reason,
+                                   uint64_t image_digest,
+                                   int image_span_start) {
     if (slot < 0) return;
     // Keep the physical slot reserved until any durable copy has completed.
     // Only then publish the logical prefix, so another session cannot restore
@@ -943,7 +951,8 @@ static void finish_prompt_snapshot(ember_server *srv, ember_backend *be,
     if (saved && ember_backend_disk_enabled(be))
         (void)ember_backend_disk_save(be, slot, ids, cut, reason);
     pthread_mutex_lock(&srv->state_lock);
-    if (!saved || !ember_kv_commit(&srv->kv, slot, ids, cut))
+    if (!saved || !ember_kv_commit(&srv->kv, slot, ids, cut,
+                                   image_digest, image_span_start))
         ember_kv_release(&srv->kv, slot);
     pthread_mutex_unlock(&srv->state_lock);
 }
@@ -2182,13 +2191,17 @@ static void log_generation_performance(const ember_gen_result *res) {
 
 static void free_vision_runs(ember_vision_run *runs, int count) {
     if (!runs) return;
-    for (int i = 0; i < count; ++i) free((void *)runs[i].embeddings);
+    for (int i = 0; i < count; ++i) {
+        free((void *)runs[i].embeddings);
+        free((void *)runs[i].token_ids);
+    }
     free(runs);
 }
 
-// Encode images in message/part order, then expand each single image_pad token
-// to exactly the projector's merged row count. The repeated ids are retained
-// for PLE; only their embedding rows are replaced below the backend ABI.
+// Encode images in message/part order, tokenize the loaded architecture's
+// private placeholder, and replace each exact sequence in the already-tokenized
+// prompt. DeepSeek may use a multi-token sequence; Qwen's single image_pad
+// retains its repeated-id fallback.
 static bool prepare_vision_prompt(
         ember_backend *be, const ember_chat_request *req,
         int32_t **ids_io, int *count_io,
@@ -2199,7 +2212,7 @@ static bool prepare_vision_prompt(
     int images = 0;
     for (int m = 0; m < req->n_messages; ++m)
         for (int p = 0; p < req->messages[m].n_parts; ++p)
-            if (req->messages[m].parts[p].kind == EMBER_CONTENT_IMAGE_URL)
+            if (req->messages[m].parts[p].kind == EMBER_CONTENT_IMAGE)
                 ++images;
     if (images <= 0) {
         snprintf(error, error_cap, "image content was not preserved in the request");
@@ -2207,80 +2220,133 @@ static bool prepare_vision_prompt(
     }
     ember_vision_image *encoded = calloc((size_t)images, sizeof(*encoded));
     ember_vision_run *runs = calloc((size_t)images, sizeof(*runs));
-    if (!encoded || !runs) abort();
+    int *planned_offsets = calloc((size_t)images, sizeof(*planned_offsets));
+    if (!encoded || !runs || !planned_offsets) abort();
+    int32_t *placeholder_ids = NULL;
+    const int placeholder_count =
+        ember_backend_vision_placeholder_ids(be, &placeholder_ids);
+    if (placeholder_count <= 0 || !placeholder_ids) {
+        free(placeholder_ids);
+        free(planned_offsets);
+        free(encoded);
+        free(runs);
+        snprintf(error, error_cap,
+                 "vision backend has no image placeholder contract");
+        return false;
+    }
+    if (!ember_vision_prompt_find_all(
+            *ids_io, *count_io, placeholder_ids, placeholder_count,
+            images, planned_offsets, error, error_cap)) {
+        free(placeholder_ids);
+        free(planned_offsets);
+        free(encoded);
+        free(runs);
+        return false;
+    }
     int image_index = 0;
+    int expansion_delta = 0;
     bool ok = true;
     for (int m = 0; m < req->n_messages && ok; ++m) {
         for (int p = 0; p < req->messages[m].n_parts && ok; ++p) {
             const ember_content_part *part = &req->messages[m].parts[p];
-            if (part->kind != EMBER_CONTENT_IMAGE_URL) continue;
-            ember_image_bytes bytes = {0};
-            ok = ember_image_data_url_decode(part->text, &bytes, error, error_cap);
-            if (ok) ok = ember_backend_vision_encode(
-                be, bytes.data, bytes.size, &encoded[image_index],
-                error, error_cap);
-            ember_image_bytes_free(&bytes);
+            if (part->kind != EMBER_CONTENT_IMAGE) continue;
+            if (!part->image.data || part->image.size == 0) {
+                snprintf(error, error_cap,
+                         "image content was not normalized at request intake");
+                ok = false;
+            }
+            if (ok && (planned_offsets[image_index] >
+                       INT_MAX - expansion_delta)) {
+                snprintf(error, error_cap,
+                         "expanded image position exceeds the prompt limit");
+                ok = false;
+            }
+            if (ok) {
+                planned_offsets[image_index] += expansion_delta;
+                ok = ember_backend_vision_encode(
+                    be, part->image.data, part->image.size,
+                    planned_offsets[image_index], &encoded[image_index],
+                    error, error_cap);
+            }
             if (ok && (encoded[image_index].grid_t != 1 ||
                        encoded[image_index].n_tokens <= 0 ||
+                       encoded[image_index].embedding_width <= 0 ||
                        !encoded[image_index].embeddings)) {
                 snprintf(error, error_cap, "vision provider returned an invalid still-image result");
                 ok = false;
+            }
+            if (ok) {
+                const int delta = encoded[image_index].n_tokens -
+                                  placeholder_count;
+                if ((delta > 0 && expansion_delta > INT_MAX - delta) ||
+                    (delta < 0 && expansion_delta < INT_MIN - delta)) {
+                    snprintf(error, error_cap,
+                             "expanded image positions exceed the prompt limit");
+                    ok = false;
+                } else {
+                    expansion_delta += delta;
+                }
             }
             ++image_index;
         }
     }
     if (!ok) goto cleanup;
 
-    size_t expanded_count = (size_t)*count_io;
+    ember_vision_prompt_image *replacement = calloc(
+        (size_t)images, sizeof(*replacement));
+    int *offsets = calloc((size_t)images, sizeof(*offsets));
+    if (!replacement || !offsets) abort();
     for (int i = 0; i < images; ++i) {
-        const size_t extra = (size_t)(encoded[i].n_tokens - 1);
-        if (expanded_count > (size_t)INT_MAX - extra) {
-            snprintf(error, error_cap, "expanded vision prompt is too large");
-            ok = false;
-            goto cleanup;
-        }
-        expanded_count += extra;
+        replacement[i].token_ids = encoded[i].token_ids;
+        replacement[i].n_tokens = encoded[i].n_tokens;
     }
-    int32_t *expanded = malloc((expanded_count ? expanded_count : 1) * sizeof(*expanded));
-    if (!expanded) abort();
-    size_t src = 0, dst = 0;
+    int32_t *expanded = NULL;
+    int expanded_count = 0;
+    ok = ember_vision_prompt_expand(
+        *ids_io, *count_io, placeholder_ids, placeholder_count,
+        replacement, images, &expanded, &expanded_count, offsets,
+        error, error_cap);
+    free(placeholder_ids);
+    placeholder_ids = NULL;
+    free(replacement);
+    if (!ok) {
+        free(offsets);
+        goto cleanup;
+    }
     for (int i = 0; i < images; ++i) {
-        while (src < (size_t)*count_io && (*ids_io)[src] != 248056)
-            expanded[dst++] = (*ids_io)[src++];
-        if (src == (size_t)*count_io) {
-            snprintf(error, error_cap, "rendered prompt has fewer image_pad tokens than images");
-            free(expanded);
+        if (offsets[i] != planned_offsets[i]) {
+            snprintf(error, error_cap,
+                     "planned image position differs after prompt expansion");
             ok = false;
-            goto cleanup;
+            break;
         }
-        runs[i].prompt_offset = (int)dst;
+        runs[i].prompt_offset = offsets[i];
         runs[i].grid_t = encoded[i].grid_t;
         runs[i].grid_h = encoded[i].grid_h;
         runs[i].grid_w = encoded[i].grid_w;
         runs[i].n_tokens = encoded[i].n_tokens;
         runs[i].embeddings = encoded[i].embeddings;
+        runs[i].embedding_width = encoded[i].embedding_width;
+        runs[i].token_ids = encoded[i].token_ids;
+        runs[i].source_digest = encoded[i].source_digest;
         encoded[i].embeddings = NULL;
-        for (int row = 0; row < runs[i].n_tokens; ++row)
-            expanded[dst++] = 248056;
-        ++src;
+        encoded[i].token_ids = NULL;
     }
-    while (src < (size_t)*count_io) {
-        if ((*ids_io)[src] == 248056) {
-            snprintf(error, error_cap, "rendered prompt has more image_pad tokens than images");
-            free(expanded);
-            ok = false;
-            goto cleanup;
-        }
-        expanded[dst++] = (*ids_io)[src++];
+    free(offsets);
+    if (!ok) {
+        free(expanded);
+        goto cleanup;
     }
     free(*ids_io);
     *ids_io = expanded;
-    *count_io = (int)dst;
+    *count_io = expanded_count;
     *runs_out = runs;
     *run_count_out = images;
     runs = NULL;
 
 cleanup:
+    free(placeholder_ids);
+    free(planned_offsets);
     for (int i = 0; i < images; ++i)
         ember_backend_vision_image_free(&encoded[i]);
     free(encoded);
@@ -2425,6 +2491,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int32_t *ids = NULL;
     ember_vision_run *vision_runs = NULL;
     int n_vision_runs = 0;
+    int image_span_start = -1;
     bool started_thinking = false;
     int n_prompt;
     if (req->continuation_only) {
@@ -2536,6 +2603,34 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
 
     if (req->has_images) {
+        // The learned block is one indivisible prefill unit and can exceed the
+        // resident scheduler's quantum. Reject before running the lazy tower;
+        // paying its GPU cost and failing admission afterwards is both wasteful
+        // and an ambiguous error boundary.
+        if (srv->batch_sessions > 1) {
+            respond_api_error(
+                fd, req->api, 400,
+                "image input is not supported with resident batching",
+                "invalid_request_error", "vision_resident_prefill_unsupported");
+            free(ids);
+            atomic_fetch_sub(&srv->busy, 1);
+            ember_backend_generation_release(be);
+            if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+            return;
+        }
+        // Exact-q1 prefill necessarily splits the learned block. Keep the
+        // reviewed image path on its indivisible ordinary prefill topology.
+        if (force_exact_prefill_enabled()) {
+            respond_api_error(
+                fd, req->api, 400,
+                "image input is not supported with exact-q1 prefill",
+                "invalid_request_error", "vision_exact_prefill_unsupported");
+            free(ids);
+            atomic_fetch_sub(&srv->busy, 1);
+            ember_backend_generation_release(be);
+            if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+            return;
+        }
         char vision_error[512] = {0};
         if (!prepare_vision_prompt(be, req, &ids, &n_prompt,
                                    &vision_runs, &n_vision_runs,
@@ -2553,6 +2648,25 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // The processor-expanded image rows are model input tokens and are the
         // meaningful prompt-token count for usage/context accounting.
         client_prompt_tokens_pre = n_prompt;
+        image_span_start = vision_runs[0].prompt_offset;
+    }
+
+    // Image-bearing requests cannot be summarized without carrying their
+    // request-owned media spans through the compactor. Fail with a distinct
+    // boundary instead of silently skipping compaction and later reporting a
+    // generic context overflow.
+    if (srv->auto_compact && image_span_start >= 0 &&
+        ember_compaction_needed(n_prompt, n_ctx)) {
+        respond_api_error(fd, req->api, 400,
+                          "context compaction is not supported for image-bearing requests",
+                          "invalid_request_error",
+                          "vision_compaction_unsupported");
+        free_vision_runs(vision_runs, n_vision_runs);
+        free(ids);
+        atomic_fetch_sub(&srv->busy, 1);
+        ember_backend_generation_release(be);
+        if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+        return;
     }
 
     // Context-length guard (ds4 http_error_context_length_exceeded): reject a
@@ -2628,9 +2742,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // happened. Keep only that next decision on the target's autoregressive
     // path. This does not force q=1 exact prefill, and older tool messages no
     // longer constrain unrelated later user turns.
-    greq.force_ar_decode =
-        tool_result_forces_ar() &&
-        ember_chat_request_is_tool_result_continuation(req);
+    greq.force_ar_decode = req->has_images ||
+        (tool_result_forces_ar() &&
+         ember_chat_request_is_tool_result_continuation(req));
     greq.force_exact_prefill = force_exact_prefill_enabled();
     // Lucebox parity (server/src/server/http_server.cpp): each omitted sampler
     // parameter resolves independently from the model card. Explicit request
@@ -2709,8 +2823,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     int restore_slot = -1, restore_len = 0;
     bool restore_pinned = false;
     pthread_mutex_lock(&srv->state_lock);
-    if (!req->has_images)
-        ember_kv_lookup(&srv->kv, ids, n_prompt, &restore_slot, &restore_len);
+    const uint64_t image_digest = request_image_digest(req);
+    ember_kv_lookup(&srv->kv, ids, n_prompt, image_digest,
+                    &restore_slot, &restore_len);
     if (restore_slot >= 0) {
         restore_pinned = ember_kv_pin(&srv->kv, restore_slot);
         if (!restore_pinned) {
@@ -2719,8 +2834,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         }
     }
     int snap_is_anchor = 0;
-    int snap_cut = req->has_images ? -1 :
-        ember_kv_snap_cut(&srv->kv, ids, n_prompt, &snap_is_anchor);
+    int snap_cut = ember_kv_snap_cut(
+        &srv->kv, ids, n_prompt, &snap_is_anchor);
+    snap_cut = ember_kv_clamp_before_image(snap_cut, image_span_start);
     // A cold-prompt anchor (shared system-prefix, no completed turn yet) is
     // expensive to rebuild, so tag it COLD for eviction protection; a completed
     // turn boundary is a routine waypoint.
@@ -2733,8 +2849,12 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // Keep the resident snapshot pinned until the longer disk checkpoint has
     // loaded and committed successfully, so an I/O failure still has a safe
     // fallback.
-    if (!req->has_images && ember_backend_disk_enabled(be)) {
+    if (ember_backend_disk_enabled(be)) {
         int dl = ember_backend_disk_prefix(be, ids, n_prompt);
+        // Disk keys contain token IDs only. Clamp the backend's returned hit,
+        // as well as save eligibility, before the first image row so a stored
+        // checkpoint can never restore KV computed for different pixels.
+        dl = ember_kv_clamp_before_image(dl, image_span_start);
         int disk_slot = -1;
         if (dl > restore_len) {
             pthread_mutex_lock(&srv->state_lock);
@@ -2745,7 +2865,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                       ember_backend_disk_lookup(be, ids, dl, disk_slot);
         pthread_mutex_lock(&srv->state_lock);
         if (loaded &&
-            ember_kv_commit(&srv->kv, disk_slot, ids, dl) &&
+            ember_kv_commit(&srv->kv, disk_slot, ids, dl,
+                            image_digest, image_span_start) &&
             ember_kv_pin(&srv->kv, disk_slot)) {
             if (restore_pinned)
                 ember_kv_unpin(&srv->kv, restore_slot);
@@ -2799,7 +2920,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_buf_free(&hdr);
         if (!header_ok) {
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -2828,7 +2950,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         if (!role_ok) {
             ember_sse_free(&st);
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
         gen_ctx g = {0};
@@ -2855,7 +2978,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // the backend can't honor (full re-prefill, no repair snapshot reserved).
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         (void)continue_tool_started_in_think(
             srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
         bool unclosed_think_tool =
@@ -3037,7 +3161,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_buf_free(&hdr);
         if (!header_ok) {
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -3065,7 +3190,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             ember_protocol_stream_free(&protocol);
             ember_sse_free(&splitter);
             finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason);
+                                   false, snap_reason,
+                                   image_digest, image_span_start);
             goto run_done;
         }
 
@@ -3097,7 +3223,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_gen_result res = ember_backend_generate(be, &greq);
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         (void)continue_tool_started_in_think(
             srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
         bool unclosed_think_tool =
@@ -3298,7 +3425,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // #2: commit only on a real backend snapshot save (see streaming path).
         finish_prompt_snapshot(
             srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason);
+            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+            image_digest, image_span_start);
         // Non-stream responses are atomic: never present partial output as a
         // successful completion or retain it in exact-tool replay memory.
         if (!res.ok) {
@@ -4149,6 +4277,9 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --port N                    listen port (default 8080)\n"
         "  --model-name ID             advertised model id\n"
         "  --model-card PATH           sampling/reasoning model card\n"
+        "  --vision-mmproj PATH        operator-owned DeepSeek native vision tower\n"
+        "  --allow-single-layer-control\n"
+        "                              diagnostic: admit exact 1/1 DeepSeek fixture\n"
         "  --cors                      allow browser cross-origin requests\n"
         "  --auto-compact              ds4-style context compaction: at 85%% of\n"
         "                              context, rebuild history as system+summary+tail\n"
@@ -4174,6 +4305,13 @@ static void print_usage(FILE *out, const char *argv0) {
         "                              Qwen recipe; requires --max-ctx 1000000\n"
         "                              and may not fit the 128-GiB UMA budget\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
+        "  --validate-vision-artifact-a PATH\n"
+        "  --validate-vision-artifact-b PATH\n"
+        "  --validate-vision-mmproj PATH\n"
+        "  --validate-vision-expect-a TEXT\n"
+        "  --validate-vision-expect-b TEXT\n"
+        "                              run the three-arm offline vision\n"
+        "                              discriminator with --validate-prompt\n"
         "  --validate-gemm-batch N     sweep HIP strided-batched GEMM counts 2..N\n"
         "                              against the one-row baseline, then exit\n"
         "                              (needs no model; safe alongside serving)\n"
@@ -4249,6 +4387,299 @@ static int run_gemm_batch_sweep(ember_backend *be, int limit) {
     }
     printf("  VERDICT: batched decode may use batchCount <= %d\n", r.max_exact);
     return 0;
+}
+
+typedef struct {
+    ember_backend *be;
+    ember_buf output;
+    ember_gen_result result;
+} vision_gate_arm;
+
+static bool vision_gate_collect_token(int32_t token, void *ud) {
+    vision_gate_arm *arm = (vision_gate_arm *)ud;
+    const char *piece = ember_backend_token_text(arm->be, token);
+    if (piece) ember_buf_puts(&arm->output, piece);
+    return true;
+}
+
+static bool run_vision_gate_arm(
+        ember_backend *be, const int32_t *prompt, int n_prompt,
+        const ember_vision_image *image, int prompt_offset,
+        int n_gen, vision_gate_arm *arm) {
+    memset(arm, 0, sizeof(*arm));
+    arm->be = be;
+    ember_vision_run run = {0};
+    ember_gen_request request = {0};
+    request.prompt = prompt;
+    request.n_prompt = n_prompt;
+    request.max_tokens = n_gen;
+    request.greedy = true;
+    request.force_ar_decode = true;
+    request.top_p = 1.0f;
+    request.rep_pen = 1.0f;
+    request.dry_allowed_length = -1;
+    request.restore_slot = -1;
+    request.snap_slot = -1;
+    request.snap_pos = -1;
+    request.on_token = vision_gate_collect_token;
+    request.ud = arm;
+    if (image) {
+        run.prompt_offset = prompt_offset;
+        run.grid_t = image->grid_t;
+        run.grid_h = image->grid_h;
+        run.grid_w = image->grid_w;
+        run.n_tokens = image->n_tokens;
+        run.embeddings = image->embeddings;
+        run.embedding_width = image->embedding_width;
+        run.token_ids = image->token_ids;
+        run.source_digest = image->source_digest;
+        request.vision = &run;
+        request.n_vision = 1;
+    }
+    arm->result = ember_backend_generate(be, &request);
+    ember_backend_generation_release(be);
+    return arm->result.ok;
+}
+
+static int read_gate_prompt(ember_backend *be, const char *path,
+                            int32_t **ids_out) {
+    *ids_out = NULL;
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "[ember-vision-gate] cannot open prompt %s: %s\n",
+                path, strerror(errno));
+        return -1;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return -1;
+    }
+    const long raw_len = ftell(file);
+    if (raw_len <= 0 || raw_len > 64L * 1024L * 1024L ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        fprintf(stderr,
+                "[ember-vision-gate] prompt must be between 1 byte and 64 MiB\n");
+        fclose(file);
+        return -1;
+    }
+    char *raw = (char *)malloc((size_t)raw_len + 1);
+    if (!raw || fread(raw, 1, (size_t)raw_len, file) != (size_t)raw_len) {
+        fprintf(stderr, "[ember-vision-gate] failed to read prompt\n");
+        free(raw);
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    raw[raw_len] = '\0';
+    const int count = ember_backend_encode(be, raw, ids_out);
+    free(raw);
+    if (count <= 0 || !*ids_out) {
+        fprintf(stderr, "[ember-vision-gate] prompt tokenization failed\n");
+        free(*ids_out);
+        *ids_out = NULL;
+        return -1;
+    }
+    return count;
+}
+
+static bool expand_gate_image(
+        const int32_t *prompt, int prompt_count,
+        const int32_t *placeholder, int placeholder_count,
+        const ember_vision_image *image, int expected_offset,
+        int32_t **expanded_out, int *expanded_count_out,
+        char *error, size_t error_cap) {
+    const ember_vision_prompt_image replacement = {
+        image->token_ids, image->n_tokens,
+    };
+    int actual_offset = -1;
+    if (!ember_vision_prompt_expand(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &replacement, 1, expanded_out, expanded_count_out,
+            &actual_offset, error, error_cap)) {
+        return false;
+    }
+    if (actual_offset != expected_offset) {
+        free(*expanded_out);
+        *expanded_out = NULL;
+        *expanded_count_out = 0;
+        snprintf(error, error_cap,
+                 "placeholder offset changed during vision expansion");
+        return false;
+    }
+    return true;
+}
+
+static int run_offline_vision_gate(
+        ember_backend *be, const char *prompt_path,
+        const char *artifact_a, const char *artifact_b,
+        const char *mmproj_path,
+        const char *expect_a, const char *expect_b,
+        int n_gen) {
+    int rc = 2;
+    int32_t *prompt = NULL;
+    int32_t *placeholder = NULL;
+    int32_t *prompt_a = NULL;
+    int32_t *prompt_b = NULL;
+    int32_t *prompt_control = NULL;
+    ember_vision_image image_a = {0};
+    ember_vision_image image_b = {0};
+    vision_gate_arm arm_a = {0};
+    vision_gate_arm arm_b = {0};
+    vision_gate_arm arm_control = {0};
+    char error[512] = {0};
+
+    const int prompt_count = read_gate_prompt(be, prompt_path, &prompt);
+    if (prompt_count <= 0) goto done;
+    const int placeholder_count =
+        ember_backend_vision_placeholder_ids(be, &placeholder);
+    if (placeholder_count <= 0 || !placeholder) {
+        fprintf(stderr,
+                "[ember-vision-gate] backend has no image placeholder contract\n");
+        goto done;
+    }
+    int prompt_offset = -1;
+    if (!ember_vision_prompt_find_unique(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &prompt_offset, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] %s\n", error);
+        goto done;
+    }
+    if (!ember_backend_prepare_offline_vision_artifact(
+            be, artifact_a, mmproj_path, prompt_offset,
+            &image_a, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] artifact A: %s\n", error);
+        goto done;
+    }
+    if (!ember_backend_prepare_offline_vision_artifact(
+            be, artifact_b, mmproj_path, prompt_offset,
+            &image_b, error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] artifact B: %s\n", error);
+        goto done;
+    }
+    if (image_a.source_digest == 0 || image_b.source_digest == 0 ||
+        image_a.source_digest == image_b.source_digest) {
+        fprintf(stderr,
+                "[ember-vision-gate] artifacts require distinct nonzero digests\n");
+        goto done;
+    }
+    int prompt_a_count = 0;
+    int prompt_b_count = 0;
+    if (!expand_gate_image(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &image_a, prompt_offset, &prompt_a, &prompt_a_count,
+            error, sizeof(error)) ||
+        !expand_gate_image(
+            prompt, prompt_count, placeholder, placeholder_count,
+            &image_b, prompt_offset, &prompt_b, &prompt_b_count,
+            error, sizeof(error))) {
+        fprintf(stderr, "[ember-vision-gate] %s\n", error);
+        goto done;
+    }
+    const int control_count = prompt_count - placeholder_count;
+    if (control_count <= 0 ||
+        (size_t)control_count > SIZE_MAX / sizeof(*prompt_control)) {
+        fprintf(stderr, "[ember-vision-gate] invalid no-image control prompt\n");
+        goto done;
+    }
+    prompt_control = (int32_t *)malloc(
+        (size_t)control_count * sizeof(*prompt_control));
+    if (!prompt_control) abort();
+    if (prompt_offset > 0) {
+        memcpy(prompt_control, prompt,
+               (size_t)prompt_offset * sizeof(*prompt_control));
+    }
+    const int tail_count =
+        prompt_count - prompt_offset - placeholder_count;
+    if (tail_count > 0) {
+        memcpy(prompt_control + prompt_offset,
+               prompt + prompt_offset + placeholder_count,
+               (size_t)tail_count * sizeof(*prompt_control));
+    }
+    const int n_ctx = ember_backend_n_ctx(be);
+    if (prompt_a_count > n_ctx - n_gen ||
+        prompt_b_count > n_ctx - n_gen ||
+        control_count > n_ctx - n_gen) {
+        fprintf(stderr,
+                "[ember-vision-gate] an arm exceeds the model context\n");
+        goto done;
+    }
+
+    const bool generated_a = run_vision_gate_arm(
+        be, prompt_a, prompt_a_count, &image_a, prompt_offset,
+        n_gen, &arm_a);
+    const bool generated_b = run_vision_gate_arm(
+        be, prompt_b, prompt_b_count, &image_b, prompt_offset,
+        n_gen, &arm_b);
+    const bool generated_control = run_vision_gate_arm(
+        be, prompt_control, control_count, NULL, -1,
+        n_gen, &arm_control);
+    const char *visible_a = visible_after_think(
+        arm_a.output.ptr ? arm_a.output.ptr : "");
+    const char *visible_b = visible_after_think(
+        arm_b.output.ptr ? arm_b.output.ptr : "");
+    const char *visible_control = visible_after_think(
+        arm_control.output.ptr ? arm_control.output.ptr : "");
+    const bool arm_a_ok = generated_a && strstr(visible_a, expect_a) != NULL &&
+                          strstr(visible_a, expect_b) == NULL;
+    const bool arm_b_ok = generated_b && strstr(visible_b, expect_b) != NULL &&
+                          strstr(visible_b, expect_a) == NULL;
+    const bool control_ok = generated_control &&
+                            strstr(visible_control, expect_a) == NULL &&
+                            strstr(visible_control, expect_b) == NULL;
+    const bool passed = generated_a && generated_b && generated_control &&
+        ember_vision_outputs_discriminate(
+            visible_a, visible_b, visible_control, expect_a, expect_b);
+
+    ember_buf out = {0};
+    ember_buf_printf(
+        &out,
+        "{\"ok\":%s,\"schema\":\"ember.ds4.vision-language-gate.v1\","
+        "\"model\":",
+        passed ? "true" : "false");
+    ember_json_escape(&out, ember_backend_model_name(be));
+    ember_buf_printf(
+        &out,
+        ","
+        "\"prompt_tokens\":%d,\"placeholder_offset\":%d,"
+        "\"requested_tokens\":%d,\"arms\":{\"a\":{"
+        "\"ok\":%s,\"artifact_digest\":\"%016" PRIx64 "\","
+        "\"grid\":[%d,%d],\"block_tokens\":%d,\"expected\":",
+        prompt_count, prompt_offset, n_gen,
+        arm_a_ok ? "true" : "false", image_a.source_digest,
+        image_a.grid_h, image_a.grid_w, image_a.n_tokens);
+    ember_json_escape(&out, expect_a);
+    ember_buf_puts(&out, ",\"output\":");
+    ember_json_escape(&out, visible_a);
+    ember_buf_printf(
+        &out,
+        "},\"b\":{\"ok\":%s,"
+        "\"artifact_digest\":\"%016" PRIx64 "\","
+        "\"grid\":[%d,%d],\"block_tokens\":%d,\"expected\":",
+        arm_b_ok ? "true" : "false", image_b.source_digest,
+        image_b.grid_h, image_b.grid_w, image_b.n_tokens);
+    ember_json_escape(&out, expect_b);
+    ember_buf_puts(&out, ",\"output\":");
+    ember_json_escape(&out, visible_b);
+    ember_buf_printf(&out, "},\"control\":{\"ok\":%s,\"output\":",
+                     control_ok ? "true" : "false");
+    ember_json_escape(&out, visible_control);
+    ember_buf_puts(&out, "}}}\n");
+    fwrite(out.ptr, 1, out.len, stdout);
+    ember_buf_free(&out);
+    rc = passed ? 0 : 1;
+
+done:
+    ember_buf_free(&arm_a.output);
+    ember_buf_free(&arm_b.output);
+    ember_buf_free(&arm_control.output);
+    ember_backend_vision_image_free(&image_a);
+    ember_backend_vision_image_free(&image_b);
+    free(prompt);
+    free(placeholder);
+    free(prompt_a);
+    free(prompt_b);
+    free(prompt_control);
+    return rc;
 }
 
 static int run_backend_validation(ember_backend *be, const char *path,
@@ -4388,6 +4819,8 @@ int main(int argc, char **argv) {
     const char *host = "127.0.0.1";
     const char *model_path = NULL, *model_name = "deepseek-v4-flash";
     const char *card_path = NULL, *kv_dir = NULL;
+    const char *vision_mmproj_path = NULL;
+    bool allow_single_layer_control = false;
     long kv_cache_mb = 0;   // 0 = library default (131072 MB)
     // Seconds of quiet before cached compute graphs are released. Long enough
     // that an active agent (which pauses seconds-to-minutes between turns)
@@ -4395,6 +4828,11 @@ int main(int argc, char **argv) {
     // back. EMBER_IDLE_RECLAIM_SECS=0 disables.
     double idle_reclaim_secs = 300.0;
     const char *validate_prompt = NULL;
+    const char *validate_vision_artifact_a = NULL;
+    const char *validate_vision_artifact_b = NULL;
+    const char *validate_vision_mmproj = NULL;
+    const char *validate_vision_expect_a = NULL;
+    const char *validate_vision_expect_b = NULL;
     int validate_tokens = 32;
     int validate_gemm_batch = 0;
     // Preserve the measured lucebox deployment override: its older DSpark
@@ -4466,6 +4904,12 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) card_path = v;
+        } else if (strcmp(opt, "--vision-mmproj") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) vision_mmproj_path = v;
+        } else if (strcmp(opt, "--allow-single-layer-control") == 0) {
+            allow_single_layer_control = true;
         } else if (strcmp(opt, "--cors") == 0) {
             g_enable_cors = true;
         } else if (strcmp(opt, "--auto-compact") == 0) {
@@ -4554,6 +4998,26 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) validate_prompt = v;
+        } else if (strcmp(opt, "--validate-vision-artifact-a") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_artifact_a = v;
+        } else if (strcmp(opt, "--validate-vision-artifact-b") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_artifact_b = v;
+        } else if (strcmp(opt, "--validate-vision-mmproj") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_mmproj = v;
+        } else if (strcmp(opt, "--validate-vision-expect-a") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_expect_a = v;
+        } else if (strcmp(opt, "--validate-vision-expect-b") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) validate_vision_expect_b = v;
         } else if (strcmp(opt, "--validate-tokens") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
@@ -4567,6 +5031,47 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    const bool vision_gate_requested =
+        validate_vision_artifact_a || validate_vision_artifact_b ||
+        validate_vision_mmproj || validate_vision_expect_a ||
+        validate_vision_expect_b;
+    if (vision_gate_requested) {
+        const struct {
+            const char *name;
+            const char *value;
+        } required[] = {
+            {"--validate-prompt", validate_prompt},
+            {"--validate-vision-artifact-a", validate_vision_artifact_a},
+            {"--validate-vision-artifact-b", validate_vision_artifact_b},
+            {"--validate-vision-mmproj", validate_vision_mmproj},
+            {"--validate-vision-expect-a", validate_vision_expect_a},
+            {"--validate-vision-expect-b", validate_vision_expect_b},
+        };
+        for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+            if (!required[i].value || !required[i].value[0]) {
+                fprintf(stderr,
+                        "[ember] offline vision gate is missing %s\n",
+                        required[i].name);
+                return 2;
+            }
+        }
+        if (strcmp(validate_vision_expect_a,
+                   validate_vision_expect_b) == 0) {
+            fprintf(stderr,
+                    "[ember] offline vision expectations must be distinct\n");
+            return 2;
+        }
+        if (validate_gemm_batch > 0) {
+            fprintf(stderr,
+                    "[ember] offline vision and GEMM validation cannot share a run\n");
+            return 2;
+        }
+        if (batch_sessions != 1) {
+            fprintf(stderr,
+                    "[ember] offline vision gate requires --batch-sessions 1\n");
+            return 2;
+        }
+    }
     // The GEMM sweep measures a HIP library property, not a model property.
     // Running it before model load keeps the standalone form usable without
     // allocating the model weights.
@@ -4577,6 +5082,20 @@ int main(int argc, char **argv) {
         print_usage(stderr, argv[0]);
         return 2;
     }
+    if (allow_single_layer_control &&
+        (!vision_mmproj_path || !vision_mmproj_path[0])) {
+        fprintf(stderr,
+                "[ember] --allow-single-layer-control requires --vision-mmproj\n");
+        return 2;
+    }
+    if (allow_single_layer_control && batch_sessions != 1) {
+        fprintf(stderr,
+                "[ember] --allow-single-layer-control requires --batch-sessions 1\n");
+        return 2;
+    }
+    if (allow_single_layer_control)
+        fprintf(stderr,
+                "[ember] WARNING: exact 1/1 DeepSeek diagnostic fixture enabled\n");
     ember_prompt_profile prompt_profile = EMBER_PROMPT_DEEPSEEK_DSML;
     char *profile_err = NULL;
     // The GPU-free backend's documented model path is the literal "stub"; it
@@ -4627,6 +5146,8 @@ int main(int argc, char **argv) {
     cfg.batch_sessions = batch_sessions;
     cfg.ds4_prefill_mode = ds4_prefill_mode;
     cfg.qwen_yarn = qwen_yarn;
+    cfg.vision_mmproj_path = vision_mmproj_path;
+    cfg.allow_single_layer_control = allow_single_layer_control;
     char *err = NULL;
     ember_backend *be = ember_backend_load(&cfg, &err);
     if (!be) {
@@ -4642,6 +5163,16 @@ int main(int argc, char **argv) {
             return rc;
         }
     }
+    if (vision_gate_requested) {
+        int rc = run_offline_vision_gate(
+            be, validate_prompt,
+            validate_vision_artifact_a, validate_vision_artifact_b,
+            validate_vision_mmproj,
+            validate_vision_expect_a, validate_vision_expect_b,
+            validate_tokens);
+        ember_backend_free(be);
+        return rc;
+    }
     if (validate_prompt) {
         int rc =
             run_backend_validation(be, validate_prompt, validate_tokens);
@@ -4654,6 +5185,7 @@ int main(int argc, char **argv) {
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
     srv.no_progress_report = no_progress_report;
+    srv.batch_sessions = batch_sessions;
     srv.auto_answer_after_loop = auto_answer_after_loop;
     if (pthread_mutex_init(&srv.gen_lock, NULL) != 0) {
         fprintf(stderr, "[ember] failed to initialize generation lock\n");

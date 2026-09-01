@@ -104,14 +104,14 @@ static void qa_kv_churn(void) {
     for (int i = 0; i < 200; i++) {
         int32_t ids[4] = {1, i, i + 1, i + 2};
         int s = ember_kv_reserve(&c);
-        ember_kv_commit(&c, s, ids, 3);
+        ember_kv_commit(&c, s, ids, 3, 0, -1);
         CHECK(c.n_entries <= 8, "cache never exceeds capacity under churn");
         if (c.n_entries > 8) break;
     }
     // a recently-committed prefix is still findable
     int32_t last[4] = {1, 199, 200, 201};
     int slot, len;
-    ember_kv_lookup(&c, last, 4, &slot, &len);
+    ember_kv_lookup(&c, last, 4, 0, &slot, &len);
     CHECK(slot >= 0, "most-recent entry survives churn");
     ember_kv_free(&c);
 }

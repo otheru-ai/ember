@@ -15,6 +15,14 @@
 typedef struct {
     uint8_t *data;
     size_t   size;
+    // Normalized media identity. The decoder accepts only these explicit
+    // image data-URL prefixes; callers never have to retain the source URL.
+    enum {
+        EMBER_IMAGE_PNG = 1,
+        EMBER_IMAGE_JPEG,
+        EMBER_IMAGE_WEBP,
+        EMBER_IMAGE_GIF,
+    } format;
 } ember_image_bytes;
 
 bool ember_image_data_url_decode(const char *url, ember_image_bytes *out,

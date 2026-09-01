@@ -19,6 +19,9 @@ namespace dflash::common {
 struct BackendArgs {
     // Required
     const char *    model_path   = nullptr;   // target .gguf
+    // Optional operator-owned DeepSeek native tower. It remains unopened until
+    // the first image request and is never sourced from request metadata.
+    const char *    vision_mmproj_path = nullptr;
 
     // The only supported device is local gfx1151 GPU 0.
     DevicePlacement device;
@@ -31,6 +34,7 @@ struct BackendArgs {
     // deepseek4-specific decode options
     int             ds4_expert_top_k = 0;  // 0 = model default
     bool            ds4_fused_decode = false;
+    bool            allow_single_layer_control = false;
 
     // Qwen3.8-Flash-Next operator override. The factory rejects this for
     // non-Qwen architectures; the Qwen loader resolves the exact factor-4,

@@ -34,7 +34,7 @@ static bool append_message_content(ember_buf *out,
         const ember_content_part *part = &msg->parts[i];
         if (part->kind == EMBER_CONTENT_TEXT) {
             ember_buf_puts(&rendered, part->text ? part->text : "");
-        } else if (part->kind == EMBER_CONTENT_IMAGE_URL && allow_images) {
+        } else if (part->kind == EMBER_CONTENT_IMAGE && allow_images) {
             // Pinned Qwen3.8 tokenizer_config.json render_content macro at
             // f5d08274bafd880402bd16f5e3e6c514136ec06c. The processor replaces
             // image_pad with the exact number of vision embeddings later.

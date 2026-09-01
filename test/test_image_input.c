@@ -22,6 +22,9 @@ int main(void) {
     CHECK(!ember_image_data_url_decode("data:image/png;base64,A===", &image,
                                        error, sizeof(error)),
           "malformed padding is rejected");
+    CHECK(!ember_image_data_url_decode("data:image/png;base64,/x==", &image,
+                                       error, sizeof(error)),
+          "non-canonical trailing base64 bits are rejected");
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail != 0;
 }
