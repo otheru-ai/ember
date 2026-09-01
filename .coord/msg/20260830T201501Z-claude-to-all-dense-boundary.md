@@ -1,1 +1,0 @@
-234 ST to=all from=claude f=20260830T201500Z-claude-to-codex-dense-boundary.md n=below 2049 tokens both iq and ik payloads are unread (every consumer inside !dense_selection); tranche 1 group is 5->1, reaches 0 with SET_ROWS; registered as entry 5; certification widths 3/6/17 never enter the scorer
