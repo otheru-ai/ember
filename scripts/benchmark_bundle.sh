@@ -65,7 +65,14 @@ DATE="$(date -u +%Y-%m-%d)"
 BUNDLE="$OUT/ember-$DATE"
 mkdir -p "$BUNDLE"
 
-DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add video --group-add render"
+VIDEO_GID=$(getent group video | cut -d: -f3)
+RENDER_GID=$(getent group render | cut -d: -f3)
+[[ "$VIDEO_GID" =~ ^[0-9]+$ && "$RENDER_GID" =~ ^[0-9]+$ ]] \
+  || { echo "video/render host GIDs unavailable" >&2; exit 1; }
+# The release image does not carry named video/render group entries. Docker
+# resolves symbolic --group-add values inside the image, so bind the host GIDs
+# explicitly after deriving them on the machine that owns /dev/kfd.
+DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add $VIDEO_GID --group-add $RENDER_GID"
 DOCKER_RUN="$DOCKER_GPU --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit core=-1"
 NAME="bench-bundle-$$"
 
@@ -132,7 +139,12 @@ SPEC_ENV="-e DFLASH_DS4_SPEC=1 -e DFLASH_DS4_DRAFT=$DRAFT -e DFLASH_DS4_Q5_VERIF
 # means running it as it shipped, so probe rather than assume. The usage text is
 # printed on any unrecognised option, so this works even where --help is not one.
 HOST_ARG="--host 127.0.0.1"
-if ! docker run --rm --entrypoint "$BIN" "$IMAGE" --help 2>&1 | grep -q -- '--host'; then
+# A host-staged binary lives under MODEL_DIR and needs the same library bundle
+# as the measured server. Probe with both mounted, otherwise exec failure is
+# misreported as an old release that predates --host.
+# shellcheck disable=SC2086
+if ! docker run --rm -v "$MODEL_DIR:$MODEL_DIR" $COMMON_ENV \
+    --entrypoint "$BIN" "$IMAGE" --help 2>&1 | grep -q -- '--host'; then
   HOST_ARG=""
   echo "  note: $IMAGE predates --host; it binds loopback by default"
 fi
