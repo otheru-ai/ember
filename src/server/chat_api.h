@@ -1,6 +1,8 @@
 // Extract a normalized chat-completion request from a parsed JSON body.
-// Handles content as a plain string OR as an array of {type:"text",text:...}
-// parts (multimodal shape — text parts flattened, non-text ignored for now).
+// Handles content as a plain string or an ordered array of text/image parts.
+// Image bytes stay request-owned while `content` carries one private model
+// placeholder at the same position, so the existing DSML renderer preserves
+// text/image order without learning transport-specific image envelopes.
 #ifndef EMBER_CHAT_API_H
 #define EMBER_CHAT_API_H
 
@@ -22,9 +24,30 @@ typedef enum {
     EMBER_TOOL_CHOICE_ALLOWED,
 } ember_tool_choice_kind;
 
+#define EMBER_IMAGE_PLACEHOLDER "<｜deepseek_image｜>"
+
+typedef enum {
+    EMBER_CONTENT_TEXT,
+    EMBER_CONTENT_IMAGE,
+} ember_content_kind;
+
+typedef struct {
+    ember_content_kind kind;
+    char              *text;        // owned for TEXT; NULL for IMAGE
+    int                image_index; // request image index for IMAGE; -1 for TEXT
+} ember_content_part;
+
+typedef struct {
+    char          *media_type; // owned canonical MIME type
+    unsigned char *data;       // owned decoded bytes
+    size_t         data_len;
+} ember_image_input;
+
 typedef struct {
     char            *role;      // "system" | "developer" | "user" | "assistant" | "tool"
-    char            *content;   // flattened text (owned; "" if none)
+    char            *content;   // rendered text + private image placeholders
+    ember_content_part *parts;  // ordered source parts (owned; optional)
+    int              n_parts;
     char            *name;      // tool name for role="tool" (owned; NULL otherwise)
     char            *reasoning; // assistant reasoning_content from history (owned; NULL)
     char            *tool_call_id; // B3: role="tool" result's tool_call_id (owned; NULL)
@@ -41,6 +64,8 @@ typedef struct {
     char           *raw_prompt;   // legacy /v1/completions prompt, otherwise NULL
     ember_chat_msg *messages;
     int             n_messages;
+    ember_image_input *images;  // prompt-order image payloads (owned)
+    int             n_images;
     char           *tools_json;   // re-serialized tools array, or NULL
     bool            has_tools;
     bool            stream;

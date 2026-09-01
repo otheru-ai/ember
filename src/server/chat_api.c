@@ -42,13 +42,170 @@ static char *dup_or(const char *s, const char *dflt) {
     return copy;
 }
 
-// content is either a string or an array of parts; flatten text parts.
-static char *flatten_content(const ember_json *content, bool *ok) {
+enum {
+    EMBER_MAX_IMAGES_PER_REQUEST = 16,
+    EMBER_MAX_DECODED_IMAGE_BYTES = 64 * 1024 * 1024,
+};
+
+static int base64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (int)(c - 'A');
+    if (c >= 'a' && c <= 'z') return (int)(c - 'a') + 26;
+    if (c >= '0' && c <= '9') return (int)(c - '0') + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+// Strict RFC 4648 decoder for data URLs. Whitespace, misplaced padding and
+// non-canonical trailing bits are rejected instead of normalized: accepting
+// multiple byte spellings for one image complicates cache identity and lets a
+// malformed payload reach a native image decoder.
+static bool decode_base64(const char *src, unsigned char **out,
+                          size_t *out_len) {
+    if (!src || !out || !out_len) return false;
+    *out = NULL;
+    *out_len = 0;
+    const size_t n = strlen(src);
+    if (n == 0 || n % 4 != 0) return false;
+    size_t padding = 0;
+    if (src[n - 1] == '=') padding++;
+    if (n >= 2 && src[n - 2] == '=') padding++;
+    if (n / 4 > (SIZE_MAX - 2) / 3) return false;
+    const size_t decoded = n / 4 * 3 - padding;
+    if (decoded == 0 || decoded > EMBER_MAX_DECODED_IMAGE_BYTES) return false;
+    unsigned char *buf = (unsigned char *)malloc(decoded);
+    if (!buf) ember_buf_fatal("out of memory decoding image data");
+    size_t pos = 0;
+    for (size_t i = 0; i < n; i += 4) {
+        const bool last = i + 4 == n;
+        const int a = base64_value((unsigned char)src[i]);
+        const int b = base64_value((unsigned char)src[i + 1]);
+        const int c = src[i + 2] == '=' ? 0
+            : base64_value((unsigned char)src[i + 2]);
+        const int d = src[i + 3] == '=' ? 0
+            : base64_value((unsigned char)src[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 ||
+            (!last && (src[i + 2] == '=' || src[i + 3] == '=')) ||
+            (src[i + 2] == '=' && src[i + 3] != '=') ||
+            (src[i + 2] == '=' && (b & 15) != 0) ||
+            (src[i + 3] == '=' && src[i + 2] != '=' && (c & 3) != 0)) {
+            free(buf);
+            return false;
+        }
+        const uint32_t bits = (uint32_t)a << 18 | (uint32_t)b << 12 |
+                              (uint32_t)c << 6 | (uint32_t)d;
+        if (pos < decoded) buf[pos++] = (unsigned char)(bits >> 16);
+        if (pos < decoded) buf[pos++] = (unsigned char)(bits >> 8);
+        if (pos < decoded) buf[pos++] = (unsigned char)bits;
+    }
+    if (pos != decoded) {
+        free(buf);
+        return false;
+    }
+    *out = buf;
+    *out_len = decoded;
+    return true;
+}
+
+static bool parse_data_image_url(const char *url, ember_image_input *out) {
+    if (!url || !out || strncmp(url, "data:", 5) != 0) return false;
+    const char *comma = strchr(url + 5, ',');
+    if (!comma) return false;
+    const size_t header_len = (size_t)(comma - (url + 5));
+    const char *mime = NULL;
+    if (header_len == strlen("image/png;base64") &&
+        !memcmp(url + 5, "image/png;base64", header_len)) {
+        mime = "image/png";
+    } else if (header_len == strlen("image/jpeg;base64") &&
+               !memcmp(url + 5, "image/jpeg;base64", header_len)) {
+        mime = "image/jpeg";
+    } else {
+        return false;
+    }
+    unsigned char *bytes = NULL;
+    size_t bytes_len = 0;
+    if (!decode_base64(comma + 1, &bytes, &bytes_len)) return false;
+    out->media_type = strdup(mime);
+    if (!out->media_type) ember_buf_fatal("out of memory parsing image data");
+    out->data = bytes;
+    out->data_len = bytes_len;
+    return true;
+}
+
+static bool request_image_push(ember_chat_request *r,
+                               ember_image_input *image, int *index_out) {
+    if (!r || !image || !image->media_type || !image->data ||
+        image->data_len == 0 || r->n_images >= EMBER_MAX_IMAGES_PER_REQUEST)
+        return false;
+    if ((size_t)(r->n_images + 1) > SIZE_MAX / sizeof(*r->images)) return false;
+    ember_image_input *grown = (ember_image_input *)realloc(
+        r->images, (size_t)(r->n_images + 1) * sizeof(*r->images));
+    if (!grown) ember_buf_fatal("out of memory parsing image list");
+    r->images = grown;
+    r->images[r->n_images] = *image;
+    memset(image, 0, sizeof(*image));
+    if (index_out) *index_out = r->n_images;
+    r->n_images++;
+    return true;
+}
+
+static bool content_part_push(ember_chat_msg *msg, ember_content_kind kind,
+                              const char *text, int image_index) {
+    if (!msg || msg->n_parts == INT_MAX ||
+        (size_t)(msg->n_parts + 1) > SIZE_MAX / sizeof(*msg->parts))
+        return false;
+    ember_content_part *grown = (ember_content_part *)realloc(
+        msg->parts, (size_t)(msg->n_parts + 1) * sizeof(*msg->parts));
+    if (!grown) ember_buf_fatal("out of memory parsing content parts");
+    msg->parts = grown;
+    ember_content_part *part = &msg->parts[msg->n_parts++];
+    part->kind = kind;
+    part->text = kind == EMBER_CONTENT_TEXT ? dup_or(text, "") : NULL;
+    part->image_index = kind == EMBER_CONTENT_IMAGE ? image_index : -1;
+    return true;
+}
+
+static bool parse_image_part(const ember_json *part, ember_image_input *out) {
+    const char *type = ember_json_str(ember_json_get(part, "type"), "");
+    const char *url = NULL;
+    if (!strcmp(type, "image_url") || !strcmp(type, "input_image")) {
+        const ember_json *node = ember_json_get(part, "image_url");
+        if (!node) node = ember_json_get(part, "url");
+        if (node && node->type == EMBER_JSON_STRING) {
+            url = node->u.str;
+        } else if (node && node->type == EMBER_JSON_OBJECT) {
+            url = ember_json_str(ember_json_get(node, "url"), NULL);
+        }
+        return url && parse_data_image_url(url, out);
+    }
+    if (strcmp(type, "image") != 0) return false;
+    const ember_json *source = ember_json_get(part, "source");
+    if (!source || source->type != EMBER_JSON_OBJECT ||
+        strcmp(ember_json_str(ember_json_get(source, "type"), ""), "base64"))
+        return false;
+    const char *media = ember_json_str(ember_json_get(source, "media_type"), NULL);
+    const char *data = ember_json_str(ember_json_get(source, "data"), NULL);
+    if (!media || !data ||
+        (strcmp(media, "image/png") && strcmp(media, "image/jpeg")) ||
+        !decode_base64(data, &out->data, &out->data_len))
+        return false;
+    out->media_type = strdup(media);
+    if (!out->media_type) ember_buf_fatal("out of memory parsing image data");
+    return true;
+}
+
+// Content is either a string or an ordered array. `content` remains the
+// renderer-facing form, with one private placeholder per image; `parts` and the
+// request image array retain the transport payload and exact ordering.
+static char *parse_content(const ember_json *content, ember_chat_msg *msg,
+                           ember_chat_request *request, bool *ok) {
     *ok = true;
     if (!content) return dup_or("", NULL);
     if (content->type == EMBER_JSON_NULL) return dup_or("", NULL);
-    if (content->type == EMBER_JSON_STRING)
+    if (content->type == EMBER_JSON_STRING) {
+        if (strstr(content->u.str, EMBER_IMAGE_PLACEHOLDER)) goto invalid;
         return dup_or(ember_json_str(content, ""), NULL);
+    }
     if (content->type == EMBER_JSON_ARRAY) {
         ember_buf b = {0};
         for (int i = 0; i < ember_json_len(content); i++) {
@@ -57,11 +214,30 @@ static char *flatten_content(const ember_json *content, bool *ok) {
             const ember_json *type_node = ember_json_get(part, "type");
             const char *type = ember_json_str(type_node, NULL);
             if (!type) goto invalid;
-            if (strcmp(type, "text") == 0) {
+            if (!strcmp(type, "text") || !strcmp(type, "input_text")) {
                 const ember_json *text = ember_json_get(part, "text");
                 if (!text || text->type != EMBER_JSON_STRING) goto invalid;
+                if (strstr(text->u.str, EMBER_IMAGE_PLACEHOLDER)) goto invalid;
                 ember_buf_puts(&b, text->u.str);
-            } // Non-text multimodal parts remain intentionally ignored.
+                if (!content_part_push(msg, EMBER_CONTENT_TEXT, text->u.str, -1))
+                    goto invalid;
+            } else if (!strcmp(type, "image_url") ||
+                       !strcmp(type, "input_image") || !strcmp(type, "image")) {
+                ember_image_input image = {0};
+                int image_index = -1;
+                if (!parse_image_part(part, &image) ||
+                    !request_image_push(request, &image, &image_index)) {
+                    free(image.media_type);
+                    free(image.data);
+                    goto invalid;
+                }
+                if (!content_part_push(
+                        msg, EMBER_CONTENT_IMAGE, NULL, image_index))
+                    goto invalid;
+                ember_buf_puts(&b, EMBER_IMAGE_PLACEHOLDER);
+            } else {
+                goto invalid;
+            }
         }
         char *s = ember_buf_take(&b);
         return s ? s : dup_or("", NULL);
@@ -495,8 +671,9 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
             (call_id && call_id->type != EMBER_JSON_STRING)) goto invalid;
         out->messages[i].role = dup_or(role->u.str, "");
         bool content_ok = false;
-        out->messages[i].content =
-            flatten_content(ember_json_get(m, "content"), &content_ok);
+        out->messages[i].content = parse_content(
+            ember_json_get(m, "content"), &out->messages[i], out,
+            &content_ok);
         if (!content_ok) goto invalid;
         out->messages[i].name =
             dup_or(ember_json_str(name, NULL), NULL);
@@ -870,8 +1047,16 @@ void ember_chat_request_free(ember_chat_request *r) {
         free(r->messages[i].reasoning);
         free(r->messages[i].tool_call_id);  // B3
         free(r->messages[i].raw_tool_text); // B3
+        for (int j = 0; j < r->messages[i].n_parts; ++j)
+            free(r->messages[i].parts[j].text);
+        free(r->messages[i].parts);
         ember_tool_calls_free(&r->messages[i].calls);
     }
     free(r->messages);
+    for (int i = 0; i < r->n_images; ++i) {
+        free(r->images[i].media_type);
+        free(r->images[i].data);
+    }
+    free(r->images);
     memset(r, 0, sizeof(*r));
 }
