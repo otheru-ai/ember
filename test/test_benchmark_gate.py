@@ -133,6 +133,41 @@ class BenchmarkGateTest(unittest.TestCase):
             summaries = [item for item in loaded if item.get("kind") == "summary"]
             self.assertEqual(summaries[-1]["hard_gate"], gate)
 
+    def test_workload_summary_preserves_prefill_rates(self) -> None:
+        on = [{"label": "image_short", "decode_tps": 20.0,
+               "prefill_tps": 31.25}]
+        off = [{"label": "image_short", "decode_tps": 18.0,
+                "prefill_tps": 30.75}]
+        row = assemble.summarise_workloads(on, off)["image_short"]
+        self.assertEqual(row["prefill_tok_s"], 31.2)
+        self.assertEqual(row["autoregressive_prefill_tok_s"], 30.8)
+
+    def test_workload_baseline_rejects_partial_or_error_rows(self) -> None:
+        on = [{"label": f"w{i}", "decode_tps": 20.0} for i in range(12)]
+        off = [{"label": f"w{i}", "decode_tps": 18.0} for i in range(12)]
+        assemble.validate_workload_rows(on, off, 12)
+        with self.assertRaisesRegex(SystemExit, "requires 12 unique rows"):
+            assemble.validate_workload_rows(on[:-1], off, 12)
+        broken = [dict(row) for row in on]
+        broken[3] = {"label": "w3", "error": "HTTP Error 422"}
+        with self.assertRaisesRegex(SystemExit, "unusable rows"):
+            assemble.validate_workload_rows(broken, off, 12)
+        with self.assertRaisesRegex(SystemExit, "requires 12 unique rows"):
+            assemble.validate_workload_rows([], [], 12)
+
+    def test_model_provenance_binds_mmproj_when_present(self) -> None:
+        model = assemble.model_provenance({
+            "TARGET": "/srv/models/vision.gguf", "TARGET_SHA": "target-sha",
+            "DRAFT": "/srv/models/draft.gguf", "DRAFT_SHA": "draft-sha",
+            "MMPROJ": "/srv/models/mmproj.gguf", "MMPROJ_SHA": "mmproj-sha",
+        })
+        self.assertEqual(model["target"], "vision.gguf")
+        self.assertEqual(model["target_sha256"], "target-sha")
+        self.assertEqual(model["mmproj"], "mmproj.gguf")
+        self.assertEqual(model["mmproj_sha256"], "mmproj-sha")
+        with self.assertRaisesRegex(SystemExit, "SHA-256 is missing"):
+            assemble.model_provenance({"MMPROJ": "/srv/models/mmproj.gguf"})
+
     def test_qwen_shape_calibration_uses_prompt_tokens(self) -> None:
         class FakeSuite:
             def __init__(self) -> None:

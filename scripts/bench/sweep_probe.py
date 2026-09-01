@@ -11,11 +11,12 @@ sequence, ~0.98 acceptance) so the curve shows CONTEXT scaling and not drifting
 draft quality -- the confound that invalidated an earlier sweep. Acceptance is
 recorded at every point so the reader can check that, not take it on faith.
 """
-import json, sys, urllib.error, urllib.request
+import json, os, sys, urllib.error, urllib.request
 
 ENDPOINT, CONFIG = sys.argv[1], sys.argv[2]
 TARGETS = [int(x) for x in sys.argv[3].split(",")]
 OUT = sys.argv[4]
+MODEL = os.environ.get("EMBER_BENCH_MODEL", "deepseek-v4-flash")
 TOK_PER_WORD = 2.52
 TASK = ("Write a very long comma-separated sequence of consecutive positive "
         "integers beginning at 1. Emit only the sequence and continue until the "
@@ -30,7 +31,7 @@ def body(target):
 
 out = open(OUT, "a")
 for t in TARGETS:
-    payload = {"model": "deepseek-v4-flash",
+    payload = {"model": MODEL,
                "messages": [{"role": "user", "content": body(t)}],
                "reasoning_effort": "none", "temperature": 0,
                "max_tokens": 256, "stream": False}

@@ -104,12 +104,53 @@ def summarise_workloads(on_rows, off_rows):
         if not r.get("decode_tps"):
             continue
         base = off.get(r["label"], {}).get("decode_tps")
-        out[r["label"]] = {
+        entry = {
             "tok_s": round(r["decode_tps"], 2),
             "autoregressive_tok_s": round(base, 2) if base else None,
             "speedup": round(r["decode_tps"] / base, 3) if base else None,
         }
+        if r.get("prefill_tps") is not None:
+            entry["prefill_tok_s"] = round(r["prefill_tps"], 1)
+        off_prefill = off.get(r["label"], {}).get("prefill_tps")
+        if off_prefill is not None:
+            entry["autoregressive_prefill_tok_s"] = round(off_prefill, 1)
+        out[r["label"]] = entry
     return out
+
+
+def validate_workload_rows(on_rows, off_rows, expected_count):
+    """A partial/error JSONL must never become a release baseline."""
+    if not expected_count:
+        return
+    expected_count = int(expected_count)
+    for name, rows in (("spec-on", on_rows), ("spec-off", off_rows)):
+        labels = [row.get("label") for row in rows]
+        if len(rows) != expected_count or len(set(labels)) != expected_count:
+            raise SystemExit(
+                f"{name} workload sweep requires {expected_count} unique rows, "
+                f"got {len(rows)} rows / {len(set(labels))} labels")
+        bad = [row for row in rows if row.get("error") or not row.get("decode_tps")]
+        if bad:
+            raise SystemExit(
+                f"{name} workload sweep has {len(bad)} unusable rows; "
+                f"first={bad[0].get('label')}: {bad[0].get('error', 'missing decode_tps')}")
+    if {row["label"] for row in on_rows} != {row["label"] for row in off_rows}:
+        raise SystemExit("spec-on and spec-off workload identities differ")
+
+
+def model_provenance(env):
+    model = {
+        "target": Path(env.get("TARGET", "")).name,
+        "target_sha256": env.get("TARGET_SHA"),
+        "drafter": Path(env.get("DRAFT", "")).name,
+        "drafter_sha256": env.get("DRAFT_SHA"),
+    }
+    if env.get("MMPROJ"):
+        if not env.get("MMPROJ_SHA"):
+            raise SystemExit("mmproj path is present but its SHA-256 is missing")
+        model["mmproj"] = Path(env["MMPROJ"]).name
+        model["mmproj_sha256"] = env.get("MMPROJ_SHA")
+    return model
 
 
 def summarise_context(rows):
@@ -162,6 +203,8 @@ def main():
         summary["hard_gate"] = benchmark_summaries[-1]["hard_gate"]
         summary["prefill_calibration"] = benchmark_summaries[-1].get(
             "prefill_calibration")
+    if env.get("EXPECTED_WORKLOADS"):
+        validate_workload_rows(wl_on, wl_off, env["EXPECTED_WORKLOADS"])
     if wl_on:
         summary["by_workload"] = summarise_workloads(wl_on, wl_off)
         # A file of connection errors still parses as JSONL and used to assemble
@@ -175,24 +218,27 @@ def main():
     if ctx:
         summary["by_context_depth"] = summarise_context(ctx)
 
+    vision_arg = "--vision-mmproj <mmproj> " if env.get("MMPROJ") else ""
+    prefill_arg = (f"--ds4-prefill {env['DS4_PREFILL']} "
+                   if env.get("DS4_PREFILL") else "")
     environment = {
         "measured_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
         "host": host_facts(bundle),
-        "model": {
-            "target": Path(env.get("TARGET", "")).name,
-            "target_sha256": env.get("TARGET_SHA"),
-            "drafter": Path(env.get("DRAFT", "")).name,
-            "drafter_sha256": env.get("DRAFT_SHA"),
-        },
+        "model": model_provenance(env),
         "runtime": {
             "engine": "ember (ember-dflash)",
             "release": env.get("RELEASE"),
             "container_image": env.get("IMAGE"),
             "binary": env.get("BIN"),
+            "server_ld_library_path": env.get("SERVER_LD_LIBRARY_PATH") or None,
         },
-        "server_args": (f"ember-dflash -m <target> --host 127.0.0.1 "
-                        f"--port {env.get('PORT')} --max-ctx 65536 "
-                        f"--ds4-expert-top-k 4 --default-temperature 0.6"),
+        "server_args": (
+            f"ember-dflash -m <target> "
+            f"{vision_arg}"
+            f"--model-name {env.get('MODEL_NAME')} --host 127.0.0.1 "
+            f"--port {env.get('PORT')} --max-ctx 65536 "
+            f"{prefill_arg}"
+            f"--ds4-expert-top-k {env.get('EXPERT_TOP_K')} --default-temperature 0.6"),
         "notes": [
             "Per-token instrumentation DISABLED (DFLASH_DS4_TIMING=0, EMBER_GTT_TRACE=0).",
             "Single request at a time; no concurrency.",
@@ -219,8 +265,8 @@ def main():
     # to advertise a chart and a sweep it had not produced.
     catalogue = [
         ("raw-results.jsonl", "Every throughput request, unaggregated"),
-        ("workloads-spec-on.jsonl", "Decode across ten generation tasks, speculation on"),
-        ("workloads-spec-off.jsonl", "The same ten tasks, autoregressive baseline"),
+        ("workloads-spec-on.jsonl", "Decode across every bound generation task, speculation on"),
+        ("workloads-spec-off.jsonl", "The same tasks, autoregressive baseline"),
         ("context-sweep.jsonl", "Prefill and decode against prompt depth, both configurations"),
         ("ember-context-scaling.svg", "Chart generated from `context-sweep.jsonl`"),
         ("summary.json", "Aggregates: medians, ranges, speedups"),

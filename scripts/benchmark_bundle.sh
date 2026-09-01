@@ -35,6 +35,11 @@ BIN=${BIN:-/ember/build-rocm/ember-dflash}
 REPO_MOUNT=${REPO_MOUNT-/root/ember}
 TARGET=${TARGET:-$MODEL_DIR/DeepSeek-V4-Flash-0731-ablit1042-v2.gguf}
 DRAFT=${DRAFT:-$MODEL_DIR/DeepSeek-V4-Flash-0731-ablit1042-DSpark-draft.gguf}
+MMPROJ=${MMPROJ:-}
+MODEL_NAME=${EMBER_BENCH_MODEL:-deepseek-v4-flash}
+EXPERT_TOP_K=${EXPERT_TOP_K:-4}
+DS4_PREFILL=${DS4_PREFILL:-}
+SERVER_LD_LIBRARY_PATH=${SERVER_LD_LIBRARY_PATH:-}
 PORT=${PORT:-18083}
 SKIP_CTX=0
 EXCLUSIVE=${EXCLUSIVE:-1}
@@ -99,6 +104,21 @@ fi
 [ -n "$TARGET_SHA" ] && [ -n "$DRAFT_SHA" ] || { echo "  model digests unavailable" >&2; exit 1; }
 echo "  target $TARGET_SHA"
 echo "  draft  $DRAFT_SHA"
+if [ -n "$MMPROJ" ]; then
+  if [ -z "${MMPROJ_SHA:-}" ]; then
+    MMPROJ_SHA=$(sha256sum "$MMPROJ" | cut -d' ' -f1)
+  fi
+  [ -n "$MMPROJ_SHA" ] || { echo "  mmproj digest unavailable" >&2; exit 1; }
+  echo "  mmproj $MMPROJ_SHA"
+fi
+
+COMMON_ENV=""
+[ -n "$SERVER_LD_LIBRARY_PATH" ] \
+  && COMMON_ENV="-e LD_LIBRARY_PATH=$SERVER_LD_LIBRARY_PATH"
+VISION_ARGS=""
+[ -n "$MMPROJ" ] && VISION_ARGS="--vision-mmproj $MMPROJ"
+PREFILL_ARGS=""
+[ -n "$DS4_PREFILL" ] && PREFILL_ARGS="--ds4-prefill $DS4_PREFILL"
 
 SPEC_ENV="-e DFLASH_DS4_SPEC=1 -e DFLASH_DS4_DRAFT=$DRAFT -e DFLASH_DS4_Q5_VERIFY=1
  -e DFLASH_DS4_SPEC_Q=6 -e DFLASH_DS4_FUSED_VERIFY=1 -e DFLASH_DS4_BATCH_VERIFY=1
@@ -123,10 +143,11 @@ start_server() { # $1 = extra env, $2 = max_ctx
   [ -n "$REPO_MOUNT" ] && mount="-v $REPO_MOUNT:/ember"
   # shellcheck disable=SC2086
   docker run -d --name "$NAME" --network host $DOCKER_RUN \
-    $mount -v "$MODEL_DIR:$MODEL_DIR" $1 \
+    $mount -v "$MODEL_DIR:$MODEL_DIR" $COMMON_ENV $1 \
     --entrypoint "$BIN" "$IMAGE" \
-    -m "$TARGET" $HOST_ARG --port "$PORT" --max-ctx "$2" \
-    --ds4-expert-top-k 4 --default-temperature 0.6 >/dev/null
+    -m "$TARGET" $VISION_ARGS --model-name "$MODEL_NAME" \
+    $HOST_ARG --port "$PORT" --max-ctx "$2" $PREFILL_ARGS \
+    --ds4-expert-top-k "$EXPERT_TOP_K" --default-temperature 0.6 >/dev/null
   for _ in $(seq 1 400); do
     curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && return 0
     # Keep the reason before the next docker rm -f discards it. Reporting only
@@ -152,7 +173,7 @@ EP="http://127.0.0.1:$PORT/v1/chat/completions"
 echo "=== 1/3 throughput groups (prefill + decode) ==="
 start_server "$SPEC_ENV" 65536 || { echo "  server failed to start"; exit 1; }
 python3 "$HERE/scripts/bench/benchmark.py" --endpoint "$EP" \
-  --output "$BUNDLE/raw-results.jsonl" >/dev/null 2>&1
+  --model "$MODEL_NAME" --output "$BUNDLE/raw-results.jsonl" >/dev/null 2>&1
 echo "  $(wc -l < "$BUNDLE/raw-results.jsonl") rows"
 
 echo "=== 2/3 decode by workload (speculation on) ==="
@@ -203,6 +224,10 @@ echo "=== assembling bundle ==="
 cp "$HERE/scripts/bench/benchmark.py" "$HERE/scripts/bench/accept_sweep.py" \
    "$HERE/scripts/bench/sweep_probe.py" "$BUNDLE/" 2>/dev/null
 TARGET_SHA="$TARGET_SHA" DRAFT_SHA="$DRAFT_SHA" RELEASE="$RELEASE" \
+MMPROJ_SHA="${MMPROJ_SHA:-}" MMPROJ="$MMPROJ" \
+MODEL_NAME="$MODEL_NAME" EXPERT_TOP_K="$EXPERT_TOP_K" DS4_PREFILL="$DS4_PREFILL" \
+SERVER_LD_LIBRARY_PATH="$SERVER_LD_LIBRARY_PATH" \
+EXPECTED_WORKLOADS="$([ "${EMBER_BENCH_VISION:-}" = 1 ] && echo 12 || echo 10)" \
 IMAGE="$IMAGE" BIN="$BIN" TARGET="$TARGET" DRAFT="$DRAFT" PORT="$PORT" \
   python3 "$HERE/scripts/bench/assemble_bundle.py" "$BUNDLE"
 
