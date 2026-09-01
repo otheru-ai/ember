@@ -1,0 +1,66 @@
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "../src/common/json.h"
+
+static int g_pass = 0, g_fail = 0;
+#define CHECK(cond, msg)                                                    \
+    do { if (cond) g_pass++; else { g_fail++; printf("  FAIL: %s\n", msg); } } while (0)
+
+static void test_chat_request(void) {
+    const char *body =
+        "{\"model\":\"deepseek-v4-flash\",\"stream\":true,\"max_tokens\":4096,"
+        "\"temperature\":0,\"reasoning_effort\":\"high\","
+        "\"messages\":[{\"role\":\"system\",\"content\":\"You are helpful.\"},"
+        "{\"role\":\"user\",\"content\":\"hi \\ud83d\\udc4b\"}],"
+        "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_time\"}}]}";
+    ember_json *v = ember_json_parse(body);
+    CHECK(v != NULL, "parse chat request");
+    if (!v) return;
+    CHECK(strcmp(ember_json_str(ember_json_get(v, "model"), "") ,
+                 "deepseek-v4-flash") == 0, "model");
+    CHECK(ember_json_bool(ember_json_get(v, "stream"), false) == true, "stream");
+    CHECK(ember_json_num(ember_json_get(v, "max_tokens"), 0) == 4096, "max_tokens");
+    CHECK(ember_json_num(ember_json_get(v, "temperature"), -1) == 0, "temperature 0");
+
+    const ember_json *msgs = ember_json_get(v, "messages");
+    CHECK(ember_json_len(msgs) == 2, "two messages");
+    const ember_json *u = ember_json_at(msgs, 1);
+    CHECK(strcmp(ember_json_str(ember_json_get(u, "role"), ""), "user") == 0, "user role");
+    // 👋 surrogate pair → 👋 (F0 9F 91 8B)
+    CHECK(strcmp(ember_json_str(ember_json_get(u, "content"), ""),
+                 "hi \xf0\x9f\x91\x8b") == 0, "surrogate pair → emoji utf-8");
+
+    const ember_json *tools = ember_json_get(v, "tools");
+    CHECK(ember_json_len(tools) == 1, "one tool");
+    const ember_json *fn = ember_json_get(ember_json_at(tools, 0), "function");
+    CHECK(strcmp(ember_json_str(ember_json_get(fn, "name"), ""), "get_time") == 0,
+          "nested tool function name");
+    ember_json_free(v);
+}
+
+static void test_edge_cases(void) {
+    ember_json *e = ember_json_parse("{}");
+    CHECK(e && e->type == EMBER_JSON_OBJECT && ember_json_len(e) == 0, "empty object");
+    ember_json_free(e);
+
+    ember_json *a = ember_json_parse("[1, 2.5, -3, true, null, \"x\"]");
+    CHECK(a && ember_json_len(a) == 6, "mixed array");
+    CHECK(a && ember_json_num(ember_json_at(a, 1), 0) == 2.5, "float element");
+    CHECK(a && ember_json_num(ember_json_at(a, 2), 0) == -3, "negative element");
+    ember_json_free(a);
+
+    CHECK(ember_json_parse("{bad}") == NULL, "syntax error → NULL");
+    CHECK(ember_json_parse("{\"a\":}") == NULL, "missing value → NULL");
+    CHECK(ember_json_parse("[1,2,") == NULL, "unterminated array → NULL");
+}
+
+int main(void) {
+    printf("ember json tests\n");
+    test_chat_request();
+    test_edge_cases();
+    printf("──────────────────────────────\n");
+    printf("  %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail == 0 ? 0 : 1;
+}
