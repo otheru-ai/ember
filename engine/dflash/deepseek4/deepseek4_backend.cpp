@@ -1056,10 +1056,22 @@ bool DeepSeek4Backend::encode_vision_image(
 
     dflash::Deepseek4VisionTowerCheckpoints checkpoints;
     dflash::Deepseek4PreparedImage prepared;
-    if (!dflash::deepseek4_run_vision_tower(
+    const bool timing = env_flag_enabled("DFLASH_DS4_TIMING");
+    const Clock::time_point tower_start = Clock::now();
+    const bool tower_ok = dflash::deepseek4_run_vision_tower(
             *vision_tower_, patches, plan.n_vit_h, plan.n_vit_w,
             w_.n_vocab, prompt_offset, checkpoints,
-            nullptr, &prepared, error)) {
+            nullptr, &prepared, error);
+    const uint64_t tower_us = elapsed_us(tower_start, Clock::now());
+    if (timing) {
+        std::fprintf(stderr,
+                     "[deepseek4-vision] tower encode: time_us=%" PRIu64
+                     " vit=%dx%d llm=%dx%d ok=%s\n",
+                     tower_us, plan.n_vit_h, plan.n_vit_w,
+                     plan.n_llm_h, plan.n_llm_w,
+                     tower_ok ? "yes" : "no");
+    }
+    if (!tower_ok) {
         return false;
     }
     if (checkpoints.n_llm_h != plan.n_llm_h ||
