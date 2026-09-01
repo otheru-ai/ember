@@ -1,5 +1,6 @@
 #include "qwen4exp_backend.h"
 
+#include "../common/activation_dump.h"
 #include "qwen4exp_activation_dump.h"
 #include "qwen4exp_frontier.h"
 #include "qwen4exp_vision.h"
@@ -559,9 +560,11 @@ GenerateResult Qwen4ExpBackend::run(const GenerateRequest & request,
                 weights_, state_, request.prompt[static_cast<size_t>(i)],
                 position, logits_, capture, error);
             if (stepped) {
-                Qwen4ExpActivationDumpResult dump_result;
-                stepped = qwen4exp_append_activation_dump(
-                    activation_dump_path_, capture, dump_result, error);
+                dflash::common::ActivationDumpResult dump_result;
+                stepped = dflash::common::append_activation_dump(
+                    activation_dump_path_, capture,
+                    kQwen4ExpActivationFloats, "Qwen4Exp",
+                    dump_result, error);
                 if (stepped) {
                     std::fprintf(stderr,
                                  "[qwen4exp] activation dump record=%llu "

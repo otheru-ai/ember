@@ -1,6 +1,8 @@
 // DeepSeek4Backend implementation — AR-only decode, chunked prefill.
 
 #include "deepseek4_backend.h"
+
+#include "../common/activation_dump.h"
 #include "deepseek4_internal.h"
 #include "common/errors.h"
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
@@ -170,6 +172,16 @@ static void configure_gfx1151_dspark_mmvq_default(int gpu) {
     // exact mismatch that cost ~1 tok/s before it was diagnosed.
     if (env_flag_enabled("DFLASH_DS4_Q5_VERIFY")) {
         ncols = DS4_Q5_VERIFY_TOKENS;
+    }
+    const char * act_dump = std::getenv("DFLASH_DS4_ACT_DUMP");
+    if (act_dump && act_dump[0]) {
+        activation_dump_path_ = act_dump;
+        if (activation_dump_path_.front() != '/' ||
+            activation_dump_path_.back() == '/') {
+            set_last_error(
+                "DFLASH_DS4_ACT_DUMP must be an absolute output file path");
+            return false;
+        }
     }
     if (const char * q = std::getenv("DFLASH_DS4_SPEC_Q")) {
         const int v = std::atoi(q);
@@ -1626,13 +1638,28 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         const int step_chunk = moe_hybrid_
             ? 1
             : step_exact ? exact_chunk : batched_chunk;
-        const int proposed = capture_exact
+        // The activation dump reads the residual at the LAST prompt token, so
+        // it needs what DSpark's capture needs: the preceding chunk split at
+        // the boundary, and the capture step itself a single exact token.
+        // Reusing that machinery keeps one chunking rule instead of two.
+        const int diag_capture_from =
+            diagnostic_capture_layer_ids ? n_total - 1 : -1;
+        const bool diag_capture_exact =
+            diag_capture_from >= 0 && i >= diag_capture_from;
+        const int proposed = (capture_exact || diag_capture_exact)
             ? 1
             : std::min(step_chunk, n_total - i);
+        // Split at whichever boundary comes first; a capture_from at or behind
+        // the cursor is inert in clamp_prefill_chunk and must not win the min.
+        int clamp_capture_from = capture_spec_features ? spec_capture_from : -1;
+        if (diag_capture_from > i &&
+            (clamp_capture_from <= i || diag_capture_from < clamp_capture_from)) {
+            clamp_capture_from = diag_capture_from;
+        }
         int n_tok = clamp_prefill_chunk(
             proposed, i, pos,
             snap_slot >= 0 ? snap_pos : -1,
-            capture_spec_features ? spec_capture_from : -1);
+            clamp_capture_from);
         if (!local_vision.empty()) {
             std::string vision_error;
             n_tok = dflash::deepseek4_image_aware_prefill_chunk(
@@ -2291,9 +2318,23 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = req.vision.empty() &&
+    // Activation dump: one residual record per prompt, for refusal-direction
+    // extraction. It shares the graph's single capture slot with DSpark, so it
+    // takes the request off speculation and onto the exact prefill path. That
+    // changes timing, which is why it is env-gated and off by default -- never
+    // enable it on a run whose numbers are being published.
+    std::vector<int> act_capture_ids;
+    std::vector<float> act_capture;
+    const bool act_dump =
+        !activation_dump_path_.empty() && !req.prompt.empty();
+    if (act_dump) {
+        act_capture_ids.resize((size_t) w_.n_layer);
+        for (int l = 0; l < w_.n_layer; ++l) act_capture_ids[(size_t) l] = l;
+    }
+    const bool prepare_spec = req.vision.empty() && !act_dump &&
         eligible_without_gate && profitability_allowed;
-    describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
+    describe_prefill(result, cfg_.prefill_mode,
+                     req.force_exact_prefill || act_dump,
                      prepare_spec, req.force_ar_decode,
                      (int)req.prompt.size());
 
@@ -2301,11 +2342,35 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     int committed = do_prefill(req.prompt, out_io, /*kv_offset=*/0,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill,
-                               &req.vision);
+                               req.force_exact_prefill || act_dump,
+                               &req.vision,
+                               /*max_dispatched_chunk=*/nullptr,
+                               act_dump ? &act_capture_ids : nullptr,
+                               act_dump ? &act_capture : nullptr);
     if (committed < 0) {
         result.fail(GenerateErrorCode::PrefillFailed);
         return result;
+    }
+    if (act_dump) {
+        // Fail the request rather than let a short or missing record land in a
+        // file an extractor will later read as evidence.
+        dflash::common::ActivationDumpResult dump_result;
+        std::string dump_error;
+        if (!dflash::common::append_activation_dump(
+                activation_dump_path_, act_capture,
+                act_capture_ids.size() * (size_t) w_.n_embd, "DeepSeek4",
+                dump_result, dump_error)) {
+            result.fail(GenerateErrorCode::PrefillFailed,
+                        "activation dump failed: " + dump_error);
+            return result;
+        }
+        std::fprintf(stderr,
+                     "[deepseek4] activation dump record=%llu offset=%llu "
+                     "layers=%zu width=%d path=%s\n",
+                     (unsigned long long) dump_result.ordinal,
+                     (unsigned long long) dump_result.byte_offset,
+                     act_capture_ids.size(), w_.n_embd,
+                     activation_dump_path_.c_str());
     }
     maybe_log_prefill_fingerprint(last_logits_, committed);
     result.prefill_s = elapsed_s(t0);

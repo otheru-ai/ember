@@ -131,7 +131,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/qwen4exp/qwen4exp_mtp.cpp
   ${DFLASH}/qwen4exp/qwen4exp_mtp_runtime.cpp
   ${DFLASH}/qwen4exp/qwen4exp_mtp_loader.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_activation_dump.cpp
+  ${DFLASH}/common/activation_dump.cpp
   ${DFLASH}/qwen4exp/qwen4exp_backend.cpp
   ${DFLASH}/qwen4exp/qwen4exp_vision.cpp
   ${DFLASH}/qwen4exp/qwen4exp_vision_provider.cpp

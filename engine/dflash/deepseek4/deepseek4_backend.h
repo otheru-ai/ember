@@ -179,6 +179,9 @@ private:
                                    int snap_pos,
                                    int capture_from);
 
+    // Absolute path set by DFLASH_DS4_ACT_DUMP; empty disables the dump.
+    std::string activation_dump_path_;
+
     int do_prefill(const std::vector<int32_t> & tokens, const DaemonIO & io,
                    int kv_offset = 0,
                    int snap_pos = -1, int snap_slot = -1,

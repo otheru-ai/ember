@@ -1,4 +1,4 @@
-#include "qwen4exp_activation_dump.h"
+#include "activation_dump.h"
 
 #include <cerrno>
 #include <cmath>
@@ -14,8 +14,6 @@
 
 namespace dflash::common {
 namespace {
-
-constexpr size_t kRecordBytes = kQwen4ExpActivationFloats * sizeof(float);
 
 class FileDescriptor {
 public:
@@ -83,26 +81,35 @@ std::string parent_directory(const std::string & path) {
 
 } // namespace
 
-bool qwen4exp_append_activation_dump(
+bool append_activation_dump(
     const std::string & path, const std::vector<float> & activations,
-    Qwen4ExpActivationDumpResult & result, std::string & error) {
+    size_t expected_floats, const char * model_label,
+    ActivationDumpResult & result, std::string & error) {
     result = {};
     error.clear();
+    const std::string who = model_label ? model_label : "activation";
+    if (expected_floats == 0) {
+        error = who + " activation record size must be non-zero";
+        return false;
+    }
+    const size_t kRecordBytes = expected_floats * sizeof(float);
     if (path.empty() || path.front() != '/' || path.back() == '/') {
-        error = "Qwen4Exp activation dump path must be an absolute file path";
+        error = who + " activation dump path must be an absolute file path";
         return false;
     }
     if (!little_endian_f32_host()) {
-        error = "Qwen4Exp activation dumps require little-endian IEEE-754 F32";
+        error = who + " activation dumps require little-endian IEEE-754 F32";
         return false;
     }
-    if (activations.size() != kQwen4ExpActivationFloats) {
-        error = "Qwen4Exp activation record must contain exactly 48x2560 floats";
+    if (activations.size() != expected_floats) {
+        error = who + " activation record must contain exactly " +
+                std::to_string(expected_floats) + " floats, got " +
+                std::to_string(activations.size());
         return false;
     }
     for (float value : activations) {
         if (!std::isfinite(value)) {
-            error = "Qwen4Exp activation record contains a non-finite value";
+            error = who + " activation record contains a non-finite value";
             return false;
         }
     }
@@ -133,17 +140,22 @@ bool qwen4exp_append_activation_dump(
             return false;
         }
         if (!S_ISREG(status.st_mode) || status.st_size < 0) {
-            error = "existing Qwen4Exp activation dump is not a regular file";
+            error = who + " existing activation dump is not a regular file";
             return false;
         }
         existing_bytes = static_cast<uint64_t>(status.st_size);
         if (existing_bytes % kRecordBytes != 0) {
-            error = "existing Qwen4Exp activation dump ends in a partial record";
+            // Either a torn write, or a dump written with a DIFFERENT record
+            // size. The format is headerless, so those are indistinguishable
+            // and both must refuse rather than append into a file whose records
+            // an extractor would then mis-slice.
+            error = who + " existing activation dump is not a whole number of " +
+                    std::to_string(kRecordBytes) + "-byte records";
             return false;
         }
     }
     if (existing_bytes > std::numeric_limits<uint64_t>::max() - kRecordBytes) {
-        error = "Qwen4Exp activation dump size overflows uint64";
+        error = who + " activation dump size overflows uint64";
         return false;
     }
 
