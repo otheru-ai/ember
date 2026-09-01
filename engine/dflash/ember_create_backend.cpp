@@ -25,6 +25,12 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
     }
 
     if (architecture == ModelArchitecture::QWEN4_EXP) {
+        if (args.vision_mmproj_path && args.vision_mmproj_path[0]) {
+            set_last_error("--vision-mmproj is valid only for DeepSeek4 native vision");
+            std::fprintf(stderr, "[ember] backend selection failed: %s\n",
+                         last_error());
+            return nullptr;
+        }
         Qwen4ExpBackendConfig config;
         config.model_path = args.model_path;
         config.device = args.device;
@@ -50,6 +56,8 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
 
     DeepSeek4BackendConfig cfg;
     cfg.model_path   = args.model_path;
+    if (args.vision_mmproj_path)
+        cfg.vision_mmproj_path = args.vision_mmproj_path;
     cfg.device       = args.device;
     cfg.max_ctx      = args.device.max_ctx;
     cfg.chunk        = args.chunk;

@@ -26,9 +26,11 @@ def main() -> int:
     base = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
     env["EMBER_STUB_REPLY"] = "Hello from Ember."
+    env["EMBER_FORCE_EXACT_PREFILL"] = "1"
     proc = subprocess.Popen(
         [sys.argv[1], "-m", "stub", "--port", str(port),
-         "--ds4-prefill", "exact"],
+         "--ds4-prefill", "exact", "--vision-mmproj",
+         "/operator/owned/mmproj.gguf"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -157,10 +159,9 @@ def main() -> int:
         require_events(stream, '"role":"assistant"', '"content":"H"',
                        '"usage":{', "data: [DONE]")
 
-        # Image blocks are preserved by request normalization, but this build
-        # has no vision encoder/embedding splice. It must fail closed instead
-        # of answering from the surrounding text after silently dropping the
-        # image (the historical behavior).
+        # Exact-q1 is an operator-only correctness control and necessarily
+        # splits a learned image block. It must fail before the stub encoder,
+        # while the explicit operator mmproj option remains parser-valid.
         image_request = {
             "model": "deepseek-v4-flash",
             "messages": [{
@@ -176,7 +177,8 @@ def main() -> int:
         }
         code, body = request(base + "/v1/chat/completions", image_request)
         assert code == 400, body
-        assert body["error"]["code"] == "vision_not_available", body
+        assert body["error"]["code"] == \
+            "vision_exact_prefill_unsupported", body
 
         # Reasonix v1.31.3 and DeepSeek Harness's llm-deepseek 0.1.1-rc.2
         # both use the official DeepSeek Chat Completions thinking object.

@@ -16,11 +16,14 @@
 #include "deepseek4_internal.h"
 #include "deepseek4_dspark.h"
 #include "deepseek4_vision_contract.h"
+#include "deepseek4_vision_native_contract.h"
+#include "deepseek4_vision_tower.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
 
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -56,6 +59,9 @@ public:
     std::string_view vision_placeholder_text() const override {
         return dflash::DEEPSEEK4_IMAGE_PLACEHOLDER_UTF8;
     }
+    bool encode_vision_image(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        EncodedVisionImage & image, std::string & error) override;
     bool prepare_offline_vision_artifact(
         const std::string & artifact_path,
         const std::string & mmproj_path,
@@ -139,6 +145,12 @@ private:
     std::unique_ptr<XdnaDSparkDraftCompute> spec_xdna_draft_compute_;
     std::vector<ember_xdna_dspark_tensor_view_v1> spec_xdna_weight_views_;
     std::vector<float>             spec_feat_window_;
+
+    // The native tower is operator-configured and request-lazy. Guard both
+    // first load and execution so internal/direct callers cannot concurrently
+    // mutate the tower's single backend workspace.
+    std::mutex                              vision_tower_mu_;
+    std::unique_ptr<dflash::Deepseek4VisionTower> vision_tower_;
 
     bool load_spec_drafter();
     void release_spec_drafter();

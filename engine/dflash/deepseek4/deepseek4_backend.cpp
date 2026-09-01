@@ -1019,6 +1019,72 @@ void DeepSeek4Backend::release_spec_drafter() {
     spec_feat_window_.clear();
 }
 
+bool DeepSeek4Backend::encode_vision_image(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        EncodedVisionImage & image, std::string & error) {
+    image = {};
+    error.clear();
+    if (cfg_.vision_mmproj_path.empty()) {
+        error = "DeepSeek4 image input requires operator-configured --vision-mmproj";
+        return false;
+    }
+
+    dflash::Deepseek4VisionResizePlan plan;
+    std::vector<uint16_t> patches;
+    uint64_t source_digest = 0;
+    // Decode and validate request bytes before taking the tower lock or loading
+    // its ~900 MiB payload. Malformed media therefore cannot force residency.
+    if (!dflash::deepseek4_vision_preprocess_still_png(
+            encoded, encoded_size, prompt_offset,
+            plan, patches, source_digest, &error)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(vision_tower_mu_);
+    if (!vision_tower_) {
+        auto candidate = std::make_unique<dflash::Deepseek4VisionTower>();
+        std::string load_error;
+        if (!dflash::deepseek4_load_vision_tower(
+                cfg_.vision_mmproj_path, w_.n_embd, backend_,
+                *candidate, load_error)) {
+            error = "cannot load DeepSeek4 vision mmproj '" +
+                cfg_.vision_mmproj_path + "': " + load_error;
+            return false;
+        }
+        vision_tower_ = std::move(candidate);
+    }
+
+    dflash::Deepseek4VisionTowerCheckpoints checkpoints;
+    dflash::Deepseek4PreparedImage prepared;
+    if (!dflash::deepseek4_run_vision_tower(
+            *vision_tower_, patches, plan.n_vit_h, plan.n_vit_w,
+            w_.n_vocab, prompt_offset, checkpoints,
+            nullptr, &prepared, error)) {
+        return false;
+    }
+    if (checkpoints.n_llm_h != plan.n_llm_h ||
+        checkpoints.n_llm_w != plan.n_llm_w ||
+        prepared.block.token_ids.size() !=
+            static_cast<size_t>(plan.block_tokens) ||
+        w_.n_embd <= 0 ||
+        prepared.block.token_ids.size() >
+            SIZE_MAX / static_cast<size_t>(w_.n_embd) ||
+        prepared.embeddings.size() != prepared.block.token_ids.size() *
+            static_cast<size_t>(w_.n_embd)) {
+        error = "DeepSeek4 tower output differs from its preprocessing grid";
+        return false;
+    }
+
+    image.grid_t = 1;
+    image.grid_h = plan.n_llm_h;
+    image.grid_w = plan.n_llm_w;
+    image.embedding_width = w_.n_embd;
+    image.token_ids = std::move(prepared.block.token_ids);
+    image.embeddings = std::move(prepared.embeddings);
+    image.source_digest = source_digest;
+    return true;
+}
+
 bool DeepSeek4Backend::prepare_offline_vision_artifact(
         const std::string & artifact_path,
         const std::string & mmproj_path,
@@ -2187,6 +2253,12 @@ static void describe_prefill(GenerateResult &result,
 GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                                                 const DaemonIO & io) {
     GenerateResult result;
+    if (!req.vision.empty() && req.force_exact_prefill) {
+        result.fail(
+            GenerateErrorCode::PrefillFailed,
+            "vision_exact_prefill_unsupported: learned image blocks are indivisible");
+        return result;
+    }
     DaemonIO out_io = io.with_token_callback(req.on_token);
     auto t0 = Clock::now();
     sampler_ = req.sampler;
@@ -2253,7 +2325,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     ProgressCycleDetector spec_progress(
         req.budget_hook.natural_close_token_ids, req.prompt,
         req.tool_region_open_ids, req.tool_region_close_ids);
-    if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
+    if (req.vision.empty() &&
+        ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
                             profitability_allowed)) {
         if (last_logits_.empty()) {
@@ -3334,6 +3407,9 @@ ContinuousBatchMixedCompletion DeepSeek4Backend::execute_mixed(
 }
 
 void DeepSeek4Backend::shutdown() {
+    // The tower's device buffer belongs to backend_; release it before the
+    // backend handle and language weights it was validated against.
+    vision_tower_.reset();
     release_spec_drafter();
     free_resident_sessions();
     for (int i = 0; i < PREFIX_SLOTS; i++) {

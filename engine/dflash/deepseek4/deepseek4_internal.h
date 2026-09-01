@@ -347,6 +347,7 @@ struct DeepSeek4RawRingSpan {
 
 struct DeepSeek4BackendConfig {
     const char * model_path   = nullptr;
+    std::string  vision_mmproj_path;
     DevicePlacement device;
     int          chunk        = 512;   // prefill chunk size
     PrefillAttentionMode prefill_mode = PrefillAttentionMode::Exact;

@@ -19,6 +19,9 @@ namespace dflash::common {
 struct BackendArgs {
     // Required
     const char *    model_path   = nullptr;   // target .gguf
+    // Optional operator-owned DeepSeek native tower. It remains unopened until
+    // the first image request and is never sourced from request metadata.
+    const char *    vision_mmproj_path = nullptr;
 
     // The only supported device is local gfx1151 GPU 0.
     DevicePlacement device;

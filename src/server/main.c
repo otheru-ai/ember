@@ -153,6 +153,7 @@ typedef struct ember_server {
     int               n_natural_close_ids;
     double            default_temp;  // card value unless CLI-overridden
     bool              auto_compact;  // --auto-compact: ds4-style context compaction
+    int               batch_sessions; // image blocks require legacy nonresident prefill
     gen_worker        worker;     // persistent generation thread (see above)
 } ember_server;
 
@@ -2602,6 +2603,34 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     }
 
     if (req->has_images) {
+        // The learned block is one indivisible prefill unit and can exceed the
+        // resident scheduler's quantum. Reject before running the lazy tower;
+        // paying its GPU cost and failing admission afterwards is both wasteful
+        // and an ambiguous error boundary.
+        if (srv->batch_sessions > 1) {
+            respond_api_error(
+                fd, req->api, 400,
+                "image input is not supported with resident batching",
+                "invalid_request_error", "vision_resident_prefill_unsupported");
+            free(ids);
+            atomic_fetch_sub(&srv->busy, 1);
+            ember_backend_generation_release(be);
+            if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+            return;
+        }
+        // Exact-q1 prefill necessarily splits the learned block. Keep the
+        // reviewed image path on its indivisible ordinary prefill topology.
+        if (force_exact_prefill_enabled()) {
+            respond_api_error(
+                fd, req->api, 400,
+                "image input is not supported with exact-q1 prefill",
+                "invalid_request_error", "vision_exact_prefill_unsupported");
+            free(ids);
+            atomic_fetch_sub(&srv->busy, 1);
+            ember_backend_generation_release(be);
+            if (serialize) pthread_mutex_unlock(&srv->gen_lock);
+            return;
+        }
         char vision_error[512] = {0};
         if (!prepare_vision_prompt(be, req, &ids, &n_prompt,
                                    &vision_runs, &n_vision_runs,
@@ -2713,9 +2742,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // happened. Keep only that next decision on the target's autoregressive
     // path. This does not force q=1 exact prefill, and older tool messages no
     // longer constrain unrelated later user turns.
-    greq.force_ar_decode =
-        tool_result_forces_ar() &&
-        ember_chat_request_is_tool_result_continuation(req);
+    greq.force_ar_decode = req->has_images ||
+        (tool_result_forces_ar() &&
+         ember_chat_request_is_tool_result_continuation(req));
     greq.force_exact_prefill = force_exact_prefill_enabled();
     // Lucebox parity (server/src/server/http_server.cpp): each omitted sampler
     // parameter resolves independently from the model card. Explicit request
@@ -4248,6 +4277,7 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --port N                    listen port (default 8080)\n"
         "  --model-name ID             advertised model id\n"
         "  --model-card PATH           sampling/reasoning model card\n"
+        "  --vision-mmproj PATH        operator-owned DeepSeek native vision tower\n"
         "  --cors                      allow browser cross-origin requests\n"
         "  --auto-compact              ds4-style context compaction: at 85%% of\n"
         "                              context, rebuild history as system+summary+tail\n"
@@ -4787,6 +4817,7 @@ int main(int argc, char **argv) {
     const char *host = "127.0.0.1";
     const char *model_path = NULL, *model_name = "deepseek-v4-flash";
     const char *card_path = NULL, *kv_dir = NULL;
+    const char *vision_mmproj_path = NULL;
     long kv_cache_mb = 0;   // 0 = library default (131072 MB)
     // Seconds of quiet before cached compute graphs are released. Long enough
     // that an active agent (which pauses seconds-to-minutes between turns)
@@ -4870,6 +4901,10 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) card_path = v;
+        } else if (strcmp(opt, "--vision-mmproj") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v != NULL;
+            if (v) vision_mmproj_path = v;
         } else if (strcmp(opt, "--cors") == 0) {
             g_enable_cors = true;
         } else if (strcmp(opt, "--auto-compact") == 0) {
@@ -5092,6 +5127,7 @@ int main(int argc, char **argv) {
     cfg.batch_sessions = batch_sessions;
     cfg.ds4_prefill_mode = ds4_prefill_mode;
     cfg.qwen_yarn = qwen_yarn;
+    cfg.vision_mmproj_path = vision_mmproj_path;
     char *err = NULL;
     ember_backend *be = ember_backend_load(&cfg, &err);
     if (!be) {
@@ -5129,6 +5165,7 @@ int main(int argc, char **argv) {
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
     srv.no_progress_report = no_progress_report;
+    srv.batch_sessions = batch_sessions;
     srv.auto_answer_after_loop = auto_answer_after_loop;
     if (pthread_mutex_init(&srv.gen_lock, NULL) != 0) {
         fprintf(stderr, "[ember] failed to initialize generation lock\n");

@@ -41,6 +41,9 @@ typedef struct {
     int         batch_sessions; // resident continuous-batch slots (1 = legacy)
     ember_ds4_prefill_mode ds4_prefill_mode; // sparse default; exact for quality reference
     bool        qwen_yarn; // explicit static factor-4 1M Qwen recipe; off by default
+    // Operator-owned native DeepSeek vision tower. Text-only startup never
+    // opens this path; request bytes cannot select or override it.
+    const char *vision_mmproj_path;
 } ember_backend_config;
 
 // Load a model. Returns NULL on failure and sets *err (caller frees) if non-NULL.

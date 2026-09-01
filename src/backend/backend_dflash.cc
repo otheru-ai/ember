@@ -200,15 +200,27 @@ extern "C" bool ember_backend_vision_encode(
         if (error && error_cap) std::snprintf(error, error_cap, "%s", "invalid vision encode request");
         return false;
     }
-    dflash::common::EncodedVisionImage image;
-    std::string detail;
-    if (!b->be->encode_vision_image(
-            encoded, encoded_size, prompt_offset, image, detail)) {
+    try {
+        dflash::common::EncodedVisionImage image;
+        std::string detail;
+        if (!b->be->encode_vision_image(
+                encoded, encoded_size, prompt_offset, image, detail)) {
+            if (error && error_cap)
+                std::snprintf(error, error_cap, "%s", detail.c_str());
+            return false;
+        }
+        return copy_encoded_vision_image(image, out, error, error_cap);
+    } catch (const std::exception &ex) {
         if (error && error_cap)
-            std::snprintf(error, error_cap, "%s", detail.c_str());
+            std::snprintf(error, error_cap,
+                          "vision encode exception: %s", ex.what());
+        return false;
+    } catch (...) {
+        if (error && error_cap)
+            std::snprintf(error, error_cap, "%s",
+                          "unknown vision encode exception");
         return false;
     }
-    return copy_encoded_vision_image(image, out, error, error_cap);
 }
 
 extern "C" bool ember_backend_prepare_offline_vision_artifact(
@@ -587,6 +599,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
 
     BackendArgs args;
     args.model_path = cfg->model_path;
+    args.vision_mmproj_path = cfg->vision_mmproj_path;
     args.device.gpu = 0;
     args.device.max_ctx = b->n_ctx;  // KV cache context; default 8192 is too small
     args.chunk = 2048;
