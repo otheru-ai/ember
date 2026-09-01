@@ -44,6 +44,9 @@ typedef struct {
     // Operator-owned native DeepSeek vision tower. Text-only startup never
     // opens this path; request bytes cannot select or override it.
     const char *vision_mmproj_path;
+    // Diagnostic-only loader exception. The engine still admits exactly a
+    // 1-layer/1-hash-layer DeepSeek control and rejects every other truncation.
+    bool        allow_single_layer_control;
 } ember_backend_config;
 
 // Load a model. Returns NULL on failure and sets *err (caller frees) if non-NULL.

@@ -22,6 +22,23 @@ def main() -> int:
         print(f"usage: {sys.argv[0]} /path/to/ember-server", file=sys.stderr)
         return 2
 
+    missing_mmproj = subprocess.run(
+        [sys.argv[1], "-m", "stub", "--allow-single-layer-control"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        check=False,
+    )
+    assert missing_mmproj.returncode == 2
+    assert "requires --vision-mmproj" in missing_mmproj.stderr
+    resident = subprocess.run(
+        [sys.argv[1], "-m", "stub", "--allow-single-layer-control",
+         "--vision-mmproj", "/operator/owned/mmproj.gguf",
+         "--batch-sessions", "2"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        check=False,
+    )
+    assert resident.returncode == 2
+    assert "requires --batch-sessions 1" in resident.stderr
+
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     env = os.environ.copy()
@@ -30,7 +47,7 @@ def main() -> int:
     proc = subprocess.Popen(
         [sys.argv[1], "-m", "stub", "--port", str(port),
          "--ds4-prefill", "exact", "--vision-mmproj",
-         "/operator/owned/mmproj.gguf"],
+         "/operator/owned/mmproj.gguf", "--allow-single-layer-control"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,

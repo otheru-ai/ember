@@ -4278,6 +4278,8 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --model-name ID             advertised model id\n"
         "  --model-card PATH           sampling/reasoning model card\n"
         "  --vision-mmproj PATH        operator-owned DeepSeek native vision tower\n"
+        "  --allow-single-layer-control\n"
+        "                              diagnostic: admit exact 1/1 DeepSeek fixture\n"
         "  --cors                      allow browser cross-origin requests\n"
         "  --auto-compact              ds4-style context compaction: at 85%% of\n"
         "                              context, rebuild history as system+summary+tail\n"
@@ -4818,6 +4820,7 @@ int main(int argc, char **argv) {
     const char *model_path = NULL, *model_name = "deepseek-v4-flash";
     const char *card_path = NULL, *kv_dir = NULL;
     const char *vision_mmproj_path = NULL;
+    bool allow_single_layer_control = false;
     long kv_cache_mb = 0;   // 0 = library default (131072 MB)
     // Seconds of quiet before cached compute graphs are released. Long enough
     // that an active agent (which pauses seconds-to-minutes between turns)
@@ -4905,6 +4908,8 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) vision_mmproj_path = v;
+        } else if (strcmp(opt, "--allow-single-layer-control") == 0) {
+            allow_single_layer_control = true;
         } else if (strcmp(opt, "--cors") == 0) {
             g_enable_cors = true;
         } else if (strcmp(opt, "--auto-compact") == 0) {
@@ -5077,6 +5082,20 @@ int main(int argc, char **argv) {
         print_usage(stderr, argv[0]);
         return 2;
     }
+    if (allow_single_layer_control &&
+        (!vision_mmproj_path || !vision_mmproj_path[0])) {
+        fprintf(stderr,
+                "[ember] --allow-single-layer-control requires --vision-mmproj\n");
+        return 2;
+    }
+    if (allow_single_layer_control && batch_sessions != 1) {
+        fprintf(stderr,
+                "[ember] --allow-single-layer-control requires --batch-sessions 1\n");
+        return 2;
+    }
+    if (allow_single_layer_control)
+        fprintf(stderr,
+                "[ember] WARNING: exact 1/1 DeepSeek diagnostic fixture enabled\n");
     ember_prompt_profile prompt_profile = EMBER_PROMPT_DEEPSEEK_DSML;
     char *profile_err = NULL;
     // The GPU-free backend's documented model path is the literal "stub"; it
@@ -5128,6 +5147,7 @@ int main(int argc, char **argv) {
     cfg.ds4_prefill_mode = ds4_prefill_mode;
     cfg.qwen_yarn = qwen_yarn;
     cfg.vision_mmproj_path = vision_mmproj_path;
+    cfg.allow_single_layer_control = allow_single_layer_control;
     char *err = NULL;
     ember_backend *be = ember_backend_load(&cfg, &err);
     if (!be) {

@@ -25,6 +25,12 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
     }
 
     if (architecture == ModelArchitecture::QWEN4_EXP) {
+        if (args.allow_single_layer_control) {
+            set_last_error("--allow-single-layer-control is valid only for DeepSeek4 diagnostics");
+            std::fprintf(stderr, "[ember] backend selection failed: %s\n",
+                         last_error());
+            return nullptr;
+        }
         if (args.vision_mmproj_path && args.vision_mmproj_path[0]) {
             set_last_error("--vision-mmproj is valid only for DeepSeek4 native vision");
             std::fprintf(stderr, "[ember] backend selection failed: %s\n",
@@ -64,6 +70,7 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
     cfg.expert_top_k = args.ds4_expert_top_k;
     cfg.fused_decode = args.ds4_fused_decode;
     cfg.prefill_mode = args.ds4_prefill_mode;
+    cfg.allow_single_layer_control = args.allow_single_layer_control;
 
     auto backend = std::make_unique<DeepSeek4Backend>(cfg);
     if (!backend->init()) {

@@ -617,6 +617,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
     }
     args.ds4_prefill_mode_set = true;
     args.ds4_fused_decode = true;
+    args.allow_single_layer_control = cfg->allow_single_layer_control;
     args.qwen_yarn = cfg->qwen_yarn;
     args.ds4_expert_top_k = cfg->expert_top_k;  // 0 = model default
 
