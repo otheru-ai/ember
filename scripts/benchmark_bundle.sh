@@ -69,9 +69,9 @@ VIDEO_GID=$(getent group video | cut -d: -f3)
 RENDER_GID=$(getent group render | cut -d: -f3)
 [[ "$VIDEO_GID" =~ ^[0-9]+$ && "$RENDER_GID" =~ ^[0-9]+$ ]] \
   || { echo "video/render host GIDs unavailable" >&2; exit 1; }
-# The release image does not carry named video/render group entries. Docker
-# resolves symbolic --group-add values inside the image, so bind the host GIDs
-# explicitly after deriving them on the machine that owns /dev/kfd.
+# Docker resolves symbolic --group-add values inside the image: the dev image
+# has no matching entries, while the release image's entries use GIDs that do
+# not match this host. Bind the host GIDs that actually own /dev/kfd instead.
 DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add $VIDEO_GID --group-add $RENDER_GID"
 DOCKER_RUN="$DOCKER_GPU --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit core=-1"
 NAME="bench-bundle-$$"
