@@ -74,7 +74,8 @@ public:
     // for evidence is exactly the failure this design is meant to avoid.
     void abandon();
 
-    // Counts one calibration chunk (one request/graph sequence).
+    // Counts one calibration chunk. drain() does this itself when it read
+    // anything; this stays for the host test.
     void end_chunk();
 
     // Writes the legacy .dat the archived affine writer consumes. Atomic:

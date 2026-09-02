@@ -48,6 +48,7 @@ void ImatrixCollector::drain() {
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<float>   host_in;
     std::vector<int32_t> host_ids;
+    size_t drained = 0;
     for (const ImatrixSite & s : sites_) {
         const int64_t n_used   = s.ids->ne[0];
         const int64_t n_tokens = s.ids->ne[1];
@@ -66,7 +67,15 @@ void ImatrixCollector::drain() {
 
         accumulate(s.name, host_in.data(), host_ids.data(), s.n_in,
                    (int) n_used, (int) n_tokens, s.per_slot);
+        drained++;
     }
+    // A chunk is one graph pass that actually contributed rows -- NOT one
+    // prompt, since a long prompt is prefilled in several passes. The .dat's
+    // last_chunk field is provenance, not a divisor, so this is honest as long
+    // as it is written down. Counted here because the first control run
+    // collected all 129 entries and then refused to write: nothing ever called
+    // end_chunk(), so the empty-matrix guard saw 0 chunks and did its job.
+    if (drained) chunks_++;
     sites_.clear();
 }
 
