@@ -14,16 +14,16 @@ criteria or imply that a later gate has passed.
 | Gate | State | Reason |
 |---|---|---|
 | C1 text quality parity | not measured | The full-model text comparison is still open. |
-| C1 text throughput parity | not measured | No timing run is admissible before its correctness prerequisites. |
+| C1 text throughput parity | **measured, red, confounded** | Rows A and B (2026-09-01/02 section) ran the affine Vision artifact at `--ds4-expert-top-k 0` (model default, 6 routed experts) while the 2026.8.24 reference and production run top-k 4. The text-path deficit is the size the extra experts predict; a like-for-like row at top-k 4 does not exist yet. |
 | C1 text/vision routing inertness | not measured | Requires the full text-path gate on the release artifact. |
 | C1 one-layer BF16/quant discriminator | void | The identically quantized known-good 0731 control is similarly gross, so the one-layer method cannot localize a Vision-specific defect. |
-| C1 type-107 reader/writer compatibility | **artifact defect confirmed** | The Vision artifact writer emits a two-scale layout while every selected Ember CPU, MMQ, MMVQ, and conversion reader uses affine scale/offset. Actual coherent production 0731 was written affine and matches Ember; the earlier contrary control used a new fixture from the same bad writer. |
+| C1 type-107 reader/writer compatibility | **resolved on the current artifact** | The 2026-08-31 artifact was written two-scale under the affine type id and was incoherent. The current artifact `a2afd9f4…` (recipe `8765ebe`) is affine, passes gates 1–2, and answers image and text questions coherently (behavioural rows below). The format still has no discriminator; writer lineage is recorded by the pipeline, not by the file. |
 | C2 block-0 numeric differential | **green** | All 13 records pass the corrected compounding budgets at `770d2b2`. |
 | C2 tower-depth numeric differential | diagnostic only | The reference is not a numerical authority after block 0. |
 | C2 full-depth native execution | **green** | Four image requests and one text-only control completed on the 43-layer artifact at `5df70f6`. |
-| C2 synthetic behavioural differential | deliberately withheld | Policy v1 is preregistered, but the current artifact is already incoherent on text; scoring it would not diagnose vision. |
-| C2 natural-image behavioural differential | deliberately withheld | The digest-bound policy is retained for an artifact that could plausibly pass its text prerequisite. |
-| C2 image throughput | not measured | Correctness is not complete. |
+| C2 synthetic behavioural differential | **green, twice** | Policy v2 on the current artifact: PASS at ember `bbdaee1` (released-image build) and again at `f8efd7a` on the ROCm 10 image, identical per-class counts. Section 2026-09-01/02 below. |
+| C2 natural-image behavioural differential | **green at policy v4; v3 red retained** | 100 TextVQA items, arm A significant, arm B at chance, 0 cuts, 0 errors at v4 (cap 2048). The v3 run (cap 512) stays red on the record: one image-arm 422 and six `length` finishes. |
+| C2 image throughput | **measured** (rows A, B) | Image requests decode autoregressively by design (speculation is inert on image requests, speedup ≈ 1.0 in both rows). Numbers in the 2026-09-01/02 section. Not comparable to any text figure. |
 
 ## 2026-09-01 — native block-0 numeric gate
 
@@ -333,6 +333,149 @@ ROCmFPX artifact must use the affine writer matching Ember regardless of which
 matrix it consumes. No hardware run follows before the stock-types artifact is
 complete.
 
+## 2026-09-01/02 — behavioural gates on the affine artifact
+
+All numbers here are read from the retained results files, not from console
+summaries or coordination messages. The pipeline's own acceptance record is
+`otheru-quant-pipeline/docs/ACCEPTANCE.md`; where the two disagree, the results
+files named below win.
+
+### Identity
+
+- Artifact: `/srv/models/DeepSeek-V4-Flash-Vision-Exp-affine-strix-lean-8765ebe.gguf`,
+  SHA-256 `a2afd9f42881e57f95a13054900584c69cfb2a94aeba581924ae5dbd702dd55a`;
+  mmproj `9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002`.
+- Gate runner `scripts/81-run-behavioural-gate.py`
+  (`e2e78588…` for the v2/v4 runs, `ff222128…` for v3).
+- Server: `--ds4-expert-top-k` **model default** (`expert_top_k=model_default`
+  in the 0d attestation; no run passed 4). See the throughput section for why
+  this matters.
+
+### Results
+
+| run | ember | image | policy | items | retained | arm A | arm B | pass |
+|---|---|---|---|---|---|---|---|---|
+| `run-0g-synthetic-bbdaee1-3eea1db` | `bbdaee1` | `ghcr.io/otheru-ai/ember:dev-sha-63435cf365d9` | v2 (`46756403…`) | 100 | 97 | colour 25/25, count 24/25, ocr 25/25, spatial 22/22 | 0, 0, 0, 3/25 | **true** |
+| `run-rocm10-synthetic-f8efd7a-20260901` | `f8efd7a` (ROCm 10) | `sha256:88f78d3f…` | v2 | 100 | 97 | identical to the row above, per class | identical | **true** |
+| `run-0g-natural-scored-bbdaee1-9d6ea49-policyv3` | `bbdaee1` | as 0g | v3 (`0ff8c4fa…`, cap 512) | 99 (+1 error) | 99 | 87/99 = 0.879 | 0/99 | **false** |
+| `run-0l-natural-policyv4-bbdaee1-ae78f39` | `bbdaee1` | as 0g | v4 (`b82d86ff…`, cap 2048) | 100 | 100 | 90/100 = 0.900 | 0/100 | **true** |
+
+Per class, every arm A p-value against chance is below 1e-6 and every arm B
+`not_above_chance` is true; the spatial class cut 3 items on arm B (chance
+answers) in both synthetic runs. The synthetic result is byte-identical in its
+per-class counts across the two images, which is what a compiler bump that
+does not move numerics should look like; it is not evidence that it moved
+nothing (exact digests of the responses were not compared).
+
+The v3 → v4 flip is three items and the disappearance of one image-arm 422
+(`tvqa_34733`, the detected degeneration tracked as backlog 0j). The cap was
+raised by user decision with the flip stated in advance.
+
+## 2026-09-01/02 — throughput rows A and B, and what they do not compare
+
+Bundles, both `scripts/benchmark_bundle.sh` in Vision mode
+(`EMBER_BENCH_VISION=1`, 12 workloads, 7 depths, spec on/off arms):
+
+| row | bundle | ember | image | drafter |
+|---|---|---|---|---|
+| A | `/srv/models/perf/vision-baseline-current-ed6cf9f-20260901/ember-2026-09-01` | `bbdaee1` binary from the 0g run, harness `ed6cf9f` | `ghcr.io/otheru-ai/ember@sha256:14b277f8…` (2026.8.24-era) | `DeepSeek-V4-Flash-0731-ablit1042-DSpark-draft.gguf` (`1a01c80e…`) |
+| B | `/srv/models/perf/vision-rocm10-matched-draft-6575096-20260902/ember-2026-09-02` | `f8efd7a`, harness `6575096` | `ember-rocm:10.0` (`88f78d3f…`) | `DeepSeek-V4-Flash-Vision-Exp-DSpark-draft-ember.gguf` (`97ba6019…`, built at pipeline `b8c2abc`) |
+
+Server args in both: `--vision-mmproj … --max-ctx 65536 --ds4-prefill sparse
+--ds4-expert-top-k 0 --default-temperature 0.6`. The text reference rows
+(2026.8.24 and both ROCm 10 text rows in `docs/perf/data.json`) and production
+(`docker inspect ember-server`, 2026-09-02) run `--ds4-expert-top-k 4`. The
+model's `expert_used_count` is 6, so `0` means six routed experts per token
+against production's four.
+
+### Text workloads, three-way (tok/s; spec-on decode / autoregressive)
+
+| workload | 2026.8.24 | row A | row B |
+|---|---:|---:|---:|
+| alphabet | 40.61 / 23.63 | 35.50 / 22.08 | 34.00 / 22.12 |
+| code | 29.86 / 23.79 | 33.51 / 22.08 | 21.46 / 22.11 |
+| count | 40.44 / 23.33 | 36.24 / 21.83 | 23.33 / 21.87 |
+| creative | 23.19 / 23.65 | 21.70 / 22.05 | 21.40 / 22.14 |
+| essay | 23.18 / 23.64 | 21.70 / 22.09 | 21.41 / 22.14 |
+| factual | 30.81 / 23.64 | 20.98 / 22.26 | 21.22 / 22.28 |
+| json | 39.60 / 23.60 | 35.30 / 22.07 | 34.69 / 22.09 |
+| multiples | 40.40 / 23.62 | 35.37 / 22.09 | 20.53 / 22.12 |
+| prose | 23.14 / 23.65 | 21.68 / 22.08 | 21.38 / 22.15 |
+| repeat | 39.81 / 23.63 | 34.93 / 22.09 | 23.07 / 22.13 |
+| throughput median (256 tok) | 39.49 | 35.21 | 35.14 |
+
+Depth series (prefill tok/s / spec-on decode / autoregressive; acceptance):
+
+| prompt tokens | 2026.8.24 | row A | row B |
+|---:|---|---|---|
+| 43 | 71.0 / 39.19 / 23.36; 0.981 | 64.4 / 35.06 / 21.81; 0.981 | 65.1 / 22.62 / 21.83; 0.833 |
+| 862 | 281.0 / 39.43 / 22.66; 0.981 | 250.4 / 33.25 / 21.22; 0.980 | 249.5 / 28.74 / 21.21; 0.895 |
+| 3,925 | 342.0 / 38.00 / 22.74; 0.981 | 308.1 / 34.13 / 21.27; 0.981 | 297.2 / 20.49 / 21.30; 0.775 |
+| 18,553 | 299.2 / 32.62 / 20.91; 0.936 | 273.5 / 29.28 / 19.66; 0.981 | 273.7 / 19.69 / 19.67; 0.875 |
+| 38,059 | 271.0 / 24.79 / 19.01; 0.974 | 250.4 / 22.93 / 18.02; 0.978 | 249.6 / 19.55 / 18.05; 0.926 |
+| 77,068 | 223.5 / 16.58 / 16.61; — | 211.3 / 15.79 / 15.79; — | 209.8 / 15.81 / 15.80; — |
+| 116,077 | 184.1 / 14.86 / 14.88; — | 176.3 / 14.21 / 14.21; — | 175.6 / 14.23 / 14.21; — |
+
+Fixed-prompt prefill groups, median tok/s (128 / 512 / 2048 / 8192 / 16384 /
+32768 tokens): 2026.8.24 216.3 / 336.7 / 412.0 / 351.0 / 322.5 / 291.4;
+row A 188.6 / 306.3 / 381.2 / 324.7 / 303.4 / 278.3;
+row B 188.4 / 306.3 / 364.8 / 325.1 / 303.0 / 277.5.
+
+### Image workloads (rows A, B only; no text row has them)
+
+| workload | row A tok/s / AR / speedup | row B tok/s / AR / speedup |
+|---|---|---|
+| image_short | 25.76 / 25.79 / 0.999 | 25.37 / 25.85 / 0.981 |
+| image_long | 21.76 / 21.73 / 1.001 | 21.48 / 21.75 / 0.988 |
+
+Image prefill in row A: 195.6 (short) and 194.3 (long) tok/s. Speculation is
+inert on image requests in both rows, as pre-registered from the upstream
+zero MTP VL biases; the image decode figure is the autoregressive rate.
+
+### Readings
+
+1. **2026.8.24 → row A is not an artifact-versus-artifact comparison.** Every
+   autoregressive text workload is −5.8…−7.2 % and every prefill point is
+   −6…−13 %, uniformly, with acceptance unchanged (0.98 with the 0731 drafter).
+   Row A ran six routed experts per token; the reference ran four. Routed
+   expert matmuls (type 107) are roughly 18 % of decode in the release trace,
+   so 4 → 6 predicts about −8 % autoregressive, which is the size observed.
+   The prediction is stated before the measurement: **a row A rerun at
+   `--ds4-expert-top-k 4` should land within ±1 % of 2026.8.24 on every
+   autoregressive workload.** If it does not, the Vision artifact is slower
+   than 0731 on the same engine and that becomes a finding about the recipe.
+   Until that row exists, no text-throughput parity verdict for the Vision
+   artifact can be read from these bundles.
+
+2. **The behavioural gates were run at the same top-k 0.** A Vision release
+   served at top-k 4 (production's setting) has not been gated. Routing
+   truncation changes outputs; gates 3–4 would have to be re-run at the
+   serving top-k before any such release.
+
+3. **The matched Vision drafter (row B) is worse than the 0731 drafter (row A)
+   on this target, and it is the weights, not the wiring.** Acceptance on the
+   structured workloads falls from ≈0.98 to 0.70–0.89 (code 0.705, multiples
+   0.707, repeat 0.850, count 0.886) and on prose to 0.18–0.29; spec-on tok/s
+   on code/count/multiples/repeat drops 34–42 % while the autoregressive
+   controls move +0.1…+0.4 %. The two drafter files have byte-identical
+   metadata (37 keys: `capture_layer_ids [40,41,42]`, `block_size 5`,
+   `markov_rank 256`, `mask_token_id 128799`, …) and identical tensor
+   inventories except the three `exp_probs_b_vl.bias` tensors row B adds; all
+   81 shared tensors differ in content, including
+   `dflash.dspark.markov.w1/w2` and `dflash.dspark.confidence.weight`
+   (per-tensor SHA-256, 2026-09-02). So the drafter is a genuinely different
+   set of weights built from Vision-Exp's own `mtp.*` tensors, and those
+   weights predict this target's text worse than 0731's abliterated drafter
+   does. What is not yet separated: whether that is the Vision-Exp MTP head
+   itself, or something in the `b8c2abc` build (the DSpark Markov/confidence
+   tensors have no independent reference on this box). The decision this
+   forces — ship Vision with the cross-model 0731 drafter, or investigate the
+   build — is the user's.
+
+4. **ROCm 10 alone (row A → row B, autoregressive) is +0.1…+0.4 %** on every
+   text workload and within ±1 % on every prefill point except the 2048 group
+   (−4.3 %), consistent with the text rows in `docs/perf/data.json`.
+
 ## Pre-measurement runtime facts
 
 - The native tower is lazy: text-only startup does not open or allocate the
@@ -350,9 +493,17 @@ complete.
 
 ## Next admissible result
 
-The block-0 and full-depth execution prerequisites are satisfied. Behavioural
-policy v1 is versioned and digest-bound, but it must not be spent on the current
-artifact: its known text incoherence predetermines an uninformative red. The
-next C2 correctness result is the two-arm behavioural differential on a model
-that first passes the text prerequisite. No image-path throughput number may be
-published before that gate passes.
+Two rows are missing before any Vision text-throughput verdict, both one
+bundle each on the box, and both were pre-registered above:
+
+1. Row A rerun with `--ds4-expert-top-k 4` and the 0731 drafter, everything
+   else identical. Reading 1 says where it must land.
+2. Gates 3–4 at top-k 4 if that is the serving configuration.
+
+Row B's drafter question is a build-versus-model discriminator, not a rerun:
+the matched drafter needs an independent reference for its DSpark tensors or a
+second build from a clean tree before another benchmark is spent on it.
+
+The 0j degeneration (`tvqa_34733`, a detected 422, not silent corruption) is
+still open and is the only correctness item standing between the current
+artifact and the C1 text quality gate.
