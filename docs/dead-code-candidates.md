@@ -342,3 +342,39 @@ path live for that model and requires narrowing or removing this entry.
 **Recommendation: keep.** This is a measured DeepSeek prefill optimization in
 shared vendored code. Preserve the gate, but keep Qwen investigation and
 performance counts on the ordinary strided MMQ path until the falsifier fires.
+
+---
+
+## 8. `GGML_OP_FLASH_ATTN_SPARSE` and its per-call `cudaMallocAsync` path — dead
+
+**Scope:** current source call graph. Vendored-fork code (Ember addition, not
+upstream ggml).
+
+**Evidence.** `ggml_flash_attn_sparse` is declared at
+`engine/ggml/include/ggml.h:2458` and constructs `GGML_OP_FLASH_ATTN_SPARSE`
+at `engine/ggml/src/ggml.c:5591-5608`. The HIP backend dispatches it at
+`engine/ggml/src/ggml-cuda/ggml-cuda.cu:3341` and reports support at
+`:5778`, landing in `ggml_cuda_flash_attn_sparse`
+(`engine/ggml/src/ggml-cuda/fattn-sparse.cu:84-232`). There is no caller of
+`ggml_flash_attn_sparse(` anywhere under `engine/dflash/`, `src/`, or the
+rest of `engine/ggml/` other than its own definition
+(`grep -rn 'ggml_flash_attn_sparse(' engine src`).
+
+The dead body matters because of what it would cost if it were live: six
+`cudaMallocAsync` / `cudaFreeAsync` pairs per call (`fattn-sparse.cu:160-163,
+177, 192, 226-231`) plus four layout-transpose kernels, none of it pooled.
+
+**Consequence for measurement.** Do not count this path in attention
+dispatch accounting and do not attribute any observed allocator activity in
+a trace to it. If sparse attention is revived, the allocations must move to
+the graph allocator before it is benchmarked, or the first measurement will
+be of the allocator, not the kernel.
+
+**Falsifier.** Any producer calling `ggml_flash_attn_sparse(`, or
+`GGML_OP_FLASH_ATTN_SPARSE` appearing in runtime op telemetry, makes the
+path live and requires removing this entry.
+
+**Recommendation: keep, tagged.** It is a self-contained experiment with a
+clear op boundary; deleting it buys nothing measurable and it documents an
+attempted sparse-attention layout. Do not touch its allocator pattern
+until it has a producer.
