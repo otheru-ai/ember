@@ -2,6 +2,7 @@
 
 #include "deepseek4_backend.h"
 #include "deepseek4_internal.h"
+#include "deepseek4_imatrix.h"
 #include "common/errors.h"
 // dspark_worker_note_target_eval: the AR loop feeds the speculative scheduler its
 // genuine single-token baseline (see the header for why that matters).
@@ -488,6 +489,20 @@ DeepSeek4Backend::DeepSeek4Backend(const DeepSeek4BackendConfig & cfg)
 
 DeepSeek4Backend::~DeepSeek4Backend() {
     shutdown();
+    // Flush the importance matrix if collection was on. Written last, after
+    // every request has drained, and atomically (temp file + rename) so a
+    // killed process leaves no truncated matrix for a later run to mistake for
+    // a complete one.
+    if (auto * imx = ds4::ImatrixCollector::instance()) {
+        const char * out = std::getenv("DFLASH_IMATRIX_OUT");
+        std::string err;
+        if (out && *out && !imx->write(out, err)) {
+            std::fprintf(stderr, "[deepseek4-imatrix] write failed: %s\n", err.c_str());
+        } else if (out && *out) {
+            std::fprintf(stderr, "[deepseek4-imatrix] wrote %s (%d chunks)\n",
+                         out, imx->chunks());
+        }
+    }
 }
 
 struct DeepSeek4Backend::ResidentSession {

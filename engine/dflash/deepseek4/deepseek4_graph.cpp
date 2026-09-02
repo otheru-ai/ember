@@ -9,6 +9,7 @@
 //   6. MoE FFN (hash routing + top-k + shared expert + clamped SwiGLU)
 
 #include "deepseek4_internal.h"
+#include "deepseek4_imatrix.h"
 #include "deepseek4_attention_shape.h"
 #include "deepseek4_hc_cuda.h"
 #include "deepseek4_vision_contract.h"
@@ -3199,6 +3200,19 @@ static ggml_tensor * build_moe_ffn_parts(
         ggml_tensor * mid_e = build_clamped_swiglu(ctx, gate_e, up_e, w.swiglu_clamp_exp);
 
         ggml_tensor * down_e = ggml_mul_mat_id(ctx, L.ffn_down_exps, mid_e, routing.selected);
+        // Importance-matrix collection, off unless DFLASH_IMATRIX_OUT is set.
+        // Registered here rather than via an eval callback because ember drives
+        // ggml_backend_graph_compute directly and has no scheduler to hang one
+        // on. Both vision and text rows pass through this function, so an image
+        // request calibrates through exp_probs_b_vl selection, which is the
+        // whole reason the collector lives in the engine.
+        if (auto * imx = ds4::ImatrixCollector::instance()) {
+            const std::string blk = "blk." + std::to_string(layer_idx) + ".";
+            imx->set_n_expert(w.n_expert);
+            imx->register_site(blk + "ffn_gate_exps.weight", cur_3d, routing.selected, n_embd, false);
+            imx->register_site(blk + "ffn_up_exps.weight",   cur_3d, routing.selected, n_embd, false);
+            imx->register_site(blk + "ffn_down_exps.weight", mid_e,  routing.selected, n_ff_exp, true);
+        }
         down_e = ggml_reshape_3d(ctx, down_e, n_embd, n_used, n_tokens);
 
         ggml_tensor * weights_3d = ggml_reshape_3d(ctx, routing.weights, 1, n_used, n_tokens);
@@ -6252,9 +6266,13 @@ static int ds4_try_layer_major_prefill(
 
         const auto compute_t0 = Ds4TimingClock::now();
         if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
+            // A failed graph leaves undefined buffers; reading them would fold
+            // garbage into the matrix with nothing to mark it.
+            if (auto * imx = ds4::ImatrixCollector::instance()) imx->abandon();
             if (!cached_layer) ggml_free(ctx);
             return fail("compute failed", il);
         }
+        if (auto * imx = ds4::ImatrixCollector::instance()) imx->drain();
         if (telemetry) {
             telemetry->full_graph_compute_us += ds4_elapsed_us(
                 compute_t0, Ds4TimingClock::now());

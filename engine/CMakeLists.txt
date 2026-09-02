@@ -111,6 +111,8 @@ set(EMBER_ENGINE_INC
 add_library(ember_engine STATIC
   ${DFLASH}/deepseek4/deepseek4_loader.cpp
   ${DFLASH}/deepseek4/deepseek4_graph.cpp
+  ${DFLASH}/deepseek4/deepseek4_imatrix.cpp
+  ${DFLASH}/deepseek4/deepseek4_imatrix_graph.cpp
   ${DFLASH}/deepseek4/deepseek4_backend.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_biases.cpp

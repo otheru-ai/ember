@@ -260,6 +260,11 @@ add_test(NAME rocmfp_scale COMMAND test_rocmfp_scale)
 add_executable(test_rocmfp2_unpack test/test_rocmfp2_unpack.c)
 target_include_directories(test_rocmfp2_unpack PRIVATE engine/ggml/include)
 add_test(NAME rocmfp2_unpack COMMAND test_rocmfp2_unpack)
+add_executable(test_ds4_imatrix test/test_ds4_imatrix.cpp
+               engine/dflash/deepseek4/deepseek4_imatrix.cpp)
+target_include_directories(test_ds4_imatrix PRIVATE engine)
+add_test(NAME ds4_imatrix COMMAND test_ds4_imatrix)
+
 add_executable(test_rocmfp2_offset test/test_rocmfp2_offset.c)
 target_link_libraries(test_rocmfp2_offset PRIVATE m)
 add_test(NAME rocmfp2_offset COMMAND test_rocmfp2_offset)
@@ -527,7 +532,7 @@ set(EMBER_C_TESTS
   continuation dsml_decode json
   chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
   chat_template_qwen4
-  compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
+  compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
   qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
