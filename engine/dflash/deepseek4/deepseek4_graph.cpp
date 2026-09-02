@@ -346,6 +346,31 @@ struct DeepSeek4CachedLayerAlloc {
     ggml_backend_t backend = nullptr;
     ggml_gallocr_t alloc = nullptr;
 
+    // Reusable ggml metadata arena.
+    //
+    // ggml_init() calls ggml_aligned_malloc(mem_size) when mem_buffer is null,
+    // and ggml_free() releases it because mem_buffer_owned is then true. The
+    // exact tokenwise prefill loop builds one context per token per layer with
+    // a 48 MiB arena, so that was a 48 MiB alloc/free pair ~88k times per
+    // 2048-token chunk. Handing ggml a buffer makes ggml_init allocation-free
+    // and leaves ggml_free to release only the small context struct.
+    //
+    // Same arena idiom the fused decode path already uses for its 192 MiB
+    // context (see fg.sg.meta_arena). That one passes .data() directly; here
+    // the base is aligned up by hand because ggml_aligned_malloc uses 64 on
+    // x86 while std::vector guarantees only alignof(max_align_t).
+    std::vector<uint8_t> meta_arena;
+
+    void * meta_buffer(size_t need) {
+        static constexpr size_t kAlign = 64;
+        if (meta_arena.size() < need + kAlign) {
+            meta_arena.resize(need + kAlign);
+        }
+        uintptr_t raw = reinterpret_cast<uintptr_t>(meta_arena.data());
+        uintptr_t aligned = (raw + (kAlign - 1)) & ~(uintptr_t) (kAlign - 1);
+        return reinterpret_cast<void *>(aligned);
+    }
+
     bool valid() const {
         return owner_ctx && backend && alloc;
     }
@@ -357,6 +382,12 @@ struct DeepSeek4CachedLayerAlloc {
         }
         owner_ctx = nullptr;
         backend = nullptr;
+        // Deliberately NOT clearing meta_arena. free() releases the allocator,
+        // and it is called from inside the token loop the first time a layer is
+        // seen -- after meta_buffer() has already handed the arena to a live
+        // ggml_context. Clearing here would free memory that context is still
+        // using. The arena dies with the struct, which reset() achieves by
+        // clearing the owning vector.
     }
 };
 
@@ -5349,7 +5380,10 @@ static bool ds4_run_exact_tokenwise_prefill_attention(
         const auto build_t0 = Ds4TimingClock::now();
         ggml_init_params params{};
         params.mem_size = ds4_attn_step_meta_size(1);
-        params.mem_buffer = nullptr;
+        // Reused across tokens and layers: nothing from the previous context
+        // outlives its ggml_free below, since attn_out is copied into
+        // attn_out_host before the context is released.
+        params.mem_buffer = attn_alloc.meta_buffer(params.mem_size);
         params.no_alloc = true;
         ggml_context * ctx = ggml_init(params);
         if (!ctx) return false;
