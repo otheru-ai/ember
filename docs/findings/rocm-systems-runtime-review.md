@@ -91,6 +91,18 @@ is microseconds per sync, which a tok/s mean will not resolve.
    per wait — the expected effect is small or nil. Falsifier: same as
    above. Worth one run only because the wait sits on every spec-cycle
    boundary and the run is free.
+   **Result 2026-09-02 (codex, `/srv/models/perf/rocm-runtime-env-ab-44e7f5e-20260902-r6-mwaitx-only`,
+   kernel-only trace, one run vs the r3 baseline centre): idle fraction
+   0.6952 vs 0.6973 (−0.002, inside the ±0.01 band); dispatch-gap p50
+   6.593 vs 6.507 µs, p90 10.269 vs 10.204 µs, p99 30.42 vs 29.98 µs —
+   all slightly worse; top-1 % gap-time share 0.703 vs 0.708. Output
+   identical, 256 tokens with speculation. Dropped: no effect within
+   noise, and the small gap shifts point the wrong way.**
+
+**Closed 2026-09-02:** both arms measured, neither admissible. Runtime
+defaults retained. The ~0.70 idle fraction is carried by the top 1 % of
+gaps (59–141 ms), i.e. by the spec loop's own waits, not by dispatch
+latency — the remaining lever is program-side (below), not the runtime.
 
 ## Do not use
 
