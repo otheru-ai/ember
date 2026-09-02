@@ -480,24 +480,6 @@ void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
     }
 }
 
-bool deepseek4_raw_attention_visible(int query_pos, int key_pos,
-                                     int window_size, int visible_left,
-                                     int visible_right) {
-    if (query_pos < 0 || key_pos < 0 || window_size <= 0 ||
-        visible_left < 0 || visible_right < 0) {
-        return false;
-    }
-    const int64_t ordinary_start =
-        static_cast<int64_t>(query_pos) - window_size + 1;
-    const int64_t image_start =
-        static_cast<int64_t>(query_pos) - visible_left;
-    const int64_t start = std::min(ordinary_start, image_start);
-    const int64_t end =
-        static_cast<int64_t>(query_pos) + visible_right;
-    return static_cast<int64_t>(key_pos) >= std::max<int64_t>(0, start) &&
-           static_cast<int64_t>(key_pos) <= end;
-}
-
 bool deepseek4_validate_vision_chunk_ids(
         const std::vector<int32_t> & input_ids, int32_t vocab_size,
         std::string * error) {
@@ -564,12 +546,18 @@ bool deepseek4_validate_vision_chunk_ids(
 }
 
 bool deepseek4_vision_graph_cache_safe(
+        const int32_t * input_ids, size_t count, int32_t vocab_size) {
+    if (vocab_size <= 0 || (!input_ids && count > 0)) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (input_ids[i] < 0 || input_ids[i] >= vocab_size) return false;
+    }
+    return true;
+}
+
+bool deepseek4_vision_graph_cache_safe(
         const std::vector<int32_t> & input_ids, int32_t vocab_size) {
-    return vocab_size > 0 &&
-           std::all_of(input_ids.begin(), input_ids.end(),
-                       [vocab_size](int32_t token) {
-                           return token >= 0 && token < vocab_size;
-                       });
+    return deepseek4_vision_graph_cache_safe(
+        input_ids.data(), input_ids.size(), vocab_size);
 }
 
 bool deepseek4_prefill_cut_safe(const std::vector<int32_t> & input_ids,

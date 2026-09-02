@@ -155,9 +155,24 @@ void deepseek4_image_visible(const std::vector<int32_t> & input_ids,
 // window is widened only by the query's learned image-span counts. This is
 // the scalar form of inference/model.py:get_window_topk_idxs_visible and is
 // shared by GPU-free contract tests and the ggml attention-mask builder.
-bool deepseek4_raw_attention_visible(int query_pos, int key_pos,
-                                     int window_size, int visible_left,
-                                     int visible_right);
+inline bool deepseek4_raw_attention_visible(int query_pos, int key_pos,
+                                            int window_size, int visible_left,
+                                            int visible_right) {
+    if (query_pos < 0 || key_pos < 0 || window_size <= 0 ||
+        visible_left < 0 || visible_right < 0) {
+        return false;
+    }
+    const int64_t ordinary_start =
+        static_cast<int64_t>(query_pos) - window_size + 1;
+    const int64_t image_start =
+        static_cast<int64_t>(query_pos) - visible_left;
+    const int64_t start = ordinary_start < image_start
+        ? ordinary_start : image_start;
+    const int64_t bounded_start = start > 0 ? start : 0;
+    const int64_t end = static_cast<int64_t>(query_pos) + visible_right;
+    return static_cast<int64_t>(key_pos) >= bounded_start &&
+           static_cast<int64_t>(key_pos) <= end;
+}
 
 // Validate the sentinel grammar visible to one graph invocation. Complete
 // blocks may be surrounded by ordinary text, but no learned block may be
@@ -168,6 +183,8 @@ bool deepseek4_validate_vision_chunk_ids(
 
 // Layer-major graph-cache keys do not carry per-request row partitions or
 // visibility counts. Only an all-vocabulary-token chunk may reuse a graph.
+bool deepseek4_vision_graph_cache_safe(
+    const int32_t * input_ids, size_t count, int32_t vocab_size);
 bool deepseek4_vision_graph_cache_safe(
     const std::vector<int32_t> & input_ids, int32_t vocab_size);
 

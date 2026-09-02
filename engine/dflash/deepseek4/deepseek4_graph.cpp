@@ -5689,18 +5689,13 @@ static int ds4_try_layer_major_prefill(
         }
     }
 
-    bool has_vision_tokens = false;
+    const bool has_vision_tokens =
+        ds4_has_vision_tokens(token_ids, n_tokens, w.n_vocab);
     std::vector<int32_t> vision_ids;
     std::vector<int32_t> vision_left;
     std::vector<int32_t> vision_right;
-    if (token_ids) {
+    if (has_vision_tokens) {
         vision_ids.assign(token_ids, token_ids + n_tokens);
-        for (int32_t token : vision_ids) {
-            if (token >= w.n_vocab) {
-                has_vision_tokens = true;
-                break;
-            }
-        }
     }
     if (has_vision_tokens) {
         std::string vision_error;
@@ -5747,8 +5742,10 @@ static int ds4_try_layer_major_prefill(
     Ds4LayerMajorGraphCache * graph_cache = nullptr;
     bool cache_hit = false;
     bool cache_build = false;
-    if (token_ids && dflash::deepseek4_vision_graph_cache_safe(
-                         vision_ids, w.n_vocab)) {
+    const bool vision_graph_cache_safe = token_ids &&
+        dflash::deepseek4_vision_graph_cache_safe(
+            token_ids, static_cast<size_t>(n_tokens), w.n_vocab);
+    if (vision_graph_cache_safe) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
             if (candidate.matches(w, cache, backend, cache.prefill_mode,
                                   n_tokens, kv_start, capture_ids)) {
