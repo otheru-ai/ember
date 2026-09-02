@@ -71,6 +71,12 @@ is microseconds per sync, which a tok/s mean will not resolve.
    `clr/rocclr/utils/nontemporal.hpp:217-243`). Writes the doorbell
    directly instead of through `hsa_signal_store`. Falsifier: boundary-gap
    p50/p90 unchanged within run-to-run spread → drop it.
+   **Result 2026-09-02 (codex, `/srv/models/perf/rocm-runtime-env-ab-44e7f5e-20260902-r5-kernel-env-arms/doorbell`):
+   the 32-token warm-up completed with speculation, then the single
+   256-token measured request produced zero bytes for 900 s (curl exit 28).
+   No gap statistic exists. Not a perf number and not a "no gain": the
+   direct-doorbell path stalls the spec loop on this stack. Dropped and
+   moved to "Do not use"; not rerun.**
 2. **`HSA_ENABLE_MWAITX=0`** (default on, `rocr-runtime/.../core/util/flag.h:295`;
    `g_use_mwaitx = flag_.check_mwaitx(cpuinfo.mwaitx)`,
    `core/runtime/runtime.cpp:2676`). `BusyWaitSignal::WaitRelaxed`
@@ -87,6 +93,11 @@ is microseconds per sync, which a tok/s mean will not resolve.
    boundary and the run is free.
 
 ## Do not use
+
+**`DEBUG_CLR_DIRECT_DOORBELL=1`** — hung the measured request after a
+working warm-up (above). One occurrence, unexplained, on ROCm 10 dev image
+`44e7f5e`; the cost of a second look is a 15-minute GPU hang, so it is
+closed rather than diagnosed.
 
 **`HSA_ENABLE_DTIF_FAST_COPY`** exists in the 10.0 binary but is a DTIF
 simulator-platform feature (`core/inc/thunk_loader.h:54`,
