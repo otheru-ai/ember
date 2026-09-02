@@ -202,22 +202,42 @@ __global__ static void ds4_inverse_rope_coefficients_kernel(
     coefficients[2 * index + 1] = sin_theta;
 }
 
-__global__ static void ds4_forward_rope_coefficients_kernel(
-        float * coefficients,
-        int n_tokens,
+// Forward-rotated q tails, [n_tokens][n_heads][64], materialized before the
+// attention kernels. The attention dot loops then read every q element
+// through a wave-uniform global pointer, which the compiler lowers to
+// s_load_b512 feeding v_dual_fmac_f32. Rotating in the attention block into
+// LDS instead made the tail a per-element select between an LDS and a global
+// pointer: 258 flat_load_b32 behind full waitcnts per kv row, the selected
+// pointers spilled to VGPR lanes and scratch, and the 448-dim head loop lost
+// its VOPD pairing under the register pressure (see
+// docs/findings/isa-assembly-opportunities.md). One block per token: the
+// FP64 coefficient is computed once per (pair, wave) and reused across heads.
+__global__ static void ds4_forward_rope_q_tail_kernel(
+        float       * q_tails,
+        const float * q,
+        size_t        q_stride_token,
+        size_t        q_stride_head,
+        int           n_tokens,
+        int           n_heads,
         ds4_inverse_rope_params rope) {
-    const int index = (int) blockIdx.x * (int) blockDim.x +
-                      (int) threadIdx.x;
-    const int count = n_tokens * 32;
-    if (index >= count) return;
-    const int token = index / 32;
-    const int pair = index % 32;
+    constexpr int D = 512;
+    const int token = (int) blockIdx.x;
+    if (token >= n_tokens) return;
+    const int pair = (int) threadIdx.x % 32;
+    const int head_start = (int) threadIdx.x / 32;
+    const int head_step = (int) blockDim.x / 32;
     float cos_theta;
     float sin_theta;
     ds4_forward_rope_coefficients(
         pair, token, rope, cos_theta, sin_theta);
-    coefficients[2 * index + 0] = cos_theta;
-    coefficients[2 * index + 1] = sin_theta;
+    for (int h = head_start; h < n_heads; h += head_step) {
+        const float * qh = q + (size_t) token * q_stride_token +
+                           (size_t) h * q_stride_head + (D - 64);
+        float * out = q_tails + ((size_t) token * n_heads + h) * 64;
+        ds4_apply_inverse_rope_pair(
+            qh[2 * pair + 0], qh[2 * pair + 1], cos_theta, sin_theta,
+            out[2 * pair + 0], out[2 * pair + 1]);
+    }
 }
 
 // One mean latent-key vector per compressed-cache block. Raw SWA/current rows
@@ -390,7 +410,7 @@ __global__ static void ds4_flash_attn_d512_shared_kv_kernel(
         int           n_comp_blocks,
         ds4_inverse_rope_params inverse_rope,
         const float * inverse_rope_coefficients,
-        const float * forward_rope_coefficients) {
+        const float * q_rope_tails) {
     constexpr int D = 512;
     const int t = (int) blockIdx.x;
     const int h = (int) blockIdx.y;
@@ -404,23 +424,11 @@ __global__ static void ds4_flash_attn_d512_shared_kv_kernel(
     float * q_rope_tail = block_keep + n_comp_blocks;
     const float * qh = q + (size_t) t * q_stride_token +
                        (size_t) h * q_stride_head;
-
-    if (inverse_rope.forward_q_enabled) {
-        for (int pair = tid; pair < 32; pair += (int) blockDim.x) {
-            const float x0 = qh[D - 64 + 2 * pair + 0];
-            const float x1 = qh[D - 64 + 2 * pair + 1];
-            const size_t coefficient_index =
-                ((size_t) t * 32 + (size_t) pair) * 2;
-            const float cos_theta = forward_rope_coefficients[
-                coefficient_index + 0];
-            const float sin_theta = forward_rope_coefficients[
-                coefficient_index + 1];
-            ds4_apply_inverse_rope_pair(
-                x0, x1, cos_theta, sin_theta,
-                q_rope_tail[2 * pair + 0], q_rope_tail[2 * pair + 1]);
-        }
-        __syncthreads();
-    }
+    // Both candidates are global, wave-uniform pointers; keep it that way so
+    // the tail loads stay scalar (see ds4_forward_rope_q_tail_kernel).
+    const float * q_tail = q_rope_tails
+        ? q_rope_tails + ((size_t) t * n_heads + h) * 64
+        : qh + (D - 64);
 
     const int n_comp_rows = n_kv - raw_rows;
     const bool sparse = mean_k && n_comp_blocks > 0 &&
@@ -439,8 +447,8 @@ __global__ static void ds4_flash_attn_d512_shared_kv_kernel(
                 dot = 0.0f;
 #pragma unroll
                 for (int d = 0; d < D; ++d) {
-                    const float qv = inverse_rope.forward_q_enabled && d >= D - 64
-                        ? q_rope_tail[d - (D - 64)] : qh[d];
+                    const float qv = d >= D - 64
+                        ? q_tail[d - (D - 64)] : qh[d];
                     dot += qv * kb[d];
                 }
                 dot *= scale;
@@ -484,8 +492,8 @@ __global__ static void ds4_flash_attn_d512_shared_kv_kernel(
             float dot = 0.0f;
 #pragma unroll
             for (int d = 0; d < D; ++d) {
-                const float qv = inverse_rope.forward_q_enabled && d >= D - 64
-                    ? q_rope_tail[d - (D - 64)] : qh[d];
+                const float qv = d >= D - 64
+                    ? q_tail[d - (D - 64)] : qh[d];
                 dot += qv * ds4_fa_load<KV, Mask>(kr + d);
             }
             s = dot * scale + mask_v;
@@ -550,8 +558,7 @@ __global__ static void ds4_flash_attn_d512_shared_kv_kernel(
     const int comp_first = value_bounds[2];
     const int comp_last = value_bounds[3];
 
-    // Scoring is complete here, so the forward-RoPE tail scratch can be
-    // reused for inverse-RoPE output. Do not alias scores: different waves
+    // Inverse-RoPE output tail. Do not alias scores: different waves
     // accumulate value dimensions concurrently, and tail writers would race
     // readers of scores[0..63].
     float * rope_tail = q_rope_tail;
@@ -617,7 +624,7 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_kernel(
         int           raw_rows,
         ds4_inverse_rope_params inverse_rope,
         const float * inverse_rope_coefficients,
-        const float * forward_rope_coefficients) {
+        const float * q_rope_tails) {
     constexpr int D = 512;
     constexpr int N_THREADS = 256;
     const int t = (int) blockIdx.x;
@@ -630,37 +637,20 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_kernel(
     float * reduction = scores + (size_t) HEADS_PER_BLOCK * n_kv;
     int * value_bounds = reinterpret_cast<int *>(
         reduction + (size_t) HEADS_PER_BLOCK * N_THREADS);
-    float * q_rope_tail = reinterpret_cast<float *>(
-        value_bounds + (size_t) HEADS_PER_BLOCK * 4);
 
     const float * qh[HEADS_PER_BLOCK];
+    const float * q_tail[HEADS_PER_BLOCK];
 #pragma unroll
     for (int j = 0; j < HEADS_PER_BLOCK; ++j) {
         const int h = h_begin + j;
         qh[j] = q + (size_t) t * q_stride_token +
                 (size_t) h * q_stride_head;
+        // Global, wave-uniform either way: see ds4_forward_rope_q_tail_kernel.
+        q_tail[j] = q_rope_tails
+            ? q_rope_tails + ((size_t) t * n_heads + h) * 64
+            : qh[j] + (D - 64);
     }
 
-    if (inverse_rope.forward_q_enabled) {
-        for (int index = tid; index < HEADS_PER_BLOCK * 32;
-             index += (int) blockDim.x) {
-            const int j = index / 32;
-            const int pair = index % 32;
-            const float x0 = qh[j][D - 64 + 2 * pair + 0];
-            const float x1 = qh[j][D - 64 + 2 * pair + 1];
-            const size_t coefficient_index =
-                ((size_t) t * 32 + (size_t) pair) * 2;
-            const float cos_theta = forward_rope_coefficients[
-                coefficient_index + 0];
-            const float sin_theta = forward_rope_coefficients[
-                coefficient_index + 1];
-            ds4_apply_inverse_rope_pair(
-                x0, x1, cos_theta, sin_theta,
-                q_rope_tail[(size_t) j * 64 + 2 * pair + 0],
-                q_rope_tail[(size_t) j * 64 + 2 * pair + 1]);
-        }
-        __syncthreads();
-    }
 
     float local_max[HEADS_PER_BLOCK];
 #pragma unroll
@@ -684,10 +674,8 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_kernel(
                 const float kv = ds4_fa_load<KV, Mask>(kr + d);
 #pragma unroll
                 for (int j = 0; j < HEADS_PER_BLOCK; ++j) {
-                    const float qv =
-                        inverse_rope.forward_q_enabled && d >= D - 64
-                            ? q_rope_tail[(size_t) j * 64 + d - (D - 64)]
-                            : qh[j][d];
+                    const float qv = d >= D - 64
+                        ? q_tail[j][d - (D - 64)] : qh[j][d];
                     dot[j] += qv * kv;
                 }
             }
@@ -924,7 +912,7 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_compact_kernel(
         int           indexed_capacity,
         ds4_inverse_rope_params inverse_rope,
         const float * inverse_rope_coefficients,
-        const float * forward_rope_coefficients) {
+        const float * q_rope_tails) {
     constexpr int D = 512;
     constexpr int N_THREADS = 256;
     static_assert(VALUES_PER_THREAD == 2 || VALUES_PER_THREAD == 4);
@@ -938,8 +926,6 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_compact_kernel(
     float * reduction = scores + (size_t) HEADS_PER_BLOCK * score_stride;
     int * value_bounds = reinterpret_cast<int *>(
         reduction + (size_t) HEADS_PER_BLOCK * N_THREADS);
-    float * q_rope_tail = reinterpret_cast<float *>(
-        value_bounds + (size_t) HEADS_PER_BLOCK * 4);
 
     const int * token_visibility = visibility_bounds + (size_t) t * 4;
     const int mask_raw_first = token_visibility[0];
@@ -958,33 +944,18 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_compact_kernel(
     }
 
     const float * qh[HEADS_PER_BLOCK];
+    const float * q_tail[HEADS_PER_BLOCK];
 #pragma unroll
     for (int j = 0; j < HEADS_PER_BLOCK; ++j) {
         const int h = h_begin + j;
         qh[j] = q + (size_t) t * q_stride_token +
                 (size_t) h * q_stride_head;
+        // Global, wave-uniform either way: see ds4_forward_rope_q_tail_kernel.
+        q_tail[j] = q_rope_tails
+            ? q_rope_tails + ((size_t) t * n_heads + h) * 64
+            : qh[j] + (D - 64);
     }
 
-    if (inverse_rope.forward_q_enabled) {
-        for (int index = tid; index < HEADS_PER_BLOCK * 32;
-             index += (int) blockDim.x) {
-            const int j = index / 32;
-            const int pair = index % 32;
-            const float x0 = qh[j][D - 64 + 2 * pair + 0];
-            const float x1 = qh[j][D - 64 + 2 * pair + 1];
-            const size_t coefficient_index =
-                ((size_t) t * 32 + (size_t) pair) * 2;
-            const float cos_theta = forward_rope_coefficients[
-                coefficient_index + 0];
-            const float sin_theta = forward_rope_coefficients[
-                coefficient_index + 1];
-            ds4_apply_inverse_rope_pair(
-                x0, x1, cos_theta, sin_theta,
-                q_rope_tail[(size_t) j * 64 + 2 * pair + 0],
-                q_rope_tail[(size_t) j * 64 + 2 * pair + 1]);
-        }
-        __syncthreads();
-    }
 
     float local_max[HEADS_PER_BLOCK];
 #pragma unroll
@@ -1066,10 +1037,8 @@ __global__ static void ds4_flash_attn_d512_shared_kv_grouped_compact_kernel(
                 const float kv = ds4_fa_load<KV, Mask>(kr + d);
 #pragma unroll
                 for (int j = 0; j < HEADS_PER_BLOCK; ++j) {
-                    const float qv =
-                        inverse_rope.forward_q_enabled && d >= D - 64
-                            ? q_rope_tail[(size_t) j * 64 + d - (D - 64)]
-                            : qh[j][d];
+                    const float qv = d >= D - 64
+                        ? q_tail[j][d - (D - 64)] : qh[j][d];
                     dot[j] += qv * kv;
                 }
             }
@@ -1385,7 +1354,7 @@ static bool ds4_launch_flash_attn_d512_grouped(
         size_t              q_stride_head,
         ds4_inverse_rope_params inverse_rope,
         const float        * inverse_rope_coefficients,
-        const float        * forward_rope_coefficients,
+        const float        * q_rope_tails,
         size_t              shmem,
         cudaStream_t        stream) {
     dim3 grid(
@@ -1401,7 +1370,7 @@ static bool ds4_launch_flash_attn_d512_grouped(
                 mask ? (const half *) mask->data : nullptr,
                 sinks ? (const float *) sinks->data : nullptr,
                 n_tokens, n_heads, n_kv, scale, raw_rows, inverse_rope,
-                inverse_rope_coefficients, forward_rope_coefficients);
+                inverse_rope_coefficients, q_rope_tails);
     } else if (kv_f32 && (!mask || mask->type == GGML_TYPE_F32)) {
         ds4_flash_attn_d512_shared_kv_grouped_kernel<
             float, float, HEADS_PER_BLOCK>
@@ -1412,7 +1381,7 @@ static bool ds4_launch_flash_attn_d512_grouped(
                 mask ? (const float *) mask->data : nullptr,
                 sinks ? (const float *) sinks->data : nullptr,
                 n_tokens, n_heads, n_kv, scale, raw_rows, inverse_rope,
-                inverse_rope_coefficients, forward_rope_coefficients);
+                inverse_rope_coefficients, q_rope_tails);
     } else if (kv_f32 && mask && mask->type == GGML_TYPE_F16) {
         ds4_flash_attn_d512_shared_kv_grouped_kernel<
             float, half, HEADS_PER_BLOCK>
@@ -1423,7 +1392,7 @@ static bool ds4_launch_flash_attn_d512_grouped(
                 (const half *) mask->data,
                 sinks ? (const float *) sinks->data : nullptr,
                 n_tokens, n_heads, n_kv, scale, raw_rows, inverse_rope,
-                inverse_rope_coefficients, forward_rope_coefficients);
+                inverse_rope_coefficients, q_rope_tails);
     } else {
         return false;
     }
@@ -1457,7 +1426,7 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
         size_t              q_stride_head,
         ds4_inverse_rope_params inverse_rope,
         const float        * inverse_rope_coefficients,
-        const float        * forward_rope_coefficients,
+        const float        * q_rope_tails,
         size_t              shmem,
         cudaStream_t        stream) {
     GGML_ASSERT(mask && visibility_bounds);
@@ -1482,7 +1451,7 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
                 indexed_rows, indexed_counts,
                 indexed_owner_offsets, indexed_owner_ranks, indexed_capacity,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else if (kv_f32 && mask->type == GGML_TYPE_F32) {
         ds4_flash_attn_d512_shared_kv_grouped_compact_kernel<
             float, float, HEADS_PER_BLOCK, INDEXED_MASK, VALUES_PER_THREAD>
@@ -1497,7 +1466,7 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
                 indexed_rows, indexed_counts,
                 indexed_owner_offsets, indexed_owner_ranks, indexed_capacity,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else if (kv_f32 && mask->type == GGML_TYPE_F16) {
         ds4_flash_attn_d512_shared_kv_grouped_compact_kernel<
             float, half, HEADS_PER_BLOCK, INDEXED_MASK, VALUES_PER_THREAD>
@@ -1512,7 +1481,7 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
                 indexed_rows, indexed_counts,
                 indexed_owner_offsets, indexed_owner_ranks, indexed_capacity,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else {
         return false;
     }
@@ -1879,15 +1848,14 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
             (coefficient_count + 255) / 256, 256, 0, stream>>>(
                 inverse_rope_coefficients, n_tokens, inverse_rope);
     }
-    ggml_cuda_pool_alloc<float> forward_rope_coefficients_alloc(ctx.pool());
-    float * forward_rope_coefficients = nullptr;
+    ggml_cuda_pool_alloc<float> q_rope_tails_alloc(ctx.pool());
+    float * q_rope_tails = nullptr;
     if (inverse_rope.forward_q_enabled) {
-        forward_rope_coefficients = forward_rope_coefficients_alloc.alloc(
-            (size_t) n_tokens * 32 * 2);
-        const int coefficient_count = n_tokens * 32;
-        ds4_forward_rope_coefficients_kernel<<<
-            (coefficient_count + 255) / 256, 256, 0, stream>>>(
-                forward_rope_coefficients, n_tokens, inverse_rope);
+        q_rope_tails = q_rope_tails_alloc.alloc(
+            (size_t) n_tokens * (size_t) n_heads * 64);
+        ds4_forward_rope_q_tail_kernel<<<n_tokens, 256, 0, stream>>>(
+            q_rope_tails, (const float *) Q->data,
+            q_stride_token, q_stride_head, n_tokens, n_heads, inverse_rope);
     }
     ggml_cuda_pool_alloc<float> mean_k_alloc(ctx.pool());
     float * mean_k = nullptr;
@@ -1973,11 +1941,9 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
 #endif
 
     dim3 grid((unsigned) n_tokens, (unsigned) n_heads, 1);
-    const bool needs_rope_tail = inverse_rope.enabled ||
-                                 inverse_rope.forward_q_enabled;
     const size_t shmem =
         (size_t) (n_kv + 2 * n_comp_blocks +
-                  (needs_rope_tail ? 64 : 0)) * sizeof(float);
+                  (inverse_rope.enabled ? 64 : 0)) * sizeof(float);
     float params[3] = {};
     memcpy(params, dst->op_params, sizeof(params));
     const float scale = params[0];
@@ -1986,18 +1952,15 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
     constexpr int group2 = 2;
     const size_t group4_shmem =
         ((size_t) group4 * n_kv + (size_t) group4 * 256) * sizeof(float) +
-        (size_t) group4 * 4 * sizeof(int) +
-        (inverse_rope.forward_q_enabled ? (size_t) group4 * 64 * sizeof(float) : 0);
+        (size_t) group4 * 4 * sizeof(int);
     const size_t group2_shmem =
         ((size_t) group2 * n_kv + (size_t) group2 * 256) * sizeof(float) +
-        (size_t) group2 * 4 * sizeof(int) +
-        (inverse_rope.forward_q_enabled ? (size_t) group2 * 64 * sizeof(float) : 0);
+        (size_t) group2 * 4 * sizeof(int);
     const int compact_score_stride = raw_window +
         (indexed_mask ? indexed_capacity : n_comp_rows);
     const size_t compact_group4_shmem =
         ((size_t) group4 * compact_score_stride + (size_t) group4 * 256) * sizeof(float) +
-        (size_t) group4 * 4 * sizeof(int) +
-        (inverse_rope.forward_q_enabled ? (size_t) group4 * 64 * sizeof(float) : 0);
+        (size_t) group4 * 4 * sizeof(int);
     // Four heads win while two blocks can remain resident in 48 KiB of LDS.
     // Beyond that point, two-head grouping trades some K/V reuse for higher
     // occupancy; larger working sets fall back to the single-head kernel.
@@ -2008,7 +1971,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
             q_stride_token, q_stride_head,
             inverse_rope,
             inverse_rope_coefficients,
-            forward_rope_coefficients,
+            q_rope_tails,
             group4_shmem, stream);
     }
     // Long causal-prefill chunks can have thousands of physical raw rows but
@@ -2076,7 +2039,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
                 q_stride_token, q_stride_head,
                 inverse_rope,
                 inverse_rope_coefficients,
-                forward_rope_coefficients,
+                q_rope_tails,
                 compact_group4_shmem, stream);
         }
         return ds4_launch_flash_attn_d512_grouped_compact<
@@ -2088,7 +2051,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
             q_stride_token, q_stride_head,
             inverse_rope,
             inverse_rope_coefficients,
-            forward_rope_coefficients,
+            q_rope_tails,
             compact_group4_shmem, stream);
     }
     if (!sparse && n_heads % group2 == 0 && group2_shmem <= 48 * 1024) {
@@ -2098,7 +2061,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
             q_stride_token, q_stride_head,
             inverse_rope,
             inverse_rope_coefficients,
-            forward_rope_coefficients,
+            q_rope_tails,
             group2_shmem, stream);
     }
 
@@ -2113,7 +2076,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
                 mean_k, n_tokens, n_heads, n_kv, scale, raw_rows,
                 sparse_keep_rows, sparse_block_size, n_comp_blocks,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else if (kv_f32 && (!mask || mask->type == GGML_TYPE_F32)) {
         ds4_flash_attn_d512_shared_kv_kernel<float, float>
             <<<grid, 256, shmem, stream>>>(
@@ -2125,7 +2088,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
                 mean_k, n_tokens, n_heads, n_kv, scale, raw_rows,
                 sparse_keep_rows, sparse_block_size, n_comp_blocks,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else if (kv_f32 && mask && mask->type == GGML_TYPE_F16) {
         ds4_flash_attn_d512_shared_kv_kernel<float, half>
             <<<grid, 256, shmem, stream>>>(
@@ -2137,7 +2100,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
                 mean_k, n_tokens, n_heads, n_kv, scale, raw_rows,
                 sparse_keep_rows, sparse_block_size, n_comp_blocks,
                 inverse_rope, inverse_rope_coefficients,
-                forward_rope_coefficients);
+                q_rope_tails);
     } else {
         return false;
     }

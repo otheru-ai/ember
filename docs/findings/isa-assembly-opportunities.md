@@ -105,3 +105,106 @@ layer-independent, so they are not obstacles.
 
 Order of work: verify the shared-ratio assumption first, since getting it wrong
 is a correctness bug rather than a slower kernel. Then memoise.
+
+## Second pass (2026-09-02): read the compiler's output, not the ISA index
+
+Method: compile the hot TUs exactly as `build-frontier-rocm/compile_commands.json`
+does (`-O3 -DNDEBUG --offload-arch=gfx1151`) with `-S --offload-device-only`
+inside `ember-rocm:10.0-dev`, then count instruction classes per kernel. The
+kernels are the retained-trace top of prefill (`ds4_flash_attn_d512_*`, 30 %
+of prefill kernel time) and decode (`mmvq<101>` 24 %, `mmvq<107>` 18 %).
+Every hardware claim below is either the ISA XML (`isa <INSN>` on otheru) or
+the emitted assembly; where the XML does not carry a rule, that is said.
+
+### 1. FA D=512: the q rope tail was a flat-load tail — fixed
+
+Before this pass every D=512 attention kernel selected, per element, between
+an LDS pointer (rotated q tail) and a global pointer (`qh[d]`). Mixed address
+spaces lower to generic `flat_load_b32`, and the compiler could not hoist the
+selection. Per kv row, HEADS=4 compact kernel (`fa512_f_h.s`):
+
+| | before | after |
+|---|---|---|
+| instructions | 7286 | 4576 |
+| `flat_load_b32` (each behind `s_waitcnt vmcnt(0) lgkmcnt(0)`) | 258 | 0 |
+| `v_readlane_b32` / `v_writelane_b32` (pointer spills into lanes) | 541 / 529 | 93 / 52 |
+| scratch bytes ("Folded Reload") | 36 | 0 |
+| `s_cselect_b32` | 552 | 40 |
+| `s_waitcnt` | 407 | 175 |
+| `s_load_b512` (q via scalar cache) | 113 (448 dims) | 129 (all 512) |
+| VGPRs / occupancy | 50 / 16 | 42 / 16 |
+
+Fix: `ds4_forward_rope_q_tail_kernel` rotates the tail for every (token, head)
+into a `[n_tokens][n_heads][64]` pool buffer before the attention launch; the
+kernels select between two *global* wave-uniform pointers, so every q read is
+an `s_load_b512` feeding `v_fmac_f32`. Numerics unchanged: same
+`ds4_forward_rope_coefficients` and `ds4_apply_inverse_rope_pair`, same F32
+coefficient rounding, same per-head accumulation order.
+
+Two variants were tried and rejected, with the counts that rejected them:
+staging the tail in LDS unconditionally (removes flat loads but LICM hoists
+256 LDS reads into VGPRs: 96 VGPRs, scratch 32 B, `v_dual_fmac` 844 → 60);
+adding an `asm volatile("" ::: "memory")` per row to stop the hoist (VOPD
+back to 367 but scratch 68 B). Skewing odd heads by one dimension to help the
+VOPD pairer made the loop 22 % longer with 285 readlanes.
+
+What remains: `v_dual_fmac_f32` pairs 338 (before: 844, but those paired the
+now-deleted tail work too). The XML settles one VOPD rule — `VDSTY` bit 0 is
+`~VDSTX[0]`, so paired destinations need opposite parity — and does not carry
+a source-bank rule; the compiler only pairs FMAs that read *different* k
+VGPRs. The dot loop reads the same `k[d]` for four heads back to back, so the
+adjacent-only pairer finds one pair in three. This is compiler scheduling, not
+source order (the skew experiment shows the scheduler undoes source order),
+so the remaining lever is inline-asm for the 512×4 FMA block — which loses
+VOPD entirely ([[ember-gfx1151-kernel-findings]]) — or the WMMA path, already
+judged not the win. Leave it.
+
+Falsifier for the perf claim: FA kernel p50 per dispatch (trace, not tok/s)
+unchanged after the change means the flat-load latency was hidden by
+occupancy 16 and this is a code-size fix only. Expect it to move: the 258
+full-drain waits per row were serialising the global k loads.
+
+### 2. UE4M3 scale decode: 9–11 VALU ops → 2 + one convert
+
+`rocmfp4_ue4m3_to_fp32_half_finite` / `_finite` (`rocmfp4_hip_scale.cuh:37-82`)
+emit ~9/~11 VALU ops per decode. A UE4M3 byte `x` (bias 7, no sign) is a
+subnormal-capable 8-bit float; placing its 7 magnitude bits at the f16
+exponent/mantissa boundary and converting is the same function up to a power
+of two:
+
+    cvt_f32_f16((x << 7) & 0x3f80) * 128.0f
+
+is bit-identical to both decoders for all 256 inputs (Python enumeration of
+the C reference, 0 mismatches; for `x = 0x7f` it yields 240.0, the
+`half_finite` value — the `_finite` variant's `x > 0x7e → 0` clamp relies on
+the documented pre-validation of scale bytes, so keep that clamp where the
+bytes are not validated). Instructions: `v_lshlrev_b32`, `v_and_b32`,
+`v_cvt_f32_f16` (`isa V_CVT_F32_F16`: VOP1/VOP3, DPP16 yes), and the ×128 can
+fold into the kernel epilogue or `v_ldexp_f32`. Where it lands: FP4_FAST mmvq
+spends ~9 of ~100 VALU per block on the decode, FP2 mmvq 2×11 of ~66 per
+half-block, and the mmq loaders decode per tile. Unimplemented; needs
+`test_rocmfp_scale.c` extended to all 256 bytes against the reference.
+
+### 3. FP2 unpack: an identity perm and a layout that would delete the spread
+
+`rocmfpx_pack4_fp2_bits8_vec_cuda` (`vecdotq.cuh:440-461`) ends in
+`__builtin_amdgcn_perm(0, 0x03020100, sel)` — with
+`ROCMFP2_KVALUE_{0..3}_I8 = 0,1,2,3` (`rocmfpx.h:28-31`) the table is the
+identity, so it is a no-op `v_perm_b32` (4 per half-block). Remove it.
+
+The 2-bit → byte spread itself costs ~32 ops per 16 codes. With a transposed
+storage order (byte j of a 4-byte group holds elements j, j+4, j+8, j+12),
+word k of the unpacked bytes is `(x >> 2k) & 0x03030303` — 7 ops for all
+four words. It is a lossless bit permutation of the existing type, so it can
+be a load-time repack rather than a new GGUF type, and the mmq loader
+benefits equally. Unimplemented; pairs naturally with the pending `sumq`
+elimination above.
+
+### 4. Already near-optimal, do not spend time here
+
+FP4 codebook gather (2 table perms + 1 select per operand), DPP wave
+reductions (`v_add_f32_dpp` + `v_permlanex16`), and `V_DOT4_I32_IU8` use are
+what the ISA allows (`isa V_DOT4_I32_IU8`: VOP3P, no DPP16, no VOPD;
+`isa V_DOT8_I32_IU4`: VOP3P, no DPP/VOPD — the IU4 route is the existing
+ROCMI4 W4A8 design, not a quick win). `V_CVT_F32_FP8` / `V_CVT_PK_F32_FP8`
+are not in the rdna3_5 spec.
