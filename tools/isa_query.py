@@ -7,10 +7,17 @@ lookup rather than a build-and-diagnose cycle:
   * Can I hand-write this with a DPP modifier?  -> needs a *_VOP_DPP16 encoding.
   * Can the compiler pack it into a dual-issue pair? -> needs a VOPD encoding.
 
-Getting these wrong is expensive and silent. V_FMA_MIX_F32 is VOP3P-only, so
-the VOPD pair I hand-wrote could never assemble; V_PERMLANEX16_B32 is VOP3-only
-with no DPP, which is why the offset-16 step of a wave reduction cannot fold
-into the DPP butterfly. Both were discovered the slow way first.
+Getting these wrong is expensive and silent. V_FMA_MIX_F32 is VOP3P-only with
+no V_DUAL_ form, so the VOPD pair I hand-wrote could never assemble;
+V_PERMLANEX16_B32 is VOP3-only with no DPP, which is why the offset-16 step of a
+wave reduction cannot fold into the DPP butterfly. Both were discovered the slow
+way first.
+
+Read the VOPD line carefully: RDNA 3.5 carries dual-issue on SEPARATE mnemonics.
+V_AND_B32 has no VOPD encoding of its own, but V_DUAL_AND_B32 exists, so the
+operation dual-issues even though the base instruction's encoding list says
+nothing about it. There are 17 V_DUAL_* instructions; everything else genuinely
+cannot pair.
 
 Spec: https://gpuopen.com/download/machine-readable-isa/latest/
 Tooling: https://github.com/GPUOpen-Tools/isa_spec_manager
@@ -164,12 +171,23 @@ def report_operand_type(root, name):
     print(f"{name}: no such operand type. Available: {', '.join(avail)}")
 
 
-def report(name, encs, desc):
+def report(name, encs, desc, table=None):
     dpp = any("DPP16" in e for e in encs)
     vopd = any("VOPD" in e for e in encs)
+    # VOPD is carried by SEPARATE mnemonics: V_AND_B32 has no VOPD encoding but
+    # V_DUAL_AND_B32 does. Reporting only the base instruction's encodings reads
+    # as "this operation cannot dual-issue" when it can, which is the opposite
+    # of the truth and the reason this line exists.
+    dual_name = name.replace("V_", "V_DUAL_", 1) if name.startswith("V_") else None
+    has_dual = bool(table) and dual_name in table
     print(f"{name}")
     print(f"  DPP16 modifier : {'yes' if dpp else 'NO'}")
-    print(f"  VOPD dual-issue: {'yes' if vopd else 'NO'}")
+    if vopd:
+        print(f"  VOPD dual-issue: yes (this encoding)")
+    elif has_dual:
+        print(f"  VOPD dual-issue: yes, via {dual_name}")
+    else:
+        print(f"  VOPD dual-issue: NO (and no {dual_name or 'V_DUAL_*'} form)")
     print(f"  encodings      : {', '.join(encs)}")
     if desc:
         print(f"  {desc.splitlines()[0][:100]}")
@@ -201,7 +219,7 @@ def main(argv):
     for a in args:
         key = a.upper()
         if key in table:
-            report(key, *table[key])
+            report(key, *table[key], table=table)
         elif prefix_mode:
             hits = [k for k in sorted(table) if k.startswith(key)]
             print(f"{key}* -> {len(hits)} matches, DPP16-capable:")
