@@ -158,6 +158,18 @@ def validate_workload_rows(on_rows, off_rows, expected_count):
     if {row["label"] for row in on_rows} != {row["label"] for row in off_rows}:
         raise SystemExit("spec-on and spec-off workload identities differ")
 
+    # A field that is present and always zero passes a "is it a finite number"
+    # check while carrying no information. spec_cycles was 0 on every row of
+    # both published rows, which is indistinguishable from the counter never
+    # being wired up -- and it is the metric that explains a speedup change at
+    # constant accept_rate. Require the spec-on arm to show it varying.
+    on_cycles = {row.get("spec_cycles") for row in on_rows}
+    if any(row.get("spec_ran") for row in on_rows) and on_cycles == {0}:
+        raise SystemExit(
+            "spec-on rows report spec_cycles == 0 on every workload while "
+            "spec_ran is true; the counter is inert, so speculative behaviour "
+            "cannot be diagnosed from this bundle")
+
 
 def model_provenance(env):
     def digest(env_name, output_name):
