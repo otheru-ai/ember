@@ -270,7 +270,8 @@ bool deepseek4_dspark_resident_finish(
 // Run DSpark speculative decode: draft block_size candidates with `drafter`,
 // verify against the DS4 target in one batched forward, accept the matching
 // prefix, and loop. Returns generated tokens via `io.emit`. Mirrors the laguna
-// DSpark loop. accept_rate_out (optional) gets mean accepted / block.
+// DSpark loop. accept_rate_out (optional) gets accepted / offered candidates;
+// spec_cycles_out (optional) gets the number of completed speculative cycles.
 struct GenerateRequest;  // fwd (from common/…); the loop only needs n_gen + committed
 bool run_deepseek4_dspark_spec_decode(
         ggml_backend_t backend,
@@ -285,6 +286,7 @@ bool run_deepseek4_dspark_spec_decode(
         int win_len,
         std::vector<int32_t> & out_tokens,
         float * accept_rate_out,
+        int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute = nullptr,
         const std::function<bool(int32_t)> & on_token = {});
 

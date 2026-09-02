@@ -2396,6 +2396,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     std::vector<int32_t> gen;
     gen.reserve((size_t) req.n_gen);
     float accept_rate = 0.0f;
+    int spec_cycles = 0;
     bool spec_ran = false;
     bool spec_terminal = false;   // spec finished the generation on its own
     bool spec_degenerate = false;
@@ -2426,7 +2427,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                     backend_, cfg_.device.gpu, w_, cache_, *spec_drafter_, committed, seed,
                     spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr, win_len,
-                    spec_toks, &accept_rate, spec_xdna_draft_compute_.get(),
+                    spec_toks, &accept_rate, &spec_cycles,
+                    spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t tok) {
                         if (out_io.cancelled) return false;
@@ -2481,6 +2483,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);
         std::fprintf(stderr,
@@ -2798,6 +2801,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     std::vector<int32_t> generated;
     generated.reserve((size_t) req.n_gen);
     float accept_rate = 0.0f;
+    int spec_cycles = 0;
     bool spec_ran = false;
     bool spec_terminal = false;
     bool spec_degenerate = false;
@@ -2833,7 +2837,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                     backend_, cfg_.device.gpu, w_, cache_, *spec_drafter_,
                     committed, seed, spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr,
-                    win_len, spec_tokens, &accept_rate,
+                    win_len, spec_tokens, &accept_rate, &spec_cycles,
                     spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t token) {
@@ -2886,6 +2890,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);
         std::fprintf(stderr,
