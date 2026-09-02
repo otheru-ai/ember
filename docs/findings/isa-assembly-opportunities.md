@@ -218,3 +218,48 @@ what the ISA allows (`isa V_DOT4_I32_IU8`: VOP3P, no DPP16, no VOPD;
 `isa V_DOT8_I32_IU4`: VOP3P, no DPP/VOPD — the IU4 route is the existing
 ROCMI4 W4A8 design, not a quick win). `V_CVT_F32_FP8` / `V_CVT_PK_F32_FP8`
 are not in the rdna3_5 spec.
+
+### 3b. FP2 transposed layout: design, hook points, and why it is not started
+
+Written 2026-09-02 after `86d8883`/`912459f` landed. The layout change in §3
+is a load-time repack, so every reader of the type must switch under one
+compile-time macro (proposed `ROCMFP2_TRANSPOSED_LAYOUT`, default 0) or the
+no-discriminator trap of the two-scale/affine slot 107 repeats:
+
+| reader | where | note |
+|---|---|---|
+| CPU dequant (`to_float`) | `engine/ggml/rocmfpx/rocmfpx.c:722` `rocmfpx_dequantize_row_fp2` | the only CPU reader; `ggml.c:748` traits carry no CPU vec_dot, so the hybrid cold-expert path (`DFLASH_MOE_COLD_BACKEND`) dequantises through this |
+| device dequant | `ggml-cuda/dequantize.cuh` `dequantize_rocmfpx_fp2` | used by `convert.cu:892-1069` and `getrows.cu:210` |
+| MMVQ | `vecdotq.cuh` `rocmfpx_pack4_fp2_bits8_vec_cuda` + `vec_dot_rocmfpx_fp2_q8_1` | the ~28→7 op win |
+| MMQ prefill loader | `mmq.cuh:594-595`, `:1036` (`load_tiles_rocmfp2_affine`) | same unpack, same win |
+| validator | `rocmfpx.c:1032` | scale bytes only, layout-agnostic |
+| quantizer | `rocmfpx.c:666-720`, `test_rocmfpx.c` | must stay canonical (on-disk) — do not emit the transposed order |
+
+Repack hook: `deepseek4_loader.cpp:756-793` — in the `fast_managed` worker,
+after the `pread` loop for tensor `a`, `if (a.tensor->type ==
+GGML_TYPE_Q2_0_ROCMFP2) repack_in_place(dst, a.file_size)`; the pages are
+host-writable there (pread just wrote them). The `ggml_backend_tensor_set`
+fallback (`:797-800`) reads the read-only mmap, so it needs a staging copy
+for FP2 tensors. The repack is a 4×4 transpose of 2-bit fields inside each
+4-byte `qs` word — pure host code, unit-testable against the reference
+decoder like `test_rocmfp2_unpack.c`.
+
+Why not started: the win is ALU, and whether the FP2 MMVQ is VALU-bound is
+not established. Per 4-byte weight word the unpack is ~28 VALU ops against
+4 dot ops; at batch 1 that is ~8 ops per weight byte, ~20 % of the CU VALU
+rate at DRAM bandwidth, i.e. bandwidth-bound and the repack would be
+invisible. For the routed experts the vec_dot runs once per (column, row)
+with a different expert per column (`mmvq.cu:525-528` `channel_xs[j]`), so
+the unpack cannot be shared across columns and the ratio is unchanged at
+verify shapes. Only the non-`ids` FP2 matmuls (shared expert, dense
+projections if FP2) multiply the unpack by `ncols_dst`; those are where a
+`reuse_rocmfp4_weights`-style variant (`mmvq.cu:508`, FP4FAST only today)
+and the transposed layout would both pay.
+
+Pre-registered discriminator before any implementation: from the kernel
+trace codex already collects for 940, VALU-busy vs memory-unit-busy on the
+FP2 `mul_mat_vec_q` instances (counter names to be confirmed on gfx1151 by
+codex; the ISA XML describes instructions, not counters). Implement only if
+an FP2 MMVQ instance that carries ≥10 % of decode kernel time shows VALU
+busy above memory busy; otherwise close this item as "bandwidth-bound,
+not admissible" and leave §3's estimate as an estimate.
