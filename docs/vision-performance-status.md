@@ -528,3 +528,52 @@ second build from a clean tree before another benchmark is spent on it.
 The 0j degeneration (`tvqa_34733`, a detected 422, not silent corruption) is
 still open and is the only correctness item standing between the current
 artifact and the C1 text quality gate.
+
+## 2026-09-02 — 0v: the Vision drafter against the 0731 target
+
+User-authorised cross-pairing, thresholds fixed before the run (coord msg 1005):
+structured acceptance ≥ 0.95 → the pairing with the Vision target is the
+problem, reopen the drafter build; ≤ 0.90 → the MTP head predicts badly in
+general, ship Vision with the 0731 drafter; between → ambiguous, no decision.
+
+Both arms in one quiesce window, same 0731 target, same binary, same ten
+`accept_sweep.py` prompts, `--ds4-expert-top-k 0` to match rows A and B.
+Evidence: `/srv/models/perf/vision-drafter-x-0731-target-20260902-r3`.
+
+| workload | 0731 drafter (control) | Vision drafter |
+|---|---:|---:|
+| multiples * | 1.000 | 0.653 |
+| repeat * | 0.986 | 0.905 |
+| alphabet * | 0.985 | 0.933 |
+| count * | 0.981 | 0.953 |
+| json * | 0.976 | 0.980 |
+| code * | 0.925 | 0.785 |
+| factual | 0.835 | 0.644 |
+| essay | 0.363 | 0.275 |
+| prose | 0.256 | 0.237 |
+| creative | 0.188 | 0.175 |
+| **structured mean** | **0.975** | **0.868** |
+
+\* structured workloads, the ones the verdict is drawn from.
+
+**Verdict: 0.868 ≤ 0.90 → the Vision-Exp MTP head predicts worse in general.**
+It is not a pairing effect with the Vision target: swapping the target to 0731
+leaves the same deficit (row B structured ≈ 0.79 on the Vision target, 0.868
+here on the 0731 target, against ~0.98 for the 0731 drafter on either). **Ship
+Vision with the 0731 drafter.**
+
+The control is what makes that attributable: the 0731 drafter on this same
+target, harness and window reproduces 0.975, so the setup is not what is being
+measured. Both arms assert from the server log which drafter file actually
+loaded — the two files are both 10.9 GB and sit side by side in `/srv/models`,
+and a silent fallback would have produced a clean-looking 0.98 that meant
+nothing. `spec_ran` is true on all 20 requests.
+
+What this does not say: it does not explain WHY the head is weaker. The
+candidate causes remain what row B's reading listed — the Vision-Exp `mtp.*`
+weights themselves, or the `b8c2abc` DSpark build. This experiment only rules
+out "the Vision target is what the matched drafter cannot predict".
+
+Unstructured prose stays low for both drafters (0.18–0.36), as in every earlier
+row; that is a property of the workload, not of either drafter.
+
