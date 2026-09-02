@@ -472,6 +472,24 @@ zero MTP VL biases; the image decode figure is the autoregressive rate.
    forces — ship Vision with the cross-model 0731 drafter, or investigate the
    build — is the user's.
 
+   Host-side audit of the matched drafter, 2026-09-02 (pure-python GGUF
+   reader on otheru, both files): type inventory identical (25 Q8_0, 9
+   type-101 expert tensors, 2 F16, F32 for the rest, +3 F32 `bias_vl`);
+   Vision-Exp `config.json` and `inference/config.json` both carry
+   `dspark_target_layer_ids [40,41,42]`, `dspark_block_size 5`,
+   `dspark_markov_rank 256`, `dspark_noise_token_id 128799`, matching the
+   metadata the build copied from the 0731 template; no NaN and no zero
+   tensor in the 22 small tensors sampled (`dflash.*`, `output_*`, block-0
+   norms, router, `exp_probs_b`); `bias_vl` all-zero as upstream ships it;
+   Q8_0 block scales on `dflash.fc`, `attn_output_a/b`, `ffn_down_shexp`
+   have no zero blocks and RMS within 0.65–0.8× of 0731's. Norm-weight
+   RMS differs 2–4× between the two (`attn_norm` 0.048 vs 0.196,
+   `hidden_norm` 0.073 vs 0.211, `markov.w1` 0.50 vs 0.22), which is what
+   different trained weights look like, not a scale error. Nothing at the
+   artifact level says "build defect"; what remains is GPU-bound: the
+   Vision drafter against the 0731 target (low acceptance there too → the
+   head is weak in general; high → a pairing effect on this target).
+
 4. **ROCm 10 alone (row A → row B, autoregressive) is +0.1…+0.4 %** on every
    text workload and within ±1 % on every prefill point except the 2048 group
    (−4.3 %), consistent with the text rows in `docs/perf/data.json`.
