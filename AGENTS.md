@@ -210,6 +210,43 @@ in `ggml-cuda/mma.cuh` compiles to `NO_DEVICE_CODE` on this hardware.
 dry-run, unconditional production restore, and the analyzer end to end against
 synthetic rocprofv3 CSVs.
 
+### Cite the source for every hardware claim
+
+When a comment asserts how gfx1151 behaves, name the source that settles it.
+
+**If the ISA settles it, `isa <INSN>` must reproduce it in one command.** The
+machine-readable spec is mirrored on otheru at `/srv/isa` with `isa` on PATH;
+`ember/tools/isa_query.py` is the same tool and the original. It answers what
+exists, what encodings and modifiers an instruction has, its operands and bit
+layout, and its functional group:
+
+```
+isa V_FMAC_F32               # DPP16? VOPD? which encodings?
+isa --full V_WMMA_F32_16X16X16_F16
+isa --encoding ENC_VOP2      # bit layout
+isa --group WMMA
+```
+
+**If the ISA does not settle it, say so in the comment.** Instruction latency,
+issue rate, LDS and register-file capacity, occupancy, and what the compiler
+actually emits are all outside an encoding spec. A claim of that kind is not
+unfounded, but a reader who goes looking for it in the ISA will conclude that it
+is. Point at the RDNA 3.5 architecture doc, or at disassembly of the built
+object, whichever actually decides it.
+
+Two traps this rule exists because of:
+
+- **VOPD lives on separate mnemonics.** `V_AND_B32` has no VOPD encoding, but
+  `V_DUAL_AND_B32` does, so reading only the base instruction's encodings
+  concludes the operation cannot dual-issue when it can. There are 17
+  `V_DUAL_*` instructions. `isa` now resolves the counterpart; it did not
+  always, and a claim in this repo was wrong because of it.
+- **A query that finds nothing looks exactly like a feature that is absent.**
+  The published schema documentation lists six ISA subsections where there are
+  seven, and the spec itself misspells `CondtionExpression`. Match the file, not
+  the documentation, and treat an empty result as suspicious rather than
+  conclusive. `docs/findings/isa-grounding-audit.md` records the audit.
+
 ## Architecture: invariants you must not break
 
 ### The backend ABI is the seam
