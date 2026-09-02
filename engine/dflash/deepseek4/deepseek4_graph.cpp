@@ -5807,7 +5807,13 @@ static int ds4_try_layer_major_prefill(
     Ds4LayerMajorGraphCache * graph_cache = nullptr;
     bool cache_hit = false;
     bool cache_build = false;
-    if (token_ids && dflash::deepseek4_vision_graph_cache_safe(
+    // A cache hit computes without rebuilding, so nothing registers and nothing
+    // drains: collection would silently stop after the first request of a given
+    // shape while the counts stayed plausibly non-zero. That is exactly the
+    // shape of a text control run -- same-length chunks at kv_start 0 -- so the
+    // cache is disabled outright while collecting rather than worked around.
+    ds4::ImatrixCollector * const imx_collect = ds4::ImatrixCollector::instance();
+    if (!imx_collect && token_ids && dflash::deepseek4_vision_graph_cache_safe(
                          vision_ids, w.n_vocab)) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
             if (candidate.matches(w, cache, backend, cache.prefill_mode,
@@ -6050,6 +6056,15 @@ static int ds4_try_layer_major_prefill(
         cache.cur_pos = next_pos;
         return out_logits.empty() ? -1 : 1;
     }
+
+    // Collection scope: registration is a no-op outside it, so the several other
+    // graph builders that reach the MoE code cannot leave dangling sites for
+    // this path's drain to dereference. Closed on every exit.
+    struct ImxScope {
+        ds4::ImatrixCollector * c;
+        explicit ImxScope(ds4::ImatrixCollector * c_) : c(c_) { if (c) c->begin_scope(); }
+        ~ImxScope() { if (c) c->end_scope(); }
+    } imx_scope(imx_collect);
 
     ggml_tensor * state_in = state_a;
     ggml_tensor * state_out = state_b;

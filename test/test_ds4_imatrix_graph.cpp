@@ -77,6 +77,16 @@ int main() {
 
     ds4::ImatrixCollector imx;
     imx.set_n_expert(n_expert);
+
+    // Registration outside a scope must be ignored: several graph builders
+    // reach the MoE code and only one is followed by a drain, so an ungated
+    // registration would leave a pointer into a freed context for the next
+    // drain to dereference.
+    imx.register_site("blk.9.ffn_gate_exps.weight", cur_3d, ids, n_embd, false);
+    check(imx.entry("blk.9.ffn_gate_exps.weight") == nullptr,
+          "registration outside a scope is ignored");
+
+    imx.begin_scope();
     imx.register_site("blk.0.ffn_gate_exps.weight", cur_3d, ids, n_embd, false);
     imx.register_site("blk.0.ffn_down_exps.weight", mid,    ids, n_ff,   true);
 
@@ -152,6 +162,7 @@ int main() {
     }
     check(unchanged, "a second drain with no registrations does not double count");
 
+    imx.end_scope();
     ggml_gallocr_free(alloc);
     ggml_free(ctx);
     ggml_backend_free(backend);

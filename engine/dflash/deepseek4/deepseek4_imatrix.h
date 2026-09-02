@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,17 @@ public:
     // process; collection is off in every normal serving path.
     static ImatrixCollector * instance();
 
+    // Registration is ignored outside a scope. Several graph builders reach the
+    // MoE code, but only one of them is followed by a drain; without this gate
+    // the others leave sites_ holding pointers into a freed ggml_context for
+    // the next drain to dereference. Scope is opened only where a drain is
+    // guaranteed.
+    void begin_scope();
+    void end_scope();
+    bool in_scope() const { return scope_; }
+
     // Called from the graph builder. Marks `input` and `ids` as graph outputs.
+    // No-op outside a scope.
     void register_site(const std::string & name, ggml_tensor * input,
                        ggml_tensor * ids, int n_in, bool per_slot);
 
@@ -91,6 +102,12 @@ public:
     const Entry * entry(const std::string & name) const;
 
 private:
+    // The generation workers are separate threads and the collector is a
+    // process-wide singleton, so every mutating path takes this. Collection is
+    // off in normal serving, but a batched collection run would otherwise
+    // corrupt counts rather than fail.
+    mutable std::mutex mu_;
+    bool scope_ = false;
     std::vector<ImatrixSite> sites_;
     // std::map keeps the .dat entry order stable across runs, which makes two
     // collections byte-comparable.

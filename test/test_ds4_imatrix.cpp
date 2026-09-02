@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -124,7 +125,19 @@ int main() {
     const std::string path = "/tmp/ds4-imatrix-test.dat";
     std::remove(path.c_str());
     std::string err;
-    check(c.write(path, err), "writer succeeds");
+
+    // This fixture leaves experts 1, 4 and 5 unrouted, so the coverage guard
+    // must refuse: a zero row silently zero-weights an expert in the quantizer
+    // and llama-quantize does not warn.
+    unsetenv("DFLASH_IMATRIX_ALLOW_GAPS");
+    check(!c.write(path, err), "writer refuses an under-covered matrix");
+    check(err.find("uncalibrated") != std::string::npos, "refusal names the cause");
+    check(std::fopen(path.c_str(), "rb") == nullptr, "nothing was written on refusal");
+
+    // The override exists so a deliberately partial collection can still be
+    // inspected; everything below checks the format, not the coverage.
+    setenv("DFLASH_IMATRIX_ALLOW_GAPS", "1", 1);
+    check(c.write(path, err), "writer succeeds with the gap override");
 
     std::vector<DatEntry> back;
     int32_t last_chunk = -1;

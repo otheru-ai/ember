@@ -40,6 +40,8 @@ const ImatrixCollector::Entry * ImatrixCollector::entry(const std::string & name
 void ImatrixCollector::accumulate(const std::string & name, const float * input,
                                   const int32_t * ids, int n_in, int n_used,
                                   int n_tokens, bool per_slot) {
+    // drain() already holds mu_; accumulate is otherwise called only from the
+    // host test, which is single-threaded.
     Entry * e = entry_mut(name, n_in);
     if (e->n_in != n_in) return;   // shape drift: refuse rather than corrupt
     for (int t = 0; t < n_tokens; ++t) {
@@ -63,10 +65,12 @@ void ImatrixCollector::accumulate(const std::string & name, const float * input,
 }
 
 void ImatrixCollector::abandon() {
+    std::lock_guard<std::mutex> lock(mu_);
     sites_.clear();
 }
 
 void ImatrixCollector::end_chunk() {
+    std::lock_guard<std::mutex> lock(mu_);
     chunks_ += 1;
 }
 
@@ -75,6 +79,34 @@ static bool write_all(FILE * f, const void * p, size_t n) {
 }
 
 bool ImatrixCollector::write(const std::string & path, std::string & err) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    // Coverage first. An expert nothing routed to gets a zero row, which
+    // silently zero-weights that expert in the quantizer -- and llama-quantize
+    // does not warn about it. The vision corpus manifest raises exactly this
+    // risk ("any expert with a low or zero count has an unreliable or missing
+    // row"), so refuse by default rather than ship an under-covered matrix and
+    // discover it as quality loss.
+    size_t worst_gap = 0;
+    std::string worst_name;
+    for (const auto & kv : entries_) {
+        size_t gap = 0;
+        for (int ex = 0; ex < n_expert_; ++ex) {
+            if (kv.second.counts[ex] == 0) gap++;
+        }
+        if (gap > worst_gap) { worst_gap = gap; worst_name = kv.first; }
+    }
+    std::fprintf(stderr,
+                 "[deepseek4-imatrix] %zu entries, %d experts, %d chunks; "
+                 "worst uncalibrated coverage %zu/%d in %s\n",
+                 entries_.size(), n_expert_, chunks_, worst_gap, n_expert_,
+                 worst_gap ? worst_name.c_str() : "(none)");
+    if (worst_gap > 0 && !std::getenv("DFLASH_IMATRIX_ALLOW_GAPS")) {
+        err = "refusing to write: " + std::to_string(worst_gap) + " of " +
+              std::to_string(n_expert_) + " experts uncalibrated in " + worst_name +
+              " (set DFLASH_IMATRIX_ALLOW_GAPS=1 to override deliberately)";
+        return false;
+    }
+
     const std::string tmp = path + ".part";
     FILE * f = std::fopen(tmp.c_str(), "wb");
     if (!f) { err = "open " + tmp + ": " + std::strerror(errno); return false; }

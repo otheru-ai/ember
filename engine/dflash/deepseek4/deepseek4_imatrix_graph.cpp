@@ -11,17 +11,41 @@
 
 namespace ds4 {
 
+void ImatrixCollector::begin_scope() {
+    std::lock_guard<std::mutex> lock(mu_);
+    // Anything still registered belongs to a graph that was never drained.
+    // Reading it later would dereference a freed context, so drop it.
+    sites_.clear();
+    scope_ = true;
+}
+
+void ImatrixCollector::end_scope() {
+    std::lock_guard<std::mutex> lock(mu_);
+    sites_.clear();
+    scope_ = false;
+}
+
 void ImatrixCollector::register_site(const std::string & name, ggml_tensor * input,
                                      ggml_tensor * ids, int n_in, bool per_slot) {
-    if (!input || !ids) return;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!scope_ || !input || !ids) return;
     // gallocr reuses the buffer of any tensor that is not a graph output, so
     // without this the reads in drain() would return whatever ran next.
-    ggml_set_output(input);
-    ggml_set_output(ids);
+    //
+    // The flag has to go on the BASE tensor, not the view. ggml_gallocr_free_node
+    // (ggml-alloc.c:690) tests GGML_TENSOR_FLAG_OUTPUT on the node it is freeing,
+    // and the view path (:805-817) calls it with `view_src` -- so flagging a
+    // reshape view leaves its base free to be reused, and drain() then reads
+    // whatever a later node wrote. ggml_gallocr_alloc_graph's inplace check
+    // (:645) does look through view_src, which makes the asymmetry easy to miss.
+    // cur_3d is exactly such a reshape view of ffn_normed.
+    ggml_set_output(input->view_src ? input->view_src : input);
+    ggml_set_output(ids->view_src ? ids->view_src : ids);
     sites_.push_back(ImatrixSite{name, input, ids, n_in, per_slot});
 }
 
 void ImatrixCollector::drain() {
+    std::lock_guard<std::mutex> lock(mu_);
     std::vector<float>   host_in;
     std::vector<int32_t> host_ids;
     for (const ImatrixSite & s : sites_) {
