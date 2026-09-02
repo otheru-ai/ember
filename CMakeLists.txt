@@ -805,6 +805,16 @@ if(EMBER_ENGINE)
   enable_language(HIP)
   add_subdirectory(engine)
 
+  # The imatrix collector against a real ggml graph. Uses the CPU backend and
+  # never touches a device, so it runs in the GPU-less ROCm build container --
+  # but it needs the vendored ggml, hence the engine guard.
+  add_executable(test_ds4_imatrix_graph test/test_ds4_imatrix_graph.cpp
+                 engine/dflash/deepseek4/deepseek4_imatrix.cpp
+                 engine/dflash/deepseek4/deepseek4_imatrix_graph.cpp)
+  target_include_directories(test_ds4_imatrix_graph PRIVATE engine engine/ggml/include)
+  target_link_libraries(test_ds4_imatrix_graph PRIVATE ggml ggml-base ggml-cpu)
+  add_test(NAME ds4_imatrix_graph COMMAND test_ds4_imatrix_graph)
+
   # Metadata-only split-set coverage. It links the real loader's gguf parser
   # but never creates a HIP backend or touches a device, so it remains runnable
   # in the GPU-less ROCm build container.
