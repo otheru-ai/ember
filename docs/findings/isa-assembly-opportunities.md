@@ -66,3 +66,42 @@ the shifted copies carry into one another. Recorded so nobody re-derives it.
   cannot be dual-issued. Consistent with the standing finding that VOPD is
   unreachable from inline asm, and it means dual-issue is not a lever on the
   quantized dot path specifically.
+
+
+# Addendum: the per-layer causal mask rebuild (2026-09-02)
+
+`build_mla_attention` allocates and zero-fills
+`std::vector<float> mvals(n_attn * n_tokens)` and rebuilds the causal mask on
+**every call, and it is called once per layer**. The fused path already avoids
+this — it pre-builds `fg.mask_bundle` once and hands each layer a view — but the
+`layer_major_batch` prefill path does not.
+
+Sizing: at 2048 tokens and n_attn 4096 that is a 32 MB allocate-and-zero per
+layer, roughly **1.4 GB of memset per chunk** across 43 layers, on top of the
+predicate cost removed in `f4bba5a`.
+
+## My first idea was wrong
+
+I proposed hoisting the mask out of the layer loop as layer-invariant. **It is
+not.** `const int ratio = w.compress_ratios[layer_idx]` — the compressor ratio
+is per layer, and it feeds `n_comp_live`, hence `n_attn`, hence the mask shape
+and contents. A blanket hoist would produce a wrong mask for most layers.
+
+## What is actually available
+
+The mask depends on the layer *only through* `ratio`. The shipped model has
+**three distinct ratios across 43 layers**:
+
+    deepseek4.attention.compress_ratios = [0, 0, 4, 128, 4, 128, ...]
+    distinct {0, 4, 128}, counts {0: 2, 4: 21, 128: 20}
+
+So the mask can be **memoised by ratio: 43 builds become 3**, provided layers
+sharing a ratio also share `lc.n_comp` and `comp_kv->ne[1]`. Both are per-layer
+fields, so that is an assumption to verify in the cache, not to assume — it is
+the same class of mistake as the hoist above.
+
+`n_prior_rows = min(kv_start, w.n_swa)` and `n_raw` on this path are
+layer-independent, so they are not obstacles.
+
+Order of work: verify the shared-ratio assumption first, since getting it wrong
+is a correctness bug rather than a slower kernel. Then memoise.
