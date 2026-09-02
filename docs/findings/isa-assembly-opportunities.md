@@ -263,3 +263,52 @@ codex; the ISA XML describes instructions, not counters). Implement only if
 an FP2 MMVQ instance that carries ≥10 % of decode kernel time shows VALU
 busy above memory busy; otherwise close this item as "bandwidth-bound,
 not admissible" and leave §3's estimate as an estimate.
+
+### 5. FA D=512 q-rope-tail prepass: measured, and it is a regression
+
+`f5ad83f` (candidate `d466a93` = the patch transplanted onto release
+`adc8319`) rotated the forward-RoPE q tail once per call into a pool buffer so
+the D=512 kernels select between two uniform global pointers instead of
+building the tail in LDS and selecting per element. The compile-time deltas
+were large and real — exact gfx1151 TU, `<float,__half,4,true,4>`: 7286 → 4576
+instructions, 258 → 0 flat loads, 407 → 175 `s_waitcnt`, 17 → 0 scratch.
+
+Measured 2026-09-02 on gfx1151, one sparse depth-4096 request per arm, 256
+tokens, speculation on, `rocprofv3 --kernel-trace`, production quiesced
+(`/srv/models/perf/fattn-q-tail-ab-d466a93-20260902`, claude, unreviewed):
+
+| | base `adc8319` | cand `d466a93` |
+|---|---:|---:|
+| prefill tok/s | 329.4 | 305.8 |
+| decode tok/s | 22.34 | 22.28 |
+| acceptance | 0.976 | 0.981 |
+| total kernel time | 16.567 s | 17.447 s (+5.3 %) |
+| `compact<…,true,4>` prefill, grid 447744, n=21 | p50 **63.80 ms** | p50 **84.73 ms** (+32.8 %) |
+| `ds4_forward_rope_q_tail_kernel` | absent | 129 dispatches, 112 ms |
+
+The prefill row is the clean comparison: same kernel, same count, same grid,
+p50 up by a third. `docs/findings` msg 946 pre-registered "FA kernel p50
+unchanged ⇒ code-size fix only"; p50 did not stay unchanged, it got worse, so
+the change is **rejected**, not merged.
+
+Mechanism, stated as far as it is established and no further: the tail was
+built once per block in LDS and reused across every kv row; it is now read
+from a global pool buffer inside the same loop. The instruction count fell
+because the addressing became uniform, but the bytes still have to arrive, and
+on this kernel they are the binding constraint. That is consistent with the
+number and is not proven by it — nobody has read a memory counter here (see
+§3b: no PMC pass is scheduled).
+
+Not established, and named so it is not silently reused: the two arms also
+differ in decode-phase kernel *selection* (21 dispatches that are
+`compact<…,true,4>` at grid 32768 in the baseline appear as
+`shared_kv_grouped_kernel<float,__half,4>` in the candidate). Acceptance also
+differed (0.976 vs 0.981), so the decode dispatch mix is not matched between
+the arms and no decode-phase claim can be made from this run. The LDS terms
+the patch removes (`group4 * 64 * sizeof(float)`) do sit inside the 24 KiB
+guards at `fattn.cu:2004/2022`, so a selection flip is plausible — but that is
+a hypothesis, and the run does not test it.
+
+What this does not say: the removed flat loads were real, and a version that
+keeps the tail in LDS while dropping the per-element select may still win.
+That is a different patch and needs its own run.
