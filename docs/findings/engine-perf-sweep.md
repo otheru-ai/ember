@@ -58,3 +58,31 @@ formatting on the decode path. No unreserved `push_back` in a loop whose trip
 count is both large and known in advance. The engine's hot paths are, on this
 axis, already clean — which is worth recording as a negative result rather than
 leaving the impression that a sweep found nothing because it looked poorly.
+
+
+## Stop hand-auditing: the engine already measures this
+
+`DFLASH_DS4_TIMING=1` emits `[deepseek4-timing]` per phase, and it separates
+**build from compute from read** for attention, FFN and routing:
+
+    attn_build_us   attn_compute_us   attn_read_us
+    ffn_build_us    ffn_compute_us    ffn_read_us
+    route_build_us  route_compute_us  route_read_us  route_select_us
+    hc_pre_build_us hc_pre_input_us   hc_pre_compute_us
+    embed_us  output_us  sample_us  emit_us
+
+That is exactly the host-versus-device split every finding in this document has
+been arguing about from source. `attn_build_us` is graph construction — the
+phase that contains the 48 MiB-per-token arena — measured apart from the GPU
+work it feeds.
+
+**One prefill with `DFLASH_DS4_TIMING=1` on the pre-fix build settles the arena
+claim** (`64ae212`) in a way no microbenchmark can: if `attn_build_us` is a small
+fraction of `attn_compute_us`, my 917 ms/chunk allocator measurement does not
+transfer and the change is not worth its risk. If it dominates, it does.
+
+Ordering rule this suggests for anything after this document: read the telemetry
+first, pick the phase that actually costs, then audit that code. Everything
+above was found the other way round, which is why two of the four findings had
+to be discarded after measurement (`moe_hybrid` disabled, the blanket mask
+hoist wrong).
