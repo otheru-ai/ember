@@ -1676,17 +1676,28 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             *max_dispatched_chunk = std::max(*max_dispatched_chunk, n_tok);
         }
 
-        // Embed tokens
-        std::vector<float> embed(w_.n_embd * n_tok);
+        // Embed tokens into a reused, grow-only scratch buffer. On success,
+        // embedder.embed() writes every element below, so the buffer needs no
+        // clearing. Fail closed if it cannot complete that overwrite.
+        const size_t embed_need = (size_t) w_.n_embd * (size_t) n_tok;
+        if (embed_scratch_.size() < embed_need) {
+            embed_scratch_.resize(embed_need);
+        }
+        float * const embed = embed_scratch_.data();
         const auto embed_t0 = Clock::now();
         const int32_t * embed_ids = has_request_vision
             ? safe_embed_ids.values.data() + i
             : tokens.data() + i;
-        w_.embedder.embed(embed_ids, n_tok, embed.data());
+        if (!w_.embedder.embed(embed_ids, n_tok, embed)) {
+            std::fprintf(stderr,
+                         "[deepseek4] prefill embedding failed at pos=%d count=%d\n",
+                         pos, n_tok);
+            return -1;
+        }
         if (!local_vision.empty()) {
             std::string vision_error;
             if (!dflash::deepseek4_splice_vision_chunk(
-                    local_vision, w_.n_embd, i, n_tok, embed.data(),
+                    local_vision, w_.n_embd, i, n_tok, embed,
                     &vision_error)) {
                 std::fprintf(stderr, "[deepseek4-vision] %s\n",
                              vision_error.c_str());
@@ -1743,7 +1754,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         }
         bool ok = false;
         if (moe_hybrid_) {
-            ok = deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed.data(), n_tok, pos,
+            ok = deepseek4_step(backend_, cfg_.device.gpu, w_, cache_, embed, n_tok, pos,
                                 logits, moe_hybrid_.get(), tokens.data() + i,
                                 &stream_engine_, timing ? &step_tel : nullptr,
                                 hp);
@@ -1759,7 +1770,7 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
                     ? nullptr
                     : &logits;
             ok = deepseek4_step_layer_range(
-                backend_, cfg_.device.gpu, w_, cache_, hc_state, embed.data(), n_tok, pos,
+                backend_, cfg_.device.gpu, w_, cache_, hc_state, embed, n_tok, pos,
                 0, w_.n_layer, step_logits, tokens.data() + i,
                 timing ? &step_tel : nullptr,
                 step_mode != PrefillAttentionMode::Sparse, hp);

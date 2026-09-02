@@ -133,6 +133,11 @@ private:
     std::vector<float>     snapshot_logits_[PREFIX_SLOTS];
     std::vector<float>     snapshot_spec_features_[PREFIX_SLOTS];
     std::vector<float>     last_logits_;
+    // Prefill embedding scratch, reused across chunks. A fresh vector per chunk
+    // value-initialises n_embd * n_tok floats -- 32 MiB at a 2048-token chunk --
+    // which the embedder then overwrites in full. Grow-only so a later smaller
+    // chunk does not re-zero.
+    std::vector<float>     embed_scratch_;
     // Set by do_prefill when it actually persists the inline snapshot for the
     // request's snap_slot; surfaced into GenerateResult::snapshot_saved so the
     // server only commits its logical prefix entry on a real save (see #2).
