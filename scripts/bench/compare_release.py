@@ -77,11 +77,20 @@ def main():
     print(f"candidate {cand.get('id', a.candidate)}  measured {cand.get('measured')}")
 
     bw, cw = base.get("workloads", {}), cand.get("workloads", {})
-    if set(bw) != set(cw):
+    # The candidate must COVER the baseline, not equal it. A vision release adds
+    # image workloads to the ten text ones, and the ship question is still
+    # whether the existing metrics dropped -- refusing that comparison would
+    # answer nothing. A workload the baseline had and the candidate lacks is the
+    # opposite case: that is how a regression disappears, so it still refuses.
+    dropped = sorted(set(bw) - set(cw))
+    if dropped:
         raise SystemExit(
-            f"workload sets differ; refusing to compare.\n"
-            f"  only in baseline:  {sorted(set(bw) - set(cw))}\n"
-            f"  only in candidate: {sorted(set(cw) - set(bw))}")
+            f"candidate is missing {len(dropped)} workload(s) the baseline "
+            f"measured; refusing to compare: {dropped}")
+    added = sorted(set(cw) - set(bw))
+    if added:
+        print(f"\nnote: {len(added)} workload(s) new in the candidate, no "
+              f"baseline to compare: {', '.join(added)}")
     rows = []
     for k in sorted(bw):
         for m in W_METRICS:
@@ -92,9 +101,13 @@ def main():
 
     bd = {d["depth"]: d for d in base.get("depths", [])}
     cd = {d["depth"]: d for d in cand.get("depths", [])}
-    if set(bd) != set(cd):
-        raise SystemExit(f"depth sets differ; refusing to compare. "
-                         f"baseline={sorted(bd)} candidate={sorted(cd)}")
+    missing_d = sorted(set(bd) - set(cd))
+    if missing_d:
+        raise SystemExit(f"candidate is missing depths the baseline measured; "
+                         f"refusing to compare: {missing_d}")
+    extra_d = sorted(set(cd) - set(bd))
+    if extra_d:
+        print(f"\nnote: depths new in the candidate: {extra_d}")
     rows = []
     for k in sorted(bd):
         for m in D_METRICS:
