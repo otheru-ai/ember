@@ -107,6 +107,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bundle", action="append", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--merge-into", type=Path, default=None,
+                    help="existing data.json whose releases are preserved. "
+                         "Without it the output contains ONLY the bundles "
+                         "passed here, and published releases whose bundles no "
+                         "longer exist on disk are silently lost.")
     ap.add_argument("--certified", action="store_true",
                     help="these bundles came from release certification, not a manual run")
     ap.add_argument("--id", action="append", default=[], metavar="OLD=NEW",
@@ -132,6 +137,14 @@ def main():
         if all(x.isdigit() for x in parts):
             return (0, tuple(int(x) for x in parts), "")
         return (1, (), r.get("measured") or "")
+    if args.merge_into:
+        prior = json.loads(args.merge_into.read_text()).get("releases", [])
+        fresh = {r["id"] for r in releases}
+        kept = [r for r in prior if r["id"] not in fresh]
+        replaced = sorted({r["id"] for r in prior} & fresh)
+        print(f"  merge: {len(kept)} kept, {len(fresh - {r['id'] for r in prior})} added"
+              + (f", {len(replaced)} replaced ({', '.join(replaced)})" if replaced else ""))
+        releases = kept + releases
     releases.sort(key=key)
 
     workloads = sorted({w for r in releases for w in r["workloads"]})
