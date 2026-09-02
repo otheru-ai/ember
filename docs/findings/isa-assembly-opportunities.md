@@ -38,6 +38,12 @@ Both `iqs` halves of a rocmfp2 block read the *same* `bq8_1` and the *same*
 all 8 `sumq` dp4a deleted: a 50% cut in dp4a issue for the largest tensors in
 the model.**
 
+*Implemented 2026-09-02 behind `ROCMFP2_OFFSET_FROM_DS` (default off), as
+`-0.5*offset*ds.y` on each half so no `iqs` branch is needed; the pairing
+question below is answered by `mmvq.cu` (`kqs = vdr*(tid % (qi/vdr))`, both
+halves of every block always reduce into one row). `test_rocmfp2_offset.c`
+pins the per-block deviation bound. Awaits the behavioural gate on the box.*
+
 Shape of the change: subtract `offset * __high2float(bq8_1->ds)` on the
 `iqs == 0` call only, subtract nothing on `iqs == 1`, drop `sumq` entirely.
 
@@ -180,7 +186,10 @@ the C reference, 0 mismatches; for `x = 0x7f` it yields 240.0, the
 the documented pre-validation of scale bytes, so keep that clamp where the
 bytes are not validated). Instructions: `v_lshlrev_b32`, `v_and_b32`,
 `v_cvt_f32_f16` (`isa V_CVT_F32_F16`: VOP1/VOP3, DPP16 yes), and the ×128 can
-fold into the kernel epilogue or `v_ldexp_f32`. Where it lands: FP4_FAST mmvq
+fold into the kernel epilogue or `v_ldexp_f32`. *Implemented 2026-09-02
+behind `ROCMFP4_SCALE_DECODE_F16` (ember `b307ddf`), bit-identical on all 256
+bytes by host test; the kernel-descriptor denormal check and the trace A/B
+are with codex.* Where it lands: FP4_FAST mmvq
 spends ~9 of ~100 VALU per block on the decode, FP2 mmvq 2×11 of ~66 per
 half-block, and the mmq loaders decode per tile. Unimplemented; needs
 `test_rocmfp_scale.c` extended to all 256 bytes against the reference.
@@ -191,6 +200,7 @@ half-block, and the mmq loaders decode per tile. Unimplemented; needs
 `__builtin_amdgcn_perm(0, 0x03020100, sel)` — with
 `ROCMFP2_KVALUE_{0..3}_I8 = 0,1,2,3` (`rocmfpx.h:28-31`) the table is the
 identity, so it is a no-op `v_perm_b32` (4 per half-block). Remove it.
+*Removed 2026-09-02 (ember `86d8883`), `test_rocmfp2_unpack.c`.*
 
 The 2-bit → byte spread itself costs ~32 ops per 16 codes. With a transposed
 storage order (byte j of a 4-byte group holds elements j, j+4, j+8, j+12),

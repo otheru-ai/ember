@@ -347,6 +347,9 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 #define VDR_ROCMFP4_FAST_Q8_1_MMVQ GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR
 #define VDR_ROCMFP4_FAST_Q8_1_MMQ  GGML_ROCMFP4_FAST_Q8_1_MMQ_VDR
 #define VDR_ROCMFP2_Q8_1_MMVQ 1
+#ifndef ROCMFP2_OFFSET_FROM_DS
+#define ROCMFP2_OFFSET_FROM_DS 0   // see vec_dot_rocmfpx_fp2_q8_1
+#endif
 #define VDR_ROCMFP3_Q8_1_MMVQ 2
 #ifndef VDR_ROCMFP6_Q8_1_MMVQ
 #define VDR_ROCMFP6_Q8_1_MMVQ 4
@@ -547,6 +550,37 @@ static __device__ __forceinline__ float vec_dot_rocmfpx_fp2_q8_1(
 
     // affine: value = code*scale - offset ; e[0]=scale, e[1]=offset (whole 32-block)
     int sumi = 0;
+#if ROCMFP2_OFFSET_FROM_DS
+    // EMBER FORK DIVERGENCE (engine/VENDOR.md): offset term from block_q8_1.ds.y.
+    //
+    // The offset contribution over a whole 32-block is offset * d * sum(q8),
+    // and quantize_q8_1 already stores sum(x) ~= d * sum(q8) as ds.y -- the
+    // same field vec_dot_q4_0_q8_1_impl uses for its "-8" term and the same
+    // algebra the MMQ prefill loader (load_tiles_rocmfp2_affine, dm.y = -offset
+    // against y_ds) already applies to this type. Using it here deletes the
+    // second dp4a per iteration (4 of 8 per half-block, on the kernel that
+    // serves the 129 largest tensors; docs/findings/isa-assembly-
+    // opportunities.md, "half the dp4a is redundant").
+    //
+    // Each block is always evaluated as both halves by adjacent lanes
+    // (mmvq.cu: kqs = vdr * (tid % (qi/vdr)) with qi=2, vdr=1) and reduced
+    // into one row sum, so each half subtracts half the block term; 0.5 is
+    // exact. This is a numerics change of at most offset*(16*d + |sum x|*2^-11)
+    // per block (integer-vs-float sum, then the f16 rounding of ds.y), i.e.
+    // decode now rounds the offset term the way prefill already does. It ships
+    // only after the behavioural gate; default off until then.
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int val_packed = rocmfpx_pack4_fp2_bits8_vec_cuda((uint32_t) bq2->qs[4*iqs + j]);
+        const int u          = get_int_b4(bq8_1->qs, 4*iqs + j);
+        sumi = ggml_cuda_dp4a(val_packed, u, sumi);
+    }
+
+    const float2 ds     = __half22float2(bq8_1->ds);
+    const float  scale  = rocmfpx_ue4m3_to_fp32_finite(bq2->e[0]);
+    const float  offset = rocmfpx_ue4m3_to_fp32_finite(bq2->e[1]);
+    return ds.x * scale * sumi - 0.5f * offset * ds.y;
+#else
     int sumq = 0;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -560,6 +594,7 @@ static __device__ __forceinline__ float vec_dot_rocmfpx_fp2_q8_1(
     const float scale  = rocmfpx_ue4m3_to_fp32_finite(bq2->e[0]);
     const float offset = rocmfpx_ue4m3_to_fp32_finite(bq2->e[1]);
     return db * (scale * sumi - offset * sumq);
+#endif
 }
 
 static __device__ __forceinline__ float vec_dot_rocmfpx_fp3_q8_1(
