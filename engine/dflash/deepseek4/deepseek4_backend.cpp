@@ -173,16 +173,6 @@ static void configure_gfx1151_dspark_mmvq_default(int gpu) {
     if (env_flag_enabled("DFLASH_DS4_Q5_VERIFY")) {
         ncols = DS4_Q5_VERIFY_TOKENS;
     }
-    const char * act_dump = std::getenv("DFLASH_DS4_ACT_DUMP");
-    if (act_dump && act_dump[0]) {
-        activation_dump_path_ = act_dump;
-        if (activation_dump_path_.front() != '/' ||
-            activation_dump_path_.back() == '/') {
-            set_last_error(
-                "DFLASH_DS4_ACT_DUMP must be an absolute output file path");
-            return false;
-        }
-    }
     if (const char * q = std::getenv("DFLASH_DS4_SPEC_Q")) {
         const int v = std::atoi(q);
         if (v > ncols) ncols = v;
@@ -1145,6 +1135,17 @@ bool DeepSeek4Backend::prepare_offline_vision_artifact(
 }
 
 bool DeepSeek4Backend::init() {
+    const char * act_dump = std::getenv("DFLASH_DS4_ACT_DUMP");
+    if (act_dump && act_dump[0]) {
+        activation_dump_path_ = act_dump;
+        if (activation_dump_path_.front() != '/' ||
+            activation_dump_path_.back() == '/') {
+            set_last_error(
+                "DFLASH_DS4_ACT_DUMP must be an absolute output file path");
+            return false;
+        }
+    }
+
     // The shared MMVQ/MMQ crossover defaults to q=3 for NVIDIA. On gfx1151,
     // DSpark q=4 is faster through MMVQ. Keep AR and other devices unchanged,
     // and preserve LUCE_MMVQ_MAX_NCOLS as an explicit override.
