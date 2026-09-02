@@ -42,8 +42,19 @@ int main() {
     ggml_context * ctx = ggml_init(ip);
 
     // Inputs, shaped as the DS4 graph shapes them.
-    ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
-    ggml_set_input(cur);
+    //
+    // cur is an INTERMEDIATE, not a graph input, because a graph input is never
+    // freed and would make the view/base question below untestable in
+    // principle. Be honest about what this still does NOT prove: flagging the
+    // view instead of its base (ggml_gallocr_free_node, ggml-alloc.c:690, tests
+    // the flag on the node it frees, and the view path at :805-817 calls it
+    // with view_src) is a real asymmetry in the allocator, but whether the base
+    // is actually recycled depends on allocation pressure. This toy graph does
+    // not generate enough: it passes against the pre-fix code too, verified.
+    // The fix stands on reading the allocator, not on this test.
+    ggml_tensor * cur_src = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+    ggml_set_input(cur_src);
+    ggml_tensor * cur = ggml_scale(ctx, cur_src, 1.0f);
     ggml_tensor * mid = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_ff, n_used, n_tokens);
     ggml_set_input(mid);
     ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_used, n_tokens);
@@ -71,8 +82,14 @@ int main() {
     ggml_set_output(consumed);
     ggml_set_output(down_e);
 
+    // Enough downstream work that gallocr has a reason to recycle cur's buffer
+    // if it believes cur is free -- without this the bug can hide.
+    ggml_tensor * filler = consumed;
+    for (int i = 0; i < 6; ++i) filler = ggml_scale(ctx, filler, 1.0f);
+    ggml_set_output(filler);
+
     ggml_cgraph * gf = ggml_new_graph(ctx);
-    ggml_build_forward_expand(gf, consumed);
+    ggml_build_forward_expand(gf, filler);
     ggml_build_forward_expand(gf, down_e);
 
     ds4::ImatrixCollector imx;
@@ -103,7 +120,7 @@ int main() {
     std::vector<float> h_w((size_t) n_embd * n_ff * n_expert, 0.25f);
     ggml_backend_tensor_set(w_gate, h_w.data(), 0, sizeof(float) * h_w.size());
     ggml_backend_tensor_set(w_down, h_w.data(), 0, sizeof(float) * h_w.size());
-    ggml_backend_tensor_set(cur, h_cur.data(), 0, sizeof(float) * h_cur.size());
+    ggml_backend_tensor_set(cur_src, h_cur.data(), 0, sizeof(float) * h_cur.size());
     ggml_backend_tensor_set(mid, h_mid.data(), 0, sizeof(float) * h_mid.size());
     ggml_backend_tensor_set(ids, h_ids, 0, sizeof(h_ids));
 
