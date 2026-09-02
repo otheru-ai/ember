@@ -110,11 +110,32 @@ bool ImatrixCollector::write(const std::string & path, std::string & err) const 
                  "worst uncalibrated coverage %zu/%d in %s\n",
                  entries_.size(), n_expert_, chunks_, worst_gap, n_expert_,
                  worst_gap ? worst_name.c_str() : "(none)");
-    if (worst_gap > 0 && !std::getenv("DFLASH_IMATRIX_ALLOW_GAPS")) {
-        err = "refusing to write: " + std::to_string(worst_gap) + " of " +
-              std::to_string(n_expert_) + " experts uncalibrated in " + worst_name +
-              " (set DFLASH_IMATRIX_ALLOW_GAPS=1 to override deliberately)";
-        return false;
+    // Coverage is REPORTED, not enforced, and the reason is a mistake this
+    // code already made: an image collection reached 73143 graph passes with
+    // 8 of 256 experts untouched in one layer, and refusing to write threw away
+    // an hour of production downtime for a matrix that was never going to be
+    // used alone -- it merges with a text collection that has full coverage,
+    // which fills exactly those experts. Writing is cheap; recollecting is an
+    // hour of downtime. The refusal belongs where a matrix is CONSUMED, so the
+    // number goes in a sidecar the quantize stage can gate on.
+    if (worst_gap > 0) {
+        std::fprintf(stderr,
+                     "[deepseek4-imatrix] WARNING %zu/%d experts uncalibrated in %s; "
+                     "this matrix is not shippable alone -- merge it or recollect\n",
+                     worst_gap, n_expert_, worst_name.c_str());
+    }
+    {
+        const std::string cov = path + ".coverage.json";
+        FILE * cf = std::fopen(cov.c_str(), "w");
+        if (cf) {
+            std::fprintf(cf, "{\n  \"entries\": %zu,\n  \"n_expert\": %d,\n"
+                             "  \"chunks\": %d,\n  \"worst_uncalibrated\": %zu,\n"
+                             "  \"worst_entry\": \"%s\",\n  \"full_coverage\": %s\n}\n",
+                         entries_.size(), n_expert_, chunks_, worst_gap,
+                         worst_gap ? worst_name.c_str() : "",
+                         worst_gap ? "false" : "true");
+            std::fclose(cf);
+        }
     }
 
     const std::string tmp = path + ".part";

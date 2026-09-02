@@ -138,18 +138,25 @@ int main() {
         check(eerr.find("empty") != std::string::npos, "empty refusal names the cause");
     }
 
-    // This fixture leaves experts 1, 4 and 5 unrouted, so the coverage guard
-    // must refuse: a zero row silently zero-weights an expert in the quantizer
-    // and llama-quantize does not warn.
-    unsetenv("DFLASH_IMATRIX_ALLOW_GAPS");
-    check(!c.write(path, err), "writer refuses an under-covered matrix");
-    check(err.find("uncalibrated") != std::string::npos, "refusal names the cause");
-    check(std::fopen(path.c_str(), "rb") == nullptr, "nothing was written on refusal");
-
-    // The override exists so a deliberately partial collection can still be
-    // inspected; everything below checks the format, not the coverage.
-    setenv("DFLASH_IMATRIX_ALLOW_GAPS", "1", 1);
-    check(c.write(path, err), "writer succeeds with the gap override");
+    // This fixture leaves experts unrouted. Coverage is reported, not enforced:
+    // an under-covered matrix is a valid INTERMEDIATE (it merges with one that
+    // has full coverage), and refusing to write it once cost an hour of
+    // production downtime for nothing. The number lands in a sidecar so the
+    // stage that CONSUMES a matrix can refuse instead.
+    check(c.write(path, err), "writer writes an under-covered matrix");
+    {
+        FILE * cf = std::fopen((path + ".coverage.json").c_str(), "rb");
+        check(cf != nullptr, "coverage sidecar is written");
+        if (cf) {
+            char buf[512] = {0};
+            size_t n = std::fread(buf, 1, sizeof(buf) - 1, cf);
+            std::fclose(cf);
+            (void) n;
+            check(std::strstr(buf, "\"full_coverage\": false") != nullptr,
+                  "sidecar reports the gap rather than hiding it");
+            std::remove((path + ".coverage.json").c_str());
+        }
+    }
 
     std::vector<DatEntry> back;
     int32_t last_chunk = -1;
