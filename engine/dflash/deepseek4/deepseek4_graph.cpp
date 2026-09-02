@@ -4683,7 +4683,8 @@ static ggml_tensor * ds4_build_hash_routed_ffn_parts(
         ggml_tensor * hash_ids,
         int n_tokens,
         bool include_shared,
-        bool include_routed) {
+        bool include_routed,
+        int layer_idx) {
     ggml_tensor * shared_out = include_shared
         ? build_shared_ffn(ctx, ffn_normed, w, L) : nullptr;
     if (!include_routed) return shared_out;
@@ -4700,6 +4701,16 @@ static ggml_tensor * ds4_build_hash_routed_ffn_parts(
     up_e = ggml_reshape_3d(ctx, up_e, n_ff_exp, n_used, n_tokens);
     ggml_tensor * mid_e = build_clamped_swiglu(ctx, gate_e, up_e, w.swiglu_clamp_exp);
     ggml_tensor * down_e = ggml_mul_mat_id(ctx, L.ffn_down_exps, mid_e, hash_ids);
+    // Hash-routed layers reach the same experts through a table rather than a
+    // score top-k, so they carry importance too: leaving them out would ship a
+    // matrix whose first three layers are silently uncalibrated.
+    if (auto * imx = ds4::ImatrixCollector::instance()) {
+        const std::string blk = "blk." + std::to_string(layer_idx) + ".";
+        imx->set_n_expert(w.n_expert);
+        imx->register_site(blk + "ffn_gate_exps.weight", cur_3d, hash_ids, w.n_embd, false);
+        imx->register_site(blk + "ffn_up_exps.weight",   cur_3d, hash_ids, w.n_embd, false);
+        imx->register_site(blk + "ffn_down_exps.weight", mid_e,  hash_ids, n_ff_exp, true);
+    }
     down_e = ggml_reshape_3d(ctx, down_e, w.n_embd, n_used, n_tokens);
 
     ggml_tensor * probs_3d = ggml_reshape_3d(
@@ -4737,9 +4748,10 @@ static ggml_tensor * ds4_build_hash_routed_ffn(
         const DeepSeek4Layer & L,
         ggml_tensor * ffn_normed,
         ggml_tensor * hash_ids,
-        int n_tokens) {
+        int n_tokens,
+        int layer_idx) {
     return ds4_build_hash_routed_ffn_parts(
-        ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true);
+        ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true, layer_idx);
 }
 
 // DeepSeek-V4-Flash-Vision-Exp inference/model.py:620-639 routes every learned
@@ -4822,7 +4834,7 @@ static ggml_tensor * ds4_build_vision_moe_ffn(
             ggml_set_input(hash_ids);
             i32_array_inputs.push_back({hash_ids, std::move(hash_values)});
             text_out = ds4_build_hash_routed_ffn_parts(
-                ctx, w, L, text_in, hash_ids, n_text, false, true);
+                ctx, w, L, text_in, hash_ids, n_text, false, true, layer_idx);
         } else {
             text_out = build_moe_ffn_parts(
                 ctx, text_in, w, L, layer_idx, n_text,
@@ -5049,7 +5061,7 @@ static bool ds4_build_fused_decode_graph(
             ggml_set_input(hids);
             fg.hash_ids[(size_t) il] = hids;
             ffn_out = ds4_build_hash_routed_ffn(
-                ctx, w, L, ffn_normed, hids, 1);
+                ctx, w, L, ffn_normed, hids, 1, il);
         } else {
             ffn_out = build_moe_ffn(ctx, ffn_normed, w, L, il, 1);
         }
@@ -6144,7 +6156,7 @@ static int ds4_try_layer_major_prefill(
                                           w.n_expert_used, n_tokens);
             ggml_set_input(hash_ids);
             ffn_out = ds4_build_hash_routed_ffn(
-                ctx, w, L, ffn_normed, hash_ids, n_tokens);
+                ctx, w, L, ffn_normed, hash_ids, n_tokens, il);
         } else {
             ffn_out = build_moe_ffn(ctx, ffn_normed, w, L, il, n_tokens);
         }
