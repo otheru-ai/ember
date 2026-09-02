@@ -150,7 +150,16 @@ bool ImatrixCollector::write(const std::string & path, std::string & err) const 
         const int32_t len = (int32_t) kv.first.size();
         ok = ok && write_all(f, &len, sizeof(len));
         ok = ok && write_all(f, kv.first.data(), kv.first.size());
-        ok = ok && write_all(f, &e.ncall, sizeof(int32_t));
+        // ncall is 1, matching the production .dat, because the values below
+        // are already means. Upstream's legacy writer stores (sum/count)*ncall
+        // and expects the reader to divide; the shipped 0731 imatrix -- the one
+        // llama-quantize demonstrably accepts -- stores means with ncall=1.
+        // Writing the true pass count here (271 for a text run, 3401 for an
+        // image run) made imatrix_dat.py's weighted merge divide the two
+        // collections by different numbers, silently down-weighting images by
+        // ~12x on top of the stated weights.
+        const int32_t ncall_out = 1;
+        ok = ok && write_all(f, &ncall_out, sizeof(int32_t));
         const int32_t nval = (int32_t) e.values.size();
         ok = ok && write_all(f, &nval, sizeof(nval));
         // The .dat stores values already divided by counts. An expert nothing

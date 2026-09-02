@@ -66,6 +66,13 @@ bool read_dat(const std::string & path, std::vector<DatEntry> & out,
     return true;
 }
 
+bool all_of_ncall_is_one(const std::vector<DatEntry> & es) {
+    for (const DatEntry & e : es) {
+        if (e.ncall != 1) return false;
+    }
+    return !es.empty();
+}
+
 }  // namespace
 
 int main() {
@@ -164,6 +171,9 @@ int main() {
     check(read_dat(path, back, last_chunk, dataset), "file parses with an independent reader");
     check(back.size() == 2, "two entries round-trip");
     check(last_chunk == 2, "chunk count is recorded");
+    // ncall must be 1: the values are means, and a weighted merge across two
+    // collections divides by it.
+    check(all_of_ncall_is_one(back), "ncall is 1, matching the production .dat");
     check(dataset == "unit-test", "dataset name is recorded");
 
     // Stored values are divided by counts: expert 2 saw 2 tokens, so 17/2.
