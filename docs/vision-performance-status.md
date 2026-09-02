@@ -480,7 +480,10 @@ zero MTP VL biases; the image decode figure is the autoregressive rate.
    `dspark_markov_rank 256`, `dspark_noise_token_id 128799`, matching the
    metadata the build copied from the 0731 template; no NaN and no zero
    tensor in the 22 small tensors sampled (`dflash.*`, `output_*`, block-0
-   norms, router, `exp_probs_b`); `bias_vl` all-zero as upstream ships it;
+   norms, router, `exp_probs_b`); the drafter's three stages carry
+   `exp_probs_b_vl` all-zero, as upstream ships them — the 43 LM layers of
+   the affine artifact do NOT (measured 2026-09-02: mean norm 27.1, none
+   zero), so do not read this line as a statement about the main model;
    Q8_0 block scales on `dflash.fc`, `attn_output_a/b`, `ffn_down_shexp`
    have no zero blocks and RMS within 0.65–0.8× of 0731's. Norm-weight
    RMS differs 2–4× between the two (`attn_norm` 0.048 vs 0.196,
