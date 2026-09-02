@@ -437,19 +437,25 @@ static __device__ __forceinline__ int rocmfpx_pack4_fp3_vec_cuda(const uint8_t *
         (packed >> (bit_pos & 7)) & 0x0fffu);
 }
 
+// EMBER FORK DIVERGENCE (engine/VENDOR.md): the FP2 code table is the
+// identity (ROCMFP2_KVALUE_{0..3}_I8 == 0..3, rocmfpx.h), so the byte-select
+// that used to follow the spread -- __builtin_amdgcn_perm(0, 0x03020100, sel)
+// -- returned its selector word unchanged: one no-op v_perm_b32 per call, four
+// per half-block in vec_dot_rocmfp2_q8_1, on the kernel that carries the 129
+// largest tensors of the shipped recipe (docs/findings/isa-assembly-
+// opportunities.md, item 3). The spread itself is the code table applied
+// in place. The static_assert pins the identity; if the table ever changes,
+// restore the perm rather than editing the spread.
+static_assert(ROCMFP2_KVALUE_0_I8 == 0 && ROCMFP2_KVALUE_1_I8 == 1 &&
+              ROCMFP2_KVALUE_2_I8 == 2 && ROCMFP2_KVALUE_3_I8 == 3,
+              "FP2 spread relies on the identity code table");
+
 static __device__ __forceinline__ int rocmfpx_pack4_fp2_bits8_vec_cuda(const uint32_t bits8) {
 #if defined(GGML_USE_HIP)
-    const uint32_t values =
-        ((uint32_t) (uint8_t) (int8_t) ROCMFP2_KVALUE_0_I8) |
-        ((uint32_t) (uint8_t) (int8_t) ROCMFP2_KVALUE_1_I8 << 8) |
-        ((uint32_t) (uint8_t) (int8_t) ROCMFP2_KVALUE_2_I8 << 16) |
-        ((uint32_t) (uint8_t) (int8_t) ROCMFP2_KVALUE_3_I8 << 24);
-    const uint32_t selectors =
-        ((bits8 >> 0) & 3u) |
-        (((bits8 >> 2) & 3u) << 8) |
-        (((bits8 >> 4) & 3u) << 16) |
-        (((bits8 >> 6) & 3u) << 24);
-    return (int) __builtin_amdgcn_perm(0, values, selectors);
+    return (int) (((bits8 >> 0) & 3u) |
+                  (((bits8 >> 2) & 3u) << 8) |
+                  (((bits8 >> 4) & 3u) << 16) |
+                  (((bits8 >> 6) & 3u) << 24));
 #else
     const char4 v = make_char4(
         (int8_t) rocmfpx_decode_fp2_code_vec_cuda((bits8 >> 0) & 3u),
