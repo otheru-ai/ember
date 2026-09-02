@@ -126,6 +126,18 @@ int main() {
     std::remove(path.c_str());
     std::string err;
 
+    // A collector that never saw a request must not produce a file. The run
+    // that found this had a model-load failure; the destructor still fired and
+    // wrote a 0-entry matrix that passed the coverage check, because zero
+    // entries have zero gaps.
+    {
+        ds4::ImatrixCollector empty;
+        empty.set_n_expert(n_expert);
+        std::string eerr;
+        check(!empty.write(path, eerr), "writer refuses a matrix with nothing in it");
+        check(eerr.find("empty") != std::string::npos, "empty refusal names the cause");
+    }
+
     // This fixture leaves experts 1, 4 and 5 unrouted, so the coverage guard
     // must refuse: a zero row silently zero-weights an expert in the quantizer
     // and llama-quantize does not warn.

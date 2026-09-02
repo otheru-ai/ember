@@ -80,6 +80,16 @@ static bool write_all(FILE * f, const void * p, size_t n) {
 
 bool ImatrixCollector::write(const std::string & path, std::string & err) const {
     std::lock_guard<std::mutex> lock(mu_);
+    // Nothing collected is not an empty matrix, it is a failed run. Observed
+    // 2026-09-02: the model failed to load, the destructor still ran, and this
+    // wrote a 0-entry .dat that passed every check below -- zero entries means
+    // zero uncalibrated experts. A file that exists is the strongest evidence
+    // a later stage has, so refuse to create one.
+    if (entries_.empty() || chunks_ == 0) {
+        err = "refusing to write an empty matrix: " + std::to_string(entries_.size()) +
+              " entries, " + std::to_string(chunks_) + " chunks";
+        return false;
+    }
     // Coverage first. An expert nothing routed to gets a zero row, which
     // silently zero-weights that expert in the quantizer -- and llama-quantize
     // does not warn about it. The vision corpus manifest raises exactly this
