@@ -814,6 +814,9 @@ if(EMBER_ENGINE)
   target_include_directories(test_ds4_imatrix_graph PRIVATE engine engine/ggml/include)
   target_link_libraries(test_ds4_imatrix_graph PRIVATE ggml ggml-base ggml-cpu)
   add_test(NAME ds4_imatrix_graph COMMAND test_ds4_imatrix_graph)
+  # Builds a real ggml graph on the CPU backend; a hang here would otherwise
+  # block ctest indefinitely.
+  set_tests_properties(ds4_imatrix_graph PROPERTIES TIMEOUT 120)
 
   # Metadata-only split-set coverage. It links the real loader's gguf parser
   # but never creates a HIP backend or touches a device, so it remains runnable

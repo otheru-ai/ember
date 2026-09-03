@@ -1580,6 +1580,7 @@ jobs:
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
       MODEL_PATH: ${{ vars.EMBER_CERT_MODEL_PATH }}
+      MMPROJ_PATH: ${{ vars.EMBER_CERT_MMPROJ_PATH }}
       DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
       PORT: ${{ vars.EMBER_CERT_PORT || '18080' }}
       PRODUCTION_CONTAINER: ${{ vars.EMBER_PRODUCTION_CONTAINER || 'ember-server' }}
@@ -1682,8 +1683,10 @@ jobs:
 
       - name: Verify the model artifact
         env:
-          MODEL_SHA256: a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
+          # The vision model is what ember serves by default as of 2026.9.3.
+          MODEL_SHA256: 2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2
           DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
+          MMPROJ_SHA256: 9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002
         run: |
           set -euo pipefail
           python3 -c '
@@ -1793,6 +1796,20 @@ jobs:
           draft_dir="$(dirname -- "$DRAFT_PATH")"
           draft_file="$(basename -- "$DRAFT_PATH")"
           mounts+=(-v "$draft_dir:/cert-draft:ro")
+          # The vision tower. Certification must exercise the path the default
+          # deployment serves; without the tower this job would certify a
+          # vision engine using text alone.
+          mmproj_args=()
+          if [ -n "${MMPROJ_PATH:-}" ]; then
+            test -r "$MMPROJ_PATH" || {
+              echo "vision tower is not readable: $MMPROJ_PATH" >&2
+              exit 1
+            }
+            mmproj_dir="$(dirname -- "$MMPROJ_PATH")"
+            mmproj_file="$(basename -- "$MMPROJ_PATH")"
+            mounts+=(-v "$mmproj_dir:/cert-mmproj:ro")
+            mmproj_args=(--vision-mmproj "/cert-mmproj/$mmproj_file")
+          fi
           env_args=(
             -e DFLASH_DS4_SPEC=1
             -e "DFLASH_DS4_DRAFT=/cert-draft/$draft_file"
@@ -1828,6 +1845,7 @@ jobs:
             -v "$cache_volume:/cache" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
             -m "/cert-model/$model_file" \
+            ${mmproj_args[@]+"${mmproj_args[@]}"} \
             --kv-cache-dir /cache \
             --ds4-prefill exact \
             --batch-sessions 2 \
@@ -2099,6 +2117,7 @@ jobs:
     timeout-minutes: 180
     env:
       MODEL_PATH: ${{ vars.EMBER_CERT_MODEL_PATH }}
+      MMPROJ_PATH: ${{ vars.EMBER_CERT_MMPROJ_PATH }}
       DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
       RELEASE_VERSION: ${{ needs.promote.outputs.version }}
     steps:
@@ -2135,7 +2154,7 @@ jobs:
           TARGET="$MODEL_PATH"
           DRAFT="$DRAFT_PATH"
           PORT=18086
-          TARGET_SHA=a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54
+          TARGET_SHA=2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2
           DRAFT_SHA=1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
           timeout "${BENCH_TIMEOUT_MIN}m" "$GITHUB_WORKSPACE/scripts/benchmark_bundle.sh" \
             --out "$out" --release "$RELEASE_VERSION" \
@@ -2234,6 +2253,9 @@ jobs:
     timeout-minutes: 720
     env:
       TARGET_SHA: ${{ inputs.commit_sha }}
+      # The judge stays on the 0731 text model on purpose: it scores outputs and
+      # is not the artifact under test, so changing it would change the scores
+      # rather than what is being certified.
       JUDGE_REVISION: 75a4bed8e6762986d7b4169e1e1afbb57c482704
       JUDGE_FILENAME: DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf
       JUDGE_SHA256: a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54

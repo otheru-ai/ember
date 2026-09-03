@@ -98,14 +98,14 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("/resolve/$revision/$artifact_file", script)
         self.assertNotIn("/resolve/main/", script)
         self.assertIn(
-            "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
+            "2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2",
             script,
         )
         self.assertIn(
             "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
             script,
         )
-        self.assertIn("9fe32d8d4a1abed16c84e2636b26950232869929", script)
+        self.assertIn("4b551c949d44137efc8b615c6c015a6ce677d9a2", script)
         self.assertNotIn("EMBER_MODEL:-", script)
         self.assertNotIn("EMBER_DRAFT_MODEL:-", script)
         self.assertNotIn("EMBER_MODEL_SHA256-", script)
@@ -280,6 +280,19 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn('report["disk"]["checked"]', certify)
         self.assertIn('report["spec"]["checked"]', certify)
         self.assertIn("--batch-sessions 1", certify)
+        # the vision model under test
+        self.assertIn(
+            "2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2",
+            certify,
+        )
+        # its tower: certification must exercise the path the default
+        # deployment serves, not text alone
+        self.assertIn(
+            "9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002",
+            certify,
+        )
+        self.assertIn("--vision-mmproj", certify)
+        # the judge stays on the 0731 text model deliberately
         self.assertIn(
             "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
             certify,
@@ -540,13 +553,15 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_entrypoint_verifies_model_and_forwards_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = pathlib.Path(directory) / (
-                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+                "DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
             )
             draft = pathlib.Path(directory) / (
                 "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
             )
             model.write_bytes(b"release-test-model")
             draft.write_bytes(b"release-test-draft")
+            mmproj = pathlib.Path(directory) / "mmproj-DeepSeek-V4-Flash-Vision-Exp-F16.gguf"
+            mmproj.write_bytes(b"release-test-mmproj")
             fake_sha256sum = pathlib.Path(directory) / "sha256sum"
             fake_sha256sum.write_text("#!/usr/bin/env bash\nexit 0\n")
             fake_sha256sum.chmod(0o755)
@@ -734,31 +749,34 @@ class ReleaseScriptTests(unittest.TestCase):
                 capture_output=True, check=True,
             )
             urls = curl_log.read_text().splitlines()
-            self.assertEqual(len(urls), 2)
+            # model, drafter and vision tower
+            self.assertEqual(len(urls), 3)
             self.assertTrue(all(
-                "/resolve/9fe32d8d4a1abed16c84e2636b26950232869929/" in url
+                "/resolve/4b551c949d44137efc8b615c6c015a6ce677d9a2/" in url
                 for url in urls
             ))
             self.assertTrue(any("ROCMFPx-Strix-Lean-2.58bpw.gguf" in url for url in urls))
             self.assertTrue(any("DSpark-draft-4.25bpw.gguf" in url for url in urls))
             checks = sha256_log.read_text().splitlines()
-            self.assertEqual(len(checks), 2)
+            self.assertEqual(len(checks), 3)
             self.assertTrue(all(".part" in check for check in checks))
             self.assertEqual(
-                len(list((root / "artifact-integrity-v1").glob("*.identity"))), 2
+                len(list((root / "artifact-integrity-v1").glob("*.identity"))), 3
             )
 
     def test_entrypoint_can_skip_preexisting_artifact_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             model = root / (
-                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+                "DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
             )
             draft = root / (
                 "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
             )
             model.write_bytes(b"pre-provisioned-model")
             draft.write_bytes(b"pre-provisioned-draft")
+            mmproj = pathlib.Path(directory) / "mmproj-DeepSeek-V4-Flash-Vision-Exp-F16.gguf"
+            mmproj.write_bytes(b"mmproj")
             marker = root / "sha256-was-called"
             fake_sha256sum = root / "sha256sum"
             fake_sha256sum.write_text(
@@ -783,19 +801,21 @@ class ReleaseScriptTests(unittest.TestCase):
                 check=True,
             )
             self.assertFalse(marker.exists())
-            self.assertEqual(result.stderr.count("WARNING: skipping SHA-256"), 2)
+            self.assertEqual(result.stderr.count("WARNING: skipping SHA-256"), 3)
 
     def test_entrypoint_reuses_identity_bound_integrity_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             model = root / (
-                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+                "DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
             )
             draft = root / (
                 "DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
             )
             model.write_bytes(b"pre-provisioned-model")
             draft.write_bytes(b"pre-provisioned-draft")
+            mmproj = pathlib.Path(directory) / "mmproj-DeepSeek-V4-Flash-Vision-Exp-F16.gguf"
+            mmproj.write_bytes(b"mmproj")
             sha256_log = root / "sha256.log"
             fake_sha256sum = root / "sha256sum"
             fake_sha256sum.write_text(
@@ -816,29 +836,31 @@ class ReleaseScriptTests(unittest.TestCase):
                 ["bash", str(ENTRYPOINT)], env=env, text=True,
                 capture_output=True, check=True,
             )
-            self.assertEqual(first.stdout.count("verifying SHA-256"), 2)
-            self.assertEqual(len(sha256_log.read_text().splitlines()), 2)
+            self.assertEqual(first.stdout.count("verifying SHA-256"), 3)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 3)
 
             second = subprocess.run(
                 ["bash", str(ENTRYPOINT)], env=env, text=True,
                 capture_output=True, check=True,
             )
-            self.assertEqual(second.stdout.count("integrity cache hit"), 2)
-            self.assertEqual(len(sha256_log.read_text().splitlines()), 2)
+            self.assertEqual(second.stdout.count("integrity cache hit"), 3)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 3)
 
+            # Only the drafter changes here: the model and the tower keep their
+            # identity records, so exactly one artifact is re-verified.
             draft.write_bytes(b"changed-draft-with-new-identity")
             third = subprocess.run(
                 ["bash", str(ENTRYPOINT)], env=env, text=True,
                 capture_output=True, check=True,
             )
-            self.assertEqual(third.stdout.count("integrity cache hit"), 1)
+            self.assertEqual(third.stdout.count("integrity cache hit"), 2)
             self.assertEqual(third.stdout.count("verifying SHA-256"), 1)
-            self.assertEqual(len(sha256_log.read_text().splitlines()), 3)
+            self.assertEqual(len(sha256_log.read_text().splitlines()), 4)
 
     def test_entrypoint_rejects_wrong_digest_even_with_ignored_override(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = pathlib.Path(directory) / (
-                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+                "DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
             )
             model.write_bytes(b"tampered")
             env = os.environ | {
@@ -870,7 +892,7 @@ class ReleaseScriptTests(unittest.TestCase):
     def test_draft_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             model = pathlib.Path(directory) / (
-                "DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+                "DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
             )
             model.write_bytes(b"test-model")
             fake_sha256sum = pathlib.Path(directory) / "sha256sum"
@@ -945,5 +967,7 @@ class ToolResultDecodePolicyTest(unittest.TestCase):
         # today's behaviour rather than silently lifting the rule.
         self.assertIn('cached = (e && e[0] == \'0\') ? 0 : 1;', src)
         self.assertIn("tool_result_forces_ar() &&", src)
-        self.assertIn(
-            "ember_chat_request_is_tool_result_continuation(req);", src)
+        self.assertIn("ember_chat_request_is_tool_result_continuation(req)", src)
+        # An image request forces autoregressive decode too: the vision path
+        # declines speculation rather than degrading it silently.
+        self.assertIn("greq.force_ar_decode = req->has_images ||", src)
