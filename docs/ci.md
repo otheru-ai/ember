@@ -21,7 +21,7 @@ automatically builds the full ROCm `dev` stage and publishes the minimal
 dispatch. A tag-triggered build must exactly match the root `VERSION` file;
 every publish checks out and tests the exact event SHA. Versioned tags
 must point to a metadata-only release commit whose parent is named by
-`EMBER_GFX1151_CERTIFIED_SHA` after the differential validator has passed on
+certification from this repository's Actions run history after the differential validator has passed on
 target hardware. This keeps every executable input identical to the certified
 candidate while allowing automation to update the version and notes.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
@@ -245,12 +245,11 @@ Configure these GitHub repository values in addition to the runner label:
 
 | Name | Kind | Purpose |
 |---|---|---|
-| `RELEASE_AUTOMATION_TOKEN` | secret | Fine-grained GitHub token restricted to this repository with Actions variables read/write. |
 | `FORGEJO_RELEASE_SSH_KEY` | secret | Private half of a repository-scoped, write-enabled Forgejo deploy key. |
 | `FORGEJO_SSH_HOST_KEYS` | secret | Pinned SSH host keys for the source-of-truth Forgejo endpoint. |
 | `FORGEJO_RELEASE_REMOTE` | variable | Source-of-truth SSH URL, currently `ssh://git@git.otheru.ai:2222/otheru/ember.git`. |
 | `EMBER_BUILDX_BUILDER` | variable | Stable Buildx instance on `ember-builder`; defaults to `ember-release`. Never generate this per run. |
-| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Managed by promotion; the executable-tree SHA accepted by the tag publisher. |
+| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Forgejo's manual disaster-recovery publisher only. The GitHub release path reads certification from this repository's Actions run history instead, so it needs no credential and nothing to rotate. |
 | `EMBER_CERT_MODEL_PATH` | variable | Absolute Halo-host path to the pinned target GGUF. |
 | `EMBER_CERT_DRAFT_PATH` | variable | Absolute Halo-host path to the pinned DSpark draft GGUF. |
 | `EMBER_CERT_PORT` | variable | Unused loopback port for the certification server; defaults to `18080`. |
@@ -272,7 +271,7 @@ Docker Buildx and at least 200 GiB free. Configure these repository values:
 |---|---|---|
 | `EMBER_REGISTRY` | variable | `ghcr.io` |
 | `EMBER_IMAGE` | variable | `otheru-ai/ember` |
-| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Full executable-tree SHA that passed target validation (managed automatically) |
+| `EMBER_GFX1151_CERTIFIED_SHA` | variable | Forgejo break-glass publisher only; set by hand. GitHub proves certification from run history. |
 | `REGISTRY_USERNAME` | secret | registry service account |
 | `REGISTRY_TOKEN` | secret | token with image push permission |
 

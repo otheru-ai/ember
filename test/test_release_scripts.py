@@ -199,7 +199,20 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("timeout-minutes:", container)
         self.assertIn("packages: write", container)
         self.assertIn("ghcr.io/${GITHUB_REPOSITORY,,}", container)
-        self.assertIn("EMBER_GFX1151_CERTIFIED_SHA", container)
+        # A tag proves it was certified from this repository's own run history,
+        # not from a repository variable a credential wrote. The variable said
+        # only that something with actions:write set a string; run history
+        # records that the certify JOB succeeded for that exact commit, which
+        # whoever pushes a tag cannot fabricate -- and it needs no PAT, because
+        # GITHUB_TOKEN already carries actions:read.
+        self.assertNotIn("EMBER_GFX1151_CERTIFIED_SHA", container)
+        self.assertIn("actions: read", container)
+        self.assertIn("head_sha=$release_parent", container)
+        self.assertIn("actions/runs", container)
+        self.assertIn('endswith("certify")', container)
+        self.assertIn("no successful gfx1151 certification job", container)
+        # The long-lived release PAT is gone from the release path entirely.
+        self.assertNotIn("RELEASE_AUTOMATION_TOKEN", certify)
         self.assertIn("runs-on: [self-hosted, linux, x64, gfx1151]", certify)
         self.assertIn("workflow_call:", certify)
         self.assertNotIn("environment: gfx1151-certification", certify)
@@ -273,7 +286,6 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("git push --atomic", certify)
         self.assertIn("FORGEJO_RELEASE_SSH_KEY", certify)
         self.assertIn("StrictHostKeyChecking=yes", certify)
-        self.assertIn("RELEASE_AUTOMATION_TOKEN", certify)
         self.assertIn("expected=(CHANGELOG.md compose.yaml VERSION)", certify)
         triggers = certify.split("permissions:", 1)[0]
         self.assertNotIn("pull_request", triggers)

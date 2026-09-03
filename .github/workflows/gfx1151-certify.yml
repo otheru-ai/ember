@@ -12,8 +12,6 @@ on:
         required: false
         type: string
     secrets:
-      RELEASE_AUTOMATION_TOKEN:
-        required: true
       FORGEJO_RELEASE_SSH_KEY:
         required: true
       FORGEJO_SSH_HOST_KEYS:
@@ -641,7 +639,6 @@ jobs:
         env:
           TARGET_SHA: ${{ inputs.commit_sha }}
           REQUESTED_VERSION: ${{ inputs.release_version }}
-          RELEASE_AUTOMATION_TOKEN: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
           FORGEJO_RELEASE_SSH_KEY: ${{ secrets.FORGEJO_RELEASE_SSH_KEY }}
           FORGEJO_SSH_HOST_KEYS: ${{ secrets.FORGEJO_SSH_HOST_KEYS }}
           FORGEJO_RELEASE_REMOTE: ${{ vars.FORGEJO_RELEASE_REMOTE }}
@@ -652,7 +649,6 @@ jobs:
             echo 'main advanced after certification began; certify the new tip instead'
             exit 1
           }
-          test -n "$RELEASE_AUTOMATION_TOKEN"
           test -n "$FORGEJO_RELEASE_SSH_KEY"
           test -n "$FORGEJO_SSH_HOST_KEYS"
           test -n "$FORGEJO_RELEASE_REMOTE"
@@ -675,19 +671,6 @@ jobs:
           tag="v$version"
           git tag -a "$tag" -m "Ember $version" \
             -m "Certified-Parent: $TARGET_SHA"
-
-          # The tag publisher treats this repository variable as the
-          # authoritative record of which executable tree passed on gfx1151.
-          payload="$(CERTIFIED_SHA="$TARGET_SHA" python3 -c \
-            'import json, os; print(json.dumps({"name":"EMBER_GFX1151_CERTIFIED_SHA","value":os.environ["CERTIFIED_SHA"]}))')"
-          curl --fail --silent --show-error \
-            -X PATCH \
-            -H "Authorization: Bearer $RELEASE_AUTOMATION_TOKEN" \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            -H 'Content-Type: application/json' \
-            --data "$payload" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/variables/EMBER_GFX1151_CERTIFIED_SHA"
 
           ssh_dir="$RUNNER_TEMP/ember-release-ssh-$GITHUB_RUN_ID"
           cleanup() {

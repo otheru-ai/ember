@@ -15,6 +15,9 @@ permissions:
   contents: read
   packages: write
   id-token: write
+  # Reading this workflow run history is how a tag proves it was certified on
+  # gfx1151. See "Verify checkout, version, and hardware certification".
+  actions: read
 
 concurrency:
   # One persistent BuildKit instance owns the large ROCm and compiler caches.
@@ -87,8 +90,8 @@ jobs:
 
       - name: Verify checkout, version, and hardware certification
         env:
-          CERTIFIED_SHA: ${{ vars.EMBER_GFX1151_CERTIFIED_SHA }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           publish_sha="$(git rev-parse HEAD)"
@@ -110,18 +113,37 @@ jobs:
                 echo "tag $publish_tag does not match VERSION v$project_version"
                 exit 1
               }
-              test -n "$CERTIFIED_SHA" || {
-                echo 'Set EMBER_GFX1151_CERTIFIED_SHA after Halo certification'
-                exit 1
-              }
               parent_line="$(git rev-list --parents -n 1 "$publish_sha")"
               test "$(wc -w <<<"$parent_line")" -eq 2 || {
                 echo 'release commit must have exactly one parent'
                 exit 1
               }
               release_parent="$(git rev-parse "$publish_sha^")"
-              test "$CERTIFIED_SHA" = "$release_parent" || {
-                echo "certified $CERTIFIED_SHA, but release parent is $release_parent"
+              # Certification is proven from this repository's own run
+              # history, not from a value someone wrote into a repository
+              # variable. A variable says only that a credential with
+              # actions:write set a string; run history records that the
+              # certify job itself reached a successful conclusion for this
+              # exact commit, which whoever pushes a tag cannot fabricate. It
+              # also removes the long-lived release PAT, because GITHUB_TOKEN
+              # already carries actions:read.
+              #
+              # Match the JOB, not the run: promotion runs after certification
+              # and can fail on its own, leaving a red run over a green gate.
+              certified=""
+              runs_api="repos/$GITHUB_REPOSITORY/actions/runs"
+              for run_id in $(gh api \
+                  "$runs_api?head_sha=$release_parent&per_page=50" \
+                  --jq '.workflow_runs[].id'); do
+                if gh api "$runs_api/$run_id/jobs?per_page=100" \
+                    --jq '.jobs[] | select(.name | endswith("certify")) | .conclusion' \
+                    | grep -qx success; then
+                  certified="$run_id"
+                  break
+                fi
+              done
+              test -n "$certified" || {
+                echo "no successful gfx1151 certification job for $release_parent"
                 exit 1
               }
               mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "$publish_sha" | sort)
