@@ -213,6 +213,37 @@ jobs:
             --output type=registry,compression=gzip,compression-level=9,force-compression=true \
             -f docker/Dockerfile .
 
+      - name: Verify the image can run its own vision gate
+        run: |
+          set -euo pipefail
+          # The behavioural gate ships inside the image and only ever runs on
+          # the GPU box, after production has been quiesced. That makes a
+          # missing interpreter or import a fifteen-minute outage to discover,
+          # which is what python3-minimal cost on 2026-09-03: it ships the
+          # interpreter without the standard library, so the gate died on
+          # "No module named 'json'". Import it here, on a hosted runner,
+          # before the box is ever involved.
+          publish_sha="$(git rev-parse HEAD)"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${publish_sha:0:12}"
+          docker pull "$image"
+          docker run --rm --entrypoint python3 "$image" \
+            /opt/ember/vision-gate/gate.py --help >/dev/null
+          # --help exits before any policy is read, so also prove the pinned
+          # policy is present and is the file the runner expects.
+          docker run --rm --entrypoint python3 "$image" -c '
+          import hashlib, sys
+          raw = open("/opt/ember/vision-gate/policy-v4.json", "rb").read()
+          sys.path.insert(0, "/opt/ember/vision-gate")
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              "gate", "/opt/ember/vision-gate/gate.py")
+          gate = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gate)
+          digest = hashlib.sha256(raw).hexdigest()
+          assert digest == gate.POLICY_SHA256, (digest, gate.POLICY_SHA256)
+          print("vision gate policy in image:", digest)
+          '
+
       - name: Report digest, size, and vulnerability scan
         run: |
           set -euo pipefail

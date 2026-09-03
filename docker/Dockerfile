@@ -174,7 +174,7 @@ LABEL org.opencontainers.image.title="Ember" \
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl python3-minimal \
+      ca-certificates curl python3 \
  && rm -rf /var/lib/apt/lists/* \
  && (getent group video >/dev/null || echo 'video:x:44:' >> /etc/group) \
  && (getent group render >/dev/null || echo 'render:x:109:' >> /etc/group) \
