@@ -32,6 +32,26 @@ SMOKE = ROOT / "scripts" / "smoke_test.sh"
 
 
 class ReleaseScriptTests(unittest.TestCase):
+    def run_checked(self, *args, **kwargs):
+        """subprocess.run, but a nonzero exit reports the script's own stderr.
+
+        check=True raises CalledProcessError carrying only the exit status, and
+        every fatal path in docker/entrypoint.sh exits 78 through the same die()
+        helper. A failure therefore said "returned non-zero exit status 78" and
+        nothing about which of twenty checks fired -- which is exactly what made
+        an intermittent, load-correlated failure here undiagnosable.
+        """
+        kwargs.setdefault("text", True)
+        kwargs.setdefault("capture_output", True)
+        kwargs.pop("check", None)
+        result = subprocess.run(*args, **kwargs)  # noqa: S603
+        if result.returncode != 0:
+            self.fail(
+                f"{args[0]} exited {result.returncode}\n"
+                f"--- stderr ---\n{result.stderr}\n"
+                f"--- stdout ---\n{result.stdout}")
+        return result
+
     @staticmethod
     def docker_stage(dockerfile: str, name: str) -> str:
         match = re.search(
@@ -428,13 +448,8 @@ class ReleaseScriptTests(unittest.TestCase):
                 "EMBER_AUTO_ANSWER_AFTER_LOOP": "11",
                 "PATH": directory + os.pathsep + os.environ["PATH"],
             }
-            result = subprocess.run(
-                ["bash", str(ENTRYPOINT), "--ctx", "42"],
-                env=env,
-                text=True,
-                capture_output=True,
-                check=True,
-            )
+            result = self.run_checked(
+                ["bash", str(ENTRYPOINT), "--ctx", "42"], env=env)
             self.assertIn("-m " + str(model), result.stdout)
             self.assertIn("--host 0.0.0.0", result.stdout)
             self.assertIn("--port 18080", result.stdout)

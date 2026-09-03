@@ -477,6 +477,7 @@ jobs:
           out="$RUNNER_TEMP/vision-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           cleanup_gate() { docker rm -f "$name" >/dev/null 2>&1 || true; }
           trap cleanup_gate EXIT
+          mkdir -p "$out"
           model_dir="$(dirname -- "$MODEL_PATH")"
           model_file="$(basename -- "$MODEL_PATH")"
           mmproj_dir="$(dirname -- "$MMPROJ_PATH")"
@@ -540,7 +541,12 @@ jobs:
               synthetic) corpus="$GATE_CORPUS_ROOT/behavioural" ;;
               natural)   corpus="$GATE_CORPUS_ROOT/natural" ;;
             esac
+            # As the runner, not root: the gate writes its evidence with mode
+            # 0600, so root-owned results would be unreadable to the step below
+            # that prints the verdict. Creating $out first keeps the bind mount
+            # from being made root-owned by docker.
             docker run --rm --network host \
+              --user "$(id -u):$(id -g)" \
               -v "$GATE_CORPUS_ROOT:$GATE_CORPUS_ROOT:ro" \
               -v "$identity:/gate/runtime-identity.json:ro" \
               -v "$out:/gate/out" \
