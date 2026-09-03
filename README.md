@@ -19,6 +19,10 @@ Ember is a C inference server for DeepSeek-V4-Flash. It provides OpenAI Chat
 Completions, OpenAI Responses, Anthropic Messages, and legacy Completions APIs
 on one local endpoint.
 
+Since 2026.9.3 the default model is **DeepSeek-V4-Flash-Vision-Exp**, so Ember
+answers questions about images as well as text. [Sending an
+image.](#send-an-image)
+
 **23-40 tok/s decode** on a single Ryzen AI Max 395+. The latest
 2026.8.24 release-candidate sweep measured **39.59 tok/s median** on a
 structured workload (23.69 tok/s autoregressive baseline); prose and code are
@@ -52,9 +56,13 @@ scripts/preflight.sh && docker compose up -d
 
 The first start pulls the [current Ember release](https://github.com/otheru-ai/ember/releases/latest)
 image pinned in [`compose.yaml`](compose.yaml), downloads the pinned
-[DeepSeek-V4-Flash Strix Halo model and DSpark drafter](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF)
-(about 95 GiB combined), verifies both, and starts Ember at
+[DeepSeek-V4-Flash-Vision model, vision tower and DSpark drafter](https://huggingface.co/otheru/DeepSeek-V4-Flash-Vision-Strix-Halo-GGUF)
+(about 96 GiB combined), verifies all three, and starts Ember at
 `http://127.0.0.1:8080`. Interrupted downloads resume automatically.
+
+To serve the older text-only model instead, point `EMBER_MODEL_REPO` and
+`EMBER_MODEL_REVISION` at
+[the 0731 release](https://huggingface.co/otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF).
 
 Follow startup progress:
 
@@ -100,6 +108,34 @@ curl http://127.0.0.1:8080/v1/chat/completions \
     "stream": false
   }'
 ```
+
+## Send an image
+
+Images go in an OpenAI-style content part, either as a `data:` URL or a plain
+base64 payload:
+
+```bash
+IMG=$(base64 -w0 photo.png)
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"model\": \"deepseek-v4-flash\",
+    \"messages\": [{\"role\": \"user\", \"content\": [
+      {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,$IMG\"}},
+      {\"type\": \"text\", \"text\": \"What is in this image?\"}
+    ]}],
+    \"stream\": false
+  }"
+```
+
+> [!IMPORTANT]
+> **PNG only.** Ember decodes non-interlaced RGB/RGBA8 PNG and refuses JPEG,
+> WebP and GIF rather than handing request bytes to a permissive decoder.
+> Convert before sending.
+
+An image request runs one full-model prefill. Speculative decode and resident
+batching are declined for it rather than silently degraded, so an image request
+is slower than a text request of the same length.
 
 Useful endpoints:
 
@@ -201,9 +237,23 @@ EMBER_MODELS_DIR=./models
 EMBER_CACHE_DIR=./cache
 ```
 
-The default `deepseek-v4-flash` deployment uses only the pinned quant and
-drafter. They are not configurable, and Ember always verifies downloads before
-making them runnable. The first launch of an existing DeepSeek artifact hashes
+The default `deepseek-v4-flash` deployment uses the pinned quant, the vision
+tower and the drafter. Ember always verifies downloads before making them
+runnable, and a missing vision tower stops startup rather than falling back to
+the text path, so an image request can never be answered by a server that
+cannot see it.
+
+Two variables move the deployment to a different published model, both of which
+must be set together:
+
+```dotenv
+EMBER_MODEL_REPO=otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF
+EMBER_MODEL_REVISION=<immutable HuggingFace commit>
+```
+
+The revision is a commit, not a branch: a branch name would let the model change
+between container restarts. Ember refuses to start with an unpinned revision
+unless `EMBER_AUTO_DOWNLOAD=0` and the artifacts are supplied by hand. The first launch of an existing DeepSeek artifact hashes
 it and stores an identity-bound integrity record under the persistent cache
 mount. Later launches skip the content scan while device, inode, size, mtime,
 and ctime still match. A changed or replaced file is hashed again. Operators
