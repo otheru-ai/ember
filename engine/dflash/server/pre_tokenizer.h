@@ -2,8 +2,7 @@
 //
 // A BPE merge never crosses a pre-tokenized piece boundary.  Selecting the
 // wrong splitter therefore changes token IDs even when encode->decode still
-// reproduces the same text bytes. DeepSeek-V4-Flash uses `joyai-llm`; Qwen4Exp
-// uses the Qwen2 regex (single digits and Unicode letter/mark categories).
+// reproduces the same text bytes. DeepSeek-V4-Flash uses `joyai-llm`.
 
 #pragma once
 
@@ -13,8 +12,6 @@
 namespace dflash::common {
 
 enum class PreTokenizer {
-    QWEN2,
-    QWEN35,
     JOYAI_LLM,
 };
 

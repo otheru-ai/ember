@@ -97,7 +97,6 @@ add_subdirectory(vendor/xgrammar)
 add_library(ember_core STATIC
   src/server/sse.c
   src/model/tool_parser.c
-  src/model/tool_parser_qwen4.c
   src/model/tool_schema.c
   src/model/tool_grammar.c
   src/model/tool_memory.c
@@ -110,7 +109,6 @@ add_library(ember_core STATIC
   src/server/http.c
   src/server/background_gate.c
   src/model/chat_template.c
-  src/model/chat_template_qwen4.c
   src/model/image_input.c
   src/model/vision_prompt.c
   src/model/gguf.c
@@ -131,10 +129,6 @@ add_test(NAME sse COMMAND test_sse)
 add_executable(test_tool_parser test/test_tool_parser.c)
 target_link_libraries(test_tool_parser ember_core)
 add_test(NAME tool_parser COMMAND test_tool_parser)
-
-add_executable(test_tool_parser_qwen4 test/test_tool_parser_qwen4.c)
-target_link_libraries(test_tool_parser_qwen4 ember_core)
-add_test(NAME tool_parser_qwen4 COMMAND test_tool_parser_qwen4)
 
 add_executable(test_tool_schema test/test_tool_schema.c)
 target_link_libraries(test_tool_schema ember_core m)
@@ -216,10 +210,6 @@ add_test(NAME background_gate COMMAND test_background_gate)
 add_executable(test_chat_template test/test_chat_template.c)
 target_link_libraries(test_chat_template ember_core m)
 add_test(NAME chat_template COMMAND test_chat_template)
-
-add_executable(test_chat_template_qwen4 test/test_chat_template_qwen4.c)
-target_link_libraries(test_chat_template_qwen4 ember_core m)
-add_test(NAME chat_template_qwen4 COMMAND test_chat_template_qwen4)
 
 add_executable(test_model_profile test/test_model_profile.c)
 target_link_libraries(test_model_profile ember_core m)
@@ -309,92 +299,20 @@ add_executable(test_pre_tokenizer
 target_include_directories(test_pre_tokenizer PRIVATE engine/dflash/server)
 add_test(NAME pre_tokenizer COMMAND test_pre_tokenizer)
 
-add_executable(test_qwen4exp_contract test/test_qwen4exp_contract.cpp)
-target_include_directories(test_qwen4exp_contract PRIVATE
-  engine/dflash/qwen4exp)
-add_test(NAME qwen4exp_contract COMMAND test_qwen4exp_contract)
 
-add_executable(test_qwen4exp_shard_paths
-  test/test_qwen4exp_shard_paths.cpp
-  engine/dflash/qwen4exp/qwen4exp_shards.cpp)
-target_include_directories(test_qwen4exp_shard_paths PRIVATE
-  engine/dflash/qwen4exp)
-ember_strict(test_qwen4exp_shard_paths)
-add_test(NAME qwen4exp_shard_paths COMMAND test_qwen4exp_shard_paths)
 
-add_executable(test_qwen4exp_state
-  test/test_qwen4exp_state.cpp
-  engine/dflash/qwen4exp/qwen4exp_state.cpp)
-target_include_directories(test_qwen4exp_state PRIVATE
-  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
-add_test(NAME qwen4exp_state COMMAND test_qwen4exp_state)
 
-add_executable(test_qwen4exp_mtp
-  test/test_qwen4exp_mtp.cpp
-  engine/dflash/qwen4exp/qwen4exp_mtp.cpp
-  engine/dflash/qwen4exp/qwen4exp_state.cpp)
-target_include_directories(test_qwen4exp_mtp PRIVATE
-  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
-add_test(NAME qwen4exp_mtp COMMAND test_qwen4exp_mtp)
 
-add_executable(test_qwen4exp_reference
-  test/test_qwen4exp_reference.cpp
-  engine/dflash/qwen4exp/qwen4exp_reference.cpp)
-target_include_directories(test_qwen4exp_reference PRIVATE
-  engine/dflash/qwen4exp)
-ember_strict(test_qwen4exp_reference)
-add_test(NAME qwen4exp_reference COMMAND test_qwen4exp_reference)
 
-add_executable(test_qwen4exp_yarn_reference
-  test/test_qwen4exp_yarn_reference.cpp
-  engine/dflash/qwen4exp/qwen4exp_yarn_reference.cpp)
-target_include_directories(test_qwen4exp_yarn_reference PRIVATE
-  engine/dflash/qwen4exp)
-ember_strict(test_qwen4exp_yarn_reference)
-add_test(NAME qwen4exp_yarn_reference COMMAND test_qwen4exp_yarn_reference)
 
 add_executable(test_activation_dump
   test/test_activation_dump.cpp
   engine/dflash/common/activation_dump.cpp)
 target_include_directories(test_activation_dump PRIVATE
-  engine/dflash/common engine/dflash/qwen4exp)
+  engine/dflash/common)
 ember_strict(test_activation_dump)
 add_test(NAME activation_dump COMMAND test_activation_dump)
 
-add_executable(test_qwen4exp_vision
-  test/test_qwen4exp_vision.cpp
-  engine/dflash/qwen4exp/qwen4exp_vision.cpp
-  engine/dflash/qwen4exp/qwen4exp_vision_loader.cpp)
-target_include_directories(test_qwen4exp_vision PRIVATE
-  engine/dflash/qwen4exp)
-ember_strict(test_qwen4exp_vision)
-add_test(NAME qwen4exp_vision COMMAND test_qwen4exp_vision)
-
-add_library(mock_qwen4exp_vision_provider MODULE
-  test/mock_qwen4exp_vision_provider.cpp)
-target_include_directories(mock_qwen4exp_vision_provider PRIVATE
-  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
-set_target_properties(mock_qwen4exp_vision_provider PROPERTIES PREFIX "")
-add_executable(test_qwen4exp_vision_provider
-  test/test_qwen4exp_vision_provider.cpp
-  engine/dflash/qwen4exp/qwen4exp_vision.cpp
-  engine/dflash/qwen4exp/qwen4exp_vision_provider.cpp)
-target_include_directories(test_qwen4exp_vision_provider PRIVATE
-  engine/dflash engine/dflash/qwen4exp engine/ggml/include)
-target_link_libraries(test_qwen4exp_vision_provider PRIVATE
-  ${CMAKE_DL_LIBS} Threads::Threads)
-add_dependencies(test_qwen4exp_vision_provider mock_qwen4exp_vision_provider)
-add_test(NAME qwen4exp_vision_provider
-  COMMAND test_qwen4exp_vision_provider
-          $<TARGET_FILE:mock_qwen4exp_vision_provider>)
-
-add_executable(test_qwen_yarn
-  test/test_qwen_yarn.c
-  engine/dflash/common/qwen_yarn.c)
-target_include_directories(test_qwen_yarn PRIVATE engine/dflash/common)
-target_link_libraries(test_qwen_yarn PRIVATE m)
-ember_strict(test_qwen_yarn)
-add_test(NAME qwen_yarn COMMAND test_qwen_yarn)
 
 add_executable(test_gguf_quantize_common
   test/test_gguf_quantize_common.cpp
@@ -528,14 +446,12 @@ ember_strict(test_xdna_q8_model_weights)
 # ci/check_invariants.py fails the build if a test is registered without a
 # timeout, so a new add_test() cannot silently opt out of this.
 set(EMBER_C_TESTS
-  sse tool_parser tool_parser_qwen4 tool_schema tool_grammar tool_grammar_match tool_memory
+  sse tool_parser tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
   chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
-  chat_template_qwen4
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
-  progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
-  qwen4exp_yarn_reference activation_dump qwen4exp_vision
-  qwen4exp_vision_provider qwen_yarn
+  progress_cycle_detector sampler pre_tokenizer
+ activation_dump
   gguf_quantize_common
   logits_probe_format
   continuous_batch_scheduler
@@ -557,11 +473,10 @@ target_link_libraries(ember-server ember_core m)
 # list stays complete as tests are added.
 set(EMBER_STRICT_TARGETS
   ember_core ember-server
-  test_sse test_tool_parser test_tool_parser_qwen4 test_tool_schema test_tool_memory
+  test_sse test_tool_parser test_tool_schema test_tool_memory
   test_tool_grammar test_tool_grammar_match
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
-  test_chat_template_qwen4
   test_compaction test_gguf test_model_card test_model_profile test_image_input
   test_vision_prompt test_kv_cache test_qa)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
@@ -657,73 +572,8 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mirror_gh_issues.py)
   set_tests_properties(mirror_gh_issues PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_release_package
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_release_package.py)
-  set_tests_properties(qwen_release_package PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_vision_provider_scripts
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_provider_scripts.py)
-  set_tests_properties(qwen_vision_provider_scripts PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_quantize_pipeline
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)
-  set_tests_properties(qwen_quantize_pipeline PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_corpus_adapter
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_corpus_adapter.py)
-  set_tests_properties(qwen_corpus_adapter PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_intervention
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_intervention.py)
-  set_tests_properties(qwen_intervention PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_mtp_export
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_mtp_export.py)
-  set_tests_properties(qwen_mtp_export PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen4exp_baseline
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen4exp_baseline.py)
-  set_tests_properties(qwen4exp_baseline PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_builder_preflight
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_builder_preflight.py)
-  set_tests_properties(qwen_builder_preflight PROPERTIES TIMEOUT 20)
 
-  add_test(
-    NAME qwen_candidate_manifest
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_candidate_manifest.py)
-  set_tests_properties(qwen_candidate_manifest PROPERTIES TIMEOUT 20)
 
-  add_test(
-    NAME qwen_quality_judge
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_judge.py)
-  set_tests_properties(qwen_quality_judge PROPERTIES TIMEOUT 60)
-  add_test(
-    NAME qwen_quality_capture
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_capture.py)
-  set_tests_properties(qwen_quality_capture PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_quality_descriptor
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_descriptor.py)
-  set_tests_properties(qwen_quality_descriptor PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_snapshot_fetch
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_snapshot_fetch.py)
-  set_tests_properties(qwen_snapshot_fetch PROPERTIES TIMEOUT 20)
   add_test(
     NAME benchmark_gate
     COMMAND ${Python3_EXECUTABLE}
@@ -771,17 +621,6 @@ if(EMBER_ENGINE)
   # Metadata-only split-set coverage. It links the real loader's gguf parser
   # but never creates a HIP backend or touches a device, so it remains runnable
   # in the GPU-less ROCm build container.
-  add_executable(test_qwen4exp_shards test/test_qwen4exp_shards.cpp)
-  target_include_directories(test_qwen4exp_shards PRIVATE
-    engine/dflash/qwen4exp engine/ggml/include)
-  target_link_libraries(test_qwen4exp_shards PRIVATE ember_engine)
-  ember_strict(test_qwen4exp_shards)
-  add_test(NAME qwen4exp_shards COMMAND test_qwen4exp_shards)
-  set_tests_properties(qwen4exp_shards PROPERTIES TIMEOUT 60)
-
-  # Metadata/data-slice coverage for the four learned DeepSeek vision marker
-  # rows. This uses the real GGUF reader but neither creates a GPU backend nor
-  # needs model weights.
   add_executable(test_ds4_vision_markers test/test_ds4_vision_markers.cpp)
   target_include_directories(test_ds4_vision_markers PRIVATE
     engine/dflash/deepseek4 engine/ggml/include)
@@ -840,16 +679,6 @@ if(EMBER_ENGINE)
   # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
   # weights are required, but it exercises the same persistent ggml graph that
   # production dispatches through gfx1151 MMVQ/MMQ.
-  add_executable(test_qwen4exp_frontier test/test_qwen4exp_frontier.cpp)
-  target_include_directories(test_qwen4exp_frontier PRIVATE
-    engine/dflash/qwen4exp engine/ggml/include engine/ggml/src)
-  target_link_libraries(test_qwen4exp_frontier PRIVATE ember_engine)
-  add_test(NAME qwen4exp_frontier COMMAND test_qwen4exp_frontier)
-  set_tests_properties(qwen4exp_frontier PROPERTIES TIMEOUT 60)
-
-  # HIP-only, opt-in fixed-input correctness oracle for the shipped ROCmFP4
-  # formats. It compares convert.cu, dense/routed MMVQ, and dense/routed MMQ
-  # against the CPU decoders and an exact scalar matmul without model weights.
   add_executable(test_rocmi4_operator_oracle
     test/test_rocmi4_operator_oracle.hip)
   target_include_directories(test_rocmi4_operator_oracle PRIVATE
@@ -866,30 +695,13 @@ if(EMBER_ENGINE)
   set_tests_properties(rocmi4_operator_oracle PROPERTIES TIMEOUT 60)
 
   # GPU-free oracle for the graph RoPE path. Tranche 1 moves QSA rotary
-  # embedding off the host scalar `ember_qwen_yarn_apply` and into an in-graph
+  # embedding off a host scalar and into an in-graph
   # `ggml_rope_multi`; that swap has five parameters (n_dims, the interleaved
   # sections, attn_factor, the axis-major position layout, and the `c`
   # freq-factor table, which ggml *divides* by) that are silent when wrong.
   # Running the op on the CPU backend against the scalar reference catches all
   # of them without hardware. CPU and HIP share the op, so agreement here is
   # necessary but not sufficient — the hardware differential remains the gate.
-  add_executable(test_qwen_rope_graph_oracle test/test_qwen_rope_graph_oracle.cpp)
-  target_include_directories(test_qwen_rope_graph_oracle PRIVATE
-    engine/dflash/common engine/ggml/include)
-  target_link_libraries(test_qwen_rope_graph_oracle PRIVATE ember_engine)
-  # Deliberately not ember_strict, for the same reason test_qwen4exp_frontier
-  # is not: it includes ggml-backend.h, and EMBER_STRICT's -Wshadow fires
-  # inside that vendored header (ggml-backend.h:355, a function name hiding
-  # ggml_backend_graph_copy's constructor). Upstream keeps its own warning
-  # standard; holding an Ember target to ours turns a vendored header into our
-  # build error. test_qwen4exp_shards stays strict because it does not include
-  # that header.
-  add_test(NAME qwen_rope_graph_oracle COMMAND test_qwen_rope_graph_oracle)
-  set_tests_properties(qwen_rope_graph_oracle PROPERTIES TIMEOUT 60)
-
-  # Narrow placement diagnostic: loads only the trained DSpark main and three
-  # context-KV Q8_0 tensors, then measures the GPU pre-stage at proposal and
-  # context widths. It avoids a second resident target-model allocation.
   add_executable(ember-dspark-main-bench
     providers/xdna2/benchmark_dspark_main_gpu.cpp
     providers/xdna2/q8_model_weights.cpp
@@ -1036,7 +848,6 @@ if(EMBER_ENGINE)
     src/server/api_adapters.c
     src/server/compaction.c
     src/model/tool_parser.c
-    src/model/tool_parser_qwen4.c
     src/model/tool_schema.c
     src/model/tool_grammar.c
     src/server/background_gate.c
@@ -1044,7 +855,6 @@ if(EMBER_ENGINE)
     src/model/continuation.c
     src/model/dsml_decode.c
     src/model/chat_template.c
-    src/model/chat_template_qwen4.c
     src/model/image_input.c
     src/model/vision_prompt.c
     src/model/gguf.c

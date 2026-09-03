@@ -255,4 +255,4 @@ Relevant primary and project references:
 - [Dwarfstar's DeepSeek V4 implementation and scorer](https://github.com/antirez/ds4)
 - [Antirez DeepSeek V4 GGUF recipe](https://huggingface.co/antirez/deepseek-v4-gguf/blob/main/README.md)
 - [Unsloth Dynamic 2.0 GGUF method](https://unsloth.ai/docs/basics/unsloth-dynamic-2.0-ggufs)
-- [Unsloth's size/quality benchmark presentation](https://unsloth.ai/docs/models/qwen3.5/gguf-benchmarks)
+- [Unsloth's size/quality benchmark presentation](https://unsloth.ai/docs/models/gguf-benchmarks)

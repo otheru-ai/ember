@@ -13,14 +13,6 @@ bool ember_prompt_profile_from_arch(const char *architecture,
         *out = EMBER_PROMPT_DEEPSEEK_DSML;
         return true;
     }
-    // #27742 defines the GGUF architecture spelling as qwen4exp. Accept the
-    // Transformers spelling too so pre-release conversion tools can fail at
-    // the engine's stricter tensor gate rather than selecting DeepSeek DSML.
-    if (strcmp(architecture, "qwen4exp") == 0 ||
-        strcmp(architecture, "qwen4_exp") == 0) {
-        *out = EMBER_PROMPT_QWEN4_CHATML;
-        return true;
-    }
     return false;
 }
 

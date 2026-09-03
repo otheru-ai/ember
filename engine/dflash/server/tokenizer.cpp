@@ -150,7 +150,7 @@ std::vector<int32_t> Tokenizer::bpe_encode_piece(const std::string & piece) cons
             p += cplen;
         }
     } else {
-        // Qwen and JoyAI use GPT-2 byte-level BPE.
+        // JoyAI uses GPT-2 byte-level BPE.
         std::string encoded = encode_gpt2_bpe(piece);
         auto it = token_to_id_.find(encoded);
         if (it != token_to_id_.end()) return {it->second};

@@ -24,33 +24,6 @@ RUN apt-get update \
 RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
  && ldconfig
 
-# The Qwen vision tower stays in a separate llama.cpp mtmd/ggml lineage. Build
-# its tiny Ember ABI adapter against the exact converter revision; neither the
-# text GGUF nor the BF16 mmproj is present or opened during the image build.
-FROM toolchain AS qwen-vision-provider-build
-
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git python3 \
- && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /ember
-COPY scripts/build_qwen_vision_provider.sh scripts/check_qwen_vision_provider.py /ember/scripts/
-COPY tools/qwen4exp_vision_provider_llamacpp.cpp /ember/tools/
-COPY tools/qwen_vision_provider/ /ember/tools/qwen_vision_provider/
-COPY engine/dflash/qwen4exp/qwen4exp_vision_provider.h /ember/engine/dflash/qwen4exp/
-
-ENV CCACHE_DIR=/root/.cache/ccache \
-    CCACHE_COMPRESS=true \
-    CCACHE_MAXSIZE=20G
-RUN --mount=type=cache,id=ember-qwen-vision-ccache,target=/root/.cache/ccache,sharing=locked \
-    scripts/build_qwen_vision_provider.sh \
-      --build-dir /qwen-vision-build \
-      --install-dir /opt/qwen-vision-provider \
-      --backend hip \
-      --jobs "$(nproc)" \
- && install -Dm0644 /qwen-vision-build/llama.cpp/LICENSE \
-      /qwen-vision-licenses/llama.cpp/LICENSE
-
 FROM toolchain AS dev
 
 ARG EMBER_VERSION
@@ -118,16 +91,6 @@ RUN apt-get update \
 
 WORKDIR /ember
 COPY . /ember
-COPY --from=qwen-vision-provider-build /opt/qwen-vision-provider/ /opt/qwen-vision-provider/
-COPY --from=qwen-vision-provider-build /qwen-vision-licenses/ /ember-licenses/
-
-# Make the provider's private llama.cpp/mtmd dependency family visible to the
-# recursive ELF-closure scanner below.  The libraries deliberately live away
-# from Ember's vendored ggml lineage, so relying on a build-tree RUNPATH would
-# make the release image non-reproducible.
-RUN echo /opt/qwen-vision-provider/lib > /etc/ld.so.conf.d/11-qwen-vision.conf \
- && ldconfig
-
 ENV CCACHE_DIR=/root/.cache/ccache \
     CCACHE_COMPRESS=true \
     CCACHE_MAXSIZE=20G
@@ -165,10 +128,7 @@ RUN gcc -shared -fPIC -O2 -g \
  && bash docker/collect-runtime.sh /ember-runtime \
       /usr/local/bin/ember-dflash \
       /usr/local/lib/libsegvtrace.so \
-      /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so \
       /opt/rocm/bin/rocminfo \
- && install -Dm0644 /opt/qwen-vision-provider/LLAMA_CPP_REVISION \
-      /ember-runtime/opt/qwen-vision-provider/LLAMA_CPP_REVISION \
  && install -Dm0644 /opt/rocm/.info/version /ember-runtime/opt/rocm/.info/version \
  && rocblas_kpack="$(find /opt/rocm -type f \
       -path '*/.kpack/blas_lib_gfx1151.kpack' -print -quit)" \
@@ -205,7 +165,7 @@ FROM ${RUNTIME_IMAGE} AS release
 ARG EMBER_VERSION
 ARG EMBER_VCS_REF
 LABEL org.opencontainers.image.title="Ember" \
-      org.opencontainers.image.description="DeepSeek-V4-Flash and Qwen3.8-Flash-Next inference server for AMD Strix Halo" \
+      org.opencontainers.image.description="DeepSeek-V4-Flash inference server for AMD Strix Halo" \
       org.opencontainers.image.version="${EMBER_VERSION}" \
       org.opencontainers.image.revision="${EMBER_VCS_REF}" \
       org.opencontainers.image.licenses="MIT" \
@@ -224,15 +184,13 @@ COPY --from=dev /ember-runtime/ /
 COPY --from=dev /ember-licenses/ /usr/share/licenses/ember/
 COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
- && printf '%s\n' /opt/rocm/lib /opt/qwen-vision-provider/lib \
+ && printf '%s\n' /opt/rocm/lib \
       > /etc/ld.so.conf.d/10-ember-runtime.conf \
  && ldconfig \
- && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found' \
- && ! ldd /opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so | grep -q 'not found'
+ && ! ldd /usr/local/bin/ember-dflash | grep -q 'not found'
 
 ENV EMBER_MODEL_DIR=/models \
-    EMBER_KV_CACHE_DIR=/cache \
-    DFLASH_QWEN_VISION_PROVIDER=/opt/qwen-vision-provider/lib/libember_qwen4exp_vision_provider.so
+    EMBER_KV_CACHE_DIR=/cache
 
 ENTRYPOINT ["/usr/local/bin/ember-entrypoint"]
 

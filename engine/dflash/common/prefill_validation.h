@@ -1,6 +1,6 @@
 #pragma once
 
-// The Qwen production-prefill validator compares two deliberately different
+// The production-prefill validator compares two deliberately different
 // quantized-matmul families. Token disagreement is acceptable only when the
 // authoritative q1 top-two decision is less stable than the measured logit
 // perturbation between paths. This is self-calibrating: there is no model- or
@@ -10,7 +10,7 @@
 // hypothetical. A width-4 dense-MMQ control returned token-exact and accepted
 // while its logit vectors correlated only 0.556/0.601 with q1 -- both argmax
 // tokens happened to survive, so nothing token-level could see it. See
-// docs/qwen3.8-performance-status.md.
+// the retained performance evidence.
 //
 // The reason no margin rule can catch that at any threshold: both quantities it
 // compares (top-2 margin, max abs delta) are top-of-distribution order

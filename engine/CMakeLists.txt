@@ -105,7 +105,7 @@ message(STATUS
 set(DFLASH ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
 set(EMBER_ENGINE_INC
   ${DFLASH} ${DFLASH}/common ${DFLASH}/deepseek4
-  ${DFLASH}/qwen4exp ${DFLASH}/server ${DFLASH}/placement
+  ${DFLASH}/server ${DFLASH}/placement
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 add_library(ember_engine STATIC
@@ -124,21 +124,9 @@ add_library(ember_engine STATIC
   ${DFLASH}/deepseek4/deepseek4_vision_tower.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_markers.cpp
   ${DFLASH}/deepseek4/deepseek4_dspark_spec.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_model.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_shards.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_loader.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_runtime.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_frontier.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_state.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_mtp.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_mtp_runtime.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_mtp_loader.cpp
   ${DFLASH}/common/activation_dump.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_backend.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_vision.cpp
-  ${DFLASH}/qwen4exp/qwen4exp_vision_provider.cpp
+  ${DFLASH}/common/model_architecture.cpp
   ${DFLASH}/common/crash_breadcrumb.c
-  ${DFLASH}/common/qwen_yarn.c
   ${DFLASH}/common/continuous_batch_executor.cpp
   ${DFLASH}/common/continuous_batch_scheduler.cpp
   ${DFLASH}/common/resident_batch_coordinator.cpp

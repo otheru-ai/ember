@@ -218,8 +218,8 @@ jobs:
     # Keep this the narrowest grant the certify workflow actually needs. A
     # called workflow can never exceed its caller's grant and GitHub enforces
     # that statically, so a single nested job asking for more invalidates the
-    # whole of ci.yml before any job starts -- which is exactly how the qwen
-    # attestation jobs took CI down for nine days.
+    # whole of ci.yml before any job starts -- which is exactly how a set of
+    # nested attestation jobs took CI down for nine days.
     permissions:
       contents: read
       packages: read

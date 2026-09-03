@@ -15,13 +15,7 @@ int main(void) {
     CHECK(ember_prompt_profile_from_arch("deepseek4", &profile) &&
               profile == EMBER_PROMPT_DEEPSEEK_DSML,
           "deepseek4 selects DSML");
-    CHECK(ember_prompt_profile_from_arch("qwen4exp", &profile) &&
-              profile == EMBER_PROMPT_QWEN4_CHATML,
-          "canonical qwen4exp selects ChatML");
-    CHECK(ember_prompt_profile_from_arch("qwen4_exp", &profile) &&
-              profile == EMBER_PROMPT_QWEN4_CHATML,
-          "Transformers qwen4_exp spelling selects ChatML");
-    CHECK(!ember_prompt_profile_from_arch("qwen35", &profile),
+    CHECK(!ember_prompt_profile_from_arch("llama", &profile),
           "unknown architectures fail closed");
     CHECK(!ember_prompt_profile_from_arch(NULL, &profile),
           "missing architecture fails closed");

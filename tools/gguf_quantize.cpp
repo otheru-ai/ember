@@ -1,4 +1,4 @@
-// Streaming ROCMI4 GGUF quantizer used by the pinned Qwen release pipeline.
+// Streaming ROCMI4 GGUF quantizer used by the pinned release pipeline.
 //
 // The implementation is architecture-neutral: GGUF metadata supplies the
 // tensor inventory and shapes, while a conservative name/rank policy chooses
@@ -563,7 +563,7 @@ InterventionPlan load_intervention_manifest(const std::filesystem::path & path) 
         if ((is_qsa_layer && projection != "attn_output") ||
             (!is_qsa_layer && projection != "ssm_out")) {
             throw std::runtime_error(
-                "intervention target does not match the Qwen4Exp hybrid layer map: " +
+                "intervention target does not match the hybrid layer map: " +
                 target.tensor_name);
         }
         const std::string direction_id = entry.at("direction_id").get<std::string>();
@@ -917,7 +917,7 @@ void quantize_tensor(FILE * input, FILE * output, const TensorPlan & plan,
                                       worker_rows, columns, source_row_size);
             });
             // Deliberately reduce in a fixed row-major order. The direction
-            // projection is tiny relative to Qwen's weight conversion, and a
+            // projection is tiny relative to the weight conversion, and a
             // deterministic double accumulator is more valuable than a racy
             // or thread-count-dependent reduction here.
             for (std::size_t local_row = 0; local_row < count; ++local_row) {

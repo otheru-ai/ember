@@ -47,7 +47,7 @@ struct Fixture {
         const auto & config = deepseek4_vision_native_config();
         gguf_set_val_str(gguf, "clip.projector_type",
                          mutation == Mutation::WrongProjector
-                             ? "qwen3vl_merger" : "deepseekv4vision");
+                             ? "otherarch_merger" : "deepseekv4vision");
         gguf_set_val_f32(gguf,
             "clip.vision.attention.layer_norm_epsilon",
             mutation == Mutation::WrongNormEpsilon

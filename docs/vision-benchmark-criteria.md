@@ -1,6 +1,6 @@
 # Part C — what "meets or exceeds our existing quant" has to mean
 
-Written **before** the first measurement, deliberately. The Qwen work is the
+Written **before** the first measurement, deliberately. Earlier work is the
 standing lesson: a criterion chosen after seeing the numbers is not a release
 gate, it is a rubber stamp. Nothing in this file may be revised once a number
 exists for the case it governs; revise it now if it is wrong.
@@ -150,7 +150,7 @@ higher precision on the same image and prompt, not 0731.
 **The obstacle, stated now rather than discovered later.** The natural reference
 is the BF16 model, and it does not fit: BF16 is ~336 GB on a 128 GiB box. So the
 reference must itself be a quant, and a quant reference is only admissible under
-the rule already established for the Qwen F32 work: **the reference must be at
+the rule already established for the earlier F32 work: **the reference must be at
 least an order of magnitude more accurate than the effect under test**, and that
 ratio must be demonstrated, not assumed. If it cannot be demonstrated, the
 comparison is not reportable and we say so.
@@ -213,7 +213,7 @@ Prefill tokens/s and decode tokens/s, at the shapes already in the ledger for
 
 **Establish noise before comparing.** At least 5 runs per arm; report median and
 spread. A difference inside the spread is not a result. This is the rule the
-Qwen work was built on and it is not optional here.
+earlier work was built on and it is not optional here.
 
 ### Void conditions
 

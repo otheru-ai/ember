@@ -260,37 +260,6 @@ and ctime still match. A changed or replaced file is hashed again. Operators
 using a trusted, immutable model store may set `EMBER_VERIFY_EXISTING_SHA256=0`
 to skip even the first verification.
 
-An explicit, local-artifact-only Qwen deployment boundary is also available for
-a completed Qwen3.8-Flash-Next candidate. It does not silently reuse the
-DeepSeek drafter or guess an MTP depth, and it does not download unpublished
-candidate files. Place the complete candidate package in the model directory,
-then set:
-
-```dotenv
-EMBER_DEPLOYMENT_MODE=qwen3.8-flash-next
-EMBER_QWEN_MODEL=/models/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-00001-of-000NN.gguf
-EMBER_QWEN_SHA256SUMS=/models/SHA256SUMS
-EMBER_QWEN_SHA256SUMS_SHA256=<digest-from-the-certified-release-evidence>
-DFLASH_QWEN_MTP=/models/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf
-DFLASH_QWEN_MTP_DEPTH=<certified-1-through-4>
-DFLASH_QWEN_VISION_MMPROJ=/models/Qwen3.8-Flash-Next-BF16-mmproj.gguf
-DFLASH_QWEN_VISION_TEXT_MODEL=/models/Qwen3.8-Flash-Next-vocab-only.gguf
-```
-
-Pass shard `00001`; the engine discovers every ordered sibling. Startup always
-verifies the small checksum-list digest and requires the list to cover all main
-shards plus the selected MTP, BF16 mmproj, and zero-tensor vocab-only vision
-text model. Files named by the sealed list use the same identity-bound cache,
-regardless of `EMBER_VERIFY_EXISTING_SHA256`: the first launch hashes them and
-later launches hash only files whose identity changed. The release artifact
-manifest exposes those as three flattened
-companion records (`mtp`, `vision_mmproj`, and `vision_vocab`). The release
-image supplies the pinned `DFLASH_QWEN_VISION_PROVIDER` shared object. Until a candidate has its
-real-weight text/vision differential and gfx1151 release evidence, this mode is
-an engineering deployment boundary rather than a multimodal certification
-claim. See [.env.example](.env.example) for every container setting and
-[the operations guide](docs/operations.md) for the fail-closed startup checks.
-
 ## Coding agents
 
 Ember is tested with Claude Code, Codex CLI, OpenCode, pi, and OMP. Their exact

@@ -58,7 +58,7 @@ static void test_deepseek_ordered_image_placeholder(void) {
                          "> after" ASST "</think>") != NULL,
           "DeepSeek preserves ordered text/image parts with its exact marker");
     CHECK(p && strstr(p, "<|vision_start|>") == NULL,
-          "DeepSeek never renders the Qwen image wrapper");
+          "DeepSeek never renders the XML image wrapper");
     free(p);
     ember_chat_request_free(&req);
 

@@ -1,5 +1,4 @@
 #include "chat_template.h"
-#include "chat_template_qwen4.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -232,10 +231,6 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
                           ember_think_mode think_mode, bool add_generation_prompt) {
     if (!req || req->n_messages < 0 ||
         (req->n_messages > 0 && !req->messages)) return NULL;
-    if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
-        return ember_qwen4_render_prompt(req, enable_thinking,
-                                         add_generation_prompt);
-    }
     const bool think = enable_thinking;
     const bool tool_context = uses_tool_context(req);
     int last_user_idx = -1;
@@ -360,10 +355,6 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
 char *ember_render_tool_continuation_suffix(const ember_chat_request *req,
                                             bool enable_thinking) {
     if (!req || req->n_messages <= 0 || !req->messages) return NULL;
-    if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
-        return ember_qwen4_render_tool_continuation_suffix(req,
-                                                           enable_thinking);
-    }
     ember_buf b = {0};
     ember_buf_puts(&b, EOS);
     bool opened_user = false;
@@ -394,10 +385,6 @@ char *ember_render_invalid_tool_recovery_suffix(
         const char *detail) {
     if (!req || req->n_messages < 0 ||
         (req->n_messages > 0 && !req->messages)) return NULL;
-    // The DeepSeek recovery turn is DSML-specific. Qwen malformed-call retry
-    // remains disabled until its executable parser can validate the complete
-    // XML block; returning NULL makes the existing caller stop the retry.
-    if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) return NULL;
     ember_buf error = {0};
     ember_buf_puts(&error, "Tool error: invalid DSML tool call");
     if (detail && detail[0]) {

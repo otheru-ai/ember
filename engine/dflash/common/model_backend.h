@@ -90,8 +90,8 @@ struct DaemonIO {
 // after the injected close-tag sequence.
 //
 // Single vs multi-token close:
-//   Qwen3.6: </think> is one added_token (id 248069). close_token_ids
-//            has size 1. One override + budget_close_injected=true.
+//   Single-token: </think> is one added_token. close_token_ids has
+//            size 1. One override + budget_close_injected=true.
 //   DeepSeek/laguna: </think> tokenizes to 3 ordinary tokens
 //            ([1718, 37947, 32] for DS-V3). close_token_ids has
 //            size 3. Three consecutive overrides, then resume.
@@ -107,10 +107,10 @@ struct DaemonIO {
 // for thinking-enabled requests. Spec-decode integration is a follow-up.
 struct BudgetHook {
     // Multi-token close sequence injected when `(n_gen - committed)`
-    // drops to `hard_limit_remaining`. For Qwen3.x this is the
-    // canonical "Considering the limited time..." summarize-and-stop
-    // lead-in (tokenized at server startup); for non-qwen arches it's
-    // a single close-tag token. Empty = hook disabled.
+    // drops to `hard_limit_remaining`. For architectures with a
+    // canonical summarize-and-stop lead-in this is that sequence
+    // (tokenized at server startup); otherwise it is a single
+    // close-tag token. Empty = hook disabled.
     std::vector<int32_t> close_token_ids;
     // Bare natural </think> sequence. The budget hook is armed only until this
     // sequence appears in generated output. Keeping it separate from the
@@ -123,7 +123,7 @@ struct BudgetHook {
 // Optional image rows already projected to the language-model width.  The
 // projector remains a separate, lazily loaded mmproj artifact; generation owns
 // only these request-scoped rows. `prompt_offset` points at the first row in
-// `prompt`. token_ids is empty for legacy Qwen repeated-image_pad runs and
+// `prompt`. token_ids is empty for legacy repeated-image_pad runs and
 // otherwise carries the learned sentinel id for every embedding row.
 struct VisionEmbeddingRun {
     int prompt_offset = 0;
@@ -360,7 +360,7 @@ struct ModelBackend {
     // Architectures with a distinct production prefill implementation can
     // require the differential validator to compare that path against its
     // authoritative q=1 reference. DeepSeek's release validator deliberately
-    // controls sparse/dense policy elsewhere; Qwen's bounded q16 frontier is
+    // controls sparse/dense policy elsewhere; a bounded q16 frontier is
     // a separate numerical implementation and must never be optimized without
     // an explicit token-equivalence check.
     virtual bool validation_compare_production_prefill() const {
@@ -387,8 +387,9 @@ struct ModelBackend {
                                          const DaemonIO & io) = 0;
 
     // Decode, preprocess, and project one encoded still image. Architectures
-    // without a vision tower fail closed. Qwen loads its separate BF16 mmproj
-    // provider on the first call, so text-only startup/residency is unchanged.
+    // without a vision tower fail closed. An architecture with a separate
+    // mmproj loads its provider on the first call, so text-only
+    // startup/residency is unchanged.
     virtual bool encode_vision_image(const uint8_t *, size_t, int,
                                      EncodedVisionImage &,
                                      std::string & error) {

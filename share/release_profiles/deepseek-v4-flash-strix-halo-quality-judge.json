@@ -11,6 +11,6 @@
   ],
   "repo_id": "otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF",
   "revision": "75a4bed8e6762986d7b4169e1e1afbb57c482704",
-  "schema": "ember.qwen3.8.quality-judge-source.v1",
+  "schema": "ember.quality-judge-source.v1",
   "total_bytes": 91547243200
 }

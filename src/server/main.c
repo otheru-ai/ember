@@ -32,7 +32,6 @@
 #include "../model/dsml_decode.h"
 #include "../model/tool_schema.h"
 #include "../model/tool_grammar.h"
-#include "../model/tool_parser_qwen4.h"
 #include "chat_api.h"
 #include "api_adapters.h"
 #include "background_gate.h"
@@ -435,17 +434,17 @@ static bool on_token(int32_t tok, void *ud) {
     // earlier in the VISIBLE output (after any </think>): an orphan </tool_calls>
     // must not truncate a normal answer, a mismatched closer must not terminate
     // the wrong family, and a marker inside unclosed <think> is not executable.
-    // B#7: native ds_engine and Qwen qwen3_coder use one sibling block per
-    // call and may emit several — don't stop at the first closer; run to EOS so
-    // the buffered parser sees the complete call set.
+    // B#7: native ds_engine and the XML wrapper format use one sibling block
+    // per call and may emit several — don't stop at the first closer; run to
+    // EOS so the buffered parser sees the complete call set.
     if (g->has_tools && g->acc.ptr &&
         !inside_unclosed_think(g->acc.ptr, g->started_thinking)) {
         const char *vis   = visible_after_think(g->acc.ptr);
         const char *start = ember_find_tool_start(vis);
         const char *end   = start ? ember_find_tool_end(start) : NULL;
         bool native = start && strncmp(start, "<ds_engine_tool_use>", 20) == 0;
-        bool qwen = start && strncmp(start, "<tool_call>", 11) == 0;
-        if (start && end && !native && !qwen) {
+        bool wrapper = start && strncmp(start, "<tool_call>", 11) == 0;
+        if (start && end && !native && !wrapper) {
             g->acc.len = (size_t)(end - g->acc.ptr);
             g->acc.ptr[g->acc.len] = '\0';
             if (!g->collect_only) {
@@ -839,13 +838,7 @@ static void snapshot_post_toolcall(ember_server *srv, ember_backend *be,
         return;
     }
     ember_tool_calls parsed = {0};
-    if (req && req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
-        ember_qwen_tool_parse_report report = {0};
-        (void)ember_parse_qwen_tool_calls(st, req->tools_json,
-                                          &parsed, &report);
-    } else {
-        ember_parse_dsml_tool_calls(st, &parsed);
-    }
+    ember_parse_dsml_tool_calls(st, &parsed);
     bool executable = parsed.len > 0;
     ember_tool_calls_free(&parsed);
     if (!executable) {
@@ -969,15 +962,15 @@ static void remember_tool_block(ember_server *srv, ember_backend *be,
     // turn must still resolve to the same exact sampled surface, otherwise a
     // later multi-call replay compares call 2+ against a copy of call 1 only.
     static const char native_open[] = "<ds_engine_tool_use>";
-    static const char qwen_open[] = "<tool_call>";
+    static const char wrapper_open[] = "<tool_call>";
     const char *sibling_open = NULL;
     size_t sibling_open_len = 0;
     if (!strncmp(start, native_open, sizeof(native_open) - 1)) {
         sibling_open = native_open;
         sibling_open_len = sizeof(native_open) - 1;
-    } else if (!strncmp(start, qwen_open, sizeof(qwen_open) - 1)) {
-        sibling_open = qwen_open;
-        sibling_open_len = sizeof(qwen_open) - 1;
+    } else if (!strncmp(start, wrapper_open, sizeof(wrapper_open) - 1)) {
+        sibling_open = wrapper_open;
+        sibling_open_len = sizeof(wrapper_open) - 1;
     }
     if (sibling_open) {
         const char *cursor = end;
@@ -1288,36 +1281,6 @@ static bool parse_executable_tool_calls(const ember_chat_request *req,
                                         ember_tool_calls *out,
                                         const char **detail_out) {
     if (detail_out) *detail_out = NULL;
-    if (req && req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML) {
-        ember_qwen_tool_parse_report report = {0};
-        ember_parse_qwen_tool_calls(text, req->tools_json, out, &report);
-        if (!report.found) {
-            if (!req->tool_choice_required) return true;
-            if (detail_out)
-                *detail_out = "tool_choice required at least one tool call";
-            return false;
-        }
-        const char *detail = NULL;
-        if (report.contaminated)
-            detail = "nested Qwen tool markup appeared inside an argument";
-        else if (report.malformed)
-            detail = "nested or malformed Qwen tool-call tags were generated";
-        else if (report.trailing)
-            detail = "non-whitespace followed the Qwen tool-call wrapper";
-        else if (!report.complete)
-            detail = "the generated Qwen tool-call block was truncated";
-        else if (out->len == 0)
-            detail = "the generated Qwen tool-call block could not be parsed";
-        else if (out->len != report.wrappers)
-            detail = "nested or mismatched Qwen function wrappers were generated";
-        else if (!req->parallel_tool_calls && out->len > 1)
-            detail = "parallel tool calls were disabled for this request";
-        if (!detail) detail = validate_tool_call_schemas(req, out);
-        if (!detail) return true;
-        ember_tool_calls_free(out);
-        if (detail_out) *detail_out = detail;
-        return false;
-    }
     ember_tool_parse_report report = {0};
     ember_parse_dsml_tool_calls_ex(text, out, &report);
     if (!report.found) {
@@ -1764,7 +1727,7 @@ static bool tool_result_forces_ar(void) {
     return cached != 0;
 }
 
-// Benchmark-only correctness control. The ordinary HTTP path batches Qwen
+// Benchmark-only correctness control. The ordinary HTTP path batches
 // prefill, so a decode-only measurement at a deep context would otherwise
 // inherit state produced by the currently rejected multi-row path. Keep this
 // operator-wide rather than client-selectable: exact q=1 prefill is extremely
@@ -2200,8 +2163,8 @@ static void free_vision_runs(ember_vision_run *runs, int count) {
 
 // Encode images in message/part order, tokenize the loaded architecture's
 // private placeholder, and replace each exact sequence in the already-tokenized
-// prompt. DeepSeek may use a multi-token sequence; Qwen's single image_pad
-// retains its repeated-id fallback.
+// prompt. DeepSeek uses a multi-token sequence; the single-id placeholder
+// case retains its repeated-id fallback.
 static bool prepare_vision_prompt(
         ember_backend *be, const ember_chat_request *req,
         int32_t **ids_io, int *count_io,
@@ -2928,8 +2891,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_sse_stream st;
         ember_sse_init(&st, id, req->model, created, req->has_tools,
                        started_thinking, false);
-        if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML)
-            ember_sse_set_qwen_tools(&st, req->tools_json);
         ember_sse_set_reasoning_filter(
             &st, srv->card.thinking_terminator_hint);
         st.include_usage = req->stream_include_usage;
@@ -3169,8 +3130,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_sse_stream splitter;
         ember_sse_init(&splitter, id, req->model, created, req->has_tools,
                        started_thinking, false);
-        if (req->prompt_profile == EMBER_PROMPT_QWEN4_CHATML)
-            ember_sse_set_qwen_tools(&splitter, req->tools_json);
         ember_sse_set_reasoning_filter(
             &splitter, srv->card.thinking_terminator_hint);
         splitter.stops = req->stop;
@@ -4299,11 +4258,7 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --prefix-cache-slots N      resident prefix snapshots (default 8)\n"
         "  --batch-sessions N          resident concurrent sessions (default 1,\n"
         "                              max 64; >1 enables continuous batching)\n"
-        "  --max-ctx N                 context length (Qwen default 262144;\n"
-        "                              DeepSeek default 131072)\n"
-        "  --qwen-yarn                opt in to the official static factor-4\n"
-        "                              Qwen recipe; requires --max-ctx 1000000\n"
-        "                              and may not fit the 128-GiB UMA budget\n"
+        "  --max-ctx N                 context length (default 131072)\n"
         "  --validate-prompt PATH      run AR/snapshot/DSpark/disk differential and exit\n"
         "  --validate-vision-artifact-a PATH\n"
         "  --validate-vision-artifact-b PATH\n"
@@ -4871,10 +4826,8 @@ int main(int argc, char **argv) {
     // load at 131072 was verified on the 128 GB box: GTT 11.2 GiB, 24 GiB host
     // free. Raising further is mostly a prefix-slot budgeting question (each
     // snapshot scales with this value), not a KV or model one.
-    // Resolve after architecture detection: Qwen's native text limit is
-    // 262144 while DeepSeek keeps Ember's measured 131072 deployment default.
+    // DeepSeek keeps Ember's measured 131072 deployment default.
     int max_ctx = 0;
-    bool qwen_yarn = false;
     double bg_idle_secs = 5.0, bg_max_wait_secs = 60.0;
     bool options_ok = true;
     for (int i = 1; i < argc; i++) {
@@ -4988,8 +4941,6 @@ int main(int argc, char **argv) {
         } else if (strcmp(opt, "--max-ctx") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1, INT_MAX, &max_ctx);
-        } else if (strcmp(opt, "--qwen-yarn") == 0) {
-            qwen_yarn = true;
         } else if (strcmp(opt, "--validate-gemm-batch") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
@@ -5109,23 +5060,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     free(profile_err);
-    const int resolved_max_ctx = max_ctx > 0 ? max_ctx
-        : prompt_profile == EMBER_PROMPT_QWEN4_CHATML ? 262144
-        : 131072;
-    if (qwen_yarn && prompt_profile != EMBER_PROMPT_QWEN4_CHATML) {
-        fprintf(stderr,
-                "[ember] --qwen-yarn is valid only for Qwen3.8-Flash-Next\n");
-        return 2;
-    }
-    if (qwen_yarn && resolved_max_ctx != 1000000) {
-        fprintf(stderr,
-                "[ember] --qwen-yarn requires the official --max-ctx 1000000 recipe\n");
-        return 2;
-    }
-    if (qwen_yarn)
-        fprintf(stderr,
-                "[ember] WARNING: Qwen static factor-4 YaRN is enabled; "
-                "the loader will reject any plan exceeding 128-GiB UMA\n");
+    const int resolved_max_ctx = max_ctx > 0 ? max_ctx : 131072;
     if (strcmp(host, "127.0.0.1") != 0)
         fprintf(stderr,
                 "[ember] WARNING: listening beyond loopback; Ember has no "
@@ -5145,7 +5080,6 @@ int main(int argc, char **argv) {
     cfg.kv_cache_mb = kv_cache_mb;   // --kv-cache-mb, 0 = default
     cfg.batch_sessions = batch_sessions;
     cfg.ds4_prefill_mode = ds4_prefill_mode;
-    cfg.qwen_yarn = qwen_yarn;
     cfg.vision_mmproj_path = vision_mmproj_path;
     cfg.allow_single_layer_control = allow_single_layer_control;
     char *err = NULL;

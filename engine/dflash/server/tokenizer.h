@@ -4,8 +4,9 @@
 // then provides encode (text → token IDs) and decode (token IDs → text).
 //
 // Pre-tokenization is selected from tokenizer.ggml.pre. DeepSeek-V4-Flash's
-// joyai-llm splitter is model-coupled: substituting Qwen changes BPE boundaries
-// and silently conditions the model on the wrong prompt token stream.
+// joyai-llm splitter is model-coupled: substituting another splitter changes
+// BPE boundaries and silently conditions the model on the wrong prompt token
+// stream.
 
 #pragma once
 
@@ -102,10 +103,11 @@ private:
     // Special token IDs
     int32_t bos_id_ = -1;
     int32_t eos_id_ = -1;
-    int32_t eos_chat_id_ = -1;  // <|im_end|> for Qwen3
+    int32_t eos_chat_id_ = -1;  // <|im_end|> for ChatML models
 
     // Selected from tokenizer.ggml.pre at load time. Keeping this as runtime
-    // state prevents Qwen4Exp from silently taking DeepSeek's JoyAI splitter.
+    // state prevents another architecture from silently taking DeepSeek's
+    // JoyAI splitter.
     PreTokenizer pre_type_ = PreTokenizer::JOYAI_LLM;
 
     // Decode mode: SentencePiece tokens use UTF-8 with ▁ for space;

@@ -121,7 +121,7 @@ static void test_legacy_single_token_fallback(void) {
               input, 3, placeholder, 1, &image, 1,
               &output, &count, &offset, NULL, 0) &&
               count == 5 && offset == 1 && ids_equal(output, expected, 5),
-          "legacy Qwen run repeats its one image_pad token");
+          "a legacy run repeats its one image_pad token");
     free(output);
 }
 

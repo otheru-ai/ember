@@ -204,7 +204,7 @@ Validate discovery with `omp models find ember`, then run
 Ember supports streaming text, reasoning, function tools, parallel tool calls,
 tool-result replay, stop sequences, and usage reporting across these adapters.
 Native Chat Completions also accepts `image_url` content parts and routes them
-through the opt-in Qwen vision seam. The Responses adapter rejects
+through the opt-in vision seam. The Responses adapter rejects
 `input_image`, and the Anthropic Messages adapter currently accepts only
 `type: text` content blocks. Audio, computer-use, and provider-hosted tools are
 not implemented. Vision remains an opt-in deployment boundary, not a certified

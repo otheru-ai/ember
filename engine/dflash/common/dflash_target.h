@@ -1,7 +1,7 @@
 // dflash_target.h — Interface that any target model must implement to support
 // DFlash speculative decoding with the universal DFlash draft model.
 //
-// The DFlash draft model (z-lab/DFlashDraftModel) is a single generic Qwen3-style
+// The DFlash draft model (z-lab/DFlashDraftModel) is a single generic
 // architecture that works with ANY target model. It cross-attends to intermediate
 // features captured during the target's forward pass, and outputs hidden states
 // in the target's representation space. The target's own lm_head then projects

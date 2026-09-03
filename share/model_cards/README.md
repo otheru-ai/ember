@@ -6,9 +6,8 @@ rebuild. Explicit request fields and CLI flags still take precedence.
 
 Ember does not infer a sidecar from GGUF metadata. Without `--model-card`, the
 server uses the DeepSeek defaults compiled into `src/model/model_card.c`.
-Qwen3.8-Flash-Next deployments must pass
-`--model-card share/model_cards/qwen3.8-flash-next.json`; its thinking and
-non-thinking sampler recommendations differ, as recorded in the card notes.
+Any other deployment must pass its own `--model-card`, because thinking and
+non-thinking sampler recommendations differ per model.
 
 ## Fields
 
@@ -39,5 +38,4 @@ npx --yes ajv-cli@5 validate \
   --spec=draft2020
 ```
 
-Validate the Qwen card with the same command after substituting
-`share/model_cards/qwen3.8-flash-next.json` for the data path.
+Validate any other card with the same command after substituting its path.

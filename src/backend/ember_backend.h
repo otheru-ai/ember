@@ -21,10 +21,6 @@ extern "C" {
 
 typedef struct ember_backend ember_backend;
 
-// Qwen3.8-Flash-Next's projected vision rows are fixed at this width.  This
-// ABI constant mirrors the model contract without exposing engine headers.
-enum { EMBER_QWEN_VISION_EMBEDDING_WIDTH = 2560 };
-
 typedef enum {
     EMBER_DS4_PREFILL_SPARSE = 0,
     EMBER_DS4_PREFILL_EXACT  = 1,
@@ -40,7 +36,6 @@ typedef struct {
     long        kv_cache_mb;  // disk budget (0 = default)
     int         batch_sessions; // resident continuous-batch slots (1 = legacy)
     ember_ds4_prefill_mode ds4_prefill_mode; // sparse default; exact for quality reference
-    bool        qwen_yarn; // explicit static factor-4 1M Qwen recipe; off by default
     // Operator-owned native DeepSeek vision tower. Text-only startup never
     // opens this path; request bytes cannot select or override it.
     const char *vision_mmproj_path;
@@ -71,7 +66,7 @@ typedef struct {
     int    n_tokens;
     float *embeddings; // row-major [n_tokens,embedding_width]
     // Appended model-neutral contract. token_ids may be NULL only for the
-    // legacy Qwen repeated-image_pad path.
+    // legacy repeated-image_pad path.
     int      embedding_width;
     int32_t *token_ids;
     uint64_t source_digest;
@@ -300,7 +295,7 @@ bool ember_backend_batch_stats_get(const ember_backend *b,
 
 // ── engine differential validation ──
 // Runs a greedy autoregressive baseline. Architectures with a separate
-// production prefill path (currently Qwen's bounded q16 frontier) also run an
+// production prefill path (currently the bounded q16 frontier) also run an
 // AR decode from that prefill and compare it with the q=1 baseline. It then
 // restores the exact prefill snapshot and runs the normal speculative path
 // from that same state. When disk KV is enabled and the prompt is large enough

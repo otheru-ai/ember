@@ -82,7 +82,7 @@ void write_bias_gguf(const std::filesystem::path & path,
     if (!model || !gguf) std::abort();
     gguf_set_val_str(gguf, "general.architecture",
                      mutation == Mutation::WrongArchitecture
-                         ? "qwen4exp" : "deepseek4");
+                         ? "otherarch" : "deepseek4");
     std::array<float, 8> data {};
     for (int layer = 0; layer < 3; ++layer) {
         if (mutation == Mutation::MissingLayer && layer == 1) continue;

@@ -33,11 +33,13 @@ DeepSeek-V4-Flash-Vision-Exp, and the container builds on ROCm 10.0.
 - **entrypoint:** the vision tower is downloaded and verified alongside the
   model and the drafter. A missing tower is a hard error, not a quiet fall back
   to the text path.
-- **qwen:** Qwen3.8-Flash-Next support, the IU4 quantization lane, and the
-  evidence gates around it.
 
 ### Changed
 
+- **scope:** the unfinished second-architecture runtime, its CI lanes and its
+  documentation are no longer carried on `main`. They were never released and
+  the fourteen workflows they brought fired on every push; the work continues
+  on its own branch. Nothing shipped changes.
 - **container:** ROCm 10.0.0, pinned by digest, with a build-time assertion that
   the toolchain reports that version.
 - **entrypoint:** the default DeepSeek deployment is the vision model. The

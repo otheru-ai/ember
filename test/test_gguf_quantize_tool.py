@@ -81,7 +81,7 @@ def write_fixture(
     tensors: list[tuple[str, int, list[int]]] | None = None,
 ) -> None:
     metadata: list[tuple[str, int, object]] = [
-        ("general.architecture", GGUF_STRING, "qwen4exp"),
+        ("general.architecture", GGUF_STRING, "testarch"),
         ("general.file_type", GGUF_UINT32, 1),
         ("test.u64", GGUF_ARRAY, (GGUF_UINT64, [23703573157769, 300001275])),
     ]
@@ -318,13 +318,21 @@ class QuantizerToolTests(unittest.TestCase):
                 ("blk.0.ffn_down_exps.weight", TYPE_BF16, [32, 2, 2]),
                 ("blk.0.ffn_down_shexp.weight", TYPE_BF16, [32, 2]),
             ])
-            profile = json.loads((pathlib.Path(__file__).resolve().parents[1] /
-                                  "share" / "release_profiles" /
-                                  "qwen3.8-flash-next-rocmi4-strix-halo.json").read_text())
-            fast_arm = next(
-                arm for arm in profile["quantization"]["performance_bakeoff"]["arms"]
-                if arm["id"] == "rocmfp4-fast-matrix-q6k-embedding-head")
-            fast_options = [value for override in fast_arm["per_tensor_overrides"][1:]
+            # The rocmfp4-fast-matrix-q6k-embedding-head arm, inlined. It used
+            # to be read out of a release profile; the profile went with its
+            # model, and what this test needs is the override shapes, not the
+            # provenance of any one release.
+            overrides = [
+                r"^blk\.[0-9]+\.(hc_(attn|ffn)_(down|up|inject)|"
+                r"ffn_(gate_up|down)_exps|ffn_(gate|up|down)_shexp|"
+                r"attn_(q|k|v|output|qkv|gate)|indexer\.(q_proj|k_proj)|"
+                r"ssm_(alpha|beta|out)|ple_(key|value))\.weight$"
+                "=Q4_0_ROCMFP4_FAST",
+                r"^output_hc_(down|up)\.weight$=Q4_0_ROCMFP4_FAST",
+                r"^token_embd\.weight$=Q6_K",
+                r"^output\.weight$=Q6_K",
+            ]
+            fast_options = [value for override in overrides
                             for value in ("--tensor-type", override)]
             command = self.command(source, output, *fast_options)
             completed = subprocess.run(command, check=False, text=True,
@@ -423,7 +431,7 @@ class QuantizerToolTests(unittest.TestCase):
                 "weight_intervention": True,
                 "prompt_only": False,
                 "application_stage": "pre_quantization_encoding",
-                "source": {"repo_id": "Qwen/Qwen3.8-Flash-Next"},
+                "source": {"repo_id": "example/Test-Model"},
                 "tooling": {"upstream_heretic": {"revision": "b" * 40}},
                 "corpora": [{"id": "fixture"}],
                 "directions": [{
@@ -556,7 +564,7 @@ class QuantizerToolTests(unittest.TestCase):
                 "weight_intervention": True,
                 "prompt_only": False,
                 "application_stage": "pre_quantization_encoding",
-                "source": {"repo_id": "Qwen/Qwen3.8-Flash-Next"},
+                "source": {"repo_id": "example/Test-Model"},
                 "tooling": {"upstream_heretic": {"revision": "b" * 40}},
                 "corpora": [{"id": "fixture"}],
                 "directions": [{

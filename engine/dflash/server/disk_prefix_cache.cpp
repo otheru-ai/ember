@@ -781,7 +781,7 @@ bool DiskPrefixCache::save(int slot, const std::vector<int32_t> & prompt_ids,
     // bounded so a hot restore never turns into an unbounded sequence of reads.
     const DiskEntry * parent = nullptr;
     // Delta checkpoints currently depend on DeepSeek's per-layer compressor
-    // counters in ds4_snap_meta. Qwen exports complete vector-backed state and
+    // counters in ds4_snap_meta. Other backends export complete vector-backed state and
     // therefore writes independent base checkpoints until it has an equally
     // explicit append-only counter contract.
     const bool delta_capable =

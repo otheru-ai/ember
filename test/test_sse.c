@@ -183,16 +183,16 @@ static void test_tool_marker_suppressed(void) {
     free(sse);
 }
 
-static void test_qwen_marker_false_positive_on_dsml_profile(void) {
-    // Regression: a DSML-profile stream whose ordinary prose contains the Qwen
-    // marker used to lose every byte from the marker onward, with no error and
-    // no log. TOOL_STARTS carries "<tool_call>" unconditionally, so the marker
-    // fires and rewinds emit_pos, but main.c's profile-aware
-    // parse_executable_tool_calls reports ordinary assistant text -- which is
-    // exactly why no error or discard branch could fire. The caller then runs
-    // the final update and emit_tools, mirrored here.
+static void test_tool_marker_false_positive_on_dsml_profile(void) {
+    // Regression: a DSML-profile stream whose ordinary prose contains the XML
+    // wrapper marker used to lose every byte from the marker onward, with no
+    // error and no log. TOOL_STARTS carries "<tool_call>" unconditionally, so
+    // the marker fires and rewinds emit_pos, while the DSML parser correctly
+    // reports ordinary assistant text -- which is exactly why no error or
+    // discard branch could fire. The caller then runs the final update and
+    // emit_tools, mirrored here.
     const char *full =
-        "In Qwen syntax a call is written <tool_call> followed by JSON.";
+        "In that syntax a call is written <tool_call> followed by JSON.";
     ember_sse_stream st;
     ember_sse_init(&st, "cc", "m", 1700000000, /*has_tools=*/true, false, false);
     ember_buf out = {0}, acc = {0};
@@ -244,7 +244,6 @@ static void test_tool_calls_emitted(void);
 static void test_tool_attempt_reset(void);
 static void test_matching_tool_closer_required(void);
 static void test_native_tool_id_is_registered(void);
-static void test_qwen_tools_buffer_and_emit(void);
 static void test_stop_precedes_tool(void);
 static void test_more_than_sixteen_tool_ids(void);
 static void test_usage_reports_prefill_policy(void);
@@ -346,14 +345,13 @@ int main(void) {
     test_split_think_close();
     test_force_close_hint_filtered_from_reasoning();
     test_tool_marker_suppressed();
-    test_qwen_marker_false_positive_on_dsml_profile();
+    test_tool_marker_false_positive_on_dsml_profile();
     test_short_dsml_spelling();
     test_utf8_safe_limit_direct();
     test_tool_calls_emitted();
     test_tool_attempt_reset();
     test_matching_tool_closer_required();
     test_native_tool_id_is_registered();
-    test_qwen_tools_buffer_and_emit();
     test_stop_precedes_tool();
     test_more_than_sixteen_tool_ids();
     test_usage_reports_prefill_policy();
@@ -598,39 +596,6 @@ static void test_native_tool_id_is_registered(void) {
     CHECK(st.n_tool_ids == 1, "native streamed id registered for replay");
     CHECK(st.n_tool_ids == 1 && strstr(out.ptr, st.tool_ids[0]) != NULL,
           "registered native id matches emitted id");
-    ember_buf_free(&out);
-    ember_sse_free(&st);
-}
-
-static void test_qwen_tools_buffer_and_emit(void) {
-    const char *tools =
-        "[{\"type\":\"function\",\"function\":{\"name\":\"weather\","
-        "\"parameters\":{\"type\":\"object\",\"properties\":{"
-        "\"city\":{\"type\":\"string\"},"
-        "\"days\":{\"type\":\"integer\"}}}}}]";
-    const char *raw =
-        "visible\n\n<tool_call>\n<function=weather>\n"
-        "<parameter=city>Paris</parameter>\n"
-        "<parameter=days>2</parameter>\n</function>\n</tool_call>\n"
-        "<tool_call>\n<function=weather>\n"
-        "<parameter=city>Rome</parameter>\n"
-        "<parameter=days>3</parameter>\n</function>\n</tool_call>";
-    ember_sse_stream st;
-    ember_buf out = {0};
-    ember_sse_init(&st, "cc", "qwen", 1700000000, true, false, false);
-    ember_sse_set_qwen_tools(&st, tools);
-    for (size_t n = 1; n <= strlen(raw); ++n)
-        ember_sse_update(&st, raw, n, false, &out);
-    CHECK(strstr(out.ptr ? out.ptr : "", "<tool_call>") == NULL,
-          "Qwen tool markup is withheld before validation");
-    CHECK(ember_sse_emit_tools(&st, raw, strlen(raw), &out),
-          "validated Qwen wrappers emit structured deltas");
-    CHECK(st.n_tool_ids == 2,
-          "each repeated Qwen wrapper receives an exact-replay id");
-    CHECK(strstr(out.ptr ? out.ptr : "", "\"name\":\"weather\"") != NULL &&
-          strstr(out.ptr ? out.ptr : "", "{\\\"city\\\":\\\"Paris\\\","
-                 "\\\"days\\\":2}") != NULL,
-          "Qwen schema-coerced arguments are streamed as JSON text");
     ember_buf_free(&out);
     ember_sse_free(&st);
 }

@@ -1,8 +1,7 @@
 # Operations guide
 
-This guide covers the release-default DeepSeek-V4-Flash ROCMFPx deployment and
-the explicit, candidate-only Qwen3.8-Flash-Next deployment boundary on a native
-Linux AMD Strix Halo (`gfx1151`) host. Ember is not a general-purpose GGUF
+This guide covers the release-default DeepSeek-V4-Flash ROCMFPx deployment on
+a native Linux AMD Strix Halo (`gfx1151`) host. Ember is not a general-purpose GGUF
 runner, and the release image is not expected to work on other GPU or NPU
 architectures.
 
@@ -73,62 +72,6 @@ scripts/smoke_test.sh
 The smoke test checks health, model discovery, and status without generating
 tokens. Use `scripts/smoke_test.sh --generate` after an upgrade to exercise a
 short end-to-end inference request.
-
-## Opt-in Qwen3.8-Flash-Next deployment
-
-Qwen deployment is explicit and local-artifact-only. The entrypoint does not
-fall back to the DeepSeek drafter, infer a speculative depth, or download an
-unpublished candidate. Obtain one certified candidate bundle containing:
-
-- the complete ordered main GGUF shard set;
-- its matching quantized MTP GGUF and selected depth from the bakeoff record;
-- `Qwen3.8-Flash-Next-BF16-mmproj.gguf`;
-- `Qwen3.8-Flash-Next-vocab-only.gguf`; and
-- a basename-only `SHA256SUMS` whose release evidence also gives the checksum
-  file's own SHA-256.
-
-All of those model artifacts and `SHA256SUMS` must be regular, non-symlink
-files directly beneath the directory mounted at `/models`. The selected main
-path must be shard `00001`; Ember validates that the checksum set contains
-every sibling through the declared `of-000NN` count. The set must also contain
-the exact selected MTP, mmproj, and vocab-only text-model names. The artifact
-manifest flattens these into the `mtp`, `vision_mmproj`, and `vision_vocab`
-companion records. Startup validates the checksum-list digest and then all
-listed files even when
-`EMBER_VERIFY_EXISTING_SHA256=0`; that DeepSeek optimization never weakens the
-Qwen boundary.
-
-Copy [.env.example](../.env.example), fill the exact names and evidence digest,
-and start the ordinary release service:
-
-```dotenv
-EMBER_DEPLOYMENT_MODE=qwen3.8-flash-next
-EMBER_QWEN_MODEL=/models/Qwen3.8-Flash-Next-Heretic-ROCmI4-Strix-Halo-00001-of-000NN.gguf
-EMBER_QWEN_SHA256SUMS=/models/SHA256SUMS
-EMBER_QWEN_SHA256SUMS_SHA256=<64-lowercase-hex-from-release-evidence>
-DFLASH_QWEN_MTP=/models/Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf
-DFLASH_QWEN_MTP_DEPTH=<certified-1-through-4>
-DFLASH_QWEN_VISION_MMPROJ=/models/Qwen3.8-Flash-Next-BF16-mmproj.gguf
-DFLASH_QWEN_VISION_TEXT_MODEL=/models/Qwen3.8-Flash-Next-vocab-only.gguf
-```
-
-```bash
-docker compose up -d
-docker compose logs -f ember
-```
-
-The release image fixes `DFLASH_QWEN_VISION_PROVIDER` to its packaged dynamic
-provider. The entrypoint also requires that shared object to be a readable
-regular file before launching the server. This wires the runtime boundary.
-Certification comes only from the exact `vision-certified.json` produced by
-`qwen-gfx1151-vision.yml`; it covers a pinned image-text corpus twice (cold and
-warm), a direct pinned-llama.cpp embedding differential with explicit float32
-tolerances, and raw phase-separated RSS/HWM/GTT/UMA residency. Its GitHub
-attestation is verified immediately and again at the publication boundary.
-Require that evidence,
-the ordinary gfx1151 runtime record, and
-ordinary text/MTP certification before describing the deployment as a
-certified multimodal release.
 
 ## Opt-in CPU/GPU/NPU deployment
 
@@ -207,8 +150,8 @@ DeepSeek artifacts on every start. On a trusted, immutable model store, set
 `EMBER_VERIFY_EXISTING_SHA256=0` to skip only those startup scans. Downloads
 remain verified before promotion regardless of this setting. The DeepSeek
 pair has its own license on its Hugging Face card and is not included in the
-Ember image. Qwen candidates use the sealed, local-only procedure above and
-are never selected by merely dropping another GGUF into `/models`.
+Ember image. Another model is never selected by merely dropping a GGUF into
+`/models`.
 
 ## Runtime state and observability
 
@@ -306,8 +249,6 @@ digests. A local dashboard bundle is useful for comparison, but its
 | XRT reports mapping/`ENOSPC` failures | Confirm IOMMU translation is enabled and memlock is unlimited; `amd_iommu=off` is unsupported. |
 | `insufficient free space` | Free space in `EMBER_MODELS_DIR` or move it to a larger local filesystem. |
 | `model SHA-256 mismatch` | Remove the named final or `.part` file and retry; do not disable verification to hide corruption. |
-| `Qwen SHA256SUMS ...` | The opt-in Qwen bundle is incomplete, unsafe, or differs from its release evidence. Restore the exact bundle; do not regenerate a checksum list around changed files. |
-| `Qwen vision provider is not a readable regular file` | Use the matching release image with its packaged provider; do not point a certified artifact set at an arbitrary shared object. |
 | container remains `starting` | Model load is still in progress; inspect logs. If the server exited, Compose will show the startup error. |
 | clients cannot connect | Confirm `/health`, host/port overrides, and routing. The default `127.0.0.1` bind is intentionally unreachable from another network namespace; use `EMBER_HOST=0.0.0.0` only behind a trusted gateway. |
 | agent behaves differently | Check the exact client settings in `client-compatibility.md`, especially base URL, model id, context, and tool mode. |

@@ -47,7 +47,8 @@ The changelog improves **graph replay for asynchronous allocations** —
 allocation nodes no longer block during replay. That is not why HIP graph replay
 was ruled out here: the blocker was a measured **1.84 us/node floor on gfx1151**
 plus an observed regression, which an allocation-node fix does not touch. See
-`docs/dead-code-candidates.md` entry 4. Do not re-open it on this changelog line.
+the dead-code register kept on the branch that owns that runtime (entry 4).
+Do not re-open it on this changelog line.
 
 ## Breaking change to watch
 

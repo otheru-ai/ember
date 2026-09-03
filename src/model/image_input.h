@@ -2,7 +2,7 @@
 //
 // Remote HTTP fetching is deliberately not performed by the unauthenticated
 // inference server: it would create an SSRF surface and ambiguous timeout/
-// redirect policy. Qwen vision accepts base64 data URLs here; other transports
+// redirect policy. Vision accepts base64 data URLs here; other transports
 // fail with a distinct error so images can never be silently discarded.
 
 #ifndef EMBER_IMAGE_INPUT_H

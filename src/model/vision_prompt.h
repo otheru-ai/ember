@@ -15,7 +15,7 @@
 
 typedef struct {
     // NULL means repeat placeholder_ids[0], supported only when the
-    // architecture's placeholder is exactly one token (legacy Qwen).
+    // architecture's placeholder is exactly one token.
     const int32_t *token_ids;
     int            n_tokens;
 } ember_vision_prompt_image;

@@ -5,7 +5,7 @@
 // convert.cu dequantizer, production MMVQ, and production MMQ all consume the
 // same hand-packed quant blocks and are checked against the CPU decoder plus
 // scalar F32 matmul. Both dense MUL_MAT and routed MUL_MAT_ID are covered for
-// ROCMI4 and for the Q4_0_ROCMFP4_FAST type dominant in the Qwen checkpoint.
+// ROCMI4 and for the Q4_0_ROCMFP4_FAST type dominant in that checkpoint.
 // At the failing production widths only dense dispatches reach MMQ; the routed
 // MMQ arm is a forced-wide regression control, not a blocker reproduction.
 //

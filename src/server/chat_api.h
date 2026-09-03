@@ -23,7 +23,6 @@ typedef enum { EMBER_THINK_NONE, EMBER_THINK_HIGH, EMBER_THINK_MAX } ember_think
 // zero-initialized GPU-free fixtures preserve their behavior.
 typedef enum {
     EMBER_PROMPT_DEEPSEEK_DSML = 0,
-    EMBER_PROMPT_QWEN4_CHATML = 1,
 } ember_prompt_profile;
 
 typedef enum {

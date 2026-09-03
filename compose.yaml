@@ -32,17 +32,6 @@ services:
       - EMBER_TOOL_LOOP_REPORT=${EMBER_TOOL_LOOP_REPORT:-}
       - EMBER_NO_PROGRESS_REPORT=${EMBER_NO_PROGRESS_REPORT:-}
       - EMBER_AUTO_ANSWER_AFTER_LOOP=${EMBER_AUTO_ANSWER_AFTER_LOOP:-}
-      # The opt-in qwen3.8-flash-next deployment is local-artifact-only until
-      # a candidate is certified and published. The entrypoint requires all of
-      # these values, verifies the digest-pinned SHA256SUMS set, and passes
-      # shard 00001 to the engine so it discovers the ordered siblings.
-      - EMBER_QWEN_MODEL
-      - EMBER_QWEN_SHA256SUMS
-      - EMBER_QWEN_SHA256SUMS_SHA256
-      - DFLASH_QWEN_MTP
-      - DFLASH_QWEN_MTP_DEPTH
-      - DFLASH_QWEN_VISION_MMPROJ
-      - DFLASH_QWEN_VISION_TEXT_MODEL
       # Speculative-decode tuning. Unset means "use the engine default"; an
       # empty value is NOT the same thing (SPEC_MAX_CTX would log an invalid
       # -value warning, and LUCE_MMVQ_MAX_NCOLS uses "unset" to mean "derive

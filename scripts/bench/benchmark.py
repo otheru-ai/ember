@@ -116,7 +116,7 @@ def model_inventory_from_build_record(
         raise ValueError(
             "ordered output shards differ from quantizer size preflight")
     return ({
-        "schema": "ember.qwen3.8.ordered-model-inventory.v1",
+        "schema": "ember.ordered-model-inventory.v1",
         "source": "required_quant_build_record",
         "build_record": {"path": str(record_path), "sha256": record_sha256},
         "first_shard": str(model),
@@ -302,12 +302,12 @@ def evaluate_memory_gate(resources: dict, *, gtt_cap_bytes: int) -> dict:
 
 
 HARD_GATE_PROTOCOL = "ember-2026.8.24-prefill2048-decode256-v1"
-QWEN_HARD_GATE_PROTOCOL = "ember-2026.8.29-qwen-prefill2074-decode256-v1"
+CALIBRATED_HARD_GATE_PROTOCOL = "ember-2026.8.29-prefill2074-decode256-v1"
 HARD_GATE_PREFILL_TPS = 412.0
 HARD_GATE_DECODE_TPS = 39.49
 HARD_GATE_PREFILL_TOKENS = 2074
 HARD_GATE_SAMPLES = 3
-DIFFERENTIAL_DECODE_SCHEMA = "ember.qwen3.8.differential-decode-comparison.v1"
+DIFFERENTIAL_DECODE_SCHEMA = "ember.differential-decode-comparison.v1"
 DIFFERENTIAL_DECODE_PURPOSE = "same_process_diagnostic_not_hard_gate_timing"
 DIFFERENTIAL_DECODE_TOKENS = 64
 
@@ -724,7 +724,7 @@ def calibrate_prefill_words(suite: Suite, target_tokens: int,
     """Find the alpha-word count that this server tokenizes to target_tokens.
 
     The published 2K shape happened to be 2,074 tokens with the DeepSeek
-    template. Qwen has a different template/tokenizer, so its hard gate first
+    template. A different template or tokenizer shifts that, so the hard gate
     calibrates the inert filler rather than failing on tokenizer overhead. Use
     usage.prompt_tokens: prefix-cache hits can reduce evaluated_prefill_tokens
     during the probes even though the complete prompt shape is unchanged.
@@ -769,8 +769,8 @@ def calibrate_decode_marker(suite: Suite, target_tokens: int,
                             max_attempts: int = 8) -> tuple[str, list[dict]]:
     """Select a recorded deterministic prompt that reaches the decode shape.
 
-    Qwen's greedy response length is unexpectedly sensitive to the otherwise
-    inert marker: retained Q3 evidence stopped at 25, 1, and 256 tokens for
+    Greedy response length is unexpectedly sensitive to the otherwise inert
+    marker: retained evidence stopped at 25, 1, and 256 tokens for
     markers D, E, and F.  Calibrate from a fixed public ordering, then repeat
     that exact prompt for timing.  This does not use calibration throughput and
     makes the workload selection auditable instead of silently discarding
@@ -810,8 +810,8 @@ def main() -> int:
                         default=HARD_GATE_DECODE_TPS)
     parser.add_argument("--require-gate", action="store_true",
                         help="exit nonzero unless the matched hard gate passes")
-    parser.add_argument("--calibrate-qwen-shapes", action="store_true",
-                        help="use recorded Qwen-specific exact-shape calibration")
+    parser.add_argument("--calibrate-shapes", action="store_true",
+                        help="use recorded exact-shape calibration")
     parser.add_argument("--server-pid", type=int,
                         help="explicit host PID of the timed server container")
     parser.add_argument("--proc-root", type=Path, default=Path("/proc"))
@@ -829,8 +829,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.require_gate and args.protocol != "hard-gate":
         parser.error("--require-gate requires --protocol hard-gate")
-    if args.calibrate_qwen_shapes and args.protocol != "hard-gate":
-        parser.error("--calibrate-qwen-shapes requires --protocol hard-gate")
+    if args.calibrate_shapes and args.protocol != "hard-gate":
+        parser.error("--calibrate-shapes requires --protocol hard-gate")
     if args.prefill_target <= 0 or args.decode_target <= 0:
         parser.error("gate targets must be positive")
     if args.server_pid is not None and args.server_pid <= 1:
@@ -867,7 +867,7 @@ def main() -> int:
         "started_unix": time.time(),
         "endpoint": args.endpoint,
         "model": args.model,
-        "protocol": (QWEN_HARD_GATE_PROTOCOL if args.calibrate_qwen_shapes
+        "protocol": (CALIBRATED_HARD_GATE_PROTOCOL if args.calibrate_shapes
                      else HARD_GATE_PROTOCOL if args.protocol == "hard-gate"
                      else "full"),
         "container_pid": sampler.pid,
@@ -891,15 +891,15 @@ def main() -> int:
     if args.protocol == "hard-gate":
         hard_gate_words, calibration = calibrate_prefill_words(
             suite, HARD_GATE_PREFILL_TOKENS,
-            marker="A" if args.calibrate_qwen_shapes else "0")
-    if args.calibrate_qwen_shapes:
+            marker="A" if args.calibrate_shapes else "0")
+    if args.calibrate_shapes:
         markers = iter("BCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*()")
     shapes = ((hard_gate_words, 3),) if args.protocol == "hard-gate" else (
         (128, 3), (512, 3), (2048, 3), (8192, 3), (16384, 2), (32768, 2))
     for words, repeats in shapes:
         for repeat in range(1, repeats + 1):
             # Calibrate with single-token marker A, then time unique same-class
-            # markers B/C/D. This avoids both Qwen's digit-vs-letter token-count
+            # markers B/C/D. This avoids both the digit-vs-letter token-count
             # difference and an identical-prompt prefix-cache hit; the hard
             # gate still verifies all three evaluated exactly 2,074 tokens.
             marker = next(markers)
@@ -913,7 +913,7 @@ def main() -> int:
             )
 
     decode_marker = None
-    if args.calibrate_qwen_shapes:
+    if args.calibrate_shapes:
         decode_marker, decode_calibration = calibrate_decode_marker(
             suite, 256)
     for repeat in range(1, 4):
@@ -937,7 +937,7 @@ def main() -> int:
     gate = evaluate_hard_gate(
         suite.records, prefill_target=args.prefill_target,
         decode_target=args.decode_target,
-        protocol=(QWEN_HARD_GATE_PROTOCOL if args.calibrate_qwen_shapes
+        protocol=(CALIBRATED_HARD_GATE_PROTOCOL if args.calibrate_shapes
                   else HARD_GATE_PROTOCOL)) if args.protocol == "hard-gate" else None
     resources = sampler.summary()
     memory_gate = evaluate_memory_gate(
@@ -956,7 +956,7 @@ def main() -> int:
             "target_completion_tokens": 256,
             "selected_marker": decode_marker,
             "attempts": decode_calibration,
-        } if args.calibrate_qwen_shapes else None),
+        } if args.calibrate_shapes else None),
         "resources": resources,
         "memory_gate": memory_gate,
     })

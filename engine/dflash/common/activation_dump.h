@@ -9,7 +9,7 @@
 // that a later extractor mistakes for evidence.
 //
 // The record size is the caller's contract and is passed in rather than being a
-// compile-time constant: Qwen3.8-Flash-Next captures 48x2560, DeepSeek-V4
+// compile-time constant: one architecture captures 48x2560, DeepSeek-V4
 // captures 43x4096. A file holds records of ONE size; appending a differently
 // shaped record to an existing dump is rejected, because the format is
 // headerless and a size change would otherwise be silently unrecoverable.

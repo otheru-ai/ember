@@ -122,4 +122,5 @@ race copies against kernels.
 `engine/ggml/src/ggml-cuda/fattn-sparse.cu` allocates six device buffers
 with `cudaMallocAsync` and frees them per call. That would be a real
 per-dispatch cost — but the op has no producer in the tree. Filed as
-dead-code entry 8 in `docs/dead-code-candidates.md`, not as a perf finding.
+dead-code entry 8 in the register kept on the branch that owns that runtime,
+not as a perf finding.

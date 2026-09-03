@@ -207,7 +207,7 @@ class BenchmarkGateTest(unittest.TestCase):
                 "TARGET_SHA": "target-sha", "TARGET_SHA_SOURCE": "asserted",
                 "DRAFT_SHA": "draft-sha", "DRAFT_SHA_SOURCE": "computed"})
 
-    def test_qwen_shape_calibration_uses_prompt_tokens(self) -> None:
+    def test_shape_calibration_uses_prompt_tokens(self) -> None:
         class FakeSuite:
             def __init__(self) -> None:
                 self.words: list[int] = []
@@ -217,7 +217,7 @@ class BenchmarkGateTest(unittest.TestCase):
                 del group, repeat
                 words = prompt.count(" alpha")
                 self.words.append(words)
-                # Simulate a Qwen template with 31 tokens of overhead rather
+                # Simulate a template with 31 tokens of overhead rather
                 # than the DeepSeek protocol's 26.
                 return {"ok": True, "prompt_tokens": words + 31,
                         "evaluated_prefill_tokens": 1}
@@ -228,7 +228,7 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual(fake.words, [2048, 2043])
         self.assertEqual(attempts[-1]["prompt_tokens"], 2074)
 
-    def test_qwen_decode_calibration_records_and_selects_exact_shape(self) -> None:
+    def test_decode_calibration_records_and_selects_exact_shape(self) -> None:
         class FakeSuite:
             def __init__(self) -> None:
                 self.markers: list[str] = []
@@ -250,11 +250,11 @@ class BenchmarkGateTest(unittest.TestCase):
         self.assertEqual([row["completion_tokens"] for row in attempts],
                          [25, 1, 256])
 
-    def test_qwen_gate_protocol_is_bound_in_machine_evidence(self) -> None:
+    def test_calibrated_gate_protocol_is_bound_in_machine_evidence(self) -> None:
         gate = benchmark.evaluate_hard_gate(
             self.records(), prefill_target=412.0, decode_target=39.49,
-            protocol=benchmark.QWEN_HARD_GATE_PROTOCOL)
-        self.assertEqual(gate["protocol"], benchmark.QWEN_HARD_GATE_PROTOCOL)
+            protocol=benchmark.CALIBRATED_HARD_GATE_PROTOCOL)
+        self.assertEqual(gate["protocol"], benchmark.CALIBRATED_HARD_GATE_PROTOCOL)
 
     def test_differential_decode_rates_are_independently_derived(self) -> None:
         evidence = {
@@ -345,11 +345,11 @@ class BenchmarkGateTest(unittest.TestCase):
             root = Path(raw)
             shards = []
             for index, data in enumerate((b"one", b"two"), 1):
-                name = f"qwen-rocmi4-{index:05d}-of-00002.gguf"
+                name = f"model-rocmi4-{index:05d}-of-00002.gguf"
                 path = root / name
                 path.write_bytes(data)
                 shards.append({
-                    "path": f"/qwen-work/final/{name}",
+                    "path": f"/model-work/final/{name}",
                     "size_bytes": len(data),
                     "sha256": hashlib.sha256(data).hexdigest(),
                 })
@@ -361,7 +361,7 @@ class BenchmarkGateTest(unittest.TestCase):
                     "artifact_bytes": 6,
                 },
             }
-            record_path = root / "qwen-quant-build-record.json"
+            record_path = root / "model-quant-build-record.json"
             record_path.write_text(json.dumps(record), encoding="utf-8")
             record_sha = hashlib.sha256(record_path.read_bytes()).hexdigest()
             inventory, copied = benchmark.model_inventory_from_build_record(

@@ -35,19 +35,11 @@ struct BackendArgs {
     int             ds4_expert_top_k = 0;  // 0 = model default
     bool            ds4_fused_decode = false;
     bool            allow_single_layer_control = false;
-
-    // Qwen3.8-Flash-Next operator override. The factory rejects this for
-    // non-Qwen architectures; the Qwen loader resolves the exact factor-4,
-    // 1,000,000-token recipe and still applies the 128-GiB residency gate.
-    bool            qwen_yarn = false;
-
 };
 
 // ─── Factory function ───────────────────────────────────────────────────
 // Inspects `general.architecture`, validates the selected model contract, then
-// constructs the implemented backend. Qwen4Exp currently supports ordinary
-// single-session autoregressive text generation; vision, MTP, and resident
-// batching remain explicit unsupported capabilities.
+// constructs the implemented backend.
 std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args);
 
 }  // namespace dflash::common

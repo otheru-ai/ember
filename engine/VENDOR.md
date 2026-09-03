@@ -25,18 +25,6 @@ gfx1151 speculative-decode measurements. Before updating it, diff the candidate
 upstream revision against `8fd9584`, preserve the license notices above, and
 record the new upstream commit and any local divergence in this file.
 
-The Qwen3.8-Flash-Next text runtime also carries an Ember-owned C static-YaRN
-policy/reference implementation. Its arithmetic follows Transformers revision
-`36deb0b53ed0863f4b4dfdea23dcaec7f3df3701`; the exact factor-4, 262144-to-1M
-recipe is pinned to the official model README revision
-`f5d08274bafd880402bd16f5e3e6c514136ec06c`. This is an explicit operator
-override because the checkpoint metadata remains ordinary RoPE. The local q=1
-runtime uses the C reference for its QSA and indexer positions; future graph
-paths should pass the same resolved parameters through ggml's existing
-`ggml_rope_multi`/`GGML_ROPE_TYPE_IMROPE` implementation rather than adding a
-new kernel. The 128-GiB memory planner remains authoritative and may reject the
-official 1M recipe for otherwise valid released weights.
-
 The ROCMI4 storage/runtime and optional gfx1151 W4A4 path are manually ported
 from the MIT-licensed `radicalgeek/ROCmFPX` lineage: exact format commit
 `16d05b80f70b06b008da26bc1be7d36f116c61e4`, lossless int8 MMQ commit
@@ -48,29 +36,6 @@ Ember's engine is pruned and locally optimized; it intentionally keeps exact
 int8 MMQ as the default. Canonical ROCMI4 owns GGUF file type 118. Ember's older
 Q2 recipe metadata moved to 119/120 while its on-disk tensor type 107 remains
 unchanged, preserving tensor-dispatched loading of already-published files.
-
-The Qwen3.8-Flash-Next format bakeoff also admits the existing
-`Q3_0_ROCMFPX` type (GGML tensor type 104) for the mapped
-`per_layer_token_embd.weight` row table. Its 32-weight/14-byte layout was
-re-audited against `ciru-ai/ROCmFPX` revision
-`112629f1ed1acc2e8071693fce83cc7f5070693a`; no broad vendor refresh was
-performed. The tensor mix is provenance-pinned to
-`agentionai/Qwen3.8-Flash-Next-ROCmFP4-FAST-GGUF` revision
-`9089b24dbed6e087a705201ba59a104575bda0b9`, but only as an experimental
-recipe input. Ember's own intervention, quantization audit, quality, memory,
-PLE-latency, and gfx1151 gates remain authoritative.
-
-The off-by-default Qwen correctness diagnostic also extends
-`GGML_CUDA_FORCE_CUBLAS` to suppress quantized MMVQ in the fusion predicate,
-plain `mul_mat`, and `mul_mat_id`, so every quantized projection reaches the
-dequantize-and-GEMM family. `DFLASH_CUBLAS_F32_REFERENCE=1` then forces the
-existing cuBLAS fallback to dequantize quantized operands to F32 and emits
-positive route evidence; it fails closed unless the force-cuBLAS build and
-`GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F=1` are both present. This explicit env is
-necessary instead of `ggml_mul_mat_set_prec(GGML_PREC_F32)` because upstream's
-`mul_mat_id` synchronous fallback zero-initializes each per-expert destination
-and thereby silently drops the caller's precision request. Ordinary builds and
-force-cuBLAS builds without the env retain their prior operand precision.
 
 ROCm-family MMQ dispatch evidence is also an Ember-owned diagnostic extension
 in `ggml-cuda/mmq.cu`: the legacy
@@ -91,13 +56,13 @@ fixture that the shipped graph never constructs.
 
 Ember pins the shape contract between `g` and `beta` with the host-testable
 predicate in `ggml-cuda/gated_delta_net_layout.h`, asserted by
-`gated_delta_net.cu` and covered in `test_qwen4exp_frontier`. Upstream indexes
+`gated_delta_net.cu`. Upstream indexes
 both from one offset built from beta's outer strides while asserting only that
 each is contiguous, which does not imply compatible shapes. The predicate
 requires equal outer dimensions and, for a scalar gate, equal strides. KDA gates are intentionally
 `[S_v, H, T, B]` rather than beta's `[1, H, T, B]`, so their strides differ and
 the kernel's existing `gb_offset * S_v` supplies the required rescaling. The
-Qwen GDN graph uses the scalar form and reshapes both tensors to
+caller's GDN graph uses the scalar form and reshapes both tensors to
 `[1, n_heads, n_tokens, 1]`; the assertions pin that caller contract so a
 future reshape fails loudly instead of silently misreading `g` at beta's
 spacing. Preserve them across vendor refreshes.
@@ -119,8 +84,8 @@ split/peer-copy surface and RCCL integration are removed; a compile-time guard
 also excludes the shared substrate's internal peer-copy branch.
 
 The retained dflash source closure contains only the DeepSeek4 target. The
-legacy Qwen3.5 target loader, draft/DeltaNet object graph, platform mmap shim,
-and Qwen pre-tokenizers are removed. DeepSeek4 keeps a narrow CPU-embedding
+legacy non-DeepSeek target loaders, draft/DeltaNet object graph, platform
+mmap shim, and their pre-tokenizers are removed. DeepSeek4 keeps a narrow CPU-embedding
 helper and accepts only the checkpoint's required `tokenizer.ggml.pre` value,
 `joyai-llm`. Legacy Laguna expert-remap/cache code, its custom CUDA combine op,
 generic chat-family probing, and unused placement/load helpers are also absent.
