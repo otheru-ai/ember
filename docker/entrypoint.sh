@@ -4,18 +4,44 @@ set -euo pipefail
 model_dir="${EMBER_MODEL_DIR:-/models}"
 server_bin="${EMBER_SERVER_BIN:-/usr/local/bin/ember-dflash}"
 deployment_mode="${EMBER_DEPLOYMENT_MODE:-deepseek-v4-flash}"
-repo="otheru/DeepSeek-V4-Flash-Strix-Halo-GGUF"
-revision="9fe32d8d4a1abed16c84e2636b26950232869929"
-file="DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
-expected_sha256="a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54"
-expected_size="91547243200"
+# The default DeepSeek deployment is the VISION model as of this release. The
+# previous text-only artifact is not deleted and stays servable by pointing
+# EMBER_MODEL_DIR at a copy, or by setting the three EMBER_MODEL_* overrides
+# below; it is simply no longer what a fresh container downloads.
+#
+# The drafter is the 0731 one on purpose. A drafter built from the Vision
+# checkpoint's own mtp.* tensors exists and accepts 0.868 on structured
+# workloads against 0.975 for this one, measured on the same target in the same
+# window -- and swapping the target reproduces the deficit, so it is the head,
+# not the pairing. See releases/vision-exp/PROVENANCE.md in the pipeline repo.
+repo="${EMBER_MODEL_REPO:-otheru/DeepSeek-V4-Flash-Vision-Strix-Halo-GGUF}"
+revision="${EMBER_MODEL_REVISION:-UNPINNED}"
+file="DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
+expected_sha256="2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2"
+expected_size="91547293152"
 draft_file="DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf"
 draft_expected_sha256="1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6"
 draft_expected_size="10897111840"
+# The vision tower. Required for image input and downloaded with the model; the
+# server refuses image requests without it rather than answering from text.
+mmproj_file="mmproj-DeepSeek-V4-Flash-Vision-Exp-F16.gguf"
+mmproj_expected_sha256="9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002"
+mmproj_expected_size="933251200"
 model="$model_dir/$file"
 draft="$model_dir/$draft_file"
+mmproj="$model_dir/$mmproj_file"
+# An unpinned revision would fetch whatever the branch tip happens to be, which
+# is how a container silently changes model between restarts. Refuse, unless
+# the operator has supplied their own artifacts and turned auto-download off.
+if [[ "$revision" == UNPINNED && "${EMBER_AUTO_DOWNLOAD:-1}" == 1 ]]; then
+  echo "ember: model revision is not pinned; set EMBER_MODEL_REVISION to an" \
+       "immutable HuggingFace commit, or set EMBER_AUTO_DOWNLOAD=0 and supply" \
+       "the artifacts in EMBER_MODEL_DIR" >&2
+  exit 78
+fi
 model_verified=0
 draft_verified=0
+mmproj_verified=0
 verify_existing_sha256="${EMBER_VERIFY_EXISTING_SHA256:-1}"
 integrity_cache_dir="${EMBER_INTEGRITY_CACHE_DIR:-\
 ${EMBER_KV_CACHE_DIR:-/cache}/artifact-integrity-v1}"
@@ -334,6 +360,28 @@ case "$deployment_mode" in
     # the pinned, verified artifact unless an operator explicitly overrides it.
     export DFLASH_DS4_SPEC="${DFLASH_DS4_SPEC:-1}"
     export DFLASH_DS4_DRAFT="${DFLASH_DS4_DRAFT:-$draft}"
+
+    if [[ ! -r "$mmproj" && "$mmproj" == "$model_dir/$mmproj_file" && \
+          "${EMBER_AUTO_DOWNLOAD:-1}" == 1 ]]; then
+      download_artifact "$mmproj_file" "$mmproj_expected_size" \
+        "$mmproj_expected_sha256" "vision tower"
+      mmproj_verified=1
+      mmproj="$downloaded_artifact"
+    fi
+
+    # A missing tower is a hard error, not a silent downgrade to text. An image
+    # request against a server without one must not look like a model that
+    # answered without looking.
+    if [[ ! -r "$mmproj" ]]; then
+      echo "ember: vision tower is not readable: $mmproj" >&2
+      exit 66
+    fi
+
+    if [[ "$mmproj_verified" != 1 ]]; then
+      verify_existing_artifact "$mmproj" "$mmproj_expected_sha256" "vision tower"
+    fi
+
+    deepseek_vision_args=(--vision-mmproj "$mmproj")
     ;;
   qwen3.8-flash-next)
     prepare_qwen
@@ -361,6 +409,7 @@ fi
 
 exec "$server_bin" \
   -m "$model" \
+  ${deepseek_vision_args[@]+"${deepseek_vision_args[@]}"} \
   --kv-cache-dir "${EMBER_KV_CACHE_DIR:-/cache}" \
   --host "${EMBER_HOST:-127.0.0.1}" \
   --port "${EMBER_PORT:-8080}" \
