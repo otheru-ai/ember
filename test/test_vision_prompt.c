@@ -80,12 +80,16 @@ static void test_all_placeholder_offsets(void) {
               error, sizeof(error)) && offsets[0] == -1 &&
               strstr(error, "more than one") != NULL,
           "placeholder planning rejects fewer images than placeholders");
-    offsets[0] = 4;
-    offsets[1] = 4;
+    // expected_count is how many slots the callee writes, so an over-count
+    // case needs an array sized for the count being asked about -- not for the
+    // two placeholders the input happens to contain. Reusing offsets[2] here
+    // wrote one past the end, which ASan caught; the production caller in
+    // main.c already sizes this correctly with calloc(images).
+    int over[3] = {4, 4, 4};
     CHECK(!ember_vision_prompt_find_all(
-              input, 9, placeholder, 2, 3, offsets,
-              error, sizeof(error)) && offsets[0] == -1 &&
-              offsets[1] == -1,
+              input, 9, placeholder, 2, 3, over,
+              error, sizeof(error)) && over[0] == -1 && over[1] == -1 &&
+              over[2] == -1,
           "placeholder planning rejects more images than placeholders");
 }
 
