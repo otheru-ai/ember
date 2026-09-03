@@ -15,7 +15,7 @@ deployment_mode="${EMBER_DEPLOYMENT_MODE:-deepseek-v4-flash}"
 # window -- and swapping the target reproduces the deficit, so it is the head,
 # not the pairing. See releases/vision-exp/PROVENANCE.md in the pipeline repo.
 repo="${EMBER_MODEL_REPO:-otheru/DeepSeek-V4-Flash-Vision-Strix-Halo-GGUF}"
-revision="${EMBER_MODEL_REVISION:-b9746252159d9f32cb171777f659c5386c553fc3}"
+revision="${EMBER_MODEL_REVISION:-ba9824c9bc69ce3cdeea91d6529ff764720ec737}"
 file="DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf"
 expected_sha256="2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2"
 expected_size="91547293152"
