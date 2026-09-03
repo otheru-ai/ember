@@ -35,7 +35,12 @@ jobs:
             8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
             "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" .github/workflows/*.yml
+          # The style and info tiers are noise against workflow YAML: every
+          # SC2016 in this repo is an Actions expression or a markdown backtick
+          # inside single quotes, which is correct -- Actions substitutes those
+          # before the shell runs, so double-quoting them would be the bug.
+          # Warnings and errors still fail the job.
+          SHELLCHECK_OPTS='-S warning' "$RUNNER_TEMP/actionlint" .github/workflows/*.yml
 
   build-test:
     runs-on: ubuntu-24.04

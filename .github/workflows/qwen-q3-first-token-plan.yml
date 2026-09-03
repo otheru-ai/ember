@@ -197,7 +197,6 @@ jobs:
           plan_sha="$(sha256sum "$plan" | awk '{print $1}')"
           python3 scripts/qwen_bakeoff.py --plan "$plan" --stage verify \
             --output "$RUNNER_TEMP/qwen-q3-first-token-plan-verified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
-          intervention="$CAPTURE_MANIFEST"
           mapfile -t intervention_pair < <(python3 - "$CAPTURE_MANIFEST" \
               "$INTERVENTION_ID" "$QUANTIZATION_ARM" "$FORMAT_ROW_ID" "$plan" <<'PY'
           import hashlib, json, pathlib, sys

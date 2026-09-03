@@ -4,3 +4,4 @@ self-hosted-runner:
     - gfx1151
     - docker
     - docker-build
+    - qwen-quant

@@ -2550,7 +2550,6 @@ jobs:
         run: |
           set -euo pipefail
           workspace=/var/tmp/ember-qwen3.8-flash-next
-          snapshot="$workspace/snapshots/$QWEN_REVISION"
           output="$workspace/artifacts/stock-rocmi4-${TARGET_SHA:0:12}"
           test ! -e "$output"
           python3 - "$workspace/artifacts" ".stock-rocmi4-${TARGET_SHA:0:12}.transaction-" \
@@ -2903,6 +2902,7 @@ jobs:
               stream.write(f"QWEN_MTP_MODEL={mtp_path}\n")
               stream.write(f"QWEN_MTP_EXPECTED_SHA256={mtp['quantized_sha256']}\n")
           PY
+          # shellcheck source=/dev/null  # written by the python block above
           source "$artifact_env"
           cat "$artifact_env" >>"$GITHUB_ENV"
           direct_sha256() {

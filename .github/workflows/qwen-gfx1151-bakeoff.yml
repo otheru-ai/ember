@@ -152,7 +152,7 @@ jobs:
               QWEN_RESULTS_ACCUMULATOR_BUNDLE QWEN_RESULTS_ACCUMULATOR_BUNDLE_SHA256 \
               QWEN_PRIOR_LEDGER QWEN_PRIOR_LEDGER_SHA256 QWEN_PRIOR_LEDGER_BUNDLE \
               QWEN_PRIOR_LEDGER_BUNDLE_SHA256; do
-            export "$name"
+            export "${name?}"
             printf '%s=%s\n' "$name" "${!name}" >>"$GITHUB_ENV"
           done
 

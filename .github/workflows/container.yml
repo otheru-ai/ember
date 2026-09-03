@@ -200,7 +200,6 @@ jobs:
           set -euo pipefail
           publish_sha="$(git rev-parse HEAD)"
           short_sha="${publish_sha:0:12}"
-          project_version="$(tr -d '\n' < VERSION)"
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           # This is the exact dev stage cached by the release build above.  The
           # Qwen real-weight gate additionally compares its embedded CMake SHA
