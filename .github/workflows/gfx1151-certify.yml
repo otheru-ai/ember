@@ -52,6 +52,15 @@ jobs:
       DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
       PORT: ${{ vars.EMBER_CERT_PORT || '18080' }}
       PRODUCTION_CONTAINER: ${{ vars.EMBER_PRODUCTION_CONTAINER || 'ember-server' }}
+      # The artifacts this release certifies. Job-level because more than one
+      # step needs them: the verifier hashes the files, and the behavioural gate
+      # binds the same digests into its runtime identity. Two copies would be
+      # two things to update.
+      #
+      # The vision model is what ember serves by default as of 2026.9.3.
+      MODEL_SHA256: 2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2
+      DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
+      MMPROJ_SHA256: 9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002
     steps:
       - name: Validate configured artifacts and devices
         run: |
@@ -150,11 +159,6 @@ jobs:
           }
 
       - name: Verify the model artifact
-        env:
-          # The vision model is what ember serves by default as of 2026.9.3.
-          MODEL_SHA256: 2ff6ff0c4bd20d8438113404d9c7c3d4495bbc4b43b5622f37a0f68aebfebbc2
-          DRAFT_SHA256: 1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6
-          MMPROJ_SHA256: 9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002
         run: |
           set -euo pipefail
           python3 -c '

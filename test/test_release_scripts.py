@@ -285,6 +285,54 @@ class ReleaseScriptTests(unittest.TestCase):
         # the box.
         self.assertIn("EMBER_AUTO_DOWNLOAD=0", certify)
 
+    def test_certify_steps_reference_only_defined_variables(self) -> None:
+        """Every $VAR a certify step uses must actually be set for that step.
+
+        shellcheck cannot see GitHub's env, so an undefined one is invisible
+        until the step runs -- and these steps only run on the GPU box, after
+        production has been quiesced. `MODEL_SHA256: unbound variable` cost a
+        certification window because the digests were step-level env on the
+        verifier and the behavioural gate needed them too.
+        """
+        import yaml
+
+        workflow = yaml.safe_load(GITHUB_CERTIFY.read_text())
+        provided = {
+            "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+            "GITHUB_OUTPUT", "GITHUB_ENV", "GITHUB_STEP_SUMMARY",
+            "GITHUB_WORKSPACE", "GITHUB_SHA", "GITHUB_EVENT_NAME",
+            "GITHUB_ACTOR", "GITHUB_REF", "GITHUB_SERVER_URL",
+            "RUNNER_TEMP", "RUNNER_WORKSPACE", "RUNNER_OS",
+            "PATH", "HOME", "PWD", "SHELL", "USER", "IFS", "PYTHONPATH",
+        }
+        for job_name, job in workflow["jobs"].items():
+            job_env = set(job.get("env") or {})
+            # A step can export into later steps by writing $GITHUB_ENV, so
+            # collect those names for the whole job rather than calling them
+            # undefined where they are used.
+            exported: set[str] = set()
+            for step in job.get("steps") or []:
+                body = step.get("run") or ""
+                if "GITHUB_ENV" in body:
+                    exported |= set(re.findall(r"([A-Z][A-Z0-9_]{2,})=", body))
+            job_env |= exported
+            for step in job.get("steps") or []:
+                script = step.get("run")
+                if not script:
+                    continue
+                defined = job_env | set(step.get("env") or {}) | provided
+                # Anything the script assigns itself is fine too.
+                defined |= set(re.findall(r"^\s*(?:export\s+)?([A-Za-z_]\w*)=",
+                                          script, re.MULTILINE))
+                defined |= set(re.findall(r"\bfor\s+([A-Za-z_]\w*)\s+in\b", script))
+                defined |= set(re.findall(r"\blocal\s+([A-Za-z_]\w*)=", script))
+                used = set(re.findall(r"\$\{?([A-Z][A-Z0-9_]{2,})\}?", script))
+                missing = sorted(used - defined)
+                self.assertEqual(
+                    missing, [],
+                    f"{job_name} / {step.get('name')} uses undefined "
+                    f"{missing}; add it to the job or step env")
+
     def test_github_release_candidate_is_gated_and_automatic(self) -> None:
         ci = GITHUB_CI.read_text()
         container = GITHUB_CONTAINER.read_text()
