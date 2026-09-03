@@ -215,18 +215,14 @@ jobs:
     # workflow has already published and scanned the immutable sha-* candidate.
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') && needs.scope.outputs.code == 'true' }}
     needs: [publish-candidate, scope]
-    # A called workflow can never exceed its caller's grant, and GitHub checks
-    # that statically: if any nested job asks for more, the whole of ci.yml is
-    # rejected before a single job starts. Six qwen jobs inside the certify
-    # workflow attest their artifacts, so the three permissions they ask for
-    # are granted here even though the release path itself does not use them.
-    # Narrowing this again means dropping those requests downstream first.
+    # Keep this the narrowest grant the certify workflow actually needs. A
+    # called workflow can never exceed its caller's grant and GitHub enforces
+    # that statically, so a single nested job asking for more invalidates the
+    # whole of ci.yml before any job starts -- which is exactly how the qwen
+    # attestation jobs took CI down for nine days.
     permissions:
       contents: read
       packages: read
-      id-token: write
-      attestations: write
-      artifact-metadata: write
     uses: ./.github/workflows/gfx1151-certify.yml
     with:
       commit_sha: ${{ github.sha }}

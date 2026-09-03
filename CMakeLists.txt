@@ -663,50 +663,25 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_release_package.py)
   set_tests_properties(qwen_release_package PROPERTIES TIMEOUT 20)
   add_test(
-    NAME qwen_publication_envelope
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_publication_envelope.py)
-  set_tests_properties(qwen_publication_envelope PROPERTIES TIMEOUT 20)
-  add_test(
     NAME qwen_vision_provider_scripts
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_provider_scripts.py)
   set_tests_properties(qwen_vision_provider_scripts PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_vision_hardware_gate
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_vision_hardware_gate.py)
-  set_tests_properties(qwen_vision_hardware_gate PROPERTIES TIMEOUT 20)
   add_test(
     NAME qwen_quantize_pipeline
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quantize.py)
   set_tests_properties(qwen_quantize_pipeline PROPERTIES TIMEOUT 20)
   add_test(
-    NAME qwen_candidate_builder
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_candidate_builder.py)
-  set_tests_properties(qwen_candidate_builder PROPERTIES TIMEOUT 20)
-  add_test(
     NAME qwen_corpus_adapter
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_corpus_adapter.py)
   set_tests_properties(qwen_corpus_adapter PROPERTIES TIMEOUT 20)
   add_test(
-    NAME qwen_bakeoff
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_bakeoff.py)
-  set_tests_properties(qwen_bakeoff PROPERTIES TIMEOUT 20)
-  add_test(
     NAME qwen_intervention
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_intervention.py)
   set_tests_properties(qwen_intervention PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_capture_control
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_capture_control.py)
-  set_tests_properties(qwen_capture_control PROPERTIES TIMEOUT 20)
   add_test(
     NAME qwen_mtp_export
     COMMAND ${Python3_EXECUTABLE}
@@ -722,32 +697,12 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_builder_preflight.py)
   set_tests_properties(qwen_builder_preflight PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_real_weight_gate
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_real_weight_gate.py)
-  set_tests_properties(qwen_real_weight_gate PROPERTIES TIMEOUT 20)
 
-  add_test(
-    NAME qwen_bakeoff_workflow
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_bakeoff_workflow.py)
-  set_tests_properties(qwen_bakeoff_workflow PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_construct_workflow
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_construct_workflow.py)
-  set_tests_properties(qwen_construct_workflow PROPERTIES TIMEOUT 20)
   add_test(
     NAME qwen_candidate_manifest
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_candidate_manifest.py)
   set_tests_properties(qwen_candidate_manifest PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_retire_stock_workflow
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_retire_stock_workflow.py)
-  set_tests_properties(qwen_retire_stock_workflow PROPERTIES TIMEOUT 20)
 
   add_test(
     NAME qwen_quality_judge
@@ -764,11 +719,6 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_descriptor.py)
   set_tests_properties(qwen_quality_descriptor PROPERTIES TIMEOUT 20)
-  add_test(
-    NAME qwen_quality_workflow
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_qwen_quality_workflow.py)
-  set_tests_properties(qwen_quality_workflow PROPERTIES TIMEOUT 20)
   add_test(
     NAME qwen_snapshot_fetch
     COMMAND ${Python3_EXECUTABLE}

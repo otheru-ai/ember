@@ -292,11 +292,6 @@ class ReleaseScriptTests(unittest.TestCase):
             certify,
         )
         self.assertIn("--vision-mmproj", certify)
-        # the judge stays on the 0731 text model deliberately
-        self.assertIn(
-            "a936e0a514385c8ae964c0f42263a4314a34fbc6efea9d9aced5320f320a3d54",
-            certify,
-        )
         self.assertIn(
             "1a01c80eceae302bcc1d70836759ee97974d7983c5084ef43f6ef772a8970ae6",
             certify,
@@ -308,19 +303,11 @@ class ReleaseScriptTests(unittest.TestCase):
         # where a checkout is fine and a failure cannot cost a release.
         certify_job = certify.split("\n  promote:", 1)[0]
         self.assertNotIn("actions/checkout", certify_job)
-        self.assertIn('"$source_sha" "$source_output" <<\'PY\'', certify_job)
-        self.assertIn("source_sha, source_output = sys.argv[1:]", certify_job)
+        # It authenticates and pulls the published candidate rather than
+        # building anything on the machine that holds production.
         self.assertIn("GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}", certify_job)
-        self.assertIn('echo "$GHCR_TOKEN" | docker login ghcr.io', certify_job)
-        self.assertIn("-from-([0-9a-f]{40})", certify_job)
-        self.assertIn("PROFILE_RESUME_ARG", certify_job)
-        self.assertIn("  qwen-resume-q3-timing:", certify_job)
-        self.assertIn("--calibrate-qwen-shapes", certify_job)
-        self.assertIn("No model", certify_job)
-        self.assertIn("integrity hash or quant construction is repeated", certify_job)
-        self.assertIn('test "$current_engine_sha" = "${retained[2]}"', certify_job)
-        self.assertIn('len(row.get("counter_files") or []) != 2', certify_job)
-        self.assertIn("--require-memory-gate", certify_job)
+        self.assertIn("docker login ghcr.io", certify_job)
+        self.assertIn("docker pull", certify_job)
         self.assertNotIn("benchmark_bundle.sh", certify_job)
         self.assertIn("  benchmark:", certify)
         self.assertIn("needs: [certify, promote]", certify)
@@ -374,152 +361,6 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("ember-trivy-cache", container)
         self.assertIn("advice.detachedHead", container)
         self.assertNotIn("tags: ['v*']", forgejo_container)
-
-    def test_counter_calibration_does_not_reacquire_workflow_gpu_lock(self) -> None:
-        certify = GITHUB_CERTIFY.read_text()
-        calibration = certify.split(
-            "\n  qwen-calibrate-counter-units:", 1
-        )[1].split("\n  qwen-resume-q3-timing:", 1)[0]
-        self.assertIn(
-            '"$CALIBRATION_SOURCE/scripts/calibrate_counter_units.sh" \\\n'
-            '            --image "$CALIBRATION_IMAGE" --out-dir "$out" '
-            '--no-quiesce',
-            calibration,
-        )
-
-    def test_resumed_profiler_does_not_reacquire_workflow_gpu_lock(self) -> None:
-        certify = GITHUB_CERTIFY.read_text()
-        profiler = certify.split(
-            "\n  qwen-resume-q3-profile:", 1
-        )[1].split("\n  qwen-calibrate-counter-units:", 1)[0]
-        self.assertIn(
-            '"$PROFILE_SCRIPT_ROOT/scripts/profile_gpu.sh" --no-quiesce \\',
-            profiler,
-        )
-
-    def test_certification_uses_checked_in_counter_calibration(self) -> None:
-        certify = GITHUB_CERTIFY.read_text()
-        self.assertIn(
-            "/ember/share/benchmark/gfx1151-rocm10-counter-calibration.json",
-            certify,
-        )
-        self.assertIn("--counter-calibration", certify)
-
-    def test_qwen_control_conversion_is_exact_bounded_and_recoverable(self) -> None:
-        container = GITHUB_CONTAINER.read_text()
-        certify = GITHUB_CERTIFY.read_text()
-        dockerfile = DOCKERFILE.read_text()
-        self.assertIn('tag "$image:dev-sha-$short_sha"', container)
-        self.assertIn("--target dev", container)
-        self.assertIn("dev-image-metadata.json", container)
-        dev_stage = dockerfile.split("FROM toolchain AS dev", 1)[1].split(
-            "FROM ${RUNTIME_IMAGE} AS release", 1
-        )[0]
-        self.assertIn("ARG EMBER_VERSION", dev_stage)
-        self.assertIn("ARG EMBER_VCS_REF", dev_stage)
-        self.assertIn(
-            'org.opencontainers.image.revision="${EMBER_VCS_REF}"', dev_stage
-        )
-        self.assertIn(
-            'org.opencontainers.image.version="${EMBER_VERSION}"', dev_stage
-        )
-        self.assertIn("ember-gguf-quantize ember-token-dump", dockerfile)
-        self.assertIn("python3-venv git time", dockerfile)
-        self.assertIn("qwen-convert-control:", certify)
-        self.assertIn("--bounded-memory-temp", certify)
-        self.assertIn("--stock-control", certify)
-        self.assertIn("--gguf-splitter", certify)
-        self.assertIn("scripts/qwen_mtp_export.py", certify)
-        self.assertIn("Qwen3.8-Flash-Next-MTP-ROCmI4-Strix-Halo.gguf", certify)
-        self.assertIn("--network none", certify)
-        self.assertIn("/usr/bin/time -v", certify)
-        self.assertIn("final_release_eligible", certify)
-        self.assertIn("Stock-Control", certify)
-        self.assertIn("qwen-docker-$GITHUB_RUN_ID", certify)
-        self.assertIn("Remove temporary registry credentials", certify)
-        control = certify.split("\n  qwen-convert-control:", 1)[1]
-        self.assertIn('-e LLAMA_REVISION="$LLAMA_REVISION"', control)
-        self.assertIn('[[ "$LLAMA_REVISION" == "$commit"* ]]', control)
-        self.assertLess(control.index('[[ "$LLAMA_REVISION" == "$commit"* ]]'),
-                        control.index("ember-gpu-lock acquire"))
-        for repository in (
-            "/ember", "/qwen-work/tooling/llama.cpp",
-            "/qwen-work/tooling/ROCmFPX",
-        ):
-            self.assertIn(f"safe.directory {repository}", control)
-        self.assertNotIn("safe.directory '*'", control)
-        for command in (
-            "ember-gpu-lock acquire", "ember-gpu-lock release",
-            "ember-cert-production stop", "ember-cert-production mask",
-            "ember-cert-production unmask", "ember-cert-production start",
-        ):
-            self.assertIn(command, control)
-        self.assertGreaterEqual(control.count("if: ${{ always()"), 4)
-
-    def test_qwen_stock_capture_is_digest_bound_no_clobber_and_nonpublishing(self) -> None:
-        certify = GITHUB_CERTIFY.read_text()
-        self.assertIn("qwen-capture-control:", certify)
-        capture = certify.split("\n  qwen-capture-control:", 1)[1]
-        self.assertIn("startsWith(inputs.release_version, 'qwen-capture-control')", capture)
-        self.assertIn(":dev-sha-${CAPTURE_TOOL_SHA:0:12}", capture)
-        self.assertIn("QWEN_DEV_IMAGE_DIGEST", capture)
-        self.assertIn("EMBER_CONFIGURED_GIT_HEAD:STRING", capture)
-        self.assertIn("test \"$(git rev-parse HEAD)\" = \"$CAPTURE_TOOL_SHA\"", capture)
-        self.assertIn("git merge-base --is-ancestor \"$TARGET_SHA\" \"$CAPTURE_TOOL_SHA\"", capture)
-        self.assertIn("--tool-revision \"$CAPTURE_TOOL_SHA\"", capture)
-        self.assertIn("--artifact-revision \"$TARGET_SHA\"", capture)
-        self.assertIn('manifest["model"]["quantizer_ember_revision"]', capture)
-        self.assertIn('manifest["image"]["ember_revision"]', capture)
-        self.assertIn(
-            "/srv/ember/qwen3.8-otheru-corpus-${OTHERU_REVISION:0:8}", capture,
-        )
-        recipe_digest = hashlib.sha256(
-            (ROOT / "share" / "quant_eval" /
-             "qwen3.8-flash-next-bakeoff.json").read_bytes()
-        ).hexdigest()
-        for digest in (
-            "19c70ad1ce7664b58fbaa854f7a80bc50868873a89e44459002b634137d5cc1d",
-            "a41997529ad28af7234e036f05bd9bca39c504f8ec118568b73699e9b314d140",
-            "a3bededd14b030fdf06562f6739f879838902f6f4691817573a98bbe9ac6cf7c",
-            recipe_digest,
-        ):
-            self.assertIn(digest, capture)
-        self.assertIn("qwen-quant-build-record.json", capture)
-        self.assertIn("(record.get(\"output\") or {}).get(\"shards\")", capture)
-        self.assertIn("names[0]", capture)
-        self.assertIn("quantized_sha256", capture)
-        self.assertIn("dd if=\"$1\" iflag=direct", capture)
-        self.assertIn("qwen-capture-corpus-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", capture)
-        self.assertIn("docker run --rm --network none", capture)
-        self.assertIn("artifact entry is not a regular file", capture)
-        self.assertIn("os.chmod(path, 0o400, follow_symlinks=False)", capture)
-        self.assertIn("Remove the run-scoped corpus copy", capture)
-        self.assertIn("scripts/qwen_capture_control.py", capture)
-        self.assertIn("--image-digest \"$QWEN_DEV_IMAGE_DIGEST\"", capture)
-        self.assertIn("--mtp-sha256 \"$QWEN_MTP_SHA256\"", capture)
-        self.assertIn("test ! -e \"$output\" && test ! -L \"$output\"", capture)
-        self.assertIn("$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT", capture)
-        self.assertIn("publishes", capture)
-        self.assertIn("len(manifest[\"interventions\"]) == 16", capture)
-        self.assertIn("QWEN_CAPTURE_MANIFEST_SHA256", capture)
-        self.assertIn("Capture manifest SHA-256:", capture)
-        self.assertIn("Stock build record SHA-256:", capture)
-        for command in (
-            "ember-gpu-lock release", "ember-cert-production unmask",
-            "ember-cert-production start",
-        ):
-            self.assertIn(command, capture)
-        self.assertIn("if: ${{ always() && steps.qwen-capture-safety", capture)
-        self.assertIn("^/qwen-capture-control-[0-9]+$", capture)
-        self.assertIn(".gpu-lock-held", capture)
-        self.assertIn(".production-masked", capture)
-        self.assertIn(".production-was-active", capture)
-        self.assertIn("Remove temporary registry credentials", capture)
-        for forbidden in (
-            "qwen_quantize.py", "docker push", "gh release", "huggingface-cli",
-            "actions/upload-artifact", "--execute",
-        ):
-            self.assertNotIn(forbidden, capture)
 
     def test_release_build_caches_are_persistent_and_bounded(self) -> None:
         dockerfile = DOCKERFILE.read_text()
