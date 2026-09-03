@@ -1,0 +1,97 @@
+{
+  "schema": "ds4-vision-behavioural-gate-policy-v4",
+  "decided_by": "user",
+  "decided_utc": "2026-09-01T00:36:00Z",
+  "package": "balanced",
+  "rationale": "Discriminates the failure this gate exists to catch -- a model that ignores the image and answers from text priors -- without going red on a single ambiguous render, which would send us debugging the corpus instead of the engine.",
+  "generation": {
+    "decoding": "greedy",
+    "temperature": 0.0,
+    "max_tokens": 512,
+    "note": "Greedy makes the run reproducible; no seed is required and none may be relied on.",
+    "max_tokens_note": "Raised from 32 on 2026-09-01 by user decision. This model emits reasoning_content before content and reasoning counts against the completion budget: run 0d spent 146 completion tokens to answer '4'. At 32 every item returned finish_reason 'length' with empty content, so the gate went red for a harness reason with no bearing on the model. 512 is the value 0d stopped naturally under. NOT results-driven: no gate item had been scored when this was changed, and the evidence came from an independent run."
+  },
+  "scoring": {
+    "normalisation": "lowercase, strip characters outside [a-z0-9 ], collapse and trim whitespace",
+    "match": "normalised equality, OR whole-word containment of the answer in the response",
+    "substring_containment": "NOT accepted -- 'four' must not be satisfied by 'fourteen'"
+  },
+  "arm_b_cut_rule": {
+    "action": "an item answered correctly in arm B is CUT from arm A scoring, not scored",
+    "why": "it carries a text prior and is not evidence about the vision path either way",
+    "reporting": "cut ids listed per class; cutting shrinks the set and that cost is reported, never hidden"
+  },
+  "synthetic": {
+    "corpus": "/srv/models/vision-gate/behavioural",
+    "n_per_class": 25,
+    "classes": [
+      "count",
+      "colour",
+      "spatial",
+      "ocr"
+    ],
+    "arm_a_min_accuracy_per_class": 0.9,
+    "arm_a_significance": {
+      "test": "one-sided exact binomial vs the item chance",
+      "alpha": 0.01
+    },
+    "arm_b_requirement": {
+      "test": "one-sided exact binomial vs the item chance",
+      "alpha": 0.05,
+      "rule": "arm B must NOT be significantly above chance"
+    },
+    "aggregation": "ALL FOUR classes must pass independently; no averaging across classes"
+  },
+  "natural": {
+    "corpus": "/srv/models/vision-gate/natural",
+    "n_items": 100,
+    "min_retained_after_cuts": 80,
+    "min_retained_rationale": "if more than 20 items carry text priors the corpus is compromised and must be rebuilt, not scored",
+    "arm_a_min_accuracy": 0.7,
+    "claim_scope": "supports a C2 quality statement; it is NOT comparable to production, which has no vision path",
+    "chance": 0.029513049607039876,
+    "chance_provenance": {
+      "measured_by": "scripts/83-calibrate-free-answer-chance.py",
+      "arm": "text-only; no image sent, no arm A computed",
+      "class": "textvqa",
+      "n": 100,
+      "text_only_correct": 0,
+      "point_estimate": 0.0,
+      "value_is": "Clopper-Pearson one-sided UPPER bound, not the point estimate",
+      "confidence": 0.95,
+      "calibration_file": "/tmp/claude-1000/-home-mythos-Projects-ember/c0cf0e9a-c83f-4e31-98e3-920c9056f20d/scratchpad/cal-final.json",
+      "calibration_sha256": "46d2befe2f24db20c3000f5645c550b9fcd161cf9466a5767ea37552b42d91a4",
+      "manifest_sha256": "b69b1979e4cee4fa294e0b759cba62dd715f6ae86376ccf2626eb72e872f325c",
+      "model": "deepseek-v4-flash-vision-affine",
+      "why": "a free-answer corpus has no combinatorial chance level; chance 0.0 makes the exact-binomial arm-B test degenerate, so a single text-only hit would force the class red"
+    },
+    "chance_provenance_implications": {
+      "arm_b_alpha": 0.05,
+      "arm_b_red_at_hits": 7,
+      "arm_b_tolerates_hits": 6,
+      "min_retained_tolerates_cuts": 20,
+      "binding_constraint": "arm_b_above_chance",
+      "note": "these two rules are not the same test -- above-chance asks whether a systematic text prior exists, min_retained asks whether the corpus is compromised -- but the stricter one decides the verdict, and it is stricter than the twenty the min_retained rationale describes"
+    },
+    "max_tokens": 2048,
+    "max_tokens_note": "User decision 2026-09-01 after the tvqa_34733 localiser. 512 was calibrated on run 0d, a 146-token counting item; free-answer OCR demonstrably needs more. At 512 the watchdog caught a long reasoning excursion mid-cycle and returned 422; at 2048 the reasoning budget is exhausted, the server force-closes, and the model returns the correct answer. Forced-choice sets keep the 512 default. Consequence stated BEFORE the rerun: this is expected to turn natural from RED to PASS, which is why it was a user decision and why both runs must be reported together.",
+    "max_tokens_supersedes_default": 512
+  },
+  "verdict": {
+    "rule": "RED if any synthetic class misses its floor or its significance test, if arm B is above chance anywhere, if retained natural items fall below the minimum, or if natural arm A misses its floor",
+    "reporting": "per class always; a set that passes on aggregate while failing a class is a finding, not a pass",
+    "immutability": "this file is digest-bound and pre-registered. A threshold changed after seeing model output is a NEW policy version and a NEW run, and both must appear in the evidence."
+  },
+  "supersedes": {
+    "policy": "policy-v3.json",
+    "sha256": "0ff8c4fa047ef6941d9f01c820e9e1a3160c2bb025a7db7d2d9d4cef434f188e",
+    "retained": "/tmp/claude-1000/-home-mythos-Projects-ember/c0cf0e9a-c83f-4e31-98e3-920c9056f20d/scratchpad/policy-v3.json"
+  },
+  "harness_rules": {
+    "repetition_422": {
+      "rule": "HTTP 422 with error code repetition_detected is a SCORED MISS in an arm that sent NO image, and remains an ERROR in any arm that sent one",
+      "why": "the no-image arm exists to measure whether the model can answer without the image; degenerating is that measurement, and ember refusing to return the partial is the engine working. Treating it as a request error discarded a whole 100-item calibration over the one item that demonstrated the point best",
+      "not_symmetric": "degenerating WITH the image present is a real failure and must not be recorded as a wrong answer"
+    }
+  }
+}

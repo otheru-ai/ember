@@ -19,8 +19,8 @@ import urllib.request
 from typing import Any
 
 
-POLICY_SCHEMA = "ds4-vision-behavioural-gate-policy-v1"
-POLICY_SHA256 = "aeb1a1b6a760ad6e73df58455bd32fc66b957b7d67772e46f49b2441ce236ad2"
+POLICY_SCHEMA = "ds4-vision-behavioural-gate-policy-v4"
+POLICY_SHA256 = "b82d86ff9989f6c57656ac868b4eeb601d8009ce784c666124bbca0535c4bb03"
 EVIDENCE_SCHEMA = "ember.ds4.vision-behavioural-evidence.v1"
 RUNTIME_SCHEMA = "ember.ds4.vision-behavioural-runtime.v1"
 CORPUS_SHA256 = {
@@ -34,6 +34,24 @@ ITEM_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 class GateError(ValueError):
     pass
+
+
+class RepetitionRefusal(Exception):
+    """Ember refused a degenerate generation with HTTP 422.
+
+    Policy v4 scores this asymmetrically, and the asymmetry is the point. In the
+    no-image arm, degenerating IS the measurement -- that arm exists to ask
+    whether the model can answer without seeing the picture, and looping instead
+    of answering is a clear no. Treating it as a transport error once discarded
+    an entire 100-item calibration over the single item that demonstrated the
+    point best. With the image present it stays an error, because a model that
+    degenerates while looking at the picture is a real failure and must not be
+    quietly filed as one wrong answer.
+    """
+
+    def __init__(self, raw: bytes):
+        super().__init__("generation refused as degenerate")
+        self.raw = raw
 
 
 def canonical(value: Any) -> bytes:
@@ -90,7 +108,7 @@ def descriptor(path: Path, raw: bytes) -> dict[str, Any]:
 def validate_policy(path: Path) -> tuple[dict[str, Any], bytes]:
     policy, raw = read_object(path, "vision gate policy", 128 * 1024)
     if sha256_bytes(raw) != POLICY_SHA256:
-        raise GateError("vision gate policy is not the preregistered v1 policy")
+        raise GateError("vision gate policy is not the preregistered v4 policy")
     if (policy.get("schema") != POLICY_SCHEMA or
             policy.get("decided_by") != "user" or
             policy.get("package") != "balanced"):
@@ -102,7 +120,7 @@ def validate_policy(path: Path) -> tuple[dict[str, Any], bytes]:
     if (not isinstance(generation, dict) or
             generation.get("decoding") != "greedy" or
             generation.get("temperature") != 0.0 or
-            generation.get("max_tokens") != 32 or
+            generation.get("max_tokens") != 512 or
             not isinstance(scoring, dict) or
             not isinstance(synthetic, dict) or
             not isinstance(natural, dict)):
@@ -114,7 +132,8 @@ def validate_policy(path: Path) -> tuple[dict[str, Any], bytes]:
             (synthetic.get("arm_b_requirement") or {}).get("alpha") != 0.05 or
             natural.get("n_items") != 100 or
             natural.get("min_retained_after_cuts") != 80 or
-            natural.get("arm_a_min_accuracy") != 0.70):
+            natural.get("arm_a_min_accuracy") != 0.70 or
+            natural.get("max_tokens") != 2048):
         raise GateError("vision gate policy thresholds differ")
     return policy, raw
 
@@ -239,7 +258,23 @@ def binomial_upper_tail(successes: int, trials: int, chance: float) -> float:
                for k in range(successes, trials + 1))
 
 
-def build_payload(row: dict[str, Any], model: str, arm: str) -> dict[str, Any]:
+def generation_budget(policy: dict[str, Any], kind: str) -> int:
+    """The completion budget this kind runs under, taken from the policy.
+
+    It used to be the literal 32 here while the policy was merely asserted to
+    say 32, which is the failure the policy exists to prevent: a threshold the
+    runner does not read is not a threshold. This model emits reasoning_content
+    before content and reasoning spends the same budget, so 32 returned
+    finish_reason "length" with empty content on every item -- red for a harness
+    reason with no bearing on the model. The natural set overrides the default
+    again because its answers are longer.
+    """
+    override = policy[kind].get("max_tokens")
+    return int(override if override is not None else policy["generation"]["max_tokens"])
+
+
+def build_payload(row: dict[str, Any], model: str, arm: str,
+                  max_tokens: int) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
     if arm == "A":
         content.append({"type": "image_url", "image_url": {"url":
@@ -248,7 +283,8 @@ def build_payload(row: dict[str, Any], model: str, arm: str) -> dict[str, Any]:
         raise GateError("unknown behavioural arm")
     content.append({"type": "text", "text": row["question"]})
     return {"model": model, "stream": False, "temperature": 0.0,
-            "max_tokens": 32, "messages": [{"role": "user", "content": content}]}
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": content}]}
 
 
 def post_json(endpoint: str, payload: dict[str, Any], timeout: float) -> tuple[dict[str, Any], bytes]:
@@ -265,6 +301,8 @@ def post_json(endpoint: str, payload: dict[str, Any], timeout: float) -> tuple[d
                 raise GateError(f"behavioural request returned HTTP {response.status}")
     except urllib.error.HTTPError as exc:
         raw = exc.read()
+        if exc.code == 422 and b"repetition_detected" in raw:
+            raise RepetitionRefusal(raw) from exc
         raise GateError(f"behavioural request returned HTTP {exc.code}: " +
                         raw.decode("utf-8", "replace")) from exc
     try:
@@ -353,22 +391,36 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     write_new(identity_path, identity_raw)
     write_new(corpus_path, manifest_raw)
 
+    budget = generation_budget(policy, args.kind)
     scored = []
     # Run the withheld control first so no image output is observed before the
     # control arm has been fixed and retained for every item.
     for arm in ("B", "A"):
         for index, row in enumerate(rows, 1):
             print(f"[{arm} {index}/{len(rows)}] {row['id']}", file=sys.stderr, flush=True)
-            payload = build_payload(row, args.model, arm)
+            payload = build_payload(row, args.model, arm, budget)
             request_raw = canonical(payload)
             request_path = output / f"arm-{arm.lower()}" / f"{row['id']}.request.json"
             response_path = output / f"arm-{arm.lower()}" / f"{row['id']}.response.json"
             write_new(request_path, request_raw)
-            value, response_raw = post_json(args.endpoint, payload, args.timeout)
+            try:
+                value, response_raw = post_json(args.endpoint, payload, args.timeout)
+            except RepetitionRefusal as refusal:
+                if arm == "A":
+                    raise GateError(
+                        f"item {row['id']} degenerated WITH the image present; "
+                        "policy v4 keeps that an error, not a wrong answer") from refusal
+                write_new(response_path, refusal.raw)
+                row["arm_b_content"] = ""
+                row["arm_b_correct"] = False
+                row["arm_b_refused"] = True
+                row["arm_b_response"] = descriptor(response_path, refusal.raw)
+                continue
             write_new(response_path, response_raw)
             content = response_content(value)
             row[f"arm_{arm.lower()}_content"] = content
             row[f"arm_{arm.lower()}_correct"] = answer_matches(content, row["answer"])
+            row[f"arm_{arm.lower()}_refused"] = False
             row[f"arm_{arm.lower()}_response"] = descriptor(response_path, response_raw)
 
     for row in rows:
@@ -380,6 +432,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                        "arm_a_response": row["arm_a_response"],
                        "arm_b_normalized": normalize(row["arm_b_content"]),
                        "arm_b_correct": row["arm_b_correct"],
+                       "arm_b_refused": row.get("arm_b_refused", False),
                        "arm_b_response": row["arm_b_response"],
                        "cut": row["arm_b_correct"]})
 
@@ -391,6 +444,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
               "runtime_identity": descriptor(identity_path, identity_raw),
               "corpus": descriptor(corpus_path, manifest_raw),
               "runtime": identity, "generation": policy["generation"],
+              "max_tokens": budget,
               "verdict": verdict, "items": scored}
     write_new(output / "result.json", canonical(result))
     return result

@@ -174,7 +174,7 @@ LABEL org.opencontainers.image.title="Ember" \
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates curl \
+      ca-certificates curl python3-minimal \
  && rm -rf /var/lib/apt/lists/* \
  && (getent group video >/dev/null || echo 'video:x:44:' >> /etc/group) \
  && (getent group render >/dev/null || echo 'render:x:109:' >> /etc/group) \
@@ -182,6 +182,13 @@ RUN apt-get update \
 
 COPY --from=dev /ember-runtime/ /
 COPY --from=dev /ember-licenses/ /usr/share/licenses/ember/
+# The vision behavioural gate travels with the image it certifies. The certify
+# job deliberately checks out nothing onto the machine that holds production, so
+# a gate that lived only in the repo could not run there -- and a gate run from
+# a different revision than the image would not be evidence about that image.
+# The corpus images stay outside; the manifest binds each one by SHA-256.
+COPY scripts/ds4_vision_behavior_gate.py /opt/ember/vision-gate/gate.py
+COPY share/vision_gate/policy-v4.json /opt/ember/vision-gate/policy-v4.json
 COPY docker/entrypoint.sh /usr/local/bin/ember-entrypoint
 RUN chmod 0755 /usr/local/bin/ember-entrypoint \
  && printf '%s\n' /opt/rocm/lib \

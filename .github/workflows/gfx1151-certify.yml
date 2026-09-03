@@ -440,6 +440,128 @@ jobs:
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
 
+      - name: Run the vision behavioural gate
+        env:
+          GATE_CORPUS_ROOT: ${{ vars.EMBER_CERT_VISION_GATE_ROOT }}
+        run: |
+          set -euo pipefail
+          # Everything above proves the vision artifacts are the right bytes and
+          # that the tower loads. None of it sends an image, so a build whose
+          # image routing is dead passes all of it. This step is the one that
+          # would go red for that.
+          #
+          # It runs its own server because the gate's runtime contract requires
+          # speculation and exact prefill OFF: a drafter or a different prefill
+          # path would confound what the two arms are measuring. Arm B sends
+          # each question with NO image, and any item it answers is cut rather
+          # than scored, so a model answering from text priors cannot pass.
+          if [ -z "${GATE_CORPUS_ROOT:-}" ]; then
+            echo 'EMBER_CERT_VISION_GATE_ROOT is not configured' >&2
+            exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
+          if sudo -n /usr/local/sbin/ember-cert-production is-active >/dev/null 2>&1; then
+            echo 'production was restarted during certification' >&2
+            exit 1
+          fi
+          for _ in $(seq 1 60); do
+            available_kib="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+            (( available_kib >= 100 * 1024 * 1024 )) && break
+            sleep 5
+          done
+          name="ember-vision-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          out="$RUNNER_TEMP/vision-gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cleanup_gate() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup_gate EXIT
+          model_dir="$(dirname -- "$MODEL_PATH")"
+          model_file="$(basename -- "$MODEL_PATH")"
+          mmproj_dir="$(dirname -- "$MMPROJ_PATH")"
+          mmproj_file="$(basename -- "$MMPROJ_PATH")"
+          port=$(( PORT + 1 ))
+          docker run -d --name "$name" --network host \
+            --device /dev/kfd --device /dev/dri \
+            --group-add video --group-add render \
+            --ipc host --security-opt seccomp=unconfined \
+            --ulimit memlock=-1:-1 \
+            -v "$model_dir:/cert-model:ro" -v "$mmproj_dir:/cert-mmproj:ro" \
+            --entrypoint /usr/local/bin/ember-dflash "$image" \
+            -m "/cert-model/$model_file" \
+            --vision-mmproj "/cert-mmproj/$mmproj_file" \
+            --ds4-expert-top-k 4 --batch-sessions 1 \
+            --host 127.0.0.1 --port "$port" >/dev/null
+          ready=0
+          for _ in $(seq 1 240); do
+            if curl --fail --silent --max-time 5 \
+                "http://127.0.0.1:$port/health" >/dev/null; then
+              ready=1; break
+            fi
+            running="$(docker inspect --format '{{.State.Running}}' "$name")"
+            if [[ "$running" != true ]]; then docker logs "$name"; exit 1; fi
+            sleep 5
+          done
+          [[ "$ready" = 1 ]] || { docker logs "$name"; exit 1; }
+
+          endpoint="http://127.0.0.1:$port/v1/chat/completions"
+          identity="$RUNNER_TEMP/vision-gate-identity-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+          engine_sha="$(docker run --rm --entrypoint sha256sum "$image" \
+            /usr/local/bin/ember-dflash | awk '{print $1}')"
+          rocm_version="$(docker run --rm --entrypoint cat "$image" \
+            /opt/rocm/.info/version)"
+          python3 - "$identity" "$TARGET_SHA" "$engine_sha" "$MODEL_SHA256" \
+              "$MMPROJ_SHA256" "$rocm_version" "$endpoint" <<'PY'
+          import json, sys
+          path, commit, engine, model, mmproj, rocm, endpoint = sys.argv[1:]
+          identity = {
+              "schema": "ember.ds4.vision-behavioural-runtime.v1",
+              "ember_commit": commit,
+              "engine_binary_sha256": engine,
+              "model_identity_sha256": model,
+              "vision_mmproj_sha256": mmproj,
+              "gpu_arch": "gfx1151",
+              "rocm_version": rocm.strip(),
+              "endpoint": endpoint,
+              "model": "deepseek-v4-flash",
+              "batch_sessions": 1,
+              "exact_prefill": False,
+              "speculation": False,
+          }
+          with open(path, "w") as handle:
+              handle.write(json.dumps(identity, ensure_ascii=False,
+                                      sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          identity_sha="$(sha256sum "$identity" | awk '{print $1}')"
+
+          for kind in synthetic natural; do
+            case "$kind" in
+              synthetic) corpus="$GATE_CORPUS_ROOT/behavioural" ;;
+              natural)   corpus="$GATE_CORPUS_ROOT/natural" ;;
+            esac
+            docker run --rm --network host \
+              -v "$GATE_CORPUS_ROOT:$GATE_CORPUS_ROOT:ro" \
+              -v "$identity:/gate/runtime-identity.json:ro" \
+              -v "$out:/gate/out" \
+              --entrypoint python3 "$image" \
+              /opt/ember/vision-gate/gate.py \
+              --kind "$kind" \
+              --policy /opt/ember/vision-gate/policy-v4.json \
+              --corpus "$corpus" \
+              --runtime-identity /gate/runtime-identity.json \
+              --runtime-identity-sha256 "$identity_sha" \
+              --endpoint "$endpoint" \
+              --model deepseek-v4-flash \
+              --output "/gate/out/$kind"
+          done
+          # The runner exits nonzero on a red verdict, so reaching here is a
+          # pass. Print the verdicts anyway: a gate whose result is never read
+          # is indistinguishable from one that was not run.
+          for kind in synthetic natural; do
+            python3 -c '
+          import json, sys
+          result = json.load(open(sys.argv[1]))
+          print(sys.argv[2], "passed:", result["passed"], result["verdict"])
+          ' "$out/$kind/result.json" "$kind"
+          done
+
       - name: Unblock production
         if: ${{ always() && steps.production.outputs.blocked == 'yes' }}
         run: sudo -n /usr/local/sbin/ember-cert-production unmask

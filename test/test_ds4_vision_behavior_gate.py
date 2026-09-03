@@ -96,14 +96,47 @@ def main() -> int:
     assert verdict["first_red"] == "retained_count"
 
     payload = gate.build_payload(
-        {"question": "How many?", "image": b"\x89PNG\r\n\x1a\n"}, "model", "A")
-    assert payload["temperature"] == 0.0 and payload["max_tokens"] == 32
+        {"question": "How many?", "image": b"\x89PNG\r\n\x1a\n"}, "model", "A", 512)
+    assert payload["temperature"] == 0.0 and payload["max_tokens"] == 512
     assert payload["messages"][0]["content"][0]["image_url"]["url"].startswith(
         "data:image/png;base64,")
     withheld = gate.build_payload(
-        {"question": "How many?", "image": b"ignored"}, "model", "B")
+        {"question": "How many?", "image": b"ignored"}, "model", "B", 512)
     assert withheld["messages"][0]["content"] == [
         {"type": "text", "text": "How many?"}]
+
+    # The budget must come OUT of the policy, not out of this file. A runner
+    # that asserts the policy says 512 and then sends 32 anyway is the exact
+    # failure the pre-registration is supposed to prevent, and that is what this
+    # runner did until 2026-09-03.
+    budget_policy = policy()
+    budget_policy["generation"] = {"max_tokens": 512}
+    budget_policy["natural"]["max_tokens"] = 2048
+    assert gate.generation_budget(budget_policy, "synthetic") == 512
+    assert gate.generation_budget(budget_policy, "natural") == 2048, (
+        "the natural override must win over the generation default")
+    budget_policy["natural"].pop("max_tokens")
+    assert gate.generation_budget(budget_policy, "natural") == 512, (
+        "without an override the generation default applies")
+
+    # Policy v4 scores a degenerate refusal asymmetrically, so the two arms must
+    # not share a code path.
+    assert issubclass(gate.RepetitionRefusal, Exception)
+    assert not issubclass(gate.RepetitionRefusal, gate.GateError), (
+        "a refusal must be distinguishable from a transport error")
+
+    # The committed inputs must BE the ones the runner pins. Two files holding
+    # the same digest in different places is how a pre-registered policy quietly
+    # stops being the one that runs.
+    import hashlib
+    share = ROOT / "share" / "vision_gate"
+    for name, expected in (
+            ("policy-v4.json", gate.POLICY_SHA256),
+            ("synthetic-manifest.json", gate.CORPUS_SHA256["synthetic"]),
+            ("natural-manifest.json", gate.CORPUS_SHA256["natural"])):
+        digest = hashlib.sha256((share / name).read_bytes()).hexdigest()
+        assert digest == expected, (
+            f"{name} is {digest}, but the runner pins {expected}")
 
     print("ds4 vision behavior gate: PASS")
     return 0

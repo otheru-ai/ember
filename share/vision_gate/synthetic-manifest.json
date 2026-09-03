@@ -1,0 +1,1197 @@
+{
+  "seed": 20260831,
+  "size": [
+    448,
+    448
+  ],
+  "n_items": 100,
+  "classes": [
+    "colour",
+    "count",
+    "ocr",
+    "spatial"
+  ],
+  "arms": {
+    "A": "image + question",
+    "B": "question only, image withheld"
+  },
+  "pass_rule": "Arm B at chance, Arm A far enough above arm B that the gap cannot be sampling noise at a pre-registered threshold, and per-class results reported separately.",
+  "limitation": "Synthetic. Exact ground truth and controlled difficulty, so it is a functional gate, not a natural-image capability benchmark.",
+  "items": [
+    {
+      "id": "count_000",
+      "class": "count",
+      "image": "images/count_000.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "fd1959b422e2baa18e2ccb3202cb19fb0868989a2e740a0bd279794d918512b3",
+      "note": ""
+    },
+    {
+      "id": "count_001",
+      "class": "count",
+      "image": "images/count_001.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "7",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "b7c89de8c8fdbe836aacc295d75075945cb17db77e6757fca2836c780b666f9c",
+      "note": ""
+    },
+    {
+      "id": "count_002",
+      "class": "count",
+      "image": "images/count_002.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "568c3ee1c75015ce97ed73c1000067f7d116b3f9c59fb297098047c3f01ac87f",
+      "note": ""
+    },
+    {
+      "id": "count_003",
+      "class": "count",
+      "image": "images/count_003.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "7",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "2528474db52200b0685eb233bde179a8b6dbcaf958c60517f59db8368a320b84",
+      "note": ""
+    },
+    {
+      "id": "count_004",
+      "class": "count",
+      "image": "images/count_004.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "5",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "f020a17435ef5a25b7008540ee56a70745801f5ce647bbbe044c08934471f440",
+      "note": ""
+    },
+    {
+      "id": "count_005",
+      "class": "count",
+      "image": "images/count_005.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "cb2219cb096b169103709fd6f8700dfdd2ce36a60fadf571abaa003bba886656",
+      "note": ""
+    },
+    {
+      "id": "count_006",
+      "class": "count",
+      "image": "images/count_006.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "6",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "a1638dcea01cf223f6048384c335e25b122af37abd483bf1e6a0de6591d2edc0",
+      "note": ""
+    },
+    {
+      "id": "count_007",
+      "class": "count",
+      "image": "images/count_007.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "1",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "6430055334b7d9e66fe686320415a3e6c9b9afec576e80b240d0801da619b8ea",
+      "note": ""
+    },
+    {
+      "id": "count_008",
+      "class": "count",
+      "image": "images/count_008.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "fa12515b8bfba998e8b29b8a7298b500eea155cc5635548e50c7af3a891febc7",
+      "note": ""
+    },
+    {
+      "id": "count_009",
+      "class": "count",
+      "image": "images/count_009.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "98aa0d40680a01336c0b157f97e94ba755add13b2628a6d5bd7e423dfe12790c",
+      "note": ""
+    },
+    {
+      "id": "count_010",
+      "class": "count",
+      "image": "images/count_010.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "2",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "7c7e1cf2a1c7ee211433d5cc56b8a918390fb21e5ab6498862d74245078856c5",
+      "note": ""
+    },
+    {
+      "id": "count_011",
+      "class": "count",
+      "image": "images/count_011.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "8",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "9a0e75c4bfb0c3d668824d13f7a45db02100b8c643d4951ea46591bf38327a9a",
+      "note": ""
+    },
+    {
+      "id": "count_012",
+      "class": "count",
+      "image": "images/count_012.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "5",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "d9a4687b83086425f6bd1b3db3ef0152d2e7e00d7edeb74921717e94f1ebd44f",
+      "note": ""
+    },
+    {
+      "id": "count_013",
+      "class": "count",
+      "image": "images/count_013.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "2",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "331d7678e335421d5363259bf55570280abc43e18007142cd85f6d68104a1766",
+      "note": ""
+    },
+    {
+      "id": "count_014",
+      "class": "count",
+      "image": "images/count_014.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "6",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "3ecdfc3812cbdf389580bd648200c685cf36d44f237aa2889e86d23120e84f19",
+      "note": ""
+    },
+    {
+      "id": "count_015",
+      "class": "count",
+      "image": "images/count_015.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "fea1ce117b5884519365e025b5f2ddff49282662b809d71e961498d0f8725a85",
+      "note": ""
+    },
+    {
+      "id": "count_016",
+      "class": "count",
+      "image": "images/count_016.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "3",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "907551402b0a9ff9b957369fda3ca8f3d9d27ba795140161e17fb498d330a82d",
+      "note": ""
+    },
+    {
+      "id": "count_017",
+      "class": "count",
+      "image": "images/count_017.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "6",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "d06d340c7128525b284689be905dd2040ced10b369b5e395a45b134dddae4137",
+      "note": ""
+    },
+    {
+      "id": "count_018",
+      "class": "count",
+      "image": "images/count_018.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "4",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "cca4cc8e1196eeb5b1f90f22101f4ac60803c191dcbcd7ad0d666fe56a27058b",
+      "note": ""
+    },
+    {
+      "id": "count_019",
+      "class": "count",
+      "image": "images/count_019.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "2",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "c713c1ae429ebc4cb11a408170cd9d3ab550292abf5639e49975c9393ba97459",
+      "note": ""
+    },
+    {
+      "id": "count_020",
+      "class": "count",
+      "image": "images/count_020.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "2",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "d6719e013bdc7ae6a444706a6f0b131707ff6748b8f82dff4a72df6b60500e27",
+      "note": ""
+    },
+    {
+      "id": "count_021",
+      "class": "count",
+      "image": "images/count_021.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "8",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "b3ab7000bd228b101c8d6cfca39f8e9af7e95457706397afc22a26cf5698a03e",
+      "note": ""
+    },
+    {
+      "id": "count_022",
+      "class": "count",
+      "image": "images/count_022.png",
+      "question": "How many circles are in this image? Answer with a single digit.",
+      "answer": "6",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "181bcc4ba6eca12ef1e6dc68cc01afbd178848e74a0ecb89f3b1c14c02572828",
+      "note": ""
+    },
+    {
+      "id": "count_023",
+      "class": "count",
+      "image": "images/count_023.png",
+      "question": "How many squares are in this image? Answer with a single digit.",
+      "answer": "6",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "b4021a332d4c28cee3541e7cdfd0fe00761f3d74a1c810b454e43a1cc7abbe66",
+      "note": ""
+    },
+    {
+      "id": "count_024",
+      "class": "count",
+      "image": "images/count_024.png",
+      "question": "How many triangles are in this image? Answer with a single digit.",
+      "answer": "3",
+      "chance": 0.125,
+      "options": null,
+      "sha256": "62c24287aa0dc538f17008ffce44df47a8a6e29b7a7b4747479d4f781ae83d78",
+      "note": ""
+    },
+    {
+      "id": "colour_000",
+      "class": "colour",
+      "image": "images/colour_000.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "purple",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "4fbbc7646b6d0afcbf47570c895e04f51d98165e8c7697dbf158e0bf8e289f42",
+      "note": "distractor circle is yellow"
+    },
+    {
+      "id": "colour_001",
+      "class": "colour",
+      "image": "images/colour_001.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "dbbdb04485bfe1e3f01a1df0aa76acf9dc5c8d41a2695cd20617bddee24ccd63",
+      "note": "distractor triangle is orange"
+    },
+    {
+      "id": "colour_002",
+      "class": "colour",
+      "image": "images/colour_002.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "purple",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "e18e2c6b07bcbf8f356a577e5586e7bb234ad487de6165276c6309f6ba4fc4c2",
+      "note": "distractor square is blue"
+    },
+    {
+      "id": "colour_003",
+      "class": "colour",
+      "image": "images/colour_003.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "d2745de540fd7d823622f0a21e701feadd6b60d6e2966f26053998ca8434c74b",
+      "note": "distractor triangle is orange"
+    },
+    {
+      "id": "colour_004",
+      "class": "colour",
+      "image": "images/colour_004.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "blue",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "452b8d77b26b4c4e383048f7aeb4dd201599763d304bdfd926efdbc1fa8b5d07",
+      "note": "distractor square is purple"
+    },
+    {
+      "id": "colour_005",
+      "class": "colour",
+      "image": "images/colour_005.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "19a6d0a47d798e7bc4d6650f9cb8708bad8edb879d6a38076c9041c3b8f9b94f",
+      "note": "distractor triangle is yellow"
+    },
+    {
+      "id": "colour_006",
+      "class": "colour",
+      "image": "images/colour_006.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "red",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "128b685f9efa50ba1bcb707455410ca38bb72647a7a765bf11f515ecebf75a6d",
+      "note": "distractor circle is blue"
+    },
+    {
+      "id": "colour_007",
+      "class": "colour",
+      "image": "images/colour_007.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "orange",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "0fe716e181be7a8815d078599b89868e44ad7bf313b50065f76e7838edceef4c",
+      "note": "distractor circle is yellow"
+    },
+    {
+      "id": "colour_008",
+      "class": "colour",
+      "image": "images/colour_008.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "yellow",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "4d09337c9275db249bd9ee8ffbba1c71c78a57dd7b6e04026738fead7fda9dd9",
+      "note": "distractor triangle is green"
+    },
+    {
+      "id": "colour_009",
+      "class": "colour",
+      "image": "images/colour_009.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "yellow",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "54fe96c78b4d1402eff9998d03c2a0b76c65e7959d809fef01ef065f4a0462ad",
+      "note": "distractor circle is green"
+    },
+    {
+      "id": "colour_010",
+      "class": "colour",
+      "image": "images/colour_010.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "blue",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "f268140c43eccb46cff09bb10cc4792cdf8a4204fa4410532a8e395664cd8387",
+      "note": "distractor triangle is purple"
+    },
+    {
+      "id": "colour_011",
+      "class": "colour",
+      "image": "images/colour_011.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "orange",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "92b3efbd8e883e6329c1d9dad44a8fbfb8f2ee8fc32fcf327c363bc6d4403b09",
+      "note": "distractor square is purple"
+    },
+    {
+      "id": "colour_012",
+      "class": "colour",
+      "image": "images/colour_012.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "051dfa230a966c1887660b2b98dd69193f029fdebdccfb8d0a9c6560f11973a7",
+      "note": "distractor triangle is yellow"
+    },
+    {
+      "id": "colour_013",
+      "class": "colour",
+      "image": "images/colour_013.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "blue",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "ed6d5a82766854aa091d993a038f29d1bef72140e2a06c9b0d6f23c637ce8913",
+      "note": "distractor circle is yellow"
+    },
+    {
+      "id": "colour_014",
+      "class": "colour",
+      "image": "images/colour_014.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "orange",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "9d1ad4cea7ed123fb0b8957348ec729a34c271c0c8cb658dadb6e5ef45cbfec6",
+      "note": "distractor circle is red"
+    },
+    {
+      "id": "colour_015",
+      "class": "colour",
+      "image": "images/colour_015.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "purple",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "7dae17785e928d7082b772b813e1a5a5d6a3fb514a7b46c171ba1f6f264c281b",
+      "note": "distractor triangle is red"
+    },
+    {
+      "id": "colour_016",
+      "class": "colour",
+      "image": "images/colour_016.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "red",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "f1be0d7c8d28b9b11bac18b29fbe8bc4b16e9ed416090a3a2c4bd9bf0126e6a6",
+      "note": "distractor square is green"
+    },
+    {
+      "id": "colour_017",
+      "class": "colour",
+      "image": "images/colour_017.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "638f05119fff324b1610f988c7b0f36f34d7c3957e9f6d58f05ffaa22e02c14a",
+      "note": "distractor circle is red"
+    },
+    {
+      "id": "colour_018",
+      "class": "colour",
+      "image": "images/colour_018.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "red",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "92f1207d34853ee3c9d67489f23deeafb621be707dfb66c5ada350efb0498662",
+      "note": "distractor square is yellow"
+    },
+    {
+      "id": "colour_019",
+      "class": "colour",
+      "image": "images/colour_019.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "6e7bb33e6520e8b2e2a11a6f2c1b9140177b198fd05e64b31ccdb2d64aa38177",
+      "note": "distractor triangle is purple"
+    },
+    {
+      "id": "colour_020",
+      "class": "colour",
+      "image": "images/colour_020.png",
+      "question": "What colour is the circle? Answer with one word.",
+      "answer": "yellow",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "c2ebd908b0a9e1fdd5237c6a6de39ab652ebf40cdc58ce66202571b3a42ce7fc",
+      "note": "distractor square is orange"
+    },
+    {
+      "id": "colour_021",
+      "class": "colour",
+      "image": "images/colour_021.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "red",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "a65c0ff211e1bd640e6d15a0c87f71ac843fb94416c9b0c7fb9917c3581c04f0",
+      "note": "distractor circle is orange"
+    },
+    {
+      "id": "colour_022",
+      "class": "colour",
+      "image": "images/colour_022.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "yellow",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "78a05716ba9456b65c685a30794a63d9dd9244aa160d6960209103760723f764",
+      "note": "distractor triangle is green"
+    },
+    {
+      "id": "colour_023",
+      "class": "colour",
+      "image": "images/colour_023.png",
+      "question": "What colour is the square? Answer with one word.",
+      "answer": "green",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "2512ce5ed972eb13dec8ee2f5bcf06ca1f9006673999dc8a864a80de31522919",
+      "note": "distractor triangle is blue"
+    },
+    {
+      "id": "colour_024",
+      "class": "colour",
+      "image": "images/colour_024.png",
+      "question": "What colour is the triangle? Answer with one word.",
+      "answer": "orange",
+      "chance": 0.16666666666666666,
+      "options": null,
+      "sha256": "41307608120c958b19608192610ee14c480d62e7d19d2a3587e96b874b7ba864",
+      "note": "distractor circle is yellow"
+    },
+    {
+      "id": "spatial_000",
+      "class": "spatial",
+      "image": "images/spatial_000.png",
+      "question": "Which shape is at the top, the triangle or the circle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "circle"
+      ],
+      "sha256": "4205830457d7d40d089155b185d65507bed6c8ed1fa22d2a52704883f40a6c2a",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_001",
+      "class": "spatial",
+      "image": "images/spatial_001.png",
+      "question": "Which shape is on the left, the triangle or the square? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "square"
+      ],
+      "sha256": "c4e5ccf56b2abdf65b2c152de82232f1d27e20763d2076f91f40333a72be2cc3",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_002",
+      "class": "spatial",
+      "image": "images/spatial_002.png",
+      "question": "Which shape is on the left, the square or the circle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "circle"
+      ],
+      "sha256": "91101309506d26e9a55ad339011b4cb0ce3a4e808165ad677a1ff101eb0214c1",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_003",
+      "class": "spatial",
+      "image": "images/spatial_003.png",
+      "question": "Which shape is on the left, the triangle or the square? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "square"
+      ],
+      "sha256": "c97516653e99b98ccb961fd995e7d5fa94f74fe14d9545683f823ae8a50031c7",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_004",
+      "class": "spatial",
+      "image": "images/spatial_004.png",
+      "question": "Which shape is on the left, the triangle or the square? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "square"
+      ],
+      "sha256": "b783e16b813de00743888e99626c58bf0f362dc04fab9e4dcba434eb8698c854",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_005",
+      "class": "spatial",
+      "image": "images/spatial_005.png",
+      "question": "Which shape is at the top, the circle or the triangle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "0d850eed55384ed47a5861927c7289da3b44e444b847bfdc2f9871a61b629dd0",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_006",
+      "class": "spatial",
+      "image": "images/spatial_006.png",
+      "question": "Which shape is at the top, the square or the triangle? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "triangle"
+      ],
+      "sha256": "1572be126856e1df84e12643fcc105abf9f030b9d84a475a07a04adef65c5f35",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_007",
+      "class": "spatial",
+      "image": "images/spatial_007.png",
+      "question": "Which shape is on the left, the square or the triangle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "triangle"
+      ],
+      "sha256": "9223233aba6d8754f49e7602ec75f04b23feabe4449e89fd5be00365e83ecc8d",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_008",
+      "class": "spatial",
+      "image": "images/spatial_008.png",
+      "question": "Which shape is on the left, the circle or the square? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "square"
+      ],
+      "sha256": "2145fcc70529fe28254e58685658af4d79ca2f8c01c68d3a70b7628ab2f26efe",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_009",
+      "class": "spatial",
+      "image": "images/spatial_009.png",
+      "question": "Which shape is at the top, the circle or the triangle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "5dd497dd1eb737bc468559aa51107f1b5f5404a92478592a1d97bff0cb17bc34",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_010",
+      "class": "spatial",
+      "image": "images/spatial_010.png",
+      "question": "Which shape is at the top, the triangle or the square? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "square"
+      ],
+      "sha256": "e14e07dd3d7cc5b817429c9f19f115cb34b1cb6e35cf3adad03c1667e4a83317",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_011",
+      "class": "spatial",
+      "image": "images/spatial_011.png",
+      "question": "Which shape is at the top, the triangle or the circle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "circle"
+      ],
+      "sha256": "ea68ffec20005bd206b2dbc3a3a8aa08a9c86d88dd7c56ab7d1e59fd24717ce2",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_012",
+      "class": "spatial",
+      "image": "images/spatial_012.png",
+      "question": "Which shape is at the top, the square or the triangle? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "triangle"
+      ],
+      "sha256": "843174dd46c27d46afae1075eb9976e56d73ae749fad0e3b15f48a5885183021",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_013",
+      "class": "spatial",
+      "image": "images/spatial_013.png",
+      "question": "Which shape is on the left, the circle or the triangle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "52b9ef121feefd1642b1bacef3d3c43298414d07186a27b25affbb77f2a19c65",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_014",
+      "class": "spatial",
+      "image": "images/spatial_014.png",
+      "question": "Which shape is on the left, the circle or the triangle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "5e233370f049283d8a5c089d61be7885755265a708be0fea2f178b9f5b408bc2",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_015",
+      "class": "spatial",
+      "image": "images/spatial_015.png",
+      "question": "Which shape is on the left, the circle or the triangle? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "fff9aa35f0997e5a1a68d6af79062c78b9f282982cfd47b055b3503158a1bab4",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_016",
+      "class": "spatial",
+      "image": "images/spatial_016.png",
+      "question": "Which shape is at the top, the circle or the triangle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "6fc2b8185e4e7c0ca982a09722359e16e0099554c227a3ca2bb750db3b4222a2",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_017",
+      "class": "spatial",
+      "image": "images/spatial_017.png",
+      "question": "Which shape is at the top, the circle or the square? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "square"
+      ],
+      "sha256": "e2ae14aed6da3b0e2f6a5ddf297700c0f5116b03f9233d945d890093ce2fc75e",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_018",
+      "class": "spatial",
+      "image": "images/spatial_018.png",
+      "question": "Which shape is on the left, the square or the circle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "circle"
+      ],
+      "sha256": "91101309506d26e9a55ad339011b4cb0ce3a4e808165ad677a1ff101eb0214c1",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "spatial_019",
+      "class": "spatial",
+      "image": "images/spatial_019.png",
+      "question": "Which shape is at the top, the triangle or the square? Answer with one word.",
+      "answer": "triangle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "square"
+      ],
+      "sha256": "8e064fd99ecb5391f5eaace354c80c41ac34176d5d4da1ed321b3ed10d898535",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_020",
+      "class": "spatial",
+      "image": "images/spatial_020.png",
+      "question": "Which shape is at the top, the circle or the triangle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "triangle"
+      ],
+      "sha256": "9e4ba3621c199aab82b6fa453567b2c77bf8f0261a8aeee76d9932a181a562d4",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_021",
+      "class": "spatial",
+      "image": "images/spatial_021.png",
+      "question": "Which shape is at the top, the square or the triangle? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "triangle"
+      ],
+      "sha256": "f5b0e2ebf0c1a5309fdfc628fa76a3d3f43745328c9d013da3b85aa92ed84123",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_022",
+      "class": "spatial",
+      "image": "images/spatial_022.png",
+      "question": "Which shape is at the top, the triangle or the circle? Answer with one word.",
+      "answer": "circle",
+      "chance": 0.5,
+      "options": [
+        "triangle",
+        "circle"
+      ],
+      "sha256": "4fec557d097c4d242a6d6f549f92753dea9b803101138e66307208c21630123b",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_023",
+      "class": "spatial",
+      "image": "images/spatial_023.png",
+      "question": "Which shape is at the top, the circle or the square? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "circle",
+        "square"
+      ],
+      "sha256": "b5bb11ad8f4961c314c4d3e95d057cea91c9cf3677b2b1041cad3ee88e0aa147",
+      "note": "axis=vertical rel=above"
+    },
+    {
+      "id": "spatial_024",
+      "class": "spatial",
+      "image": "images/spatial_024.png",
+      "question": "Which shape is on the left, the square or the triangle? Answer with one word.",
+      "answer": "square",
+      "chance": 0.5,
+      "options": [
+        "square",
+        "triangle"
+      ],
+      "sha256": "81c400e291769b63d12fdd464b91de1dd5ce3acf43adeb6a011efa721133a7e6",
+      "note": "axis=horizontal rel=left"
+    },
+    {
+      "id": "ocr_000",
+      "class": "ocr",
+      "image": "images/ocr_000.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "FV88",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "91dce2840d4ff4b512cbc6e00f1cb9096737ce27b261a6a8cd0b55b1bda4fafe",
+      "note": ""
+    },
+    {
+      "id": "ocr_001",
+      "class": "ocr",
+      "image": "images/ocr_001.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "TTTP",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "75894dd8370dd997526c09c7836fb8bf2e6b6c10710edcb2069e54f0fc88c85b",
+      "note": ""
+    },
+    {
+      "id": "ocr_002",
+      "class": "ocr",
+      "image": "images/ocr_002.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "KN9Q",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "2a5a0451131d2a51d3f29d3d84d80f580766616a7025809d57089959eda8ae15",
+      "note": ""
+    },
+    {
+      "id": "ocr_003",
+      "class": "ocr",
+      "image": "images/ocr_003.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "W5R6",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "5028d05e41435ca4c3997c6e7ea546a94ed1da37e6f242978f7eebb662974ff7",
+      "note": ""
+    },
+    {
+      "id": "ocr_004",
+      "class": "ocr",
+      "image": "images/ocr_004.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "AEVT",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "b8ea73dc962855070fd28ccc62ea836716a13136f807713f57b581c4510a802b",
+      "note": ""
+    },
+    {
+      "id": "ocr_005",
+      "class": "ocr",
+      "image": "images/ocr_005.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "BLVT",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "9c883918507d5920bd53406089797cf1a0ffefa23e28d5630256bc9b032e4f53",
+      "note": ""
+    },
+    {
+      "id": "ocr_006",
+      "class": "ocr",
+      "image": "images/ocr_006.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "SH26",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "3fa8992c9e5ef6d79292e0cc9fc6e74b2e75fe49ff42fc3d38b3cca7216d44e8",
+      "note": ""
+    },
+    {
+      "id": "ocr_007",
+      "class": "ocr",
+      "image": "images/ocr_007.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "W3V9",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "db6ad62d345b0dcc4eab8fbc9966211e2d0f0304dce7d8da5e716ef3cd7ae2ff",
+      "note": ""
+    },
+    {
+      "id": "ocr_008",
+      "class": "ocr",
+      "image": "images/ocr_008.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "QVQQ",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "56a102d1ff53ceb874cfdb407a4292fcb26fb2972ac9cb084399397068f5d7d7",
+      "note": ""
+    },
+    {
+      "id": "ocr_009",
+      "class": "ocr",
+      "image": "images/ocr_009.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "ZKGJ",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "62bf8d89cc43bd38db4724b8c8d689641bf04fc87475dfed228823b5bdd1a11a",
+      "note": ""
+    },
+    {
+      "id": "ocr_010",
+      "class": "ocr",
+      "image": "images/ocr_010.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "9UC9",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "a3a9af8d87f27ed4c021a5891919ebb8f5c1b42ad07b8b25183fa3560487ccc8",
+      "note": ""
+    },
+    {
+      "id": "ocr_011",
+      "class": "ocr",
+      "image": "images/ocr_011.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "HF4W",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "6f0ea623ccced89d65b981657dba439d288477222096f8a9a31372d757ff654a",
+      "note": ""
+    },
+    {
+      "id": "ocr_012",
+      "class": "ocr",
+      "image": "images/ocr_012.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "XNN3",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "5cbdeaae9a7c2e111a9ecbd184d8d0cfee19e0811d8eff12e2a21e16089c3a60",
+      "note": ""
+    },
+    {
+      "id": "ocr_013",
+      "class": "ocr",
+      "image": "images/ocr_013.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "DQN6",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "269abb3993307b32baeadaaed0025b90b6ad8f5b58eeb58559408a80f8acb8fe",
+      "note": ""
+    },
+    {
+      "id": "ocr_014",
+      "class": "ocr",
+      "image": "images/ocr_014.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "SV7E",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "f2a71700f92539ee4945c2a3b24f132f1d411853ce9b27468b0bae41549a7322",
+      "note": ""
+    },
+    {
+      "id": "ocr_015",
+      "class": "ocr",
+      "image": "images/ocr_015.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "RNCP",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "609571b0969cbcef32dce2b3aa24f26d14392e89cbb3b2b4b0808a3a1d1204de",
+      "note": ""
+    },
+    {
+      "id": "ocr_016",
+      "class": "ocr",
+      "image": "images/ocr_016.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "T3KH",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "7e98a1f633b6cf9ecbefb09a9e0caf94a583a7ead089ac508b9e8ac829a8bc56",
+      "note": ""
+    },
+    {
+      "id": "ocr_017",
+      "class": "ocr",
+      "image": "images/ocr_017.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "ASSJ",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "e16bbb6b85eb29b86aed3a2188bc888331a8a6f96cfc3e7698fc41080f94c4ec",
+      "note": ""
+    },
+    {
+      "id": "ocr_018",
+      "class": "ocr",
+      "image": "images/ocr_018.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "VLBC",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "ce5a3b64d5f175bb8e09bf2b9207af9b9ac834e2dddd3d5f9ceaf073cea0ea49",
+      "note": ""
+    },
+    {
+      "id": "ocr_019",
+      "class": "ocr",
+      "image": "images/ocr_019.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "GZUX",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "b6cfb7f2ded8491f5af8da66bbb3f28d90903e4e76513bdea6150c6edd4b963b",
+      "note": ""
+    },
+    {
+      "id": "ocr_020",
+      "class": "ocr",
+      "image": "images/ocr_020.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "UAKC",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "992d2e3a18c73e37fc631cfb074d0fd3e0c7664993d8da5daf8e7022d53f2afa",
+      "note": ""
+    },
+    {
+      "id": "ocr_021",
+      "class": "ocr",
+      "image": "images/ocr_021.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "YE6J",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "5229f5c6af8ff2d2f004896353227c891d2ed21ab678812c1456544afb8346c0",
+      "note": ""
+    },
+    {
+      "id": "ocr_022",
+      "class": "ocr",
+      "image": "images/ocr_022.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "NRTW",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "3b65a7c56f0446475913f4759731395073b5dc60805398a374d0a7a251eb8901",
+      "note": ""
+    },
+    {
+      "id": "ocr_023",
+      "class": "ocr",
+      "image": "images/ocr_023.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "L7J9",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "07e9adbb4b88fe7428bf47d5be3579d9222dc9ec5a713a0bd9b28e57b29c799c",
+      "note": ""
+    },
+    {
+      "id": "ocr_024",
+      "class": "ocr",
+      "image": "images/ocr_024.png",
+      "question": "What four-character code is written in this image? Answer with the code only.",
+      "answer": "XRHN",
+      "chance": 9.5367431640625e-07,
+      "options": null,
+      "sha256": "5bdc639d60d248e96c4f32a059a90248931d738b344243c2d0cd083cdea77944",
+      "note": ""
+    }
+  ]
+}
