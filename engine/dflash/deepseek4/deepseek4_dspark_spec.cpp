@@ -1150,8 +1150,10 @@ bool run_deepseek4_dspark_spec_decode(
         int win_len,
         std::vector<int32_t> & out_tokens,
         float * accept_rate_out,
+        int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute,
         const std::function<bool(int32_t)> & on_token) {
+    if (spec_cycles_out) *spec_cycles_out = 0;
     const int n_embd = target_w.n_embd;
     const int n_tgt = drafter.n_target_layers;
     const int block = drafter.block_size;
@@ -2077,6 +2079,9 @@ bool run_deepseek4_dspark_spec_decode(
         *accept_rate_out = offered_sum > 0
             ? (float) accept_sum / (float) offered_sum
             : 0.0f;
+    }
+    if (spec_cycles_out) {
+        *spec_cycles_out = steps > INT_MAX ? INT_MAX : (int) steps;
     }
     std::fprintf(stderr,
                  "[ds4-spec] gen=%d steps=%ld mean_accept=%.2f/%.2f "

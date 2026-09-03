@@ -403,11 +403,55 @@ static void test_visibility_and_prefill_boundaries() {
           !deepseek4_raw_attention_visible(0, 0, 0, 0, 0) &&
           !deepseek4_raw_attention_visible(0, 0, 128, -1, 0),
           "invalid raw-attention shapes fail closed");
+    const int windows[] = {0, 1, 64, 128};
+    const int visible_lefts[] = {-1, 0, 1, 140};
+    const int visible_rights[] = {-1, 0, 1, 20};
+    bool visibility_matches_reference = true;
+    for (int query = -1; query <= 260; ++query) {
+        for (int key = -1; key <= 280; ++key) {
+            for (int window : windows) {
+                for (int visible_left : visible_lefts) {
+                    for (int visible_right : visible_rights) {
+                        bool reference = false;
+                        if (query >= 0 && key >= 0 && window > 0 &&
+                            visible_left >= 0 && visible_right >= 0) {
+                            const int64_t ordinary_start =
+                                static_cast<int64_t>(query) - window + 1;
+                            const int64_t image_start =
+                                static_cast<int64_t>(query) - visible_left;
+                            const int64_t start =
+                                std::min(ordinary_start, image_start);
+                            const int64_t end =
+                                static_cast<int64_t>(query) + visible_right;
+                            reference = static_cast<int64_t>(key) >=
+                                            std::max<int64_t>(0, start) &&
+                                        static_cast<int64_t>(key) <= end;
+                        }
+                        if (deepseek4_raw_attention_visible(
+                                query, key, window, visible_left,
+                                visible_right) != reference) {
+                            visibility_matches_reference = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(visibility_matches_reference,
+          "inline raw-attention predicate matches the original scalar form");
     CHECK(deepseek4_validate_vision_chunk_ids(prompt, vocab),
           "complete learned image blocks are valid graph inputs");
     CHECK(!deepseek4_vision_graph_cache_safe(prompt, vocab) &&
           deepseek4_vision_graph_cache_safe({10, 11, 12}, vocab),
           "image visibility and row partitions disable graph-cache reuse");
+    const int32_t text_ids[] = {10, 11, 12};
+    const int32_t invalid_ids[] = {10, -1, 12};
+    CHECK(deepseek4_vision_graph_cache_safe(text_ids, 3, vocab) &&
+          !deepseek4_vision_graph_cache_safe(
+              prompt.data(), prompt.size(), vocab) &&
+          !deepseek4_vision_graph_cache_safe(invalid_ids, 3, vocab) &&
+          deepseek4_vision_graph_cache_safe(nullptr, 0, vocab),
+          "allocation-free vision graph-cache containment mismatch");
     std::vector<int32_t> partial(prompt.begin(), prompt.end() - 2);
     CHECK(!deepseek4_validate_vision_chunk_ids(partial, vocab),
           "a graph chunk ending before the image boundary is rejected");

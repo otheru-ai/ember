@@ -353,13 +353,13 @@ target_include_directories(test_qwen4exp_yarn_reference PRIVATE
 ember_strict(test_qwen4exp_yarn_reference)
 add_test(NAME qwen4exp_yarn_reference COMMAND test_qwen4exp_yarn_reference)
 
-add_executable(test_qwen4exp_activation_dump
-  test/test_qwen4exp_activation_dump.cpp
-  engine/dflash/qwen4exp/qwen4exp_activation_dump.cpp)
-target_include_directories(test_qwen4exp_activation_dump PRIVATE
-  engine/dflash/qwen4exp)
-ember_strict(test_qwen4exp_activation_dump)
-add_test(NAME qwen4exp_activation_dump COMMAND test_qwen4exp_activation_dump)
+add_executable(test_activation_dump
+  test/test_activation_dump.cpp
+  engine/dflash/common/activation_dump.cpp)
+target_include_directories(test_activation_dump PRIVATE
+  engine/dflash/common engine/dflash/qwen4exp)
+ember_strict(test_activation_dump)
+add_test(NAME activation_dump COMMAND test_activation_dump)
 
 add_executable(test_qwen4exp_vision
   test/test_qwen4exp_vision.cpp
@@ -534,7 +534,7 @@ set(EMBER_C_TESTS
   chat_template_qwen4
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer qwen4exp_contract qwen4exp_shard_paths qwen4exp_state qwen4exp_mtp qwen4exp_reference
-  qwen4exp_yarn_reference qwen4exp_activation_dump qwen4exp_vision
+  qwen4exp_yarn_reference activation_dump qwen4exp_vision
   qwen4exp_vision_provider qwen_yarn
   gguf_quantize_common
   logits_probe_format

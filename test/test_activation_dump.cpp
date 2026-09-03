@@ -1,3 +1,4 @@
+#include "activation_dump.h"
 #include "qwen4exp_activation_dump.h"
 
 #include <cmath>
@@ -43,14 +44,14 @@ int main() {
         first[i] = static_cast<float>(i % 997U) / 997.0f;
         second[i] = -first[i];
     }
-    Qwen4ExpActivationDumpResult result;
+    ActivationDumpResult result;
     std::string error;
-    CHECK(qwen4exp_append_activation_dump(path, first, result, error),
+    CHECK(append_activation_dump(path, first, kQwen4ExpActivationFloats, "Qwen4Exp", result, error),
           "first complete record appended");
     CHECK(result.ordinal == 0 && result.byte_offset == 0,
           "first record position reported");
     CHECK(file_size(path) == record_bytes, "first record has exact size");
-    CHECK(qwen4exp_append_activation_dump(path, second, result, error),
+    CHECK(append_activation_dump(path, second, kQwen4ExpActivationFloats, "Qwen4Exp", result, error),
           "second complete record appended");
     CHECK(result.ordinal == 1 && result.byte_offset == record_bytes,
           "second record position reported");
@@ -66,31 +67,60 @@ int main() {
           "raw record order and values preserved");
 
     std::vector<float> wrong(7, 0.0f);
-    CHECK(!qwen4exp_append_activation_dump(path, wrong, result, error) &&
-          error.find("48x2560") != std::string::npos,
+    CHECK(!append_activation_dump(path, wrong, kQwen4ExpActivationFloats, "Qwen4Exp", result, error) &&
+          error.find(std::to_string(kQwen4ExpActivationFloats)) !=
+              std::string::npos &&
+          error.find("got 7") != std::string::npos,
           "wrong activation shape rejected");
     CHECK(file_size(path) == 2 * record_bytes,
           "shape rejection does not alter output");
     first[17] = std::numeric_limits<float>::quiet_NaN();
-    CHECK(!qwen4exp_append_activation_dump(path, first, result, error) &&
+    CHECK(!append_activation_dump(path, first, kQwen4ExpActivationFloats, "Qwen4Exp", result, error) &&
           error.find("non-finite") != std::string::npos,
           "non-finite activation rejected");
 
     const std::string partial = root + "/partial.f32";
     { std::ofstream out(partial, std::ios::binary); out.put('x'); }
     first[17] = 0.0f;
-    CHECK(!qwen4exp_append_activation_dump(partial, first, result, error) &&
-          error.find("partial record") != std::string::npos,
+    CHECK(!append_activation_dump(partial, first, kQwen4ExpActivationFloats, "Qwen4Exp", result, error) &&
+          error.find("whole number of") != std::string::npos,
           "pre-existing partial capture rejected");
     CHECK(file_size(partial) == 1, "partial capture remains untouched");
-    CHECK(!qwen4exp_append_activation_dump("relative.f32", first, result, error),
+    CHECK(!append_activation_dump("relative.f32", first, kQwen4ExpActivationFloats, "Qwen4Exp", result, error),
           "relative dump path rejected");
+
+    // The DeepSeek-V4 geometry, which is why the record size is a parameter:
+    // 43 captured layers x 4096, not the Qwen 48 x 2560.
+    const size_t ds4_floats = 43u * 4096u;
+    const uint64_t ds4_bytes = static_cast<uint64_t>(ds4_floats * sizeof(float));
+    const std::string ds4_path = root + "/ds4.f32";
+    std::vector<float> ds4(ds4_floats, 0.25f);
+    CHECK(append_activation_dump(ds4_path, ds4, ds4_floats, "DeepSeek4",
+                                 result, error),
+          "DeepSeek4-shaped record appends");
+    CHECK(file_size(ds4_path) == ds4_bytes, "DeepSeek4 record has exact size");
+
+    // A file holds records of ONE size. The format is headerless, so appending
+    // a differently shaped record would silently corrupt every later slice.
+    CHECK(!append_activation_dump(ds4_path, first, kQwen4ExpActivationFloats,
+                                  "Qwen4Exp", result, error) &&
+          !error.empty(),
+          "mixing record geometries in one file is refused");
+    CHECK(file_size(ds4_path) == ds4_bytes,
+          "refused geometry change leaves the dump byte-identical");
+
+    // A zero-size record geometry is a caller bug, not an empty write.
+    CHECK(!append_activation_dump(ds4_path, ds4, 0, "DeepSeek4", result, error),
+          "zero-length record geometry is refused");
+
+    (void)::unlink((ds4_path + ".lock").c_str());
+    (void)::unlink(ds4_path.c_str());
 
     (void)::unlink((path + ".lock").c_str());
     (void)::unlink(path.c_str());
     (void)::unlink((partial + ".lock").c_str());
     (void)::unlink(partial.c_str());
     (void)::rmdir(root.c_str());
-    std::printf("qwen4exp_activation_dump: %d passed, %d failed\n", g_pass, g_fail);
+    std::printf("activation_dump: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

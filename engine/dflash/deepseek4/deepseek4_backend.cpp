@@ -1,6 +1,8 @@
 // DeepSeek4Backend implementation — AR-only decode, chunked prefill.
 
 #include "deepseek4_backend.h"
+
+#include "../common/activation_dump.h"
 #include "deepseek4_internal.h"
 #include "deepseek4_imatrix.h"
 #include "common/errors.h"
@@ -1148,6 +1150,17 @@ bool DeepSeek4Backend::prepare_offline_vision_artifact(
 }
 
 bool DeepSeek4Backend::init() {
+    const char * act_dump = std::getenv("DFLASH_DS4_ACT_DUMP");
+    if (act_dump && act_dump[0]) {
+        activation_dump_path_ = act_dump;
+        if (activation_dump_path_.front() != '/' ||
+            activation_dump_path_.back() == '/') {
+            set_last_error(
+                "DFLASH_DS4_ACT_DUMP must be an absolute output file path");
+            return false;
+        }
+    }
+
     // The shared MMVQ/MMQ crossover defaults to q=3 for NVIDIA. On gfx1151,
     // DSpark q=4 is faster through MMVQ. Keep AR and other devices unchanged,
     // and preserve LUCE_MMVQ_MAX_NCOLS as an explicit override.
@@ -1641,13 +1654,28 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         const int step_chunk = moe_hybrid_
             ? 1
             : step_exact ? exact_chunk : batched_chunk;
-        const int proposed = capture_exact
+        // The activation dump reads the residual at the LAST prompt token, so
+        // it needs what DSpark's capture needs: the preceding chunk split at
+        // the boundary, and the capture step itself a single exact token.
+        // Reusing that machinery keeps one chunking rule instead of two.
+        const int diag_capture_from =
+            diagnostic_capture_layer_ids ? n_total - 1 : -1;
+        const bool diag_capture_exact =
+            diag_capture_from >= 0 && i >= diag_capture_from;
+        const int proposed = (capture_exact || diag_capture_exact)
             ? 1
             : std::min(step_chunk, n_total - i);
+        // Split at whichever boundary comes first; a capture_from at or behind
+        // the cursor is inert in clamp_prefill_chunk and must not win the min.
+        int clamp_capture_from = capture_spec_features ? spec_capture_from : -1;
+        if (diag_capture_from > i &&
+            (clamp_capture_from <= i || diag_capture_from < clamp_capture_from)) {
+            clamp_capture_from = diag_capture_from;
+        }
         int n_tok = clamp_prefill_chunk(
             proposed, i, pos,
             snap_slot >= 0 ? snap_pos : -1,
-            capture_spec_features ? spec_capture_from : -1);
+            clamp_capture_from);
         if (!local_vision.empty()) {
             std::string vision_error;
             n_tok = dflash::deepseek4_image_aware_prefill_chunk(
@@ -1663,9 +1691,12 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
             *max_dispatched_chunk = std::max(*max_dispatched_chunk, n_tok);
         }
 
-        // Embed tokens into a reused, grow-only scratch buffer. embedder.embed()
-        // writes every element below, so it is never read before being filled
-        // and needs no clearing.
+        // Embed tokens into a reused, grow-only scratch buffer. On success,
+        // embedder.embed() writes every element below, so it is never read
+        // before being filled and needs no clearing. Fail closed if it cannot
+        // complete that overwrite: a reused buffer means a partial write would
+        // otherwise leave the PREVIOUS chunk's embeddings in place, which is
+        // worse than a fresh allocation's zeros.
         const size_t embed_need = (size_t) w_.n_embd * (size_t) n_tok;
         if (embed_scratch_.size() < embed_need) {
             embed_scratch_.resize(embed_need);
@@ -1675,7 +1706,12 @@ int DeepSeek4Backend::do_prefill(const std::vector<int32_t> & tokens,
         const int32_t * embed_ids = has_request_vision
             ? safe_embed_ids.values.data() + i
             : tokens.data() + i;
-        w_.embedder.embed(embed_ids, n_tok, embed);
+        if (!w_.embedder.embed(embed_ids, n_tok, embed)) {
+            std::fprintf(stderr,
+                         "[deepseek4] prefill embedding failed at pos=%d count=%d\n",
+                         pos, n_tok);
+            return -1;
+        }
         if (!local_vision.empty()) {
             std::string vision_error;
             if (!dflash::deepseek4_splice_vision_chunk(
@@ -2312,9 +2348,23 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
         sampling_requires_ar, req.n_gen, capture_spec_budget);
     const bool profitability_allowed = !eligible_without_gate ||
         dspark_worker_scheduler().allow_spec_request();
-    const bool prepare_spec = req.vision.empty() &&
+    // Activation dump: one residual record per prompt, for refusal-direction
+    // extraction. It shares the graph's single capture slot with DSpark, so it
+    // takes the request off speculation and onto the exact prefill path. That
+    // changes timing, which is why it is env-gated and off by default -- never
+    // enable it on a run whose numbers are being published.
+    std::vector<int> act_capture_ids;
+    std::vector<float> act_capture;
+    const bool act_dump =
+        !activation_dump_path_.empty() && !req.prompt.empty();
+    if (act_dump) {
+        act_capture_ids.resize((size_t) w_.n_layer);
+        for (int l = 0; l < w_.n_layer; ++l) act_capture_ids[(size_t) l] = l;
+    }
+    const bool prepare_spec = req.vision.empty() && !act_dump &&
         eligible_without_gate && profitability_allowed;
-    describe_prefill(result, cfg_.prefill_mode, req.force_exact_prefill,
+    describe_prefill(result, cfg_.prefill_mode,
+                     req.force_exact_prefill || act_dump,
                      prepare_spec, req.force_ar_decode,
                      (int)req.prompt.size());
 
@@ -2322,11 +2372,35 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     int committed = do_prefill(req.prompt, out_io, /*kv_offset=*/0,
                                req.snap_pos, req.snap_slot,
                                prepare_spec,
-                               req.force_exact_prefill,
-                               &req.vision);
+                               req.force_exact_prefill || act_dump,
+                               &req.vision,
+                               /*max_dispatched_chunk=*/nullptr,
+                               act_dump ? &act_capture_ids : nullptr,
+                               act_dump ? &act_capture : nullptr);
     if (committed < 0) {
         result.fail(GenerateErrorCode::PrefillFailed);
         return result;
+    }
+    if (act_dump) {
+        // Fail the request rather than let a short or missing record land in a
+        // file an extractor will later read as evidence.
+        dflash::common::ActivationDumpResult dump_result;
+        std::string dump_error;
+        if (!dflash::common::append_activation_dump(
+                activation_dump_path_, act_capture,
+                act_capture_ids.size() * (size_t) w_.n_embd, "DeepSeek4",
+                dump_result, dump_error)) {
+            result.fail(GenerateErrorCode::PrefillFailed,
+                        "activation dump failed: " + dump_error);
+            return result;
+        }
+        std::fprintf(stderr,
+                     "[deepseek4] activation dump record=%llu offset=%llu "
+                     "layers=%zu width=%d path=%s\n",
+                     (unsigned long long) dump_result.ordinal,
+                     (unsigned long long) dump_result.byte_offset,
+                     act_capture_ids.size(), w_.n_embd,
+                     activation_dump_path_.c_str());
     }
     maybe_log_prefill_fingerprint(last_logits_, committed);
     result.prefill_s = elapsed_s(t0);
@@ -2351,6 +2425,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     std::vector<int32_t> gen;
     gen.reserve((size_t) req.n_gen);
     float accept_rate = 0.0f;
+    int spec_cycles = 0;
     bool spec_ran = false;
     bool spec_terminal = false;   // spec finished the generation on its own
     bool spec_degenerate = false;
@@ -2381,7 +2456,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                     backend_, cfg_.device.gpu, w_, cache_, *spec_drafter_, committed, seed,
                     spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr, win_len,
-                    spec_toks, &accept_rate, spec_xdna_draft_compute_.get(),
+                    spec_toks, &accept_rate, &spec_cycles,
+                    spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t tok) {
                         if (out_io.cancelled) return false;
@@ -2436,6 +2512,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);
         std::fprintf(stderr,
@@ -2753,6 +2830,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     std::vector<int32_t> generated;
     generated.reserve((size_t) req.n_gen);
     float accept_rate = 0.0f;
+    int spec_cycles = 0;
     bool spec_ran = false;
     bool spec_terminal = false;
     bool spec_degenerate = false;
@@ -2788,7 +2866,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                     backend_, cfg_.device.gpu, w_, cache_, *spec_drafter_,
                     committed, seed, spec_budget - 1,
                     win_len > 0 ? spec_feat_window_.data() : nullptr,
-                    win_len, spec_tokens, &accept_rate,
+                    win_len, spec_tokens, &accept_rate, &spec_cycles,
                     spec_xdna_draft_compute_.get(),
                     [&out_io, &spec_progress, &spec_degenerate,
                      &termination_reason](int32_t token) {
@@ -2841,6 +2919,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);
         std::fprintf(stderr,

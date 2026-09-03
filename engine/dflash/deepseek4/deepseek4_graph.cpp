@@ -5749,18 +5749,13 @@ static int ds4_try_layer_major_prefill(
         }
     }
 
-    bool has_vision_tokens = false;
+    const bool has_vision_tokens =
+        ds4_has_vision_tokens(token_ids, n_tokens, w.n_vocab);
     std::vector<int32_t> vision_ids;
     std::vector<int32_t> vision_left;
     std::vector<int32_t> vision_right;
-    if (token_ids) {
+    if (has_vision_tokens) {
         vision_ids.assign(token_ids, token_ids + n_tokens);
-        for (int32_t token : vision_ids) {
-            if (token >= w.n_vocab) {
-                has_vision_tokens = true;
-                break;
-            }
-        }
     }
     if (has_vision_tokens) {
         std::string vision_error;
@@ -5813,8 +5808,10 @@ static int ds4_try_layer_major_prefill(
     // shape of a text control run -- same-length chunks at kv_start 0 -- so the
     // cache is disabled outright while collecting rather than worked around.
     ds4::ImatrixCollector * const imx_collect = ds4::ImatrixCollector::instance();
-    if (!imx_collect && token_ids && dflash::deepseek4_vision_graph_cache_safe(
-                         vision_ids, w.n_vocab)) {
+    const bool vision_graph_cache_safe = token_ids &&
+        dflash::deepseek4_vision_graph_cache_safe(
+            token_ids, static_cast<size_t>(n_tokens), w.n_vocab);
+    if (!imx_collect && vision_graph_cache_safe) {
         for (auto & candidate : ds4_layer_major_graph_caches) {
             if (candidate.matches(w, cache, backend, cache.prefill_mode,
                                   n_tokens, kv_start, capture_ids)) {
