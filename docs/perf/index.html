@@ -99,6 +99,11 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
   .stat-value{font-size:38px}
   .stat-unit{font-size:14px}
 }
+  table.vision{width:100%;border-collapse:collapse;font-size:14px}
+  table.vision th,table.vision td{padding:8px 10px;text-align:right;
+    border-bottom:1px solid var(--line)}
+  table.vision th:first-child,table.vision td:first-child{text-align:left}
+  table.vision th{font-weight:600;opacity:.75}
 </style>
 </head>
 <body>
@@ -137,6 +142,21 @@ code{font-family:var(--mono);font-size:12.5px;color:var(--muted)}
       <div><span class="eyebrow">Generation</span><h2 id="wl-title">Decode throughput by workload</h2></div>
     </div>
     <div id="wl-chart" class="chart"></div>
+  </section>
+
+  <section class="card" id="vision-card" hidden>
+    <div class="section-heading">
+      <div><span class="eyebrow">Images</span><h2>Vision request cost</h2></div>
+    </div>
+    <p class="note">
+      Image requests decline speculation and resident batching, so their decode
+      is autoregressive and is <strong>not</strong> comparable with the
+      speculative text figures above. The first image of a server's life also
+      pays to load the vision tower; that cost is shown separately because it
+      happens once, not per request. Releases before vision shipped have no row
+      here because nothing measured them, not because they scored zero.
+    </p>
+    <div id="vision-table"></div>
   </section>
 
   <section class="card">
@@ -451,6 +471,38 @@ function render(){
     S.view,v=>S.view=v);
   tabs(document.getElementById("d-sel"),[["decode","Decode"],["prefill","Prefill"],["ttft","TTFT"]],
     S.metric,v=>S.metric=v);
+
+  // Vision: a table, not a chart. There is one release with data, the numbers
+  // are of three different kinds (a one-off load, a per-request latency, a
+  // rate), and a chart of three incomparable quantities for one series would
+  // be decoration. Revisit when a second release has a row to compare against.
+  const withVis=rels.filter(r=>r.vision&&r.vision.samples);
+  const visCard=document.getElementById("vision-card");
+  visCard.hidden=!withVis.length;
+  if(withVis.length){
+    const fmtMs=v=>v==null?"—":(v>=1000?(v/1000).toFixed(2)+" s":Math.round(v)+" ms");
+    const fmt2=v=>v==null?"—":(+v).toFixed(2);
+    let h='<table class="vision"><thead><tr><th>Release</th>'
+      +'<th>First image (tower load)</th><th>Prefill, warm</th>'
+      +'<th>Decode, warm</th><th>Round trip, warm</th><th>Samples</th>'
+      +'</tr></thead><tbody>';
+    withVis.forEach(r=>{
+      const v=r.vision;
+      h+=`<tr><td>${r.id}</td>`
+        +`<td>${v.cold_wall_seconds==null?"—":v.cold_wall_seconds.toFixed(2)+" s"}</td>`
+        +`<td>${fmtMs(v.warm_prefill_ms)}</td>`
+        +`<td>${fmt2(v.warm_decode_tps)} tok/s</td>`
+        +`<td>${v.warm_wall_seconds==null?"—":v.warm_wall_seconds.toFixed(2)+" s"}</td>`
+        +`<td>${v.samples}</td></tr>`;
+    });
+    h+="</tbody></table>";
+    const first=withVis[0].vision;
+    if(first.image_sha256)
+      h+=`<p class="note">Probe image ${first.image_bytes} bytes, `
+        +`sha256 <code>${first.image_sha256.slice(0,16)}…</code>, `
+        +`${first.prompt_tokens==null?"?":first.prompt_tokens} prompt tokens.</p>`;
+    document.getElementById("vision-table").innerHTML=h;
+  }
 
   // release history -- aggregate decode and peak prefill, side by side. Both
   // come from the two legs every bundle has ever run, and both fit in the width

@@ -721,6 +721,11 @@ jobs:
       MMPROJ_PATH: ${{ vars.EMBER_CERT_MMPROJ_PATH }}
       DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
       RELEASE_VERSION: ${{ needs.promote.outputs.version }}
+      # The same constants the certify job verified against the artifacts on
+      # disk. Repeated here because job-level env does not cross jobs; the
+      # values are asserted rather than recomputed, and the bundle records
+      # which job asserted them.
+      MMPROJ_SHA256: 9225c5562c05bd910245ab24c9274ca777eba2a801990f47ebe0c6344f144002
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -750,7 +755,22 @@ jobs:
           # Unlike certification this job owns nothing yet, so the script takes
           # the GPU lock and manages production itself, restoring it on exit.
           # Digests are the constants certification already verified.
+          # Asserting a digest instead of hashing 96 GiB requires saying who
+          # asserted it, so the bundle records where the value came from
+          # rather than presenting an unsourced constant as measured fact.
+          # The certify job in this same run verified both against the pinned
+          # constants before promotion.
           export MODEL_DIR TARGET DRAFT PORT TARGET_SHA DRAFT_SHA
+          export TARGET_SHA_ASSERTED_BY DRAFT_SHA_ASSERTED_BY
+          # The tower, so the bundle measures the image path too. Without it
+          # the engine refuses image input and the vision block is silently
+          # absent -- which is what every release before this one has.
+          export MMPROJ MMPROJ_SHA MMPROJ_SHA_ASSERTED_BY
+          TARGET_SHA_ASSERTED_BY="gfx1151 certify job, run $GITHUB_RUN_ID"
+          DRAFT_SHA_ASSERTED_BY="$TARGET_SHA_ASSERTED_BY"
+          MMPROJ="$MMPROJ_PATH"
+          MMPROJ_SHA="$MMPROJ_SHA256"
+          MMPROJ_SHA_ASSERTED_BY="$TARGET_SHA_ASSERTED_BY"
           MODEL_DIR="$(dirname "$MODEL_PATH")"
           TARGET="$MODEL_PATH"
           DRAFT="$DRAFT_PATH"

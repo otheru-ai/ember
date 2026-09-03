@@ -92,6 +92,10 @@ def load(bundle: Path, certified: bool):
         "throughput": norm_decode(summary.get("decode")),
         "prefill_groups": norm_prefill(summary.get("prefill")),
         "workloads": summary.get("by_workload") or {},
+        # Only releases that measured the image path carry this. The page
+        # renders the section for those and omits it for the rest, rather
+        # than showing an empty chart that looks like a regression.
+        "vision": summary.get("vision"),
         "depths": depths,
         "provenance": {
             "bundle": bundle.name,

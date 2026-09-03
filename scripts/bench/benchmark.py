@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -11,6 +12,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -428,10 +430,22 @@ class Suite:
         *,
         group: str,
         repeat: int,
+        image_data_url: str | None = None,
     ) -> dict:
+        # An image turns the prompt into the multimodal content array. Nothing
+        # else changes: the same timings and the same record shape, so a vision
+        # row can be compared with a text row of the same prompt length without
+        # anyone having to reconcile two formats.
+        if image_data_url is None:
+            content: object = prompt
+        else:
+            content = [
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+                {"type": "text", "text": prompt},
+            ]
         payload = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "reasoning_effort": "none",
             "temperature": 0,
             "max_tokens": max_tokens,
@@ -465,6 +479,7 @@ class Suite:
                 "label": label,
                 "repeat": repeat,
                 "ok": True,
+                "has_image": image_data_url is not None,
                 "wall_seconds": wall,
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
@@ -703,6 +718,69 @@ def make_decode_prompt(marker: str) -> str:
     )
 
 
+VISION_PROMPT = ("Describe this image in one sentence, then stop.")
+
+
+def run_vision_group(suite: Suite, image_path: Path, repeats: int,
+                     max_tokens: int) -> dict:
+    """Measure the image path, reported separately from text on purpose.
+
+    Image requests decline speculation and resident batching, so their decode
+    is autoregressive. Plotting them on the same axis as speculative text
+    decode would invite a comparison that is not like for like, which is why
+    these land in their own block rather than as another workload.
+
+    The FIRST request is reported separately too: it pays for loading the ~900
+    MiB vision tower, which happens once per server rather than once per image.
+    Folding that into a median would overstate every later request and hide the
+    startup cost that an operator actually feels.
+    """
+    raw = image_path.read_bytes()
+    if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise SystemExit(f"{image_path} is not a PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+    digest = sha256_bytes(raw)
+
+    rows = []
+    for repeat in range(1, repeats + 1):
+        rows.append(suite.request(
+            f"vision-{repeat}", VISION_PROMPT, max_tokens,
+            group="vision", repeat=repeat, image_data_url=data_url))
+
+    ok = [r for r in rows if r.get("ok")]
+    if not ok:
+        return {"image_sha256": digest, "samples": 0, "error": "no successful vision request"}
+
+    cold, warm = ok[0], ok[1:]
+
+    def med(values: list[float]) -> float | None:
+        clean = [v for v in values if isinstance(v, (int, float))]
+        # percentile() takes a FRACTION, not 0-100: (len-1)*pct indexes the
+        # ordered list, so 50 walks off the end of anything shorter than 51.
+        return round(percentile(clean, 0.5), 2) if clean else None
+
+    result = {
+        "image_sha256": digest,
+        "image_bytes": len(raw),
+        "samples": len(ok),
+        "max_tokens": max_tokens,
+        # Cold includes the one-off tower load; warm is what a served request
+        # costs once the tower is resident.
+        "cold_prefill_ms": cold.get("prefill_ms"),
+        "cold_wall_seconds": round(cold["wall_seconds"], 3),
+        "warm_prefill_ms": med([r.get("prefill_ms") for r in warm]),
+        "warm_decode_tps": med([r.get("decode_tokens_per_second") for r in warm]),
+        "warm_wall_seconds": med([r["wall_seconds"] for r in warm]),
+        "prompt_tokens": cold.get("prompt_tokens"),
+        # Recorded, not assumed: if a future build starts speculating on image
+        # requests this says so instead of the number quietly changing meaning.
+        "spec_ran": [r.get("spec_ran") for r in ok],
+        "prefill_mode": cold.get("prefill_mode"),
+    }
+    suite.emit({"kind": "vision_summary", **result})
+    return result
+
+
 def wait_for_health(endpoint: str, timeout: float, status_path: Path) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -826,6 +904,14 @@ def main() -> int:
     parser.add_argument("--health-endpoint",
                         help="wait here while sampling the server's model-load phase")
     parser.add_argument("--health-timeout", type=float, default=1800.0)
+    parser.add_argument("--vision-image", type=Path,
+                        help="PNG to measure the image path with; omitted "
+                             "means no vision block, which is what every "
+                             "release before 2026.9.3 has")
+    parser.add_argument("--vision-repeats", type=int, default=4,
+                        help="first request pays the tower load and is "
+                             "reported separately from the rest")
+    parser.add_argument("--vision-max-tokens", type=int, default=128)
     args = parser.parse_args()
     if args.require_gate and args.protocol != "hard-gate":
         parser.error("--require-gate requires --protocol hard-gate")
@@ -845,6 +931,12 @@ def main() -> int:
         parser.error("--health-timeout must be positive")
     if args.health_endpoint and args.server_pid is None:
         parser.error("--health-endpoint requires explicit --server-pid")
+    if args.vision_image is not None and not args.vision_image.is_file():
+        parser.error(f"--vision-image is not a file: {args.vision_image}")
+    if args.vision_repeats < 2:
+        parser.error("--vision-repeats must be at least 2: one cold, one warm")
+    if args.vision_max_tokens <= 0:
+        parser.error("--vision-max-tokens must be positive")
 
     suite = Suite(args.endpoint, args.output, args.timeout, args.model)
     selected_pid = args.server_pid if args.server_pid is not None else container_pid()
@@ -939,6 +1031,14 @@ def main() -> int:
         decode_target=args.decode_target,
         protocol=(CALIBRATED_HARD_GATE_PROTOCOL if args.calibrate_shapes
                   else HARD_GATE_PROTOCOL)) if args.protocol == "hard-gate" else None
+    vision = None
+    if args.vision_image is not None:
+        print("=== vision (image path, speculation declined by design) ===",
+              file=sys.stderr, flush=True)
+        vision = run_vision_group(
+            suite, args.vision_image, args.vision_repeats,
+            args.vision_max_tokens)
+
     resources = sampler.summary()
     memory_gate = evaluate_memory_gate(
         resources, gtt_cap_bytes=args.gtt_cap_bytes)
@@ -946,6 +1046,7 @@ def main() -> int:
         "kind": "summary",
         "finished_unix": time.time(),
         "groups": groups,
+        "vision": vision,
         "hard_gate": gate,
         "prefill_calibration": ({
             "target_prompt_tokens": HARD_GATE_PREFILL_TOKENS,

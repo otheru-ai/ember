@@ -253,6 +253,12 @@ def main():
     benchmark_summaries = [r for r in rows if r.get("kind") == "summary"]
     if benchmark_summaries and benchmark_summaries[-1].get("hard_gate"):
         summary["hard_gate"] = benchmark_summaries[-1]["hard_gate"]
+        # Absent for every release before vision shipped, so carry it only
+        # when a run actually measured it rather than writing a null that
+        # reads like a measured zero.
+        vision = benchmark_summaries[-1].get("vision")
+        if vision:
+            summary["vision"] = vision
         summary["prefill_calibration"] = benchmark_summaries[-1].get(
             "prefill_calibration")
     if env.get("EXPECTED_WORKLOADS"):

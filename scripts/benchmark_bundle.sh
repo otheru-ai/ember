@@ -61,6 +61,10 @@ done
 [ -n "$RELEASE" ] || { echo "--release is required" >&2; exit 2; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Pinned probe image for the vision measurement. Committed and digest-bound so
+# the number describes the same request every time; content does not matter for
+# timing, resolution does. Defined after HERE, which it depends on.
+VISION_PROBE=${VISION_PROBE:-$HERE/share/bench/vision-probe.png}
 DATE="$(date -u +%Y-%m-%d)"
 BUNDLE="$OUT/ember-$DATE"
 mkdir -p "$BUNDLE"
@@ -201,10 +205,25 @@ stop_server() {
 
 EP="http://127.0.0.1:$PORT/v1/chat/completions"
 
+# The image path is measured in the same server as the text throughput group,
+# so the two describe one process rather than two. It needs the tower: without
+# --vision-mmproj the engine refuses image input, which is correct but would
+# make the block silently absent.
+VISION_BENCH_ARGS=""
+if [ -n "$MMPROJ" ] && [ -n "$VISION_PROBE" ]; then
+  [ -r "$VISION_PROBE" ] || { echo "  vision probe unreadable: $VISION_PROBE" >&2; exit 1; }
+  VISION_BENCH_ARGS="--vision-image $VISION_PROBE"
+  echo "  vision probe $(sha256sum "$VISION_PROBE" | cut -d' ' -f1)"
+elif [ -z "$MMPROJ" ]; then
+  echo "  no MMPROJ: skipping the vision block"
+fi
+
 echo "=== 1/3 throughput groups (prefill + decode) ==="
 start_server "$SPEC_ENV" 65536 || { echo "  server failed to start"; exit 1; }
+# shellcheck disable=SC2086  # deliberately word-split: empty means no flag
 python3 "$HERE/scripts/bench/benchmark.py" --endpoint "$EP" \
-  --model "$MODEL_NAME" --output "$BUNDLE/raw-results.jsonl" >/dev/null 2>&1
+  --model "$MODEL_NAME" --output "$BUNDLE/raw-results.jsonl" \
+  $VISION_BENCH_ARGS >/dev/null 2>&1
 echo "  $(wc -l < "$BUNDLE/raw-results.jsonl") rows"
 
 echo "=== 2/3 decode by workload (speculation on) ==="

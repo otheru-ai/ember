@@ -589,6 +589,11 @@ if(Python3_Interpreter_FOUND)
 
 
   add_test(
+    NAME bench_vision
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_bench_vision.py)
+  set_tests_properties(bench_vision PROPERTIES TIMEOUT 60)
+  add_test(
     NAME benchmark_gate
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_gate.py)
