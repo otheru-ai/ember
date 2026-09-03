@@ -317,6 +317,52 @@ class ReleaseScriptTests(unittest.TestCase):
         # the box.
         self.assertIn("EMBER_AUTO_DOWNLOAD=0", certify)
 
+    def test_reusable_workflow_callers_grant_enough_permission(self) -> None:
+        """A caller must grant at least what the workflow it calls asks for.
+
+        GitHub resolves this statically: if a called workflow -- or any job
+        inside it -- requests a permission the caller did not grant, the ENTIRE
+        caller file is rejected before a single job starts. The run shows
+        `startup_failure` with no logs and no job list, which reads like an
+        outage rather than a permissions bug.
+
+        This has now happened twice on this repository. Once when nested
+        attestation jobs asked for id-token/attestations/artifact-metadata, and
+        once when container.yml started needing actions:read to prove
+        certification. Both times CI looked broken for reasons unrelated to the
+        change that caused it.
+        """
+        import yaml
+
+        rank = {"none": 0, "read": 1, "write": 2}
+        for caller_path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            caller = yaml.safe_load(caller_path.read_text())
+            for job_name, job in (caller.get("jobs") or {}).items():
+                uses = job.get("uses")
+                if not isinstance(uses, str) or not uses.startswith("./"):
+                    continue
+                granted = job.get("permissions") or {}
+                # removeprefix, not lstrip: lstrip strips CHARACTERS, so
+                # "./.github/..." loses the dot of ".github" too.
+                called_path = ROOT / uses.removeprefix("./")
+                called = yaml.safe_load(called_path.read_text())
+
+                # What the called workflow needs: its own top-level block, plus
+                # anything its individual jobs ask for.
+                required: dict[str, str] = dict(called.get("permissions") or {})
+                for inner in (called.get("jobs") or {}).values():
+                    for scope, level in (inner.get("permissions") or {}).items():
+                        if rank.get(level, 0) > rank.get(required.get(scope, "none"), 0):
+                            required[scope] = level
+
+                for scope, level in sorted(required.items()):
+                    have = granted.get(scope, "none")
+                    self.assertGreaterEqual(
+                        rank.get(have, 0), rank.get(level, 0),
+                        f"{caller_path.name} job '{job_name}' grants "
+                        f"{scope}: {have} but {called_path.name} needs "
+                        f"{scope}: {level} -- GitHub will reject the whole file")
+
     def test_ctest_jobs_install_what_the_tests_import(self) -> None:
         """Every CI job that runs ctest must install this suite's imports.
 

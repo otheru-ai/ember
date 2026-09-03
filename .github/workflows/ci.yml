@@ -210,6 +210,10 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      # container.yml proves a tag was certified by reading this repository's
+      # run history. A called workflow can never exceed its caller's grant, and
+      # GitHub rejects the whole file at parse time if it tries.
+      actions: read
     uses: ./.github/workflows/container.yml
 
   certify-and-release:
