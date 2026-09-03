@@ -11,6 +11,67 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+> [!NOTE]
+> Draft, assembled 2026-09-02 from the 569 commits on
+> `feat/bench-release-compare` that `main` does not have. Entries below are
+> written from commits, not from intent; anything a measurement has not
+> confirmed says so. A release is cut by `.github/workflows/gfx1151-certify.yml`
+> against a commit SHA, not by editing this file.
+
+### Added
+
+- **vision:** native DeepSeek-V4 vision support — bounded PNG decoder, native
+  image preprocessing reproduced against the reference, tower execution and
+  contract loader, learned prefill graph, and image-token routing through the
+  second router bias (`exp_probs_b_vl`) with in-span bidirectional attention
+  visibility. 23 `feat(vision)` commits.
+- **vision:** a two-armed behavioural gate. Arm B sends each question with no
+  image and any item it answers is cut rather than scored, so a model answering
+  from text priors cannot pass.
+- **deepseek4:** importance-matrix collection inside the engine
+  (`DFLASH_IMATRIX_OUT`), covering both the score-routed and hash-routed MoE
+  paths and writing the legacy `.dat` the affine writer consumes. Upstream's
+  collector has no image path for any model, so this is the only way to
+  calibrate a quantization on the routing images actually take.
+- **qwen:** Qwen3.8-Flash-Next family support, IU4 quantization lane, and the
+  evidence gates around it.
+
+### Fixed
+
+- **deepseek4:** four defects in the imatrix collector, each of which produced a
+  well-formed file with wrong or missing contents: a graph-output flag set on a
+  view rather than its base, registration on graph paths that never drain, the
+  layer-major graph cache silently skipping collection, and an empty matrix that
+  passed its own coverage check.
+- **engine:** layer capture bound to its authority bundle; single-layer control
+  model admission.
+
+### Performance
+
+- **deepseek4:** prefill embed buffer and exact-prefill attention metadata arena
+  reused across chunks.
+- **rocmfp2/rocmfp4:** identity `v_perm_b32` removed from the FP2 unpack; UE4M3
+  scale decode through the f16 converter and the FP2 affine offset term from
+  `block_q8_1.ds.y`, both **opt-in and unmeasured on hardware** — they are
+  compiled out by default and no throughput claim attaches to them.
+
+### Measured and rejected — not in this release
+
+- The FA D=512 q-rope-tail prepass (`f5ad83f`) is **not merged**. It cut the
+  kernel from 7286 to 4576 instructions and removed 258 flat loads, and made
+  prefill slower: p50 63.80 → 84.73 ms on the same kernel, count and grid.
+- Both ROCm runtime environment overrides were measured and dropped;
+  `DEBUG_CLR_DIRECT_DOORBELL=1` hung a request outright and is now documented
+  as do-not-use.
+
+### Not yet true of this branch
+
+- No throughput number has been measured for the vision path at the serving
+  expert top-k.
+- Quantization quality is uncharacterized: no perplexity, no KL divergence
+  against BF16.
+
+
 ## 2026.8.24
 
 ### Added
