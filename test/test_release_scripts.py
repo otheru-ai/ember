@@ -317,6 +317,41 @@ class ReleaseScriptTests(unittest.TestCase):
         # the box.
         self.assertIn("EMBER_AUTO_DOWNLOAD=0", certify)
 
+    def test_ctest_jobs_install_what_the_tests_import(self) -> None:
+        """Every CI job that runs ctest must install this suite's imports.
+
+        GitHub's ubuntu-24.04 image ships PyYAML; Forgejo's node:24-bookworm
+        container with a bare `apt-get install python3` does not. A test added
+        with `import yaml` therefore passed on GitHub and took Forgejo red,
+        which is exactly the kind of divergence that gets discovered days later
+        by someone else. Assert the dependency in both files instead.
+        """
+        import yaml
+
+        third_party = {"yaml"}
+        imported = set()
+        for path in sorted(pathlib.Path(ROOT / "test").glob("*.py")):
+            body = path.read_text()
+            imported |= third_party.intersection(
+                re.findall(r"^\s*import (\w+)", body, re.MULTILINE))
+        self.assertIn("yaml", imported,
+                      "this test is pointless if nothing imports yaml")
+
+        packages = {"yaml": "python3-yaml"}
+        for workflow in (ROOT / ".forgejo" / "workflows" / "ci.yml",
+                         ROOT / ".github" / "workflows" / "ci.yml"):
+            parsed = yaml.safe_load(workflow.read_text())
+            for name, job in parsed["jobs"].items():
+                steps = job.get("steps") or []
+                if not any("ctest" in (s.get("run") or "") for s in steps):
+                    continue
+                installed = " ".join(s.get("run") or "" for s in steps)
+                for module in sorted(imported):
+                    self.assertIn(
+                        packages[module], installed,
+                        f"{workflow.name} job '{name}' runs ctest but never "
+                        f"installs {packages[module]}, which the suite imports")
+
     def test_certify_steps_reference_only_defined_variables(self) -> None:
         """Every $VAR a certify step uses must actually be set for that step.
 
