@@ -1076,6 +1076,28 @@
           "speedup": 1.673,
           "tok_s": 39.75
         }
+      },
+      "vision": {
+        "cold_prefill_ms": 1576.7,
+        "cold_wall_seconds": 5.71,
+        "image_bytes": 117091,
+        "image_sha256": "4d81625116ee1dd58731d36eb78510819c6c863ee9a89c9b92c17b910c353478",
+        "max_tokens": 128,
+        "prefill_mode": "sparse",
+        "prompt_tokens": 361,
+        "samples": 4,
+        "spec_ran": [
+          false,
+          false,
+          false,
+          false
+        ],
+        "warm_decode_tps": 23.9,
+        "warm_prefill_ms": 1564.4,
+        "warm_wall_seconds": 4.65,
+        "bundle": "bench-vis2-2026.9.3-20260903-230711",
+        "measured_separately": true,
+        "note": "measured in a second bundle of the same artifact on the same day; the text and depth figures above come from the first"
       }
     }
   ],
