@@ -11,66 +11,73 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
-> [!NOTE]
-> Draft, assembled 2026-09-02 from the 569 commits on
-> `feat/bench-release-compare` that `main` does not have. Entries below are
-> written from commits, not from intent; anything a measurement has not
-> confirmed says so. A release is cut by `.github/workflows/gfx1151-certify.yml`
-> against a commit SHA, not by editing this file.
+Ember becomes a vision engine. Its default model is now the vision-capable
+DeepSeek-V4-Flash-Vision-Exp, and the container builds on ROCm 10.0.
 
 ### Added
 
-- **vision:** native DeepSeek-V4 vision support — bounded PNG decoder, native
-  image preprocessing reproduced against the reference, tower execution and
-  contract loader, learned prefill graph, and image-token routing through the
-  second router bias (`exp_probs_b_vl`) with in-span bidirectional attention
-  visibility. 23 `feat(vision)` commits.
+- **vision:** native DeepSeek-V4 image support. Bounded PNG decoder, image
+  preprocessing reproduced against the reference implementation, native tower
+  execution and contract loader, learned prefill graph, and image-token routing
+  through the model's second router bias (`exp_probs_b_vl`) with in-span
+  bidirectional attention visibility. Images are PNG only; JPEG, WebP and GIF
+  are refused rather than handed to a permissive decoder.
 - **vision:** a two-armed behavioural gate. Arm B sends each question with no
-  image and any item it answers is cut rather than scored, so a model answering
-  from text priors cannot pass.
+  image, and any item it answers is cut rather than scored, so a model that
+  ignores images cannot pass on text priors.
 - **deepseek4:** importance-matrix collection inside the engine
   (`DFLASH_IMATRIX_OUT`), covering both the score-routed and hash-routed MoE
-  paths and writing the legacy `.dat` the affine writer consumes. Upstream's
+  paths and writing the legacy `.dat` the affine quantizer consumes. Upstream's
   collector has no image path for any model, so this is the only way to
   calibrate a quantization on the routing images actually take.
-- **qwen:** Qwen3.8-Flash-Next family support, IU4 quantization lane, and the
+- **entrypoint:** the vision tower is downloaded and verified alongside the
+  model and the drafter. A missing tower is a hard error, not a quiet fall back
+  to the text path.
+- **qwen:** Qwen3.8-Flash-Next support, the IU4 quantization lane, and the
   evidence gates around it.
+
+### Changed
+
+- **container:** ROCm 10.0.0, pinned by digest, with a build-time assertion that
+  the toolchain reports that version.
+- **entrypoint:** the default DeepSeek deployment is the vision model. The
+  text-only 0731 artifact is neither deprecated nor deleted and stays servable
+  through `EMBER_MODEL_REPO` and `EMBER_MODEL_REVISION`.
 
 ### Fixed
 
-- **deepseek4:** four defects in the imatrix collector, each of which produced a
-  well-formed file with wrong or missing contents: a graph-output flag set on a
-  view rather than its base, registration on graph paths that never drain, the
-  layer-major graph cache silently skipping collection, and an empty matrix that
-  passed its own coverage check.
+- **deepseek4:** vision support had put a cross-translation-unit call inside the
+  prefill causal-mask loop, where it could neither inline nor vectorise. It cost
+  6x on that loop for text requests, which contain no images at all.
+- **deepseek4:** four defects in the imatrix collector, each of which would have
+  produced a well-formed file with wrong or missing contents: a graph-output
+  flag set on a view rather than its base, registration on graph paths that
+  never drain, the layer-major graph cache silently skipping collection, and an
+  empty matrix that passed its own coverage check.
 - **engine:** layer capture bound to its authority bundle; single-layer control
   model admission.
 
 ### Performance
 
-- **deepseek4:** prefill embed buffer and exact-prefill attention metadata arena
-  reused across chunks.
-- **rocmfp2/rocmfp4:** identity `v_perm_b32` removed from the FP2 unpack; UE4M3
-  scale decode through the f16 converter and the FP2 affine offset term from
-  `block_q8_1.ds.y`, both **opt-in and unmeasured on hardware** — they are
-  compiled out by default and no throughput claim attaches to them.
+- **deepseek4:** the prefill embed buffer and the exact-prefill attention
+  metadata arena are reused across chunks instead of reallocated.
+- **rocmfp2/rocmfp4:** an identity `v_perm_b32` removed from the FP2 unpack. Two
+  further changes, UE4M3 scale decode through the f16 converter and the FP2
+  affine offset term from `block_q8_1.ds.y`, are compiled out by default and
+  carry no throughput claim.
 
-### Measured and rejected — not in this release
+### Measured and rejected
 
-- The FA D=512 q-rope-tail prepass (`f5ad83f`) is **not merged**. It cut the
-  kernel from 7286 to 4576 instructions and removed 258 flat loads, and made
-  prefill slower: p50 63.80 → 84.73 ms on the same kernel, count and grid.
-- Both ROCm runtime environment overrides were measured and dropped;
-  `DEBUG_CLR_DIRECT_DOORBELL=1` hung a request outright and is now documented
-  as do-not-use.
+- The flash-attention D=512 q-rope-tail prepass is not in this release. It
+  removed 2,710 instructions and 258 flat loads from the kernel and made prefill
+  slower: p50 63.80 ms to 84.73 ms on the same kernel, count and grid.
+- Both ROCm runtime environment overrides were measured and dropped.
+  `DEBUG_CLR_DIRECT_DOORBELL=1` hung a request outright.
 
-### Not yet true of this branch
+### Not measured
 
-- No throughput number has been measured for the vision path at the serving
-  expert top-k.
-- Quantization quality is uncharacterized: no perplexity, no KL divergence
-  against BF16.
-
+Vision throughput at the serving expert top-k, and quantization quality against
+BF16 for either model. Neither has a number, and the model cards say so.
 
 ## 2026.8.24
 
