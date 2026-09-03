@@ -150,6 +150,51 @@ static void test_head_and_boundaries(void) {
     ember_chat_request_free(&r);
 }
 
+// A message that arrived as a content array owns a `parts` allocation as well
+// as its flattened `content`. Compaction drops middle messages, and dropping
+// one must release the parts too -- a leak here is invisible in the report and
+// scales with conversation length. ASan in CI is what actually catches it; this
+// test exists to put a parts-bearing message in the dropped range at all.
+static void test_dropped_message_with_content_parts(void) {
+    setenv("EMBER_STUB_REPLY",
+           "DURABLE STATE: the parts-bearing turn was dropped cleanly.", 1);
+    char *err = NULL;
+    ember_backend_config cfg = {0};
+    cfg.model_path = "stub";
+    cfg.max_ctx = 2048;
+    cfg.model_name = "stub-model";
+    ember_backend *be = ember_backend_load(&cfg, &err);
+    CHECK(be != NULL, "stub backend loads");
+    free(err);
+
+    ember_chat_request r;
+    build_req(&r, 24);
+    // Message 3 is a middle user turn, comfortably inside the dropped range.
+    ember_chat_msg *m = &r.messages[3];
+    m->n_parts = 2;
+    m->parts = (ember_content_part *)calloc(2, sizeof(ember_content_part));
+    m->parts[0].kind = EMBER_CONTENT_TEXT;
+    m->parts[0].text = strdup("the original text part");
+    m->parts[1].kind = EMBER_CONTENT_TEXT;
+    m->parts[1].text = strdup("a second part with a detail hint");
+    m->parts[1].detail = strdup("auto");
+
+    char *prompt = ember_render_prompt(&r, true, EMBER_THINK_HIGH, true);
+    int32_t *ids = NULL;
+    int n_prompt = ember_backend_encode(be, prompt, &ids);
+    free(prompt); free(ids);
+    CHECK(n_prompt > 0, "the parts-bearing fixture encodes");
+
+    ember_compaction_report rep = {0};
+    bool ok = ember_compact_request(be, &r, ember_backend_n_ctx(be), n_prompt,
+                                    -1, "unit test", &rep);
+    CHECK(ok && rep.applied, "compaction applies with a parts-bearing message");
+    CHECK(rep.dropped_messages > 0, "the parts-bearing turn was in the drop range");
+    ember_chat_request_free(&r);
+    ember_backend_free(be);
+    unsetenv("EMBER_STUB_REPLY");
+}
+
 // ── full exchange against the stub backend ──────────────────────────────────
 
 static void test_exchange(void) {
@@ -315,6 +360,7 @@ int main(void) {
     test_sigil();
     test_prompt_and_wrap();
     test_head_and_boundaries();
+    test_dropped_message_with_content_parts();
     test_exchange();
     test_guards();
     test_report_json();

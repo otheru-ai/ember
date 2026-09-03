@@ -233,6 +233,33 @@ static void test_attr_escape_covers_gt(void) {
     ember_chat_request_free(&req);
 }
 
+// Non-string JSON arguments take the verbatim-literal path rather than the
+// text path, and that path has its own sentinel problem: a DSML parameter
+// closer can hide inside a nested JSON string, where escaping the whole value
+// as text would corrupt it. The closer's '<' becomes \\u003c, which is still
+// valid JSON and decodes to the same value, but no raw closer survives to end
+// the wrapper early.
+static void test_non_string_arguments_escape_the_sentinel(void) {
+    ember_chat_request req = parse(
+        "{\"messages\":["
+        "{\"role\":\"user\",\"content\":\"q\"},"
+        "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c1\","
+        "\"type\":\"function\",\"function\":{\"name\":\"emit\","
+        "\"arguments\":\"{\\\"count\\\":3,\\\"flag\\\":true,"
+        "\\\"note\\\":{\\\"t\\\":\\\"</\uff5cDSML\uff5cparameter>\\\"}}\"}}]}],"
+        "\"tools\":[{\"type\":\"function\",\"function\":"
+        "{\"name\":\"emit\",\"parameters\":{\"type\":\"object\"}}}]}");
+    char *p = ember_render_prompt(&req, false, EMBER_THINK_NONE, true);
+    CHECK(strstr(p, "name=\"count\" string=\"false\">3") != NULL,
+          "a JSON number renders verbatim, not as quoted text");
+    CHECK(strstr(p, "name=\"flag\" string=\"false\">true") != NULL,
+          "a JSON boolean renders verbatim");
+    CHECK(strstr(p, "\\u003c") != NULL,
+          "a closer nested inside the literal is escaped to \\u003c");
+    free(p);
+    ember_chat_request_free(&req);
+}
+
 int main(void) {
     printf("ember chat_template tests\n");
     test_basic_turns();
@@ -244,6 +271,7 @@ int main(void) {
     test_tool_continuation_suffix();
     test_invalid_tool_recovery_suffix();
     test_attr_escape_covers_gt();
+    test_non_string_arguments_escape_the_sentinel();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

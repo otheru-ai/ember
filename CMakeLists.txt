@@ -465,6 +465,14 @@ set_tests_properties(${EMBER_C_TESTS} PROPERTIES TIMEOUT 60)
 add_executable(ember-server src/server/main.c)
 target_link_libraries(ember-server ember_core m)
 
+# Unit tests for main.c's internal helpers. They are static, so the test
+# translation unit includes main.c with its entry point renamed rather than
+# widening the server's linkage for the benefit of a test. See the file header.
+add_executable(test_server_helpers test/test_server_helpers.c)
+target_link_libraries(test_server_helpers ember_core m)
+add_test(NAME server_helpers COMMAND test_server_helpers)
+set_tests_properties(server_helpers PROPERTIES TIMEOUT 60)
+
 # Ember-owned targets, held to EMBER_STRICT. Excludes every target that
 # compiles or includes vendored engine/ code (test_prefill_policy,
 # test_dspark_scheduler, test_progress_cycle_detector,
@@ -478,7 +486,7 @@ set(EMBER_STRICT_TARGETS
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
   test_compaction test_gguf test_model_card test_model_profile test_image_input
-  test_vision_prompt test_kv_cache test_qa)
+  test_vision_prompt test_kv_cache test_qa test_server_helpers)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
 endforeach()
@@ -528,6 +536,12 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_continuous_batch_server.py
             $<TARGET_FILE:ember-server>)
   set_tests_properties(continuous_batch_server PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME tool_continuation_server
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_tool_continuation_server.py
+            $<TARGET_FILE:ember-server>)
+  set_tests_properties(tool_continuation_server PROPERTIES TIMEOUT 60)
   add_test(
     NAME tool_safety_server
     COMMAND ${Python3_EXECUTABLE}
