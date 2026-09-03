@@ -258,6 +258,33 @@ class ReleaseScriptTests(unittest.TestCase):
         triggers = certify.split("permissions:", 1)[0]
         self.assertNotIn("pull_request", triggers)
 
+    def test_certify_mounts_match_the_entrypoint_filenames(self) -> None:
+        """The smoke test mounts artifacts at the names the entrypoint expects.
+
+        These live in two files and drifted once already: the default model
+        moved to the vision artifact while the certify mount kept the old 0731
+        name, so the entrypoint could not find its model and downloaded 85 GiB
+        instead, which consumed the step and the run. Asserting the names
+        against each other is what makes that a red test rather than a wasted
+        certification.
+        """
+        certify = GITHUB_CERTIFY.read_text()
+        entrypoint = ENTRYPOINT.read_text()
+
+        def entrypoint_value(name: str) -> str:
+            match = re.search(rf'^{name}="([^"]+)"', entrypoint, re.MULTILINE)
+            self.assertIsNotNone(match, f"{name} not found in the entrypoint")
+            return match.group(1)
+
+        for var in ("file", "draft_file", "mmproj_file"):
+            self.assertIn(f"/models/{entrypoint_value(var)}", certify,
+                          f"certify does not mount the entrypoint's {var}")
+
+        # And it must never resolve a missing artifact by fetching one: a
+        # downloaded replacement would certify something other than what is on
+        # the box.
+        self.assertIn("EMBER_AUTO_DOWNLOAD=0", certify)
+
     def test_github_release_candidate_is_gated_and_automatic(self) -> None:
         ci = GITHUB_CI.read_text()
         container = GITHUB_CONTAINER.read_text()

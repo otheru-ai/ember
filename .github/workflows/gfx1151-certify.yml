@@ -379,13 +379,31 @@ jobs:
             docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true
           }
           trap cleanup_server EXIT
-          model_target=/models/DeepSeek-V4-Flash-0731-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf
+          # These paths are the names the ENTRYPOINT looks for, not the names
+          # the artifacts happen to carry on this box. They must track
+          # docker/entrypoint.sh: when the default model moved to the vision
+          # artifact and these did not, the entrypoint failed to find its model
+          # under the old 0731 name and started an 85 GiB download, which ate
+          # the step and the run. EMBER_AUTO_DOWNLOAD=0 below makes the next
+          # such mismatch fail in seconds instead.
+          model_target=/models/DeepSeek-V4-Flash-Vision-Exp-Abliterated-ROCMFPx-Strix-Lean-2.58bpw.gguf
           draft_target=/models/DeepSeek-V4-Flash-0731-Abliterated-DSpark-draft-4.25bpw.gguf
+          mmproj_target=/models/mmproj-DeepSeek-V4-Flash-Vision-Exp-F16.gguf
           mounts=(-v "$MODEL_PATH:$model_target:ro" -v "$cache_volume:/cache")
           env_args=(
             -e "EMBER_PORT=$PORT"
+            # Certification validates the artifacts on this box. Downloading a
+            # replacement would certify something else, so never download.
+            -e EMBER_AUTO_DOWNLOAD=0
           )
           mounts+=(-v "$DRAFT_PATH:$draft_target:ro")
+          # The vision tower is not optional for the default deployment: the
+          # entrypoint exits 66 without it.
+          test -r "$MMPROJ_PATH" || {
+            echo "vision tower is not readable: $MMPROJ_PATH" >&2
+            exit 1
+          }
+          mounts+=(-v "$MMPROJ_PATH:$mmproj_target:ro")
           docker run -d --name "$name" --network host \
             --device /dev/kfd --device /dev/dri \
             --group-add video --group-add render \
