@@ -42,6 +42,13 @@ DS4_PREFILL=${DS4_PREFILL:-}
 SERVER_LD_LIBRARY_PATH=${SERVER_LD_LIBRARY_PATH:-}
 PORT=${PORT:-18083}
 SKIP_CTX=0
+# Validate everything this job needs and stop before the first server starts.
+# The benchmark job has now failed twice on setup alone -- a digest asserted
+# without its provenance field, and a tower never exported -- and each of those
+# was discovered only after certification had already taken the box and
+# quiesced production. A dry run reaches the same checks in seconds, on any
+# machine, with no GPU and no downtime.
+DRY_RUN=0
 EXCLUSIVE=${EXCLUSIVE:-1}
 LOCK=${LOCK:-/root/gpu.lock}
 
@@ -54,6 +61,8 @@ while [ $# -gt 0 ]; do
     --no-repo-mount) REPO_MOUNT=""; shift ;;
     --no-exclusive) EXCLUSIVE=0; shift ;;
     --skip-context-sweep) SKIP_CTX=1; shift ;;
+    # Implies --no-exclusive: a validation pass must never quiesce production.
+    --dry-run) DRY_RUN=1; EXCLUSIVE=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -99,7 +108,12 @@ else
   # Caller owns the machine and production; only clean up our own container.
   trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT INT TERM
 fi
-for _ in $(seq 1 60); do [ "$(free -g | awk '/^Mem:/{print $7}')" -ge 100 ] && break; sleep 5; done
+# Waiting for a previous 85 GiB resident model to be released. Pointless under
+# --dry-run, which loads nothing and would otherwise sit here for five minutes
+# on any machine that is not the box.
+if [ "$DRY_RUN" = 0 ]; then
+  for _ in $(seq 1 60); do [ "$(free -g | awk '/^Mem:/{print $7}')" -ge 100 ] && break; sleep 5; done
+fi
 
 echo "=== model integrity ==="
 # Hashing the pair is ~96 GiB of reads. The certification job already verifies
@@ -165,8 +179,11 @@ HOST_ARG="--host 127.0.0.1"
 # A host-staged binary lives under MODEL_DIR and needs the same library bundle
 # as the measured server. Probe with both mounted, otherwise exec failure is
 # misreported as an old release that predates --host.
+# Skipped under --dry-run: it probes the IMAGE's CLI, which is not what a
+# wiring check is for, and pulling a 20 GiB image to read --help would make the
+# cheap check expensive.
 # shellcheck disable=SC2086
-if ! docker run --rm -v "$MODEL_DIR:$MODEL_DIR" $COMMON_ENV \
+if [ "$DRY_RUN" = 0 ] && ! docker run --rm -v "$MODEL_DIR:$MODEL_DIR" $COMMON_ENV \
     --entrypoint "$BIN" "$IMAGE" --help 2>&1 | grep -q -- '--host'; then
   HOST_ARG=""
   echo "  note: $IMAGE predates --host; it binds loopback by default"
@@ -216,6 +233,20 @@ if [ -n "$MMPROJ" ] && [ -n "$VISION_PROBE" ]; then
   echo "  vision probe $(sha256sum "$VISION_PROBE" | cut -d' ' -f1)"
 elif [ -z "$MMPROJ" ]; then
   echo "  no MMPROJ: skipping the vision block"
+fi
+
+if [ "$DRY_RUN" = 1 ]; then
+  echo "=== dry run: inputs validated, stopping before the first server ==="
+  echo "  image        $IMAGE"
+  echo "  binary       $BIN"
+  echo "  target       $TARGET ($TARGET_SHA_SOURCE)"
+  echo "  draft        $DRAFT ($DRAFT_SHA_SOURCE)"
+  echo "  mmproj       ${MMPROJ:-<none>}${MMPROJ:+ (${MMPROJ_SHA_SOURCE:-})}"
+  echo "  vision       ${VISION_BENCH_ARGS:-<none>}"
+  echo "  bundle       $BUNDLE"
+  echo "  context sweep $([ "$SKIP_CTX" = 1 ] && echo skipped || echo included)"
+  echo DRY_RUN_OK
+  exit 0
 fi
 
 echo "=== 1/3 throughput groups (prefill + decode) ==="

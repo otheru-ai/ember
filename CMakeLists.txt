@@ -589,6 +589,11 @@ if(Python3_Interpreter_FOUND)
 
 
   add_test(
+    NAME benchmark_dry_run
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_dry_run.py)
+  set_tests_properties(benchmark_dry_run PROPERTIES TIMEOUT 120)
+  add_test(
     NAME bench_vision
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_bench_vision.py)
