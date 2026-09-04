@@ -488,15 +488,6 @@ function render(){
         +`<td>${v.samples}</td></tr>`;
     });
     h+="</tbody></table>";
-    const first=withVis[0].vision;
-    if(first.image_sha256)
-      h+=`<p class="note">Probe image ${first.image_bytes} bytes, `
-        +`sha256 <code>${first.image_sha256.slice(0,16)}…</code>, `
-        +`${first.prompt_tokens==null?"?":first.prompt_tokens} prompt tokens.</p>`;
-    // A release whose vision numbers came from a different bundle than its
-    // text numbers says so here rather than presenting one run.
-    withVis.filter(r=>r.vision.note).forEach(r=>{
-      h+=`<p class="note">${r.id}: ${r.vision.note}.</p>`;});
     document.getElementById("vision-table").innerHTML=h;
   }
 
