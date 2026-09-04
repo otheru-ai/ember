@@ -129,6 +129,11 @@ add_test(NAME sse COMMAND test_sse)
 add_executable(test_tool_parser test/test_tool_parser.c)
 target_link_libraries(test_tool_parser ember_core)
 add_test(NAME tool_parser COMMAND test_tool_parser)
+# The nested-value capture ships dark, so both states are contracts:
+# tool_parser pins the default, tool_parser_nested pins the enabled path.
+add_test(NAME tool_parser_nested COMMAND test_tool_parser)
+set_tests_properties(tool_parser_nested PROPERTIES
+  ENVIRONMENT "EMBER_DSML_NESTED_VALUES=1")
 
 add_executable(test_tool_schema test/test_tool_schema.c)
 target_link_libraries(test_tool_schema ember_core m)

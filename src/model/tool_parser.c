@@ -52,6 +52,91 @@ static bool contains_n(const char *s, size_t n, const char *needle) {
 // nested call the way ds4 does. Revisit only if production telemetry shows
 // DeepSeek-V4 drifting into unescaped nested params — then port the ds4
 // structurer behind ember's off-by-default posture for risky parity features.
+// Nested-value capture. OFF by default: it changes which generated blocks are
+// executable, exactly the class of change this repo ships dark and enables in
+// deployment explicitly (see CLAUDE.md, and the divergence note below).
+//
+// Off  -- a nested opener inside a string value is contamination; the whole
+//         turn is refused and routed to malformed-call recovery. Safe, but it
+//         also refuses balanced values the model plainly meant, and when
+//         recovery cannot start the turn dies with a 422.
+// On   -- closers are matched by DEPTH, so a balanced nested block is captured
+//         whole. Unbalanced nesting is still refused: a truncated argument is
+//         never emitted either way, which is the property that matters.
+static bool nested_values_enabled(void) {
+    static _Thread_local int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("EMBER_DSML_NESTED_VALUES");
+        cached = (e && e[0] == '1') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+// The first close tag after a value is not necessarily ITS close. A model can
+// legitimately put a whole nested block inside a string argument -- writing a
+// file whose content contains DSML, or quoting an earlier turn back. Taking the
+// first close truncates that value, and a silently-truncated argument is
+// precisely the hazard the contamination check exists to prevent. So scan with
+// depth: the value keeps its nested block whole and stays faithful to what the
+// model actually emitted.
+//
+// Returns the matching close, or NULL when the nesting never balances -- that
+// IS genuinely truncated output, and it stays contaminated and unexecutable.
+//
+// open_tag is matched as a prefix (the real openers carry attributes and end at
+// a later '>'), which is what makes a nested opener count toward depth.
+static const char *matching_close(const char *from, const char *open_tag,
+                                  const char *close_tag) {
+    if (!from || !open_tag || !close_tag) return NULL;
+    if (!nested_values_enabled()) return strstr(from, close_tag);
+    const size_t o_l = strlen(open_tag), c_l = strlen(close_tag);
+    if (!o_l || !c_l) return NULL;
+    int depth = 0;
+    for (const char *p = from; *p;) {
+        if (!strncmp(p, close_tag, c_l)) {
+            if (depth == 0) return p;
+            --depth;
+            p += c_l;
+        } else if (!strncmp(p, open_tag, o_l)) {
+            if (depth == INT_MAX) return NULL;
+            ++depth;
+            p += o_l;
+        } else {
+            ++p;
+        }
+    }
+    return NULL;
+}
+
+// A nested invoke opener is only a structural error when it sits in the
+// invoke's own body. Inside a parameter VALUE it is data -- the model quoting a
+// turn, or writing a file that contains one -- so walk the body and jump over
+// each parameter's value using its matching close.
+static bool has_structural_tag(const char *from, const char *limit,
+                               const ember_dsml_syntax *sx, const char *tag) {
+    if (!from || !limit || !tag || from >= limit) return false;
+    if (!nested_values_enabled()) {
+        const char *hit = strstr(from, tag);
+        return hit && hit < limit;
+    }
+    const size_t t_l = strlen(tag);
+    const size_t po_l = strlen(sx->param_open);
+    for (const char *p = from; p < limit;) {
+        if (!strncmp(p, sx->param_open, po_l)) {
+            const char *ptag = strchr(p, '>');
+            if (!ptag || ptag >= limit) return false;
+            const char *pc =
+                matching_close(ptag, sx->param_open, sx->param_close);
+            if (!pc || pc >= limit) return false;
+            p = pc;                      // skip the value wholesale
+            continue;
+        }
+        if (!strncmp(p, tag, t_l)) return true;
+        ++p;
+    }
+    return false;
+}
+
 static bool contains_nested_tool_markup(const char *s, size_t n) {
     for (int i = 0; i < N_SYNTAX; ++i) {
         if (contains_n(s, n, SYNTAX[i].calls_open) ||
@@ -313,7 +398,8 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
         return parse_ds_engine(text, out, report);
     if (!sx) return 0;
     const char *first = dsml_at;
-    const char *original_close = strstr(first, sx->calls_close);
+    const char *original_close = matching_close(
+        first + strlen(sx->calls_open), sx->calls_open, sx->calls_close);
     if (report) {
         report->found = true;
         report->complete = original_close != NULL;
@@ -321,22 +407,23 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
             const char *tail = original_close + strlen(sx->calls_close);
             while (*tail && isspace((unsigned char)*tail)) ++tail;
             report->trailing = *tail != '\0';
+            // All of these ask "did the model mix or nest FORMATS", which is
+            // a question about structure. Inside a parameter value the same
+            // bytes are data, so every scan skips values.
             for (int i = 0; i < N_SYNTAX; ++i) {
                 if (&SYNTAX[i] == sx) continue;
-                const char *foreign = strstr(first, SYNTAX[i].calls_open);
-                const char *invoke = strstr(first, SYNTAX[i].invoke_open);
-                if ((foreign && foreign < original_close) ||
-                    (invoke && invoke < original_close)) {
+                if (has_structural_tag(first, original_close, sx,
+                                       SYNTAX[i].calls_open) ||
+                    has_structural_tag(first, original_close, sx,
+                                       SYNTAX[i].invoke_open)) {
                     report->mixed_syntax = true;
                     break;
                 }
             }
-            const char *nested_calls =
-                strstr(first + strlen(sx->calls_open), sx->calls_open);
-            if (nested_calls && nested_calls < original_close)
+            if (has_structural_tag(first + strlen(sx->calls_open),
+                                   original_close, sx, sx->calls_open))
                 report->malformed = true;
-            const char *native = strstr(first, DSE_OPEN);
-            if (native && native < original_close)
+            if (has_structural_tag(first, original_close, sx, DSE_OPEN))
                 report->mixed_syntax = true;
         }
     }
@@ -387,7 +474,8 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
     const size_t param_open_len = strlen(sx->param_open);
     const size_t param_close_len = strlen(sx->param_close);
 
-    const char *block_close = strstr(first, sx->calls_close);
+    const char *block_close = matching_close(first + strlen(sx->calls_open),
+                                             sx->calls_open, sx->calls_close);
     const char *cur = first;
     while ((cur = strstr(cur, sx->invoke_open)) != NULL &&
            (!block_close || cur < block_close)) {
@@ -396,15 +484,16 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
             if (report) report->malformed = true;
             break;
         }
-        const char *inv_close = strstr(tag_end, sx->invoke_close);
+        const char *inv_close =
+            matching_close(tag_end, sx->invoke_open, sx->invoke_close);
         if (!inv_close || (block_close && inv_close >= block_close)) {
             if (report) report->malformed = true;
             break;
         }
         if (report) report->invocations++;
 
-        const char *nested_invoke = strstr(tag_end + 1, sx->invoke_open);
-        if (nested_invoke && nested_invoke < inv_close && report)
+        if (has_structural_tag(tag_end + 1, inv_close, sx,
+                              sx->invoke_open) && report)
             report->malformed = true;
 
         char *name = attr(cur + inv_open_len, tag_end + 1, "name");
@@ -421,9 +510,23 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                 if (report) report->malformed = true;
                 break;
             }
-            const char *pclose = strstr(ptag_end, sx->param_close);
+            const char *pclose =
+                matching_close(ptag_end, sx->param_open, sx->param_close);
             if (!pclose || pclose > inv_close) {
-                if (report) report->malformed = true;
+                // Nesting never balanced, so there is no faithful value to
+                // emit. Report contamination specifically when the unbalanced
+                // remainder carries protocol markup: that is the shape the
+                // guard exists for, and it reads differently in the 422 than
+                // an ordinary truncation.
+                if (report) {
+                    const char *end = pclose ? pclose : inv_close;
+                    if (end > ptag_end + 1 &&
+                        contains_nested_tool_markup(
+                            ptag_end + 1, (size_t)(end - (ptag_end + 1))))
+                        report->contaminated = true;
+                    else
+                        report->malformed = true;
+                }
                 break;
             }
 
@@ -436,7 +539,12 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                 (is_str && strcmp(is_str, "true") && strcmp(is_str, "false"))) {
                 if (report) report->malformed = true;
             } else {
-                if (contains_nested_tool_markup(val, val_len) && report)
+                // When dark, any nested markup is contamination. When enabled,
+                // matching_close already proved this value balanced, so the
+                // block was captured whole rather than truncated at the first
+                // inner closer -- not an error.
+                if (!nested_values_enabled() &&
+                    contains_nested_tool_markup(val, val_len) && report)
                     report->contaminated = true;
                 if (nparam++) ember_buf_putc(&args, ',');
                 if (!ember_dsml_append_arg(

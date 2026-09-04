@@ -127,11 +127,17 @@ static void test_replay_requires_matching_arguments(void) {
     ember_tool_calls_free(&expected);
 }
 
-static void test_parse_report_rejects_nested_dsml_in_string(void) {
+static void test_parse_report_keeps_nested_dsml_in_string_whole(void) {
     // Production failure shape: while inside write_file.content the model copied
-    // a fresh assistant/tool turn. The nested terminal parameter closer was
-    // previously mistaken for the outer content closer, yielding truncated but
-    // executable Python.
+    // a fresh assistant/tool turn. Taking the FIRST inner parameter closer as
+    // the outer one yielded truncated but executable Python, so this was
+    // rejected outright (report.contaminated) and the turn died with a 422.
+    //
+    // Rejecting was the safe half of the answer but not the right one: the
+    // model's intent is plain, and the value is recoverable exactly when the
+    // nesting balances. Matching closers by DEPTH keeps the value whole, so the
+    // call is faithful rather than truncated -- the hazard the old rule guarded
+    // against cannot occur. Unbalanced nesting is still refused; see below.
     const char *t =
         "<?DSML?tool_calls>"
         "<?DSML?invoke name=\"write_file\">"
@@ -152,10 +158,52 @@ static void test_parse_report_rejects_nested_dsml_in_string(void) {
     ember_tool_calls tc = {0};
     ember_tool_parse_report report = {0};
     int n = ember_parse_dsml_tool_calls_ex(t, &tc, &report);
+    const char *flag = getenv("EMBER_DSML_NESTED_VALUES");
+    if (flag && flag[0] == '1') {
+        CHECK(n == 1 && tc.len == 1, "a balanced nested value is recoverable");
+        CHECK(!report.contaminated && !report.malformed && !report.trailing,
+              "balanced nesting is not a protocol error");
+        if (tc.len == 1) {
+            CHECK(strcmp(tc.calls[0].name, "write_file") == 0,
+                  "the outer call is the one executed");
+            // The whole point: the value must carry the ENTIRE nested block. If
+            // the inner closer had ended it, "python3 --version" would be absent
+            // and the written file silently truncated.
+            CHECK(strstr(tc.calls[0].arguments, "python3 --version") != NULL,
+                  "the nested block survives inside the value, untruncated");
+            CHECK(strstr(tc.calls[0].arguments, "/tmp/x.py") != NULL,
+                  "the earlier parameter is still parsed");
+        }
+    } else {
+        // Dark by default: the pre-existing contract is unchanged, so a release
+        // that does not enable the feature behaves exactly as before.
+        CHECK(n == 0 && tc.len == 0,
+              "dark: nested DSML in a string argument is never executable");
+        CHECK(report.found && report.contaminated,
+              "dark: nested DSML contamination is reported");
+    }
+    ember_tool_calls_free(&tc);
+}
+
+static void test_parse_report_rejects_unbalanced_nested_dsml(void) {
+    // The safety half. Here the nested block opens a parameter it never closes,
+    // so no faithful outer value exists at any depth. This must stay
+    // unexecutable: emitting it would truncate the argument, which is the exact
+    // hazard the contamination guard was written for.
+    const char *t =
+        "<?DSML?tool_calls>"
+        "<?DSML?invoke name=\"write_file\">"
+        "<?DSML?parameter name=\"content\" string=\"true\">"
+        "<?DSML?parameter name=\"inner\" string=\"true\">never closed"
+        "</?DSML?invoke>"
+        "</?DSML?tool_calls>";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(t, &tc, &report);
     CHECK(n == 0 && tc.len == 0,
-          "nested DSML in a string argument is never executable");
-    CHECK(report.found && report.contaminated,
-          "nested DSML contamination is reported");
+          "unbalanced nested DSML is still never executable");
+    CHECK(report.contaminated || report.malformed,
+          "unbalanced nesting is still reported as a protocol error");
     ember_tool_calls_free(&tc);
 }
 
@@ -326,7 +374,8 @@ int main(void) {
     test_ascii_spelling_multi();
     test_no_tool_calls();
     test_replay_requires_matching_arguments();
-    test_parse_report_rejects_nested_dsml_in_string();
+    test_parse_report_keeps_nested_dsml_in_string_whole();
+    test_parse_report_rejects_unbalanced_nested_dsml();
     test_parse_report_marks_repaired_tail_incomplete();
     test_executable_report_rejects_invalid_raw_json();
     test_wrapper_is_authoritative();
