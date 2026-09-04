@@ -11,6 +11,19 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.9.4
+
+### Documentation
+
+- **perf:** drop the notes under the vision table (`df6b1155`)
+- **perf:** drop the explanatory paragraph from the vision card (`55cac7a5`)
+- **perf:** publish the first vision measurements (`54749695`)
+- **perf:** publish the v2026.9.3 measurements (`5c9f2ed5`)
+
+### Other
+
+- add --dry-run, and test the certify job's wiring with it (`90846866`)
+- measure the image path, and publish it separately from text (`5ec6960d`)
 ## 2026.9.3
 
 ### Curated notes
