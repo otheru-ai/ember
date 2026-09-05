@@ -11,6 +11,10 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.9.5
+
+### Curated notes
+
 DRY repetition control now defaults to `0.8` in Compose deployments. On the
 shipping Vision model, a pre-registered experiment with 134 requests per arm
 observed 19 `repetition_detected` failures without DRY and zero with it; the
@@ -33,6 +37,31 @@ default; this release's evidence does not validate enabling that mode.
   and ICC transforms are not applied. GPU request validation remains a release
   gate; host tests cover decoded pixels and shared PNG/JPEG preprocessing.
 
+### Added
+
+- **deploy:** default the DRY sampler penalty to 0.8 (`95c4e261`)
+- **vision:** add bounded native JPEG decoding through libjpeg-turbo (`2123bfd1`)
+- **engine:** add opt-in DRY-aware DSpark target sampling (`e12bf5fd`)
+
+### Fixed
+
+- **ci:** keep benchmark dry-runs GPU-free and install JPEG prerequisites (`a1b3bdec`)
+- **build:** collect JPEG copyright from the installed dev package (`89d3c3a8`)
+- **ci:** gate container builds on CPU-capable engine tests (`3fdcf114`)
+- **tool_parser:** repair the generation and emission boundaries, not just the parser (`b26ed712`)
+- **tool_parser:** capture balanced nested DSML in string arguments (`a9f1d635`)
+
+### Documentation
+
+- **release:** scope DRY defaults and validated behavior (`2d4448d4`)
+
+### Testing
+
+- **server:** cover DRY environment default and request opt-out (`d9c8d4c4`)
+
+### Other
+
+- Merge main (v2026.9.4) into the release candidate (`8f34d641`)
 ## 2026.9.4
 
 ### Documentation
