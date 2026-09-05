@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "sampler.h"
+#include "speculative_sampler.h"
+#include <memory>
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -20,11 +22,103 @@ static int g_fail = 0;
         }                                                                    \
     } while (0)
 
+// Exercise the real request sampler against an independent one-token driver.
+// The fake model's logits depend on the entire prefix; rows beyond a rejected
+// proposal therefore belong to the wrong conditional distribution.
+static void test_speculative_sampler() {
+    using namespace dflash::common;
+    struct Mask final : TokenMask {
+        int count = 0;
+        void accept(int32_t) override { ++count; }
+        bool active() const override { return count % 5 == 2; }
+        void apply(float * logits, int vocab) override {
+            if (active() && vocab > 2) logits[2] = -INFINITY;
+        }
+    };
+    auto model = [](const std::vector<int32_t> & h) {
+        unsigned v = 19;
+        for (int32_t x : h) v = v * 31u + (unsigned)x;
+        std::vector<float> logits(7);
+        for (int i = 0; i < 7; ++i)
+            logits[(size_t)i] = (float)((v >> (i * 3)) % 17u) / 5.0f;
+        return logits;
+    };
+    for (float temp : {0.0f, 0.6f}) {
+        for (unsigned trial = 0; trial < 80; ++trial) {
+            SamplerCfg c;
+            c.temp = temp; c.dry_multiplier = 0.8f;
+            c.top_k = 5; c.top_p = 0.9f; c.min_p = 0.05f;
+            c.rep_pen = 1.1f; c.freq_pen = 0.1f; c.pres_pen = 0.1f;
+            c.rep_window = 12; c.dry_window = 12;
+            if (trial % 2) c.dry_breaker_ids = {6};
+            const std::vector<int32_t> prompt = {0, 1, 0, 1, 0, 1};
+            std::mt19937_64 ar_rng(trial + 17), spec_rng(trial + 17);
+            Mask ar_mask;
+            auto spec_mask = std::make_shared<Mask>();
+            std::vector<int32_t> h = prompt, want, got;
+            // Independent AR selection preserves the existing forced-greedy
+            // contract (bypass penalties when the structural hook forces it).
+            for (int step = 0; step < 29; ++step) {
+                auto logits = model(h);
+                if (ar_mask.active()) ar_mask.apply(logits.data(), 7);
+                int32_t next;
+                if (step % 4 == 3) {
+                    next = (int32_t)(std::max_element(logits.begin(), logits.end()) - logits.begin());
+                } else next = sample_logits(logits.data(), 7, c, h, ar_rng);
+                h.push_back(next); want.push_back(next); ar_mask.accept(next);
+            }
+            SpeculativeSampler sampler(c, prompt, spec_rng, spec_mask,
+                                       [&] { return got.size() % 4 == 3; });
+            int full = 0, partial = 0;
+            while (got.size() < want.size()) {
+                const size_t start = got.size();
+                const size_t width = std::min<size_t>(4, want.size() - start);
+                std::vector<int32_t> proposals;
+                std::vector<std::vector<float>> rows;
+                auto ph = sampler.history();
+                for (size_t i = 0; i < width; ++i) {
+                    rows.push_back(model(ph));
+                    int32_t proposal = want[start + i];
+                    if ((start / 4) % 2 && i == 1) proposal = (proposal + 1) % 7;
+                    proposals.push_back(proposal); ph.push_back(proposal);
+                }
+                bool mismatch = false;
+                for (size_t i = 0; i < width; ++i) {
+                    int32_t next = sampler.sample(rows[i].data(), 7);
+                    sampler.accept(next);
+                    got.push_back(next); // synchronous emitter drives force hook
+                    if (next != proposals[i]) { mismatch = true; break; }
+                }
+                if (mismatch) ++partial; else ++full;
+            }
+            CHECK(got == want, "sampled prefix and AR output match, including forced/masked rows");
+            CHECK(spec_rng == ar_rng, "rejected tail consumes no target RNG draws");
+            CHECK(sampler.history() == h, "only emitted prefix enters DRY history");
+            CHECK(spec_mask->count == ar_mask.count, "grammar accepts each output once");
+            CHECK(full > 0 && partial > 0, "exercise both full and partial blocks");
+        }
+    }
+    SamplerCfg c;
+    c.dry_multiplier = 8.0f;
+    std::mt19937_64 rng(4);
+    SpeculativeSampler live(c, {0, 0, 0, 0, 0}, rng);
+    float first[] = {10, 9};
+    CHECK(live.sample(first, 2) == 1, "DRY changes raw target argmax");
+    live.accept(1);
+    float second[] = {10, 9};
+    CHECK(live.sample(second, 2) == 0, "accepted token changes next-row DRY suffix");
+    std::mt19937_64 stale_rng(4);
+    SpeculativeSampler stale(c, {0, 0, 0, 0, 0}, stale_rng);
+    float bad[] = {10, 9};
+    CHECK(stale.sample(bad, 2) == 1, "stale-history negative control disagrees");
+}
+
 int main() {
     using dflash::common::SamplerCfg;
     using dflash::common::sample_logits;
 
     std::printf("ember sampler tests\n");
+    test_speculative_sampler();
     const float logits[] = {10.0f, 9.0f};
     const std::vector<int32_t> repeated_second = {1};
     std::mt19937_64 rng(1);

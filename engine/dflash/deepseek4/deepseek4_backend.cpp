@@ -13,6 +13,7 @@
 #include "deepseek4_vision_markers.h"
 #include "common/dspark_head.h"
 #include "common/sampler.h"
+#include "common/speculative_sampler.h"
 
 #include "common/gpu_runtime_compat.h"
 
@@ -1882,13 +1883,8 @@ bool DeepSeek4Backend::do_decode(int committed, int n_gen,
                               nullptr);
     };
     auto sample_from = [&](std::vector<float> & lg) -> int32_t {
-        if (token_mask && token_mask->active())
-            token_mask->apply(lg.data(), w_.n_vocab);
-        if (process_logits && !(force_greedy && force_greedy()))
-            return sample_logits(lg.data(), w_.n_vocab, sampler_, history, sampler_rng_);
-        int32_t best = 0; float mv = lg[0];
-        for (int i = 1; i < w_.n_vocab; i++) if (lg[i] > mv) { mv = lg[i]; best = i; }
-        return best;
+        return sample_request_logits(lg.data(), w_.n_vocab, sampler_, history,
+                                     sampler_rng_, token_mask.get(), force_greedy);
     };
 
     // Resuming after spec decode: out_tokens is pre-populated, so the counter
@@ -2270,7 +2266,8 @@ bool ds4_spec_should_run(const GenerateRequest & req, bool spec_enabled,
     // malformed shapes the grammar exists to prevent slip through. Route
     // constrained requests through AR, the same way the thinking budget hook
     // already does. Masking drafts directly is the follow-up.
-    else if (!reason && req.token_mask) reason = "token_mask";
+    else if (!reason && req.token_mask &&
+             !env_flag_enabled("DFLASH_DS4_SPEC_SAMPLING")) reason = "token_mask";
     else if (!reason && sampling_requires_ar) reason = "sampling";
     else if (!reason && req.n_gen <= 0) reason = "empty_budget";
     else if (!reason && spec_budget < kDSparkMinSpecBudget) reason = "short_budget";
@@ -2339,7 +2336,9 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     // The final committed position is known from the prompt length here; using
     // the same context- and reply-clamped budget as decode prevents capture
     // hooks from perturbing requests for which speculation will be skipped.
-    const bool sampling_requires_ar = sampler_.needs_logit_processing();
+    const bool sampled_spec = env_flag_enabled("DFLASH_DS4_SPEC_SAMPLING");
+    const bool sampling_requires_ar = !sampled_spec &&
+        (sampler_.needs_logit_processing() || req.token_mask != nullptr);
     const int capture_spec_budget = std::min(
         ds4_spec_emit_budget(req),
         ds4_spec_context_budget((int) req.prompt.size()));
@@ -2418,8 +2417,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
 
     // Decode
     auto t1 = Clock::now();
-    // The DSpark verifier is greedy-only. Route sampling and penalties through
-    // AR so the request's sampler contract is not silently ignored.
+    // Sampled verification is opt-in; the legacy verifier remains greedy-only.
     const int spec_budget = std::min(
         ds4_spec_emit_budget(req), ds4_spec_context_budget(committed));
     std::vector<int32_t> gen;
@@ -2433,6 +2431,8 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     ProgressCycleDetector spec_progress(
         req.budget_hook.natural_close_token_ids, req.prompt,
         req.tool_region_open_ids, req.tool_region_close_ids);
+    SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
+                                    req.token_mask, req.force_greedy_next);
     if (req.vision.empty() &&
         ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
@@ -2442,12 +2442,20 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
             return result;
         }
         int seed = 0;
-        { float mv = last_logits_[0];
-          for (int i = 1; i < w_.n_vocab; i++) if (last_logits_[i] > mv) { mv = last_logits_[i]; seed = i; } }
+        if (sampled_spec) {
+            auto seed_logits = last_logits_;
+            seed = spec_sampler.sample(seed_logits.data(), w_.n_vocab);
+            spec_sampler.accept(seed);
+        } else {
+            float mv = last_logits_[0];
+            for (int i = 1; i < w_.n_vocab; i++)
+                if (last_logits_[i] > mv) { mv = last_logits_[i]; seed = i; }
+        }
         gen.push_back(seed);
         out_io.emit(seed);
         spec_degenerate = spec_progress.observe(seed);
-        if (!out_io.cancelled && !deepseek4_is_eos_tok(seed, w_) && spec_budget > 1) {
+        if (!spec_degenerate && !out_io.cancelled &&
+            !deepseek4_is_eos_tok(seed, w_) && spec_budget > 1) {
             const int feat_row = spec_drafter_->n_target_layers * w_.n_embd;
             const int win_len = feat_row > 0 ? (int) (spec_feat_window_.size() / feat_row) : 0;
             std::vector<int32_t> spec_toks;
@@ -2475,7 +2483,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                             return false;
                         }
                         return !out_io.cancelled;
-                    })) {
+                    }, sampled_spec ? &spec_sampler : nullptr)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed");
                 return result;
@@ -2768,7 +2776,9 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         sampler_rng_.seed(sampler_.seed);
     }
 
-    const bool sampling_requires_ar = sampler_.needs_logit_processing();
+    const bool sampled_spec = env_flag_enabled("DFLASH_DS4_SPEC_SAMPLING");
+    const bool sampling_requires_ar = !sampled_spec &&
+        (sampler_.needs_logit_processing() || req.token_mask != nullptr);
     const int capture_spec_budget = std::min(
         ds4_spec_emit_budget(req), ds4_spec_context_budget(prompt_len));
     const bool eligible_without_gate = dspark_request_can_prepare(
@@ -2838,23 +2848,31 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     ProgressCycleDetector spec_progress(
         req.budget_hook.natural_close_token_ids, req.prompt,
         req.tool_region_open_ids, req.tool_region_close_ids);
+    SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
+                                    req.token_mask, req.force_greedy_next);
     if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
                             profitability_allowed)) {
         int seed = 0;
-        float max_value = last_logits_[0];
-        for (int i = 1; i < w_.n_vocab; ++i) {
-            if (last_logits_[i] > max_value) {
-                max_value = last_logits_[i];
-                seed = i;
+        if (sampled_spec) {
+            auto seed_logits = last_logits_;
+            seed = spec_sampler.sample(seed_logits.data(), w_.n_vocab);
+            spec_sampler.accept(seed);
+        } else {
+            float max_value = last_logits_[0];
+            for (int i = 1; i < w_.n_vocab; ++i) {
+                if (last_logits_[i] > max_value) {
+                    max_value = last_logits_[i];
+                    seed = i;
+                }
             }
         }
 
         generated.push_back(seed);
         out_io.emit(seed);
         spec_degenerate = spec_progress.observe(seed);
-        if (!out_io.cancelled && !deepseek4_is_eos_tok(seed, w_) &&
-            spec_budget > 1) {
+        if (!spec_degenerate && !out_io.cancelled &&
+            !deepseek4_is_eos_tok(seed, w_) && spec_budget > 1) {
             const int feat_row =
                 spec_drafter_->n_target_layers * w_.n_embd;
             const int win_len = feat_row > 0
@@ -2885,7 +2903,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                             return false;
                         }
                         return !out_io.cancelled;
-                    })) {
+                    }, sampled_spec ? &spec_sampler : nullptr)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed after restore");
                 return result;

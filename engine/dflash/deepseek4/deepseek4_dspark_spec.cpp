@@ -24,12 +24,15 @@
 //     current half before the q=1 fallback reaches the same boundary.
 // As in Dwarfstar, a fully accepted block keeps the batched target state. A
 // partial accept rolls all the way back and replays the accepted prefix through
-// the ordinary q=1 target graph. This makes the rejection path target-exact
-// without paying for a second target pass on the high-acceptance fast path.
+// the ordinary q=1 target graph. Legacy greedy replay can replace its bonus.
+// Sampled approximate verification instead preserves the already-emitted
+// q-wide selections: replay restores KV without resampling. This explicitly
+// approximate mode requires DFLASH_DS4_SPEC_SAMPLING_BATCH_VERIFY as well.
 // The legacy full-snapshot rollback remains available with
 // DFLASH_DS4_FULL_SNAP=1 when batched verification is enabled.
 
 #include "deepseek4_dspark.h"
+#include "../common/speculative_sampler.h"
 #include "deepseek4_dspark_scheduler.h"
 #include "common/dspark_draft_compute_xdna.h"
 #include "deepseek4_internal.h"
@@ -99,6 +102,18 @@ public:
             return false;
         }
         if (am.empty()) return false;
+        if (sample_next_) {
+            if (verify_logits_.size() != (size_t)n * w_.n_vocab) return false;
+            am.clear();
+            for (int i = 0; i < n; ++i) {
+                const int32_t next = sample_next_(
+                    verify_logits_.data() + (size_t)i * w_.n_vocab, w_.n_vocab);
+                if (next < 0) return false;
+                am.push_back(next);
+                if (sample_stopped_() || i + 1 == n || tokens[(size_t)i + 1] != next)
+                    break;
+            }
+        }
         last_tok = am.back();
         verify_n_ = n;
         if (all_argmax) *all_argmax = std::move(am);
@@ -109,13 +124,14 @@ public:
     // proposal. The caller must first restore target state to base_pos.
     bool verify_exact_prefix(const std::vector<int32_t> & tokens, int base_pos,
                              int & last_tok,
-                             std::vector<int32_t> * all_argmax = nullptr) {
+                             std::vector<int32_t> * all_argmax = nullptr,
+                             bool committed_replay = false) {
         const int n = (int) tokens.size();
         if (n <= 0) return false;
         embed_buf_.resize((size_t) n * w_.n_embd);
         if (!w_.embedder.embed(tokens.data(), n, embed_buf_.data())) return false;
         return verify_exact_prefix_embedded(tokens, base_pos, last_tok,
-                                            all_argmax);
+                                            all_argmax, committed_replay);
     }
 
     bool read_verify_logits(int n_tokens, std::vector<float> & out) override {
@@ -187,6 +203,12 @@ public:
     const std::vector<int> & capture_layer_ids() const override { return capture_ids_; }
 
     void set_keep_logits(bool b) { keep_logits_ = b; }
+    void set_sampler(std::function<int32_t(float *, int)> next,
+                     std::function<bool()> stopped) {
+        sample_next_ = std::move(next);
+        sample_stopped_ = std::move(stopped);
+        keep_logits_ = true;
+    }
     void set_telemetry(DeepSeek4StepTelemetry * t) { telemetry_ = t; }
     void set_strict_verify(bool b) { strict_verify_ = b; }
     const std::vector<float> & last_features() const { return verify_features_; }
@@ -196,7 +218,7 @@ public:
 private:
     bool verify_exact_prefix_embedded(
             const std::vector<int32_t> & tokens, int base_pos, int & last_tok,
-            std::vector<int32_t> * all_argmax) {
+            std::vector<int32_t> * all_argmax, bool committed_replay = false) {
         const int n = (int) tokens.size();
         if (n <= 0 || embed_buf_.size() < (size_t) n * w_.n_embd) return false;
         std::vector<int32_t> am_all;
@@ -217,12 +239,22 @@ private:
                 return false;
             }
             if (am1.empty()) return false;
+            if (sample_next_ && !committed_replay) {
+                if (logits1.size() != (size_t)w_.n_vocab) return false;
+                am1[0] = sample_next_(logits1.data(), w_.n_vocab);
+                if (am1[0] < 0) return false;
+            }
             am_all.push_back(am1[0]);
             feat_all.insert(feat_all.end(), feat1.begin(), feat1.end());
             if (keep_logits_) {
                 logits_all.insert(logits_all.end(), logits1.begin(), logits1.end());
             }
-            if (t + 1 < n && tokens[(size_t) t + 1] != am1[0]) break;
+            // Replay writes already-emitted tokens; it must neither resample,
+            // advance request hooks/RNG nor reject a sampled token by argmax.
+            if (!committed_replay) {
+                if (sample_next_ && sample_stopped_()) break;
+                if (t + 1 < n && tokens[(size_t) t + 1] != am1[0]) break;
+            }
             // No token after EOS belongs to the sequence.  Besides avoiding
             // pointless work, this prevents an accepted speculative block from
             // advancing resident KV beyond the terminal token.
@@ -247,6 +279,8 @@ private:
     DeepSeek4Snapshot snap_{};
     DeepSeek4StepTelemetry * telemetry_ = nullptr;
     bool keep_logits_ = false;
+    std::function<int32_t(float *, int)> sample_next_;
+    std::function<bool()> sample_stopped_;
     int verify_n_ = 0;
     std::vector<float> embed_buf_;
     std::vector<float> verify_logits_;
@@ -1152,7 +1186,8 @@ bool run_deepseek4_dspark_spec_decode(
         float * accept_rate_out,
         int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute,
-        const std::function<bool(int32_t)> & on_token) {
+        const std::function<bool(int32_t)> & on_token,
+        SpeculativeSampler * sampler) {
     if (spec_cycles_out) *spec_cycles_out = 0;
     const int n_embd = target_w.n_embd;
     const int n_tgt = drafter.n_target_layers;
@@ -1174,11 +1209,20 @@ bool run_deepseek4_dspark_spec_decode(
     // The q-wide graph remains opt-in because its different reduction shape
     // can change near-tied target logits. DFLASH_DS4_APPROX_VERIFY is kept as
     // a compatibility alias for older deployments.
+    // Sampled q-wide verification has a distinct numerical contract. Never
+    // inherit an old greedy BATCH_VERIFY setting as authorization for it.
     const bool batch_verify_requested =
-        spec_env_flag("DFLASH_DS4_BATCH_VERIFY") ||
-        spec_env_flag("DFLASH_DS4_APPROX_VERIFY");
+        (spec_env_flag("DFLASH_DS4_BATCH_VERIFY") ||
+         spec_env_flag("DFLASH_DS4_APPROX_VERIFY")) &&
+        (!sampler || spec_env_flag("DFLASH_DS4_SPEC_SAMPLING_BATCH_VERIFY"));
     const bool force_strict_verify =
         !batch_verify_requested || spec_env_flag("DFLASH_DS4_SEQ_VERIFY");
+    if (sampler) {
+        std::fprintf(stderr,
+                     "[ds4-spec-sampling] target-sampler=on "
+                     "qwide_requested=%d strict_forced=%d\n",
+                     batch_verify_requested ? 1 : 0, force_strict_verify ? 1 : 0);
+    }
     // Qualify the q-wide path on the request's own exact-prefix behavior. This
     // keeps short/fragile answers on the q=1 graph while allowing repetitive,
     // high-acceptance generation to amortize target weights. Zero restores the
@@ -1415,6 +1459,20 @@ bool run_deepseek4_dspark_spec_decode(
     bool scheduler_tail_handoff = false;
     bool ok = true;
     bool stop_requested = false;
+    if (sampler) {
+        target.set_sampler([&](float * logits, int vocab) -> int32_t {
+            const int32_t next = sampler->sample(logits, vocab);
+            if (next < 0) return next;
+            sampler->accept(next);
+            out_tokens.push_back(next);
+            ++n_generated;
+            // Commit synchronously: the next row's structural sampler hook
+            // must see this output, and cancelled tails must consume no RNG.
+            if (on_token && !on_token(next)) stop_requested = true;
+            if (target.is_eos(next) || n_generated >= n_gen) stop_requested = true;
+            return next;
+        }, [&] { return stop_requested; });
+    }
 
     std::vector<float> noise_embed((size_t) n_embd * block);
     std::vector<float> xdna_main_context;
@@ -1846,6 +1904,7 @@ bool run_deepseek4_dspark_spec_decode(
         // plus each candidate the target agrees with.
         int accept = 1;
         for (int i = 0; i < q - 1; i++) {
+            if (sampler && i + 1 >= (int)tgt_am.size()) break;
             if (i >= (int) tgt_am.size()) break;
             if (draft_tok[i + 1] == tgt_am[i]) accept++;
             else break;
@@ -1915,7 +1974,8 @@ bool run_deepseek4_dspark_spec_decode(
             int replay_last = -1;
             std::vector<int32_t> replay_am;
             if (!target.verify_exact_prefix(
-                    kv_toks, pos, replay_last, &replay_am) ||
+                    kv_toks, pos, replay_last, &replay_am,
+                    /*committed_replay=*/sampler != nullptr) ||
                 replay_am.empty()) {
                 std::fprintf(stderr, "[ds4-spec] replay verify failed\n");
                 ok = false;
@@ -1925,12 +1985,15 @@ bool run_deepseek4_dspark_spec_decode(
             // that case the exact replay stops at the earlier disagreement;
             // shrink the commit rather than failing the request or forcing a
             // token the ordinary target graph did not choose.
-            if ((int) replay_am.size() < accept) {
+            if (!sampler && (int) replay_am.size() < accept) {
                 accept = (int) replay_am.size();
                 matched = accept - 1;
                 commit_pos = pos + accept;
             }
-            bonus = replay_am.back();
+            // In sampled approximate mode outputs have already been selected
+            // from q-wide logits. Replay repairs KV only; changing the bonus
+            // now would disagree with emitted output and consume RNG twice.
+            if (!sampler) bonus = replay_am.back();
             exact_replay = true;
         }
         // Exact-prefix mode and accept==q already end at the precise commit
@@ -1949,7 +2012,7 @@ bool run_deepseek4_dspark_spec_decode(
 
         // Output tokens this step = accepted candidates + bonus.
         bool hit_eos = false;
-        for (int i = 1; i <= accept; i++) {
+        for (int i = 1; !sampler && i <= accept; i++) {
             const int t = (i < accept) ? draft_tok[i] : bonus;
             out_tokens.push_back(t);
             n_generated++;

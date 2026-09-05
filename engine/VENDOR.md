@@ -14,6 +14,13 @@ network fetch.
 
 ## Local modifications
 
+DRY-aware DSpark target sampling is a local Ember extension. The opt-in serial
+fresh/restore path shares the ordinary request sampler, accepts only emitted
+history, and advances grammar/structural hooks between selected rows. Strict
+q=1 verification is its default; sampled q-wide verification is separately
+opt-in and numerically approximate. See `docs/dspark-sampling.md`. The resident
+NPU path retains its existing sampled-request fallback.
+
 `engine/` is intentionally a fork, not an unmodified third-party mirror.
 Local changes cover the C ABI bridge, gfx1151 ROCMFP integration, DSpark
 scheduling, resident-session batching, the opt-in XDNA2 selected-expert and

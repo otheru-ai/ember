@@ -272,6 +272,7 @@ bool deepseek4_dspark_resident_finish(
 // prefix, and loop. Returns generated tokens via `io.emit`. Mirrors the laguna
 // DSpark loop. accept_rate_out (optional) gets accepted / offered candidates;
 // spec_cycles_out (optional) gets the number of completed speculative cycles.
+class SpeculativeSampler;
 struct GenerateRequest;  // fwd (from common/…); the loop only needs n_gen + committed
 bool run_deepseek4_dspark_spec_decode(
         ggml_backend_t backend,
@@ -288,6 +289,7 @@ bool run_deepseek4_dspark_spec_decode(
         float * accept_rate_out,
         int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute = nullptr,
-        const std::function<bool(int32_t)> & on_token = {});
+        const std::function<bool(int32_t)> & on_token = {},
+        SpeculativeSampler * sampler = nullptr);
 
 }  // namespace dflash::common
