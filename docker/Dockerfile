@@ -154,7 +154,7 @@ RUN gcc -shared -fPIC -O2 -g \
     fi \
  && du -sh /ember-runtime
 
-RUN install -Dm0644 /usr/share/doc/libturbojpeg0/copyright /ember-licenses/libjpeg-turbo/copyright \
+RUN install -Dm0644 /usr/share/doc/libturbojpeg0-dev/copyright /ember-licenses/libjpeg-turbo/copyright \
  && install -Dm0644 LICENSE /ember-licenses/ember/LICENSE \
  && install -Dm0644 engine/ggml/LICENSE /ember-licenses/ggml/LICENSE \
  && install -Dm0644 engine/dflash/LICENSE /ember-licenses/dflash/LICENSE \
