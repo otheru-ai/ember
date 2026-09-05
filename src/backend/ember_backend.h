@@ -42,6 +42,9 @@ typedef struct {
     // Diagnostic-only loader exception. The engine still admits exactly a
     // 1-layer/1-hash-layer DeepSeek control and rejects every other truncation.
     bool        allow_single_layer_control;
+    const char *dir_steering_file;
+    float       dir_steering_attn;
+    float       dir_steering_ffn;
 } ember_backend_config;
 
 // Load a model. Returns NULL on failure and sets *err (caller frees) if non-NULL.

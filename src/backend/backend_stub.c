@@ -5,6 +5,7 @@
 // generate → detokenize → SSE — run and be tested without the HIP container.
 // The real forward pass (backend_dflash.cc) replaces this behind the same ABI.
 #include "ember_backend.h"
+#include "model/directional_steering.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -29,6 +30,15 @@ struct ember_backend {
 
 ember_backend *ember_backend_load(const ember_backend_config *cfg, char **err) {
     if (err) *err = NULL;
+    ember_directional_steering *steering = NULL;
+    char steering_error[160];
+    if (cfg && !ember_directional_steering_load(
+            cfg->dir_steering_file, cfg->dir_steering_attn, cfg->dir_steering_ffn,
+            &steering, steering_error, sizeof(steering_error))) {
+        if (err) *err = strdup(steering_error);
+        return NULL;
+    }
+    free(steering); // Stub validates operator policy but runs no model math.
     ember_backend *b = (ember_backend *)calloc(1, sizeof(ember_backend));
     if (!b) {
         if (err) *err = strdup("out of memory");

@@ -1162,6 +1162,12 @@ bool build_deepseek4_moe_hybrid_storage_from_file_with_mmap(
 
 void free_deepseek4_weights(DeepSeek4Weights & w) {
     deepseek4_release_runtime_graphs(w);
+    if (w.steering_buf) ggml_backend_buffer_free(w.steering_buf);
+    if (w.steering_ctx) ggml_free(w.steering_ctx);
+    w.steering_buf = nullptr;
+    w.steering_ctx = nullptr;
+    w.steering_rows.clear();
+    w.directional_steering.reset();
     if (w.ctx) { ggml_free(w.ctx); w.ctx = nullptr; }
     if (w.buf) { ggml_backend_buffer_free(w.buf); w.buf = nullptr; }
     w.layers.clear();

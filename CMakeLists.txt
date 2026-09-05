@@ -115,6 +115,7 @@ add_library(ember_core STATIC
   src/model/model_profile.c
   src/backend/backend_stub.c
   src/model/model_card.c
+  src/model/directional_steering.c
   src/model/kv_cache.c
 )
 target_include_directories(ember_core PUBLIC src)
@@ -230,6 +231,10 @@ add_test(NAME compaction COMMAND test_compaction)
 add_executable(test_gguf test/test_gguf.c)
 target_link_libraries(test_gguf ember_core m)
 add_test(NAME gguf COMMAND test_gguf)
+
+add_executable(test_directional_steering test/test_directional_steering.c)
+target_link_libraries(test_directional_steering ember_core m)
+add_test(NAME directional_steering COMMAND test_directional_steering)
 
 add_executable(test_model_card test/test_model_card.c)
 target_link_libraries(test_model_card ember_core m)
@@ -449,7 +454,7 @@ set(EMBER_C_TESTS
   sse tool_parser tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
   chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
-  compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
+  directional_steering compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer
  activation_dump
   gguf_quantize_common
@@ -485,7 +490,7 @@ set(EMBER_STRICT_TARGETS
   test_tool_grammar test_tool_grammar_match
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
-  test_compaction test_gguf test_model_card test_model_profile test_image_input
+  test_directional_steering test_compaction test_gguf test_model_card test_model_profile test_image_input
   test_vision_prompt test_kv_cache test_qa test_server_helpers)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
@@ -493,6 +498,10 @@ endforeach()
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME steering_cli
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_steering_cli.py
+            $<TARGET_FILE:ember-server>)
+  set_tests_properties(steering_cli PROPERTIES TIMEOUT 20)
   add_test(
     NAME quant_quality_report
     COMMAND ${Python3_EXECUTABLE}
@@ -641,6 +650,12 @@ if(EMBER_ENGINE)
   # Builds a real ggml graph on the CPU backend; a hang here would otherwise
   # block ctest indefinitely.
   set_tests_properties(ds4_imatrix_graph PROPERTIES TIMEOUT 120)
+
+  add_executable(test_ds4_steering_graph test/test_ds4_steering_graph.cpp)
+  target_include_directories(test_ds4_steering_graph PRIVATE engine/dflash engine/ggml/include)
+  target_link_libraries(test_ds4_steering_graph PRIVATE ggml ggml-base ggml-cpu)
+  add_test(NAME ds4_steering_graph COMMAND test_ds4_steering_graph)
+  set_tests_properties(ds4_steering_graph PROPERTIES TIMEOUT 120)
 
   # Metadata-only split-set coverage. It links the real loader's gguf parser
   # but never creates a HIP backend or touches a device, so it remains runnable
@@ -884,6 +899,7 @@ if(EMBER_ENGINE)
     src/model/gguf.c
     src/model/model_profile.c
     src/model/model_card.c
+    src/model/directional_steering.c
     src/model/kv_cache.c
     src/server/main.c
     src/backend/backend_dflash.cc)

@@ -4236,6 +4236,10 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --port N                    listen port (default 8080)\n"
         "  --model-name ID             advertised model id\n"
         "  --model-card PATH           sampling/reasoning model card\n"
+        "  --dir-steering-file PATH    43 x 4096 little-endian F32 directions\n"
+        "  --dir-steering-attn F       attention projection scale [-100,100]\n"
+        "  --dir-steering-ffn F        FFN projection scale [-100,100]\n"
+        "                             file alone: FFN=1, attention=0; default off\n"
         "  --vision-mmproj PATH        operator-owned DeepSeek native vision tower\n"
         "  --allow-single-layer-control\n"
         "                              diagnostic: admit exact 1/1 DeepSeek fixture\n"
@@ -4775,6 +4779,9 @@ int main(int argc, char **argv) {
     const char *model_path = NULL, *model_name = "deepseek-v4-flash";
     const char *card_path = NULL, *kv_dir = NULL;
     const char *vision_mmproj_path = NULL;
+    const char *dir_steering_file = NULL;
+    double dir_steering_attn = 0.0, dir_steering_ffn = 0.0;
+    bool dir_steering_scale_set = false;
     bool allow_single_layer_control = false;
     long kv_cache_mb = 0;   // 0 = library default (131072 MB)
     // Seconds of quiet before cached compute graphs are released. Long enough
@@ -4857,6 +4864,17 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
             if (v) card_path = v;
+        } else if (strcmp(opt, "--dir-steering-file") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v && v[0];
+            if (options_ok) dir_steering_file = v;
+        } else if (strcmp(opt, "--dir-steering-attn") == 0 ||
+                   strcmp(opt, "--dir-steering-ffn") == 0) {
+            v = need_option_value(&i, argc, argv);
+            double *scale = strcmp(opt, "--dir-steering-attn") == 0
+                                ? &dir_steering_attn : &dir_steering_ffn;
+            options_ok = v && parse_double_range(v, opt, -100.0, 100.0, scale);
+            dir_steering_scale_set = true;
         } else if (strcmp(opt, "--vision-mmproj") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v != NULL;
@@ -4982,6 +5000,13 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // ds4_cli.c parse_args: file alone selects FFN=1; any explicit scale
+    // leaves the unspecified component zero, including explicit zero values.
+    if (dir_steering_file && !dir_steering_scale_set) dir_steering_ffn = 1.0;
+    if (!dir_steering_file && (dir_steering_attn != 0.0 || dir_steering_ffn != 0.0)) {
+        fprintf(stderr, "[ember] directional steering needs --dir-steering-file\n");
+        return 2;
+    }
     const bool vision_gate_requested =
         validate_vision_artifact_a || validate_vision_artifact_b ||
         validate_vision_mmproj || validate_vision_expect_a ||
@@ -5081,6 +5106,9 @@ int main(int argc, char **argv) {
     cfg.batch_sessions = batch_sessions;
     cfg.ds4_prefill_mode = ds4_prefill_mode;
     cfg.vision_mmproj_path = vision_mmproj_path;
+    cfg.dir_steering_file = dir_steering_file;
+    cfg.dir_steering_attn = (float)dir_steering_attn;
+    cfg.dir_steering_ffn = (float)dir_steering_ffn;
     cfg.allow_single_layer_control = allow_single_layer_control;
     char *err = NULL;
     ember_backend *be = ember_backend_load(&cfg, &err);

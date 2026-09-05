@@ -34,6 +34,7 @@ std::unique_ptr<ModelBackend> create_backend(const BackendArgs & args) {
     cfg.fused_decode = args.ds4_fused_decode;
     cfg.prefill_mode = args.ds4_prefill_mode;
     cfg.allow_single_layer_control = args.allow_single_layer_control;
+    cfg.directional_steering = args.directional_steering;
 
     auto backend = std::make_unique<DeepSeek4Backend>(cfg);
     if (!backend->init()) {

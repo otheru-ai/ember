@@ -15,6 +15,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include "../../../src/model/directional_steering.h"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -280,6 +282,12 @@ struct DeepSeek4Weights {
     // PORTED from lucebox d03bcc4: feed the persistent F16 MLA cache straight
     // to batched verifier attention instead of casting it to F32 every  step.
     bool fused_verify_f16_kv = false;
+    // Target-only immutable policy. DSpark stages use layers 43/44/45 and
+    // cannot reuse target direction rows 0/1/2. Acceptance uses steered target.
+    std::shared_ptr<const ember_directional_steering> directional_steering;
+    ggml_context * steering_ctx = nullptr;
+    ggml_backend_buffer_t steering_buf = nullptr;
+    std::vector<ggml_tensor *> steering_rows;
 };
 
 inline bool deepseek4_is_eos_tok(int tok, const DeepSeek4Weights & w) {
@@ -357,6 +365,7 @@ struct DeepSeek4BackendConfig {
     // Standalone diagnostic only: accept exactly the layer-0/hash-layer-0
     // control slice. No server option or environment variable sets this.
     bool         allow_single_layer_control = false;
+    std::shared_ptr<const ember_directional_steering> directional_steering;
 };
 
 // ─── Function declarations ──────────────────────────────────────────────

@@ -338,6 +338,7 @@ validation or benchmarking.
 - [Continuous batching](docs/continuous-batching.md)
 - [Measured performance: TTFT, decode, roofline](docs/performance.md)
 - [Quantisation quality and release gates](docs/quant-quality-reports.md)
+- [Experimental runtime directional steering](docs/directional-steering.md)
 - [Experimental CPU/GPU/XDNA2 inference](docs/xdna2-moe-prototype.md)
 - [Lessons from upstream engines](docs/upstream-lessons.md)
 - [Client configuration](docs/client-compatibility.md)

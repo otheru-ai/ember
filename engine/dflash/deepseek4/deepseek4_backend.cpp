@@ -1178,6 +1178,42 @@ bool DeepSeek4Backend::init() {
     if (!load_model()) {
         return false;
     }
+    if (cfg_.directional_steering) {
+        if (w_.n_layer != EMBER_STEERING_LAYERS || w_.n_embd != EMBER_STEERING_WIDTH) {
+            set_last_error("directional steering requires the full 43 x 4096 target");
+            return false;
+        }
+        w_.directional_steering = cfg_.directional_steering;
+        ggml_init_params steering_params{};
+        steering_params.mem_size = ggml_tensor_overhead() * EMBER_STEERING_LAYERS;
+        steering_params.no_alloc = true;
+        w_.steering_ctx = ggml_init(steering_params);
+        if (!w_.steering_ctx) {
+            set_last_error("cannot allocate steering tensor metadata");
+            return false;
+        }
+        w_.steering_rows.resize(EMBER_STEERING_LAYERS, nullptr);
+        for (int layer = 0; layer < EMBER_STEERING_LAYERS; ++layer) {
+            if (!w_.directional_steering->nonzero[layer]) continue;
+            auto *row = ggml_new_tensor_1d(w_.steering_ctx, GGML_TYPE_F32, w_.n_embd);
+            ggml_format_name(row, "steering.blk.%d", layer);
+            w_.steering_rows[static_cast<size_t>(layer)] = row;
+        }
+        w_.steering_buf = ggml_backend_alloc_ctx_tensors(w_.steering_ctx, backend_);
+        if (!w_.steering_buf) {
+            set_last_error("cannot allocate steering directions on backend");
+            return false;
+        }
+        for (int layer = 0; layer < EMBER_STEERING_LAYERS; ++layer) {
+            auto *row = w_.steering_rows[static_cast<size_t>(layer)];
+            if (row) ggml_backend_tensor_set(row, w_.directional_steering->rows[layer],
+                                             0, sizeof(w_.directional_steering->rows[layer]));
+        }
+        std::fprintf(stderr, "[deepseek4] directional steering: attn=%g ffn=%g; "
+                     "target including speculative verification, DSpark proposals unchanged\n",
+                     static_cast<double>(w_.directional_steering->attn_scale),
+                     static_cast<double>(w_.directional_steering->ffn_scale));
+    }
     if (!validate_prefill_mode()) {
         return false;
     }

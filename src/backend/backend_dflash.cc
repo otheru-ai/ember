@@ -8,6 +8,7 @@
 // only the C ABI. It compiles against the lucebox headers and links the static
 // lib; it must be built in the ROCm/HIP container (the C server does not).
 #include "ember_backend.h"
+#include "model/directional_steering.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -587,6 +588,15 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
         return nullptr;
     }
     try {
+    ember_directional_steering *steering_raw = nullptr;
+    char steering_error[160];
+    if (!ember_directional_steering_load(
+            cfg->dir_steering_file, cfg->dir_steering_attn, cfg->dir_steering_ffn,
+            &steering_raw, steering_error, sizeof(steering_error))) {
+        if (err) *err = c_err(steering_error);
+        return nullptr;
+    }
+    std::shared_ptr<const ember_directional_steering> steering(steering_raw, std::free);
     auto owned = std::make_unique<ember_backend>();
     ember_backend *b = owned.get();
     b->model_name = cfg->model_name ? cfg->model_name : "deepseek-v4-flash";
@@ -600,6 +610,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
     BackendArgs args;
     args.model_path = cfg->model_path;
     args.vision_mmproj_path = cfg->vision_mmproj_path;
+    args.directional_steering = steering;
     args.device.gpu = 0;
     args.device.max_ctx = b->n_ctx;  // KV cache context; default 8192 is too small
     args.chunk = 2048;
@@ -671,6 +682,7 @@ extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
                 (uint64_t)st.st_ctim.tv_nsec,
             };
             fnv(meta, sizeof(meta));
+            h = ember_directional_steering_identity(steering.get(), h);
             for (int i = 0; i < 8; i++) salt[i] = (uint8_t)(h >> (i * 8));
             uint64_t h2 = (h ^ 0x9e3779b97f4a7c15ULL) * 1099511628211ULL;
             for (int i = 0; i < 8; i++) salt[8 + i] = (uint8_t)(h2 >> (i * 8));

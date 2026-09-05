@@ -9,6 +9,7 @@
 //   6. MoE FFN (hash routing + top-k + shared expert + clamped SwiGLU)
 
 #include "deepseek4_internal.h"
+#include "deepseek4_steering.h"
 #include "deepseek4_imatrix.h"
 #include "deepseek4_attention_shape.h"
 #include "deepseek4_hc_cuda.h"
@@ -498,7 +499,8 @@ static bool build_cached_decode_ffn_graph(
         routed_out = ggml_sum_rows(out.sg.ctx, routed_out);
         routed_out = ggml_reshape_2d(out.sg.ctx, routed_out, w.n_embd, n_tokens);
 
-        ffn_out = ggml_add(out.sg.ctx, shared_out, routed_out);
+        ffn_out = ds4_directional_steering(
+            out.sg.ctx, ggml_add(out.sg.ctx, shared_out, routed_out), w, layer_idx, true);
     } else {
         ffn_out = build_moe_ffn(out.sg.ctx, ffn_normed, w, L, layer_idx, n_tokens);
     }
@@ -2428,7 +2430,7 @@ static ggml_tensor * build_mla_attention(
         out = ggml_mul_mat(ctx, L.attn_output_b, attn_low);
     }
 
-    return out;
+    return ds4_directional_steering(ctx, out, w, layer_idx, false);
 }
 
 struct DeepSeek4CachedDecodeHcPreGraph {
@@ -3235,10 +3237,10 @@ static ggml_tensor * build_moe_ffn(
         int n_tokens,
         ggml_tensor ** debug_selected,
         ggml_tensor ** debug_selection) {
-    return build_moe_ffn_parts(
+    return ds4_directional_steering(ctx, build_moe_ffn_parts(
         ctx, cur, w, L, layer_idx, n_tokens, true, true,
         L.ffn_exp_probs_b, true,
-        debug_selected, debug_selection);
+        debug_selected, debug_selection), w, layer_idx, true);
 }
 
 // ─── HC (Hierarchical Controller) Pre ───────────────────────────────────
@@ -4358,6 +4360,10 @@ static bool deepseek4_step_hybrid(
             }
         }
 
+        // Hybrid expert execution returns the complete shared+routed FFN.
+        ember_directional_steering_project(w.directional_steering.get(), il,
+                                           true, ffn_out_host.data(),
+                                           static_cast<size_t>(n_tokens));
         // ── HC post (FFN) ───────────────────────────────────────────
         const auto hc_post_ffn_t0 = Ds4TimingClock::now();
         if (hc_lw.ffn.loaded && n_tokens == 1) {
@@ -4750,8 +4756,9 @@ static ggml_tensor * ds4_build_hash_routed_ffn(
         ggml_tensor * hash_ids,
         int n_tokens,
         int layer_idx) {
-    return ds4_build_hash_routed_ffn_parts(
-        ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true, layer_idx);
+    return ds4_directional_steering(ctx, ds4_build_hash_routed_ffn_parts(
+        ctx, w, L, ffn_normed, hash_ids, n_tokens, true, true, layer_idx),
+        w, layer_idx, true);
 }
 
 // DeepSeek-V4-Flash-Vision-Exp inference/model.py:620-639 routes every learned
@@ -4844,7 +4851,7 @@ static ggml_tensor * ds4_build_vision_moe_ffn(
         routed = ggml_add(ctx, routed, scatter(text_out, text_idx));
     }
 
-    return ggml_add(ctx, shared, routed);
+    return ds4_directional_steering(ctx, ggml_add(ctx, shared, routed), w, layer_idx, true);
 }
 
 static bool ds4_fused_ensure_fn_mirrors(

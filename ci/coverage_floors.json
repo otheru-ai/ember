@@ -6,6 +6,8 @@
   "src/common/utf8.h": 94.5,
   "src/model/chat_template.c": 90.5,
   "src/model/continuation.c": 86.6,
+  "src/model/directional_steering.c": 96.7,
+  "src/model/directional_steering.h": 100.0,
   "src/model/dsml_decode.c": 90.3,
   "src/model/gguf.c": 66.6,
   "src/model/image_input.c": 82.8,

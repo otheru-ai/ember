@@ -11,6 +11,7 @@
 #include "prefill_attention_mode.h"
 
 #include <memory>
+#include "../../../src/model/directional_steering.h"
 #include <string>
 
 namespace dflash::common {
@@ -35,6 +36,7 @@ struct BackendArgs {
     int             ds4_expert_top_k = 0;  // 0 = model default
     bool            ds4_fused_decode = false;
     bool            allow_single_layer_control = false;
+    std::shared_ptr<const ember_directional_steering> directional_steering;
 };
 
 // ─── Factory function ───────────────────────────────────────────────────
