@@ -11,6 +11,19 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+DRY repetition control now defaults to `0.8` in Compose deployments. On the
+shipping Vision model, a pre-registered experiment with 134 requests per arm
+observed 19 `repetition_detected` failures without DRY and zero with it; the
+pre-registered tool-call quality guard also passed. A separate tool-call
+presence check at the deployment token budget recorded all 50 requests per
+arm with zero missed calls. These results do not establish general quality
+or throughput improvements.
+
+Set `EMBER_DRY_MULTIPLIER=0` to opt out, or override `dry_multiplier` per
+request. Deployments using raw Docker commands must pass the environment
+variable explicitly. DRY-aware sampled DSpark remains opt-in and off by
+default; this release's evidence does not validate enabling that mode.
+
 ### Added
 
 - **vision:** native 8-bit grayscale and RGB/YCbCr JPEG decoding, including
