@@ -1,0 +1,23 @@
+{
+  "target": "b26ed7126582842ebba3fd06e0639205d4047428",
+  "baseline": "a9f1d635f04052569eeaaf624fadcb6f14e22020",
+  "files": {
+    "contract.c": "febc51353f7a99eb22c53864a8562e17a03a6f80af93c5d1e91552f54c0869ca",
+    "baseline-a9f1d63-default.json": "5b28672715f1b4bd72ee02fdae7bd03c7e86661155ceb3699bc50bc99a8a645f",
+    "baseline-a9f1d63-enabled.json": "b7f894fd68a45683b8af080313f91c9b2cdaf2eca621ce56c082e7bab12e4a2a",
+    "b26ed71-default.json": "5b28672715f1b4bd72ee02fdae7bd03c7e86661155ceb3699bc50bc99a8a645f",
+    "b26ed71-enabled.json": "b551057ac7222c29ee61bc70cd52fc2d825974d1e43274df606e3e772c4b153c",
+    "b26ed71-asan-default.json": "5b28672715f1b4bd72ee02fdae7bd03c7e86661155ceb3699bc50bc99a8a645f",
+    "b26ed71-asan-enabled.json": "b551057ac7222c29ee61bc70cd52fc2d825974d1e43274df606e3e772c4b153c",
+    "debug-tests.log": "bf386c8fd161c0fd899b7f4e5e421a9f94df4a0df0926df256669121c98d04c5",
+    "release-tests.log": "92f657f76947bf52c5221e00aa7921724aa31e0e6791cc3cf157952f86bb9968",
+    "asan-tests.log": "593bb9492f238bd3dd243a52006fef77014d67a1394f21b57c7db1c1993ca9da",
+    "coverage-tests.log": "68eb0e4cb90b2d682ec8f224c8fd1a8fccee80de89a2bd6f35f4eabf46f67bcb",
+    "coverage.log": "20c1bccf61983bcc3323c37992d2bb8d5499c3da1b0a9521f51e5f560663e215",
+    "gcc-analyzer.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cppcheck.log": "b662745ccf7df185af08259b1bd59339827d08b3fa85441d1c38de9012311708"
+  },
+  "notes": [
+    "coverage.log trailing whitespace stripped; numeric output unchanged."
+  ]
+}

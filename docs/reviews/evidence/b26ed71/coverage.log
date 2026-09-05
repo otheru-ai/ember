@@ -1,0 +1,30 @@
+  line%  lines   floor  file
+   63.8   3034    63.0  src/server/main.c
+   67.1    152    66.6  src/model/gguf.c
+   78.5    209    78.0  src/backend/backend_stub.c
+   78.6     28    30.8  src/model/model_profile.c
+   83.2    220    82.6  src/server/http.c
+   83.3     78    82.8  src/model/image_input.c
+   84.5    373    84.0  src/model/tool_memory.c
+   87.1    364    86.6  src/model/continuation.c
+   87.2   1474    86.7  src/server/api_adapters.c
+   88.2    637    87.7  src/model/tool_schema.c
+   88.9    377    86.3  src/model/tool_parser.c
+   89.2    332    88.5  src/server/compaction.c
+   89.9    119    89.4  src/model/vision_prompt.c
+   90.5    148    90.0  src/model/kv_cache.c
+   90.8    153    90.3  src/model/dsml_decode.c
+   91.2     57    90.7  src/common/buf.h
+   94.6    240    90.5  src/model/chat_template.c
+   94.8    270    94.7  src/common/json.c
+   95.0    699    94.3  src/server/chat_api.c
+   95.0     20    94.5  src/common/utf8.h
+   95.7    445    95.3  src/server/sse.c
+  100.0     66    99.5  src/common/json_util.h
+  100.0    103    99.5  src/model/model_card.c
+  100.0    200    99.5  src/model/tool_grammar.c
+  100.0     18    99.5  src/server/background_gate.c
+
+weighted total: 81.4% (7993/9816 executable lines)
+
+coverage floors OK

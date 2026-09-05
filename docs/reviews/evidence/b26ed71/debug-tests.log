@@ -1,0 +1,152 @@
+Internal ctest changing into directory: /home/mythos/Projects/codex-parser-review-b26-worktree/build-review-debug
+Test project /home/mythos/Projects/codex-parser-review-b26-worktree/build-review-debug
+      Start  1: sse
+      Start  2: tool_parser
+      Start  3: tool_parser_nested
+      Start  4: sse_nested
+      Start  5: tool_schema
+      Start  6: tool_grammar
+      Start  7: tool_grammar_match
+      Start  8: tool_memory
+ 1/73 Test  #1: sse ..............................   Passed    0.00 sec
+      Start  9: continuation
+ 2/73 Test  #2: tool_parser ......................   Passed    0.00 sec
+      Start 10: dsml_decode
+ 3/73 Test  #3: tool_parser_nested ...............   Passed    0.00 sec
+      Start 11: json
+ 4/73 Test  #4: sse_nested .......................   Passed    0.00 sec
+      Start 12: chat_api
+ 5/73 Test  #5: tool_schema ......................   Passed    0.00 sec
+      Start 13: prefill_policy
+ 6/73 Test  #6: tool_grammar .....................   Passed    0.00 sec
+      Start 14: ds4_vision_contract
+ 7/73 Test #10: dsml_decode ......................   Passed    0.00 sec
+      Start 15: ds4_vision_native_contract
+ 8/73 Test #11: json .............................   Passed    0.00 sec
+      Start 16: ds4_vision_oracle
+ 9/73 Test #12: chat_api .........................   Passed    0.00 sec
+      Start 17: ds4_vision_artifact
+10/73 Test #13: prefill_policy ...................   Passed    0.00 sec
+      Start 18: api_adapters
+11/73 Test #17: ds4_vision_artifact ..............   Passed    0.00 sec
+      Start 19: http
+12/73 Test #16: ds4_vision_oracle ................   Passed    0.00 sec
+      Start 20: background_gate
+13/73 Test #20: background_gate ..................   Passed    0.00 sec
+      Start 21: chat_template
+14/73 Test #21: chat_template ....................   Passed    0.00 sec
+      Start 22: model_profile
+15/73 Test #22: model_profile ....................   Passed    0.00 sec
+      Start 23: image_input
+16/73 Test #15: ds4_vision_native_contract .......   Passed    0.01 sec
+      Start 24: vision_prompt
+17/73 Test #18: api_adapters .....................   Passed    0.00 sec
+      Start 25: compaction
+18/73 Test #23: image_input ......................   Passed    0.00 sec
+      Start 26: gguf
+19/73 Test #24: vision_prompt ....................   Passed    0.00 sec
+      Start 27: model_card
+20/73 Test #25: compaction .......................   Passed    0.00 sec
+      Start 28: kv_cache
+21/73 Test #26: gguf .............................   Passed    0.00 sec
+      Start 29: qa
+22/73 Test #19: http .............................   Passed    0.01 sec
+      Start 30: rocmfp_scale
+23/73 Test #27: model_card .......................   Passed    0.00 sec
+      Start 31: rocmfp2_unpack
+24/73 Test #28: kv_cache .........................   Passed    0.00 sec
+      Start 32: ds4_imatrix
+25/73 Test #29: qa ...............................   Passed    0.00 sec
+      Start 33: rocmfp2_offset
+26/73 Test #30: rocmfp_scale .....................   Passed    0.00 sec
+      Start 34: rocmi4
+27/73 Test #31: rocmfp2_unpack ...................   Passed    0.00 sec
+      Start 35: rocmi4_q8_i4_exact
+28/73 Test #34: rocmi4 ...........................   Passed    0.00 sec
+      Start 36: dspark_scheduler
+29/73 Test #36: dspark_scheduler .................   Passed    0.00 sec
+      Start 37: thinking_budget
+30/73 Test #37: thinking_budget ..................   Passed    0.00 sec
+      Start 38: progress_cycle_detector
+31/73 Test #14: ds4_vision_contract ..............   Passed    0.02 sec
+      Start 39: sampler
+32/73 Test #39: sampler ..........................   Passed    0.01 sec
+      Start 40: pre_tokenizer
+33/73 Test #40: pre_tokenizer ....................   Passed    0.00 sec
+      Start 41: activation_dump
+34/73 Test #32: ds4_imatrix ......................   Passed    0.03 sec
+      Start 42: gguf_quantize_common
+35/73 Test #42: gguf_quantize_common .............   Passed    0.00 sec
+      Start 43: logits_probe_format
+36/73 Test #38: progress_cycle_detector ..........   Passed    0.03 sec
+      Start 44: continuous_batch_scheduler
+37/73 Test  #7: tool_grammar_match ...............   Passed    0.06 sec
+      Start 45: continuous_batch_executor
+38/73 Test #45: continuous_batch_executor ........   Passed    0.00 sec
+      Start 46: resident_batch_coordinator
+39/73 Test #46: resident_batch_coordinator .......   Passed    0.00 sec
+      Start 47: xdna_dspark_provider
+40/73 Test #47: xdna_dspark_provider .............   Passed    0.00 sec
+      Start 48: xdna_dspark_cpu_ops
+41/73 Test #44: continuous_batch_scheduler .......   Passed    0.01 sec
+      Start 49: xdna_rocmfp4_pack
+42/73 Test #48: xdna_dspark_cpu_ops ..............   Passed    0.00 sec
+      Start 50: xdna_rocmfp4_model_weights
+43/73 Test  #9: continuation .....................   Passed    0.08 sec
+      Start 51: xdna_q8_pack
+44/73 Test #33: rocmfp2_offset ...................   Passed    0.07 sec
+      Start 52: xdna_q8_model_weights
+45/73 Test #35: rocmi4_q8_i4_exact ...............   Passed    0.07 sec
+      Start 53: server_helpers
+46/73 Test #53: server_helpers ...................   Passed    0.00 sec
+      Start 54: quant_quality_report
+47/73 Test  #8: tool_memory ......................   Passed    0.10 sec
+      Start 55: quant_behavior_eval
+48/73 Test #41: activation_dump ..................   Passed    0.08 sec
+      Start 56: ds4_vision_behavior_gate
+49/73 Test #49: xdna_rocmfp4_pack ................   Passed    0.07 sec
+      Start 57: build_revision_guard
+50/73 Test #43: logits_probe_format ..............   Passed    0.10 sec
+      Start 58: gguf_tensor_error
+51/73 Test #56: ds4_vision_behavior_gate .........   Passed    0.04 sec
+      Start 59: quant_manifest_corpus
+52/73 Test #55: quant_behavior_eval ..............   Passed    0.06 sec
+      Start 60: resident_benchmark
+53/73 Test #58: gguf_tensor_error ................   Passed    0.02 sec
+      Start 61: continuous_batch_server
+54/73 Test #51: xdna_q8_pack .....................   Passed    0.09 sec
+      Start 62: tool_continuation_server
+55/73 Test #59: quant_manifest_corpus ............   Passed    0.02 sec
+      Start 63: tool_safety_server
+56/73 Test #50: xdna_rocmfp4_model_weights .......   Passed    0.14 sec
+      Start 64: request_budgets_server
+57/73 Test #60: resident_benchmark ...............   Passed    0.06 sec
+      Start 65: client_compatibility_server
+58/73 Test #57: build_revision_guard .............   Passed    0.09 sec
+      Start 66: release_scripts
+59/73 Test #54: quant_quality_report .............   Passed    0.15 sec
+      Start 67: profile_scripts
+60/73 Test #65: client_compatibility_server ......   Passed    0.04 sec
+      Start 68: rocmi4_w4a8_isa_gate
+61/73 Test #64: request_budgets_server ...........   Passed    0.07 sec
+      Start 69: release_changelog
+62/73 Test #69: release_changelog ................   Passed    0.15 sec
+      Start 70: mirror_gh_issues
+63/73 Test #70: mirror_gh_issues .................   Passed    0.04 sec
+      Start 71: benchmark_dry_run
+64/73 Test #62: tool_continuation_server .........   Passed    0.30 sec
+      Start 72: bench_vision
+65/73 Test #66: release_scripts ..................   Passed    0.31 sec
+      Start 73: benchmark_gate
+66/73 Test #61: continuous_batch_server ..........   Passed    0.37 sec
+67/73 Test #67: profile_scripts ..................   Passed    0.35 sec
+68/73 Test #73: benchmark_gate ...................   Passed    0.07 sec
+69/73 Test #71: benchmark_dry_run ................   Passed    0.16 sec
+70/73 Test #52: xdna_q8_model_weights ............   Passed    0.86 sec
+71/73 Test #68: rocmi4_w4a8_isa_gate .............   Passed    0.79 sec
+72/73 Test #63: tool_safety_server ...............   Passed    1.39 sec
+73/73 Test #72: bench_vision .....................   Passed    2.57 sec
+
+100% tests passed, 0 tests failed out of 73
+
+Total Test time (real) =   3.04 sec
