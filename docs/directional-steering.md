@@ -18,6 +18,11 @@ row excludes that layer. Nonfinite values, short or long files, and missing
 files fail startup, including when both scales are zero. Scales must be finite
 and in `[-100,100]`. A nonzero scale requires a file.
 
+Scale calibration depends on the direction norm: multiplying a row by `c`
+multiplies its intervention by `c²`. A unit row makes the configured scale the
+fraction of its directional component removed (or amplified for negative
+scales). Preserve the row norms when comparing scale settings.
+
 With a file and neither scale flag, FFN defaults to 1 and attention to 0,
 matching ds4's CLI. Specifying either scale leaves the other at zero; an
 explicit zero is respected. Supplying no flags preserves existing behavior.
