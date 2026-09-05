@@ -1,0 +1,20 @@
+{
+  "review_target": "a9f1d635f04052569eeaaf624fadcb6f14e22020",
+  "source_sha256": {
+    "src/model/tool_parser.c": "d07d25bb82ad7c7ff316b882a6f69ea0f9bbb5c388e315ec1566d15e935493b0",
+    "src/server/sse.c": "8269f63365ce352288dd5b02080b1013d49e4ddc12c6b8b372fbbf021379353a",
+    "src/server/main.c": "8bb0a443dc5afa5cb85198a877acfb49f876f62b6b3c291487b96d55b41cc63b",
+    "CMakeLists.txt": "fa3c53cc9f50643b906bc0d17171d7ba67bf9750fea6e319119cede635549ecd"
+  },
+  "configuration": "Debug, EMBER_STRICT=ON, stub backend",
+  "targeted_ctest": [
+    "sse",
+    "tool_parser",
+    "tool_parser_nested",
+    "dsml_decode"
+  ],
+  "ctest_passed": 4,
+  "invariants_exit": 1,
+  "inspector_owner": "Codex, compiled in this review worktree",
+  "runtime_or_gpu": false
+}
