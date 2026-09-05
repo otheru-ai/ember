@@ -63,6 +63,7 @@ def main() -> None:
 
         env = os.environ.copy()
         env.pop("EMBER_FORCE_EXACT_PREFILL", None)
+        env.pop("EMBER_DRY_MULTIPLIER", None)
         env["EMBER_STUB_REPLY"] = "0123456789abcdef"
         env["EMBER_STUB_ECHO_SAMPLER"] = "1"
         proc = subprocess.Popen(
@@ -192,6 +193,7 @@ def main() -> None:
         exact_base = f"http://127.0.0.1:{exact_port}"
         exact_env = env.copy()
         exact_env["EMBER_FORCE_EXACT_PREFILL"] = "1"
+        exact_env["EMBER_DRY_MULTIPLIER"] = "0.8"
         exact_proc = subprocess.Popen(
             [
                 sys.argv[1],
@@ -234,6 +236,17 @@ def main() -> None:
             assert exact["choices"][0]["message"]["content"].endswith(
                 "exact_prefill=1"
             ), exact
+            # Shared main.c resolves the environment before the backend ABI.
+            # Reuse this server to prove default, explicit opt-out, then default
+            # again: one request must not change the persistent worker's policy.
+            assert "dry_mult=0.8 " in exact["choices"][0]["message"]["content"], exact
+            for fields, expected in [({"dry_multiplier": 0}, "dry_mult=0 "),
+                                     ({}, "dry_mult=0.8 ")]:
+                status, result = request_json(
+                    exact_base + "/v1/chat/completions", dict(exact_request, **fields)
+                )
+                assert status == 200, result
+                assert expected in result["choices"][0]["message"]["content"], result
         finally:
             if exact_proc.poll() is None:
                 exact_proc.send_signal(signal.SIGTERM)
