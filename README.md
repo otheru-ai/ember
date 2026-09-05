@@ -129,9 +129,10 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 > [!IMPORTANT]
-> **PNG only.** Ember decodes non-interlaced RGB/RGBA8 PNG and refuses JPEG,
-> WebP and GIF rather than handing request bytes to a permissive decoder.
-> Convert before sending.
+> **PNG and JPEG.** Supported: non-interlaced RGB/RGBA8 PNG, and 8-bit
+> grayscale or RGB/YCbCr baseline/progressive JPEG. WebP, GIF, CMYK and
+> non-8-bit JPEG are rejected. EXIF rotation and ICC color transforms are
+> not applied; normalize those before sending. See [image limits](docs/jpeg-input.md).
 
 An image request runs one full-model prefill. Speculative decode and resident
 batching are declined for it rather than silently degraded, so an image request

@@ -11,6 +11,15 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Added
+
+- **vision:** native 8-bit grayscale and RGB/YCbCr JPEG decoding, including
+  progressive images, through libjpeg-turbo. Complete-file preflight bounds
+  dimensions, pixels, input size and scans; codec warnings reject partial
+  images. CMYK/non-8-bit JPEG, WebP and GIF remain unsupported. EXIF rotation
+  and ICC transforms are not applied. GPU request validation remains a release
+  gate; host tests cover decoded pixels and shared PNG/JPEG preprocessing.
+
 ## 2026.9.3
 
 ### Curated notes

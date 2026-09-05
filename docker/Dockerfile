@@ -26,6 +26,11 @@ RUN echo /opt/rocm/lib > /etc/ld.so.conf.d/10-rocm.conf \
 
 FROM toolchain AS dev
 
+# Native JPEG decoder dependency; keep unrelated toolchain layers reusable.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libturbojpeg0-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 ARG EMBER_VERSION
 ARG EMBER_VCS_REF
 ARG EMBER_ROCMI4_W4A8_IU4=OFF
@@ -149,7 +154,8 @@ RUN gcc -shared -fPIC -O2 -g \
     fi \
  && du -sh /ember-runtime
 
-RUN install -Dm0644 LICENSE /ember-licenses/ember/LICENSE \
+RUN install -Dm0644 /usr/share/doc/libturbojpeg0/copyright /ember-licenses/libjpeg-turbo/copyright \
+ && install -Dm0644 LICENSE /ember-licenses/ember/LICENSE \
  && install -Dm0644 engine/ggml/LICENSE /ember-licenses/ggml/LICENSE \
  && install -Dm0644 engine/dflash/LICENSE /ember-licenses/dflash/LICENSE \
  && install -Dm0644 engine/third_party/nlohmann/LICENSE.MIT \

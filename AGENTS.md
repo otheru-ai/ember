@@ -93,7 +93,8 @@ pure CMake, and the Python scripts use only the standard library.
 Two build configurations. **Almost all work happens in the first one.**
 
 ```bash
-# GPU-free: server + stub backend + full test gauntlet. Builds on any host.
+# GPU-free: server + stub backend + full test gauntlet.
+# Debian/Ubuntu dependencies: zlib1g-dev libturbojpeg0-dev.
 cmake -S . -B build && cmake --build build && ctest --test-dir build
 
 # Real backend (ROCm/HIP; MUST run in the container — no HIP toolchain on host)

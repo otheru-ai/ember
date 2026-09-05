@@ -82,14 +82,44 @@ struct Deepseek4VisionPngInfo {
     size_t filtered_bytes = 0;
 };
 
+struct Deepseek4VisionJpegInfo {
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    int scans = 0;
+    bool progressive = false;
+};
+
+// Complete marker preflight before codec allocation: one 8-bit SOF0/SOF2
+// frame, grayscale or three components, <=64 scans, bounded dimensions and
+// terminal EOI without trailing data. Entropy/DCT validation belongs to
+// libjpeg-turbo, whose warnings as well as errors fail the decode.
+bool deepseek4_vision_validate_still_jpeg(
+    const uint8_t * encoded, size_t encoded_size,
+    int max_dimension, uint64_t max_pixels,
+    Deepseek4VisionJpegInfo & out, std::string * error = nullptr);
+
+bool deepseek4_vision_decode_still_jpeg_rgb8(
+    const uint8_t * encoded, size_t encoded_size,
+    int max_dimension, uint64_t max_pixels,
+    std::vector<uint8_t> & rgb, Deepseek4VisionJpegInfo & out,
+    std::string * error = nullptr);
+
+// Signature dispatch into the bounded PNG/JPEG decoders, then the same RGB8
+// resize/patch path. EXIF orientation and ICC transforms are not applied.
+bool deepseek4_vision_preprocess_still_image(
+    const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+    Deepseek4VisionResizePlan & plan, std::vector<uint16_t> & bf16_patches,
+    uint64_t & source_digest, std::string * error = nullptr);
+
 const Deepseek4VisionNativeConfig & deepseek4_vision_native_config();
 
 // Fail-closed request-byte preflight for the initial native PNG-only path.
 // This walks the complete chunk stream, checks every CRC, requires a terminal
 // IEND with no trailing bytes, rejects APNG animation chunks, and applies the
 // allocation ceilings before a decoder sees the payload. The initial decoder
-// intentionally accepts only non-interlaced RGB/RGBA8; JPEG/WebP/GIF remain
-// explicit unsupported formats rather than inheriting permissive defaults.
+// intentionally accepts only non-interlaced RGB/RGBA8. JPEG has a separate
+// bounded decoder; WebP/GIF remain explicit unsupported formats.
 bool deepseek4_vision_validate_still_png(
     const uint8_t * encoded, size_t encoded_size,
     int max_dimension, uint64_t max_pixels,

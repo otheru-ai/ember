@@ -816,7 +816,7 @@ bool deepseek4_vision_pack_rgb8_patches(
     return true;
 }
 
-bool deepseek4_vision_preprocess_still_png(
+bool deepseek4_vision_preprocess_still_image(
         const uint8_t * encoded, size_t encoded_size, int prompt_offset,
         Deepseek4VisionResizePlan & plan,
         std::vector<uint16_t> & bf16_patches,
@@ -828,17 +828,27 @@ bool deepseek4_vision_preprocess_still_png(
     const auto & config = deepseek4_vision_native_config();
     if (!encoded || encoded_size == 0 ||
         encoded_size > config.max_encoded_bytes || prompt_offset < 0) {
-        set_error(error, "DeepSeek4 PNG exceeds the encoded input ceiling");
+        set_error(error, "DeepSeek4 image exceeds the encoded input ceiling");
         return false;
     }
-    Deepseek4VisionPngInfo info;
     std::vector<uint8_t> source_rgb;
-    if (!deepseek4_vision_decode_still_png_rgb8(
-            encoded, encoded_size,
-            config.max_decode_dimension, config.max_decode_pixels,
-            source_rgb, info, error) ||
-        !deepseek4_vision_resize_plan(
-            info.height, info.width, prompt_offset, plan, error)) {
+    int width = 0, height = 0;
+    if (encoded_size >= 2 && encoded[0] == 0xff && encoded[1] == 0xd8) {
+        Deepseek4VisionJpegInfo info;
+        if (!deepseek4_vision_decode_still_jpeg_rgb8(
+                encoded, encoded_size, config.max_decode_dimension,
+                config.max_decode_pixels, source_rgb, info, error)) return false;
+        width = info.width;
+        height = info.height;
+    } else {
+        Deepseek4VisionPngInfo info;
+        if (!deepseek4_vision_decode_still_png_rgb8(
+                encoded, encoded_size, config.max_decode_dimension,
+                config.max_decode_pixels, source_rgb, info, error)) return false;
+        width = info.width;
+        height = info.height;
+    }
+    if (!deepseek4_vision_resize_plan(height, width, prompt_offset, plan, error)) {
         plan = {};
         return false;
     }
@@ -854,6 +864,23 @@ bool deepseek4_vision_preprocess_still_png(
     }
     source_digest = fnv1a(encoded, encoded_size);
     return true;
+}
+
+bool deepseek4_vision_preprocess_still_png(
+        const uint8_t * encoded, size_t encoded_size, int prompt_offset,
+        Deepseek4VisionResizePlan & plan,
+        std::vector<uint16_t> & bf16_patches,
+        uint64_t & source_digest, std::string * error) {
+    if (!encoded || encoded_size < sizeof(kPngSignature) ||
+        std::memcmp(encoded, kPngSignature, sizeof(kPngSignature)) != 0) {
+        plan = {};
+        bf16_patches.clear();
+        source_digest = 0;
+        set_error(error, "expected PNG input");
+        return false;
+    }
+    return deepseek4_vision_preprocess_still_image(
+        encoded, encoded_size, prompt_offset, plan, bf16_patches, source_digest, error);
 }
 
 bool deepseek4_vision_rope_angles(

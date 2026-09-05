@@ -119,6 +119,7 @@ add_library(ember_engine STATIC
   ${DFLASH}/deepseek4/deepseek4_vision_artifact.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_contract.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_native_contract.cpp
+  ${DFLASH}/deepseek4/deepseek4_vision_jpeg.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_mmproj.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_oracle.cpp
   ${DFLASH}/deepseek4/deepseek4_vision_tower.cpp
@@ -146,7 +147,7 @@ add_library(ember_engine STATIC
 
 target_include_directories(ember_engine PUBLIC ${EMBER_ENGINE_INC})
 target_compile_features(ember_engine PUBLIC cxx_std_17)
-target_link_libraries(ember_engine PUBLIC ggml ggml-base ${EMBER_GGML_BACKEND} ggml-cpu ZLIB::ZLIB ${CMAKE_DL_LIBS})
+target_link_libraries(ember_engine PUBLIC ggml ggml-base ${EMBER_GGML_BACKEND} ggml-cpu ZLIB::ZLIB ember_turbojpeg ${CMAKE_DL_LIBS})
 if(TARGET OpenMP::OpenMP_CXX)
   target_link_libraries(ember_engine PUBLIC OpenMP::OpenMP_CXX)
 endif()

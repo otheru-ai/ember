@@ -1052,7 +1052,7 @@ bool DeepSeek4Backend::encode_vision_image(
     uint64_t source_digest = 0;
     // Decode and validate request bytes before taking the tower lock or loading
     // its ~900 MiB payload. Malformed media therefore cannot force residency.
-    if (!dflash::deepseek4_vision_preprocess_still_png(
+    if (!dflash::deepseek4_vision_preprocess_still_image(
             encoded, encoded_size, prompt_offset,
             plan, patches, source_digest, &error)) {
         return false;

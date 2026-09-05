@@ -114,3 +114,12 @@ When importing a future engine fix, diff against upstream commit `8fd9584` and
 port only files reachable by this retained HIP/x86-64 build. A broad vendor
 refresh would reintroduce unsupported architectures and must be pruned and
 revalidated before landing.
+
+## Native JPEG input (local fork extension)
+
+`deepseek4_vision_jpeg.cpp` adds complete marker/bounds preflight and uses the
+distribution-maintained libjpeg-turbo TurboJPEG API for entropy/DCT decoding.
+No decoder code is copied into the fork. `STOPONWARNING`, `ACCURATEDCT` and
+`LIMITSCANS` follow upstream turbojpeg.h (2.1.5 API); Ember's own scan cap is64.
+Decoded RGB8 enters the existing native resize/patch path. See docs/jpeg-input.md
+for supported formats, malformed corpus and validation scope.

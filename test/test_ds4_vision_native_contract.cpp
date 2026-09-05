@@ -519,7 +519,138 @@ static void test_pixel_shuffle_indices() {
           "pixel-shuffle grid exceeding int32 indices is rejected");
 }
 
+
+static void test_jpeg_decode() {
+    const std::string directory = EMBER_JPEG_FIXTURE_DIR;
+    const char * names[] = {"rgb444", "rgb422", "rgb420", "progressive",
+                           "gray", "gray-progressive"};
+    std::string error;
+    for (const char * name : names) {
+        std::vector<uint8_t> jpeg, png, expected, rgb;
+        const std::string stem = directory + "/" + name;
+        CHECK(read_fixture_file(stem + ".jpg", jpeg) &&
+              read_fixture_file(stem + ".png", png) &&
+              read_fixture_file(stem + ".rgb", expected), "JPEG fixtures load");
+        if (jpeg.empty() || png.empty() || expected.empty()) continue;
+        Deepseek4VisionJpegInfo info;
+        CHECK(deepseek4_vision_decode_still_jpeg_rgb8(
+                  jpeg.data(), jpeg.size(), 16384, 16777216, rgb, info, &error) &&
+              info.width == 17 && info.height == 13 && rgb == expected,
+              "JPEG RGB8 matches retained Pillow decoding");
+        CHECK(info.progressive == (std::strstr(name, "progressive") != nullptr),
+              "JPEG frame mode retained");
+        for (int offset = 0; offset < 4; ++offset) {
+            Deepseek4VisionResizePlan jp, pp;
+            std::vector<uint16_t> jpatch, ppatch;
+            uint64_t jd = 0, pd = 0;
+            CHECK(deepseek4_vision_preprocess_still_image(
+                      jpeg.data(), jpeg.size(), offset, jp, jpatch, jd, &error) &&
+                  deepseek4_vision_preprocess_still_image(
+                      png.data(), png.size(), offset, pp, ppatch, pd, &error) &&
+                  jpatch == ppatch && jp.block_tokens == pp.block_tokens &&
+                  jp.source_width == pp.source_width &&
+                  jp.source_height == pp.source_height && jd != 0 && pd != 0 && jd != pd,
+                  "JPEG shares exact PNG RGB patch path at every prompt offset");
+        }
+        // Every incomplete prefix must reject, not return partially decoded pixels.
+        for (size_t length = 0; length < jpeg.size(); ++length) {
+            rgb = {42}; info.width = 42;
+            CHECK(!deepseek4_vision_decode_still_jpeg_rgb8(
+                      jpeg.data(), length, 16384, 16777216, rgb, info, &error) &&
+                  rgb.empty() && info.width == 0 && !error.empty(),
+                  "all JPEG truncations fail with cleared outputs");
+        }
+    }
+    std::vector<uint8_t> original;
+    CHECK(read_fixture_file(directory + "/rgb420.jpg", original), "JPEG mutation source");
+    if (original.empty()) return;
+    const auto rejected = [&](const std::vector<uint8_t> & bytes, const char * label) {
+        std::vector<uint8_t> rgb = {42};
+        Deepseek4VisionJpegInfo info; info.width = 42;
+        CHECK(!deepseek4_vision_decode_still_jpeg_rgb8(
+                  bytes.data(), bytes.size(), 16384, 16777216, rgb, info, &error) &&
+              rgb.empty() && info.width == 0 && !error.empty(), label);
+    };
+    auto changed = original; changed[0] = 0;
+    rejected(changed, "JPEG wrong magic rejected");
+    changed = original; changed.push_back(0);
+    rejected(changed, "JPEG trailing byte rejected");
+    changed = original; changed.insert(changed.end(), original.begin(), original.end());
+    rejected(changed, "concatenated JPEG images rejected");
+    std::vector<uint8_t> rgb;
+    Deepseek4VisionJpegInfo info;
+    CHECK(!deepseek4_vision_decode_still_jpeg_rgb8(
+              original.data(), original.size(), 16, 16777216, rgb, info, &error),
+          "JPEG axis limit enforced before decode");
+    CHECK(!deepseek4_vision_decode_still_jpeg_rgb8(
+              original.data(), original.size(), 16384, 220, rgb, info, &error),
+          "JPEG pixel limit enforced before decode");
+    CHECK(!deepseek4_vision_validate_still_jpeg(
+              original.data(), 64u * 1024u * 1024u + 1u, 16384, 16777216, info, &error),
+          "JPEG encoded limit checked before touching oversized payload");
+    size_t sof = 0, sos = 0, dqt = 0;
+    for (size_t pos = 2; pos + 3 < original.size();) {
+        const unsigned marker = original[pos + 1];
+        if (marker == 0xc0) sof = pos;
+        if (marker == 0xdb) dqt = pos;
+        if (marker == 0xda) { sos = pos; break; }
+        pos += 2u + (static_cast<size_t>(original[pos + 2]) << 8) + original[pos + 3];
+    }
+    CHECK(sof && sos && dqt, "fixture marker locations found");
+    if (!sof || !sos || !dqt) return;
+    changed = original; changed[sof + 5] = 0; changed[sof + 6] = 0;
+    rejected(changed, "JPEG zero height rejected");
+    changed = original; changed[sof + 7] = 0xff; changed[sof + 8] = 0xff;
+    rejected(changed, "JPEG huge width rejected");
+    changed = original; changed[sof + 4] = 12;
+    rejected(changed, "JPEG non-8-bit precision rejected");
+    changed = original; changed[sof + 1] = 0xc9;
+    rejected(changed, "JPEG arithmetic mode rejected");
+    changed = original; changed[sof + 2] = 0; changed[sof + 3] = 1;
+    rejected(changed, "JPEG invalid segment length rejected");
+    changed = original; changed[sof + 11] = 0;
+    rejected(changed, "JPEG invalid sampling factors rejected");
+    changed = original; changed[sof + 13] = changed[sof + 10];
+    rejected(changed, "JPEG duplicate frame components rejected");
+    changed = original; changed[dqt + 4] = 0xf0;
+    CHECK(deepseek4_vision_validate_still_jpeg(
+              changed.data(), changed.size(), 16384, 16777216, info, &error),
+          "bad quantization reaches codec beyond marker preflight");
+    rejected(changed, "JPEG corrupt quantization rejected by codec");
+    changed = original;
+    const size_t scan_header = 2u + (static_cast<size_t>(original[sos + 2]) << 8) + original[sos + 3];
+    changed.erase(changed.begin() + static_cast<std::ptrdiff_t>(sos + scan_header),
+                  changed.end() - 2);
+    CHECK(deepseek4_vision_validate_still_jpeg(
+              changed.data(), changed.size(), 16384, 16777216, info, &error),
+          "missing entropy reaches codec with complete marker stream");
+    rejected(changed, "JPEG partial-decode warning is fatal");
+    changed.assign(original.begin(), original.begin() + static_cast<std::ptrdiff_t>(sos));
+    for (int i = 0; i < 65; ++i)
+        changed.insert(changed.end(), original.begin() + static_cast<std::ptrdiff_t>(sos),
+                       original.begin() + static_cast<std::ptrdiff_t>(sos + scan_header));
+    changed.insert(changed.end(), {0xff, 0xd9});
+    CHECK(!deepseek4_vision_validate_still_jpeg(
+              changed.data(), changed.size(), 16384, 16777216, info, &error) &&
+          error.find("64-scan") != std::string::npos, "JPEG scan bomb rejected by scan bound");
+    std::vector<uint8_t> cmyk;
+    CHECK(read_fixture_file(directory + "/cmyk-rejected.jpg", cmyk), "CMYK fixture loads");
+    rejected(cmyk, "JPEG CMYK explicitly unsupported");
+    // Mutations may remain valid JPEGs; success must still honor all output bounds.
+    for (size_t i = 0; i < original.size(); ++i) {
+        changed = original; changed[i] ^= 0x80;
+        const bool ok = deepseek4_vision_decode_still_jpeg_rgb8(
+            changed.data(), changed.size(), 64, 4096, rgb, info, &error);
+        CHECK(ok ? (info.width > 0 && info.width <= 64 && info.height > 0 &&
+                    info.height <= 64 && rgb.size() == static_cast<size_t>(info.width) *
+                    static_cast<size_t>(info.height) * 3u)
+                 : (rgb.empty() && info.width == 0 && !error.empty()),
+              "JPEG byte mutations preserve success/failure output contract");
+    }
+}
+
 int main(int argc, char ** argv) {
+    test_jpeg_decode();
     test_exact_tensor_inventory();
     test_png_preflight();
     test_png_decode();
