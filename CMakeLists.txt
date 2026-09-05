@@ -711,9 +711,31 @@ if(EMBER_ENGINE)
   add_test(NAME ds4_vision_graph_rows COMMAND test_ds4_vision_graph_rows)
   set_tests_properties(ds4_vision_graph_rows PROPERTIES TIMEOUT 60)
 
-  # Uses the CPU backend from the ROCm toolchain build: no GPU device or model
-  # weights are required, but it exercises the same persistent ggml graph that
-  # production dispatches through gfx1151 MMVQ/MMQ.
+  # CPU-capable engine tests need the ROCm toolchain to link, but no device or
+  # model weights to execute. Keep the build dependencies and ctest selection
+  # together so a container gate cannot pass by running an unbuilt/empty set.
+  set(EMBER_ENGINE_CPU_TESTS
+    ds4_imatrix_graph
+    ds4_vision_markers
+    ds4_vision_mmproj
+    ds4_vision_biases
+    ds4_vision_graph_rows)
+  set_tests_properties(${EMBER_ENGINE_CPU_TESTS} PROPERTIES LABELS engine_cpu)
+  set(EMBER_ENGINE_CPU_TEST_TARGETS)
+  foreach(t IN LISTS EMBER_ENGINE_CPU_TESTS)
+    list(APPEND EMBER_ENGINE_CPU_TEST_TARGETS test_${t})
+  endforeach()
+  add_custom_target(check-engine-cpu
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --no-tests=error
+            -L "^engine_cpu$"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    DEPENDS ${EMBER_ENGINE_CPU_TEST_TARGETS}
+    USES_TERMINAL
+    VERBATIM)
+
+  # Arithmetic coverage requires DFLASH_ROCMI4_OPERATOR_ORACLE_HIP=1 and a
+  # GPU. The default invocation skips; the optional parser self-test exercises
+  # only dispatch-log parsing. Neither belongs to the engine_cpu arithmetic gate.
   add_executable(test_rocmi4_operator_oracle
     test/test_rocmi4_operator_oracle.hip)
   target_include_directories(test_rocmi4_operator_oracle PRIVATE

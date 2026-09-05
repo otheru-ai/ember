@@ -489,8 +489,11 @@ still fail three of these, so run them before pushing anything non-trivial.
    ```
 
 The container workflow (`container.yml`) builds the ROCm `dev` and `release`
-images without a GPU; GPU runtime validation is separate and covered under
-runtime verification above. `docs/ci.md` is the long-form reference.
+images without a GPU. The dev stage builds/runs `check-engine-cpu`: five
+CPU-capable engine graph/metadata tests, selected by the `engine_cpu` label.
+The hardware operator oracle is excluded; its default invocation skips.
+GPU runtime validation is separate and covered under runtime verification
+above. `docs/ci.md` is the long-form reference.
 
 ## Container deployment
 

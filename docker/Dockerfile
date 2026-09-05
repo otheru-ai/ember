@@ -110,6 +110,7 @@ RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharin
       --target ember-dflash ember-dspark-main-bench ember-dspark-xdna-diff \
       ember-dspark-cpu-bench ember-dspark-rocmfp4-cpu-bench \
       ember-gguf-quantize ember-token-dump -j"$(nproc)" \
+ && cmake --build /ember/build-rocm --target check-engine-cpu -j"$(nproc)" \
  && ccache --show-stats
 
 RUN gcc -shared -fPIC -O2 -g \

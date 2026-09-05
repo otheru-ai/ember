@@ -27,6 +27,17 @@ candidate while allowing automation to update the version and notes.
 The build target is pinned to `gfx1151`, so compilation needs the HIP toolchain
 and substantial disk but does not need a GPU.
 
+The Docker `dev` stage also builds and runs `check-engine-cpu`, inherited by
+both container workflows and the release stage. It selects five CPU-capable
+engine tests: `ds4_imatrix_graph`, `ds4_vision_markers`, `ds4_vision_mmproj`,
+`ds4_vision_biases`, and `ds4_vision_graph_rows`. The target builds their
+executables before running the `engine_cpu` ctest label and rejects an empty
+selection. Reproduce in a configured ROCm toolchain build with
+`cmake --build build-rocm --target check-engine-cpu -j2`; no devices or model
+weights are needed. This adds graph/metadata execution coverage, not HIP
+kernel arithmetic coverage. `rocmi4_operator_oracle` is excluded: its default
+execution skips, and arithmetic validation needs explicit opt-in and a GPU.
+
 The hosted workflows cannot execute these checks by themselves:
 
 | Out of scope | Why |
@@ -35,9 +46,10 @@ The hosted workflows cannot execute these checks by themselves:
 | Differential validator | Needs the GPU and the 85 GiB GGUF; `gfx1151-certify.yml` runs exact, batched, and optional DSpark validation. |
 
 Target-hardware certification starts automatically after the immutable
-candidate passes the hosted and container gates. The one ROCm failure mode
-hosted CI can catch cheaply is source-list drift between the two hand-maintained
-CMake lists — see `ci/check_invariants.py`.
+candidate passes the hosted and container gates. The source invariant gate
+checks drift between the two hand-maintained CMake lists; container compilation
+and the CPU-capable engine tests add separate coverage. None establishes HIP
+kernel arithmetic correctness.
 
 The saved-ISA ROCMI4 W4A8 compile-evidence gate is intentionally GitHub-only.
 It builds both packing variants in AMD's pinned ROCm 10.0 development container
