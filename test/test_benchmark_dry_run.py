@@ -22,6 +22,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -44,6 +45,34 @@ def benchmark_step() -> tuple[str, dict[str, str]]:
 
 
 class BenchmarkDryRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        self.docker_called = root / "docker-called"
+        for name, body in {
+            "getent": "exit 2",
+            "docker": f'touch "{self.docker_called}"; exit 99',
+        }.items():
+            command = root / name
+            command.write_text("#!/bin/sh\n" + body + "\n")
+            command.chmod(0o755)
+        env = patch.dict(os.environ, {"PATH": f"{root}:{os.environ['PATH']}"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def tearDown(self) -> None:
+        self.assertFalse(self.docker_called.exists(), "CPU validation invoked Docker")
+
+    def test_real_benchmark_still_requires_gpu_groups(self) -> None:
+        result = subprocess.run(
+            [str(BUNDLE), "--out", str(self.docker_called.parent / "out"),
+             "--release", "9999.1.1", "--no-exclusive"],
+            text=True, capture_output=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("video/render host GIDs unavailable", result.stderr)
+
     def test_step_exports_every_digest_with_its_provenance(self) -> None:
         """benchmark_bundle.sh refuses an asserted digest with no source.
 
@@ -143,6 +172,7 @@ exec {BUNDLE} --out "$RUNNER_TEMP/out" --release "$RELEASE_VERSION" \\
                 "DRAFT_SHA": DIGEST,
                 # TARGET_SHA_ASSERTED_BY deliberately absent.
             }
+            env.pop("TARGET_SHA_ASSERTED_BY", None)
             result = subprocess.run(
                 [str(BUNDLE), "--out", str(root / "out"), "--release", "9999.1.1",
                  "--image", "example:latest", "--binary", "/bin/true",

@@ -49,10 +49,8 @@ jobs:
           else
             test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           fi
-          command -v ccache >/dev/null || {
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends ccache
-          }
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ccache libturbojpeg0-dev python3-yaml
           python3 ci/check_invariants.py
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \

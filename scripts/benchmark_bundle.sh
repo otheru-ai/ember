@@ -78,15 +78,18 @@ DATE="$(date -u +%Y-%m-%d)"
 BUNDLE="$OUT/ember-$DATE"
 mkdir -p "$BUNDLE"
 
-VIDEO_GID=$(getent group video | cut -d: -f3)
-RENDER_GID=$(getent group render | cut -d: -f3)
-[[ "$VIDEO_GID" =~ ^[0-9]+$ && "$RENDER_GID" =~ ^[0-9]+$ ]] \
-  || { echo "video/render host GIDs unavailable" >&2; exit 1; }
-# Docker resolves symbolic --group-add values inside the image: the dev image
-# has no matching entries, while the release image's entries use GIDs that do
-# not match this host. Bind the host GIDs that actually own /dev/kfd instead.
-DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add $VIDEO_GID --group-add $RENDER_GID"
-DOCKER_RUN="$DOCKER_GPU --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit core=-1"
+# Dry-run validates inputs without consulting GPU groups or Docker.
+if [ "$DRY_RUN" = 0 ]; then
+  VIDEO_GID=$(getent group video | cut -d: -f3)
+  RENDER_GID=$(getent group render | cut -d: -f3)
+  [[ "$VIDEO_GID" =~ ^[0-9]+$ && "$RENDER_GID" =~ ^[0-9]+$ ]] \
+    || { echo "video/render host GIDs unavailable" >&2; exit 1; }
+  # Docker resolves symbolic --group-add values inside the image: the dev image
+  # has no matching entries, while the release image's entries use GIDs that do
+  # not match this host. Bind the host GIDs that actually own /dev/kfd instead.
+  DOCKER_GPU="--device /dev/kfd --device /dev/dri --group-add $VIDEO_GID --group-add $RENDER_GID"
+  DOCKER_RUN="$DOCKER_GPU --ipc host --security-opt seccomp=unconfined --ulimit memlock=-1:-1 --ulimit core=-1"
+fi
 NAME="bench-bundle-$$"
 
 if [ "$EXCLUSIVE" = 1 ]; then
@@ -104,7 +107,7 @@ if [ "$EXCLUSIVE" = 1 ]; then
   }
   trap restore EXIT INT TERM
   sudo -n /usr/local/sbin/ember-cert-production stop >/dev/null 2>&1 && echo "  production quiesced"
-else
+elif [ "$DRY_RUN" = 0 ]; then
   # Caller owns the machine and production; only clean up our own container.
   trap 'docker rm -f "$NAME" >/dev/null 2>&1' EXIT INT TERM
 fi
