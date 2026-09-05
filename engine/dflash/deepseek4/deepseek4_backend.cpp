@@ -30,6 +30,7 @@
 #include <cstring>
 #include <cinttypes>
 #include <limits>
+#include <optional>
 
 namespace dflash::common {
 
@@ -2428,11 +2429,6 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     bool spec_terminal = false;   // spec finished the generation on its own
     bool spec_degenerate = false;
     std::string termination_reason;
-    ProgressCycleDetector spec_progress(
-        req.budget_hook.natural_close_token_ids, req.prompt,
-        req.tool_region_open_ids, req.tool_region_close_ids);
-    SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
-                                    req.token_mask, req.force_greedy_next);
     if (req.vision.empty() &&
         ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
@@ -2441,11 +2437,18 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
             result.fail(GenerateErrorCode::DecodeFailed, "spec: no prefill logits");
             return result;
         }
+        // Keep prompt copies/indexing inside the path that consumes them.
+        ProgressCycleDetector spec_progress(
+            req.budget_hook.natural_close_token_ids, req.prompt,
+            req.tool_region_open_ids, req.tool_region_close_ids);
+        std::optional<SpeculativeSampler> spec_sampler;
         int seed = 0;
         if (sampled_spec) {
+            spec_sampler.emplace(sampler_, req.prompt, sampler_rng_,
+                                 req.token_mask, req.force_greedy_next);
             auto seed_logits = last_logits_;
-            seed = spec_sampler.sample(seed_logits.data(), w_.n_vocab);
-            spec_sampler.accept(seed);
+            seed = spec_sampler->sample(seed_logits.data(), w_.n_vocab);
+            spec_sampler->accept(seed);
         } else {
             float mv = last_logits_[0];
             for (int i = 1; i < w_.n_vocab; i++)
@@ -2483,7 +2486,7 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                             return false;
                         }
                         return !out_io.cancelled;
-                    }, sampled_spec ? &spec_sampler : nullptr)) {
+                    }, spec_sampler ? &*spec_sampler : nullptr)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed");
                 return result;
@@ -2845,19 +2848,21 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     bool spec_terminal = false;
     bool spec_degenerate = false;
     std::string termination_reason;
-    ProgressCycleDetector spec_progress(
-        req.budget_hook.natural_close_token_ids, req.prompt,
-        req.tool_region_open_ids, req.tool_region_close_ids);
-    SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
-                                    req.token_mask, req.force_greedy_next);
     if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
                             profitability_allowed)) {
+        // Keep prompt copies/indexing inside the path that consumes them.
+        ProgressCycleDetector spec_progress(
+            req.budget_hook.natural_close_token_ids, req.prompt,
+            req.tool_region_open_ids, req.tool_region_close_ids);
+        std::optional<SpeculativeSampler> spec_sampler;
         int seed = 0;
         if (sampled_spec) {
+            spec_sampler.emplace(sampler_, req.prompt, sampler_rng_,
+                                 req.token_mask, req.force_greedy_next);
             auto seed_logits = last_logits_;
-            seed = spec_sampler.sample(seed_logits.data(), w_.n_vocab);
-            spec_sampler.accept(seed);
+            seed = spec_sampler->sample(seed_logits.data(), w_.n_vocab);
+            spec_sampler->accept(seed);
         } else {
             float max_value = last_logits_[0];
             for (int i = 1; i < w_.n_vocab; ++i) {
@@ -2903,7 +2908,7 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                             return false;
                         }
                         return !out_io.cancelled;
-                    }, sampled_spec ? &spec_sampler : nullptr)) {
+                    }, spec_sampler ? &*spec_sampler : nullptr)) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed after restore");
                 return result;

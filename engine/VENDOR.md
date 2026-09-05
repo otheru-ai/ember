@@ -19,7 +19,9 @@ fresh/restore path shares the ordinary request sampler, accepts only emitted
 history, and advances grammar/structural hooks between selected rows. Strict
 q=1 verification is its default; sampled q-wide verification is separately
 opt-in and numerically approximate. See `docs/dspark-sampling.md`. The resident
-NPU path retains its existing sampled-request fallback.
+NPU path retains its existing sampled-request fallback. Speculative prompt
+indexing is scoped to eligible decode; sampler history is allocated only for
+sampled verification and released before any AR continuation.
 
 `engine/` is intentionally a fork, not an unmodified third-party mirror.
 Local changes cover the C ABI bridge, gfx1151 ROCMFP integration, DSpark
