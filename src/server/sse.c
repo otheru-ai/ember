@@ -116,7 +116,12 @@ const char *ember_find_tool_end(const char *s) {
         }
     }
     if (!start) return NULL;
-    const char *end = strstr(start + strlen(TOOL_STARTS[family]), TOOL_ENDS[family]);
+    // Depth-aware: a nested block inside a string value must not end the outer
+    // wrapper. gen_token truncates g->acc at this offset and stops generating, so
+    // a first-match close here cuts the value off before the parser ever sees it
+    // -- parser-side recovery cannot reach past this boundary (.coord 1067).
+    const char *end = ember_dsml_matching_close(
+        start + strlen(TOOL_STARTS[family]), TOOL_STARTS[family], TOOL_ENDS[family]);
     return end ? end + strlen(TOOL_ENDS[family]) : NULL;
 }
 
@@ -410,14 +415,19 @@ static void emit_tool_stream(ember_sse_stream *st, const char *raw,
             tool_start_delta(st, idx, name, out);
             st->tool_idx = idx; st->tool_nparams = 0; st->tool_open = true; st->any_tool = true;
         }
-        const char *inv_close = strstr(tag_end, sx->invoke_close);
+        // Same matcher as validation used, or the emitted arguments differ from
+        // the ones tool_schema approved -- the thing executed would not be the
+        // thing checked (.coord 1067 P1 #2).
+        const char *inv_close =
+            ember_dsml_matching_close(tag_end, sx->invoke_open, sx->invoke_close);
         const char *inv_limit = inv_close ? inv_close : raw + raw_len;
         const char *p = tag_end + 1;
         int pcount = 0;
         while ((p = strstr(p, sx->param_open)) != NULL && p < inv_limit) {
             const char *ptag = strchr(p, '>');
             if (!ptag || ptag >= inv_limit) break;
-            const char *pclose = strstr(ptag, sx->param_close);
+            const char *pclose =
+                ember_dsml_matching_close(ptag, sx->param_open, sx->param_close);
             if (!pclose || pclose > inv_limit) break;  // parameter not complete yet
             if (idx == st->tool_idx && pcount >= st->tool_nparams) {
                 char *key = ember_dsml_attr(p + pol, ptag + 1, "name");

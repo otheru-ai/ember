@@ -177,6 +177,11 @@ static char *dsml_unescape_n(const char *s, size_t n) {
 // Extract attribute value: key="..." starting the search at `tag`. Returns a
 // newly-allocated value or NULL. `*end` (optional) receives the byte after the
 // closing quote.
+const char *ember_dsml_matching_close(const char *from, const char *open_tag,
+                                      const char *close_tag) {
+    return matching_close(from, open_tag, close_tag);
+}
+
 char *ember_dsml_attr(const char *tag, const char *tag_limit, const char *key) {
     if (!tag || !tag_limit || !key || tag > tag_limit) return NULL;
     const size_t key_len = strlen(key);

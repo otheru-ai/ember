@@ -88,6 +88,16 @@ const ember_dsml_syntax *ember_dsml_syntaxes(int *n);
 // allocated DSML-unescaped value, or NULL. Caller frees.
 char *ember_dsml_attr(const char *tag, const char *tag_limit, const char *key);
 
+// Matching close for a DSML tag pair, honouring EMBER_DSML_NESTED_VALUES.
+// Dark (default): identical to strstr, i.e. the first close.
+// Enabled: skips balanced nested open/close pairs so a nested block inside a
+// string value does not terminate the outer tag. EVERY site that walks DSML
+// must use this -- the generation stop (main.c), the SSE emitter (sse.c) and
+// the parser each had their own first-match walker, and fixing only the parser
+// left validated arguments differing from emitted ones (.coord 1067).
+const char *ember_dsml_matching_close(const char *from, const char *open_tag,
+                                      const char *close_tag);
+
 // Append one parameter as a JSON member `"key":value` into `b` (no comma/brace).
 // string="true"/unset → DSML-unescaped then JSON-string; string="false" → raw
 // JSON (null if empty). `is_str` is the raw `string="..."` attribute or NULL.

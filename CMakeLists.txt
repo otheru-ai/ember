@@ -134,6 +134,12 @@ add_test(NAME tool_parser COMMAND test_tool_parser)
 add_test(NAME tool_parser_nested COMMAND test_tool_parser)
 set_tests_properties(tool_parser_nested PROPERTIES
   ENVIRONMENT "EMBER_DSML_NESTED_VALUES=1")
+# The emitter shares the parser's matcher, so the enabled path needs its own
+# registration too: the validation-boundary assertions in test_sse only run
+# with the flag set, and an unregistered mode is an untested mode.
+add_test(NAME sse_nested COMMAND test_sse)
+set_tests_properties(sse_nested PROPERTIES
+  ENVIRONMENT "EMBER_DSML_NESTED_VALUES=1")
 
 add_executable(test_tool_schema test/test_tool_schema.c)
 target_link_libraries(test_tool_schema ember_core m)
@@ -451,7 +457,7 @@ ember_strict(test_xdna_q8_model_weights)
 # ci/check_invariants.py fails the build if a test is registered without a
 # timeout, so a new add_test() cannot silently opt out of this.
 set(EMBER_C_TESTS
-  sse tool_parser tool_schema tool_grammar tool_grammar_match tool_memory
+  sse sse_nested tool_parser tool_parser_nested tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
   chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget

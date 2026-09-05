@@ -4,10 +4,12 @@
 // token (accumulating raw) the way the real server does.
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../src/common/buf.h"
 #include "../src/server/sse.h"
+#include "../src/model/tool_parser.h"
 #include "fixtures_real_failures.h"
 
 #define PIPE "\xef\xbd\x9c"  // U+FF5C
@@ -335,7 +337,59 @@ static void test_delivered_tool_markup_verdict(void) {
           "ember_text_has_tool_markup agrees with the streaming verdict");
 }
 
+
+// ─── the validation boundary (.coord 1067 P1 #2) ────────────────────────────
+// tool_schema validates the parsed call, then the SSE emitter re-walks the raw
+// text to stream deltas. Those are two interpretations of the same bytes, and
+// they used different closers: the parser matched by depth, the emitter took
+// the first close. The emitted argument was therefore cut at the INNER
+// parameter closer while validation had approved the whole value -- the thing
+// executed was not the thing checked. codex reached this with a nested
+// PARAMETER only, where the generation stop is already correct, proving the
+// emitter defect is independent of the stop defect.
+static void test_emitted_equals_validated_nested(void) {
+    const char *raw =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"write_file\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"content\" string=\"true\">"
+        "prefix "
+        "<" PIPE "DSML" PIPE "parameter name=\"inner\" string=\"true\">v"
+        "</" PIPE "DSML" PIPE "parameter>"
+        " suffix"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report rep = {0};
+    const int n = ember_parse_dsml_tool_calls_ex(raw, &tc, &rep);
+
+    ember_sse_stream st;
+    ember_sse_init(&st, "chatcmpl_test", "deepseek-v4-flash", 1700000000, true, false, false);
+    ember_buf out = {0};
+    ember_sse_update(&st, raw, strlen(raw), false, &out);
+    ember_sse_emit_tools(&st, raw, strlen(raw), &out);
+    const char *sse = out.ptr ? out.ptr : "";
+
+    if (getenv("EMBER_DSML_NESTED_VALUES") &&
+        getenv("EMBER_DSML_NESTED_VALUES")[0] == '1') {
+        CHECK(n == 1 && tc.len == 1, "enabled: the balanced value validates as one call");
+        // " suffix" lies AFTER the inner closer. If the emitter stopped at the
+        // first close it is absent from the stream while validation accepted it.
+        CHECK(strstr(sse, "suffix") != NULL,
+              "emitted arguments carry the whole validated value, not a prefix");
+        CHECK(strstr(sse, "inner") != NULL,
+              "the nested block survives into the emitted argument");
+    } else {
+        CHECK(n == 0, "dark: a nested value is refused, so nothing is emitted");
+    }
+    ember_tool_calls_free(&tc);
+    ember_sse_free(&st);
+    ember_buf_free(&out);
+}
+
 int main(void) {
+    test_emitted_equals_validated_nested();
     test_real_degraded_output_survives_every_chunk_size();
     test_delivered_tool_markup_verdict();
     printf("ember sse tests\n");
