@@ -304,6 +304,15 @@ add_executable(test_sampler
 target_include_directories(test_sampler PRIVATE engine/dflash/common)
 add_test(NAME sampler COMMAND test_sampler)
 
+# Sampled speculative acceptance (DFLASH_DS4_SPEC_SAMPLED) must emit exactly
+# what AR would. Drives the real sampler against a synthetic target, so it runs
+# in the GPU-free build where the DSpark path itself cannot.
+add_executable(test_spec_sampled_accept
+  test/test_spec_sampled_accept.cpp
+  engine/dflash/common/sampler.cpp)
+target_include_directories(test_spec_sampled_accept PRIVATE engine/dflash)
+add_test(NAME spec_sampled_accept COMMAND test_spec_sampled_accept)
+
 add_executable(test_pre_tokenizer
   test/test_pre_tokenizer.cpp
   engine/dflash/server/pre_tokenizer.cpp)

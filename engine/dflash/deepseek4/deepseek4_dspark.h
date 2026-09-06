@@ -29,10 +29,13 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
+#include "common/sampler.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -272,6 +275,33 @@ bool deepseek4_dspark_resident_finish(
 // prefix, and loop. Returns generated tokens via `io.emit`. Mirrors the laguna
 // DSpark loop. accept_rate_out (optional) gets accepted / offered candidates;
 // spec_cycles_out (optional) gets the number of completed speculative cycles.
+// Stochastic acceptance for a temp>0 target (DFLASH_DS4_SPEC_SAMPLED=1).
+//
+// The greedy verifier accepts a draft token iff it equals the target's argmax.
+// That is the temp==0 case of a rule that generalises exactly: draw t ~ p_i
+// from the target at position i and accept the draft iff t == draft_i. Every
+// emitted token is then drawn from the true target distribution on a correct
+// prefix, so the output distribution is identical to autoregressive decoding --
+// no draft distribution q is needed, unlike Leviathan-style rejection sampling
+// (which we cannot use here: DSpark exposes a per-position confidence head, not
+// a normalised distribution over the vocabulary).
+//
+// RNG accounting is what makes this exact. sample_logits() consumes exactly one
+// value per call (common/sampler.cpp:62), and this rule draws exactly once per
+// position it evaluates. The draw at a mismatch produces the token actually
+// emitted, and positions after it are discarded having drawn nothing -- so the
+// stream advances once per emitted token, exactly as AR does.
+//
+// `history` must hold the same tokens AR would have at that point (prompt plus
+// everything generated so far); the loop appends accepted tokens as it goes so
+// the repetition/frequency/DRY penalties see the same sequence AR would.
+struct SpecSampling {
+    const SamplerCfg *     cfg     = nullptr;  // null => greedy, today's behaviour
+    std::mt19937_64 *      rng     = nullptr;
+    std::vector<int32_t> * history = nullptr;
+    bool active() const { return cfg && rng && history; }
+};
+
 struct GenerateRequest;  // fwd (from common/…); the loop only needs n_gen + committed
 bool run_deepseek4_dspark_spec_decode(
         ggml_backend_t backend,
@@ -288,6 +318,7 @@ bool run_deepseek4_dspark_spec_decode(
         float * accept_rate_out,
         int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute = nullptr,
-        const std::function<bool(int32_t)> & on_token = {});
+        const std::function<bool(int32_t)> & on_token = {},
+        const SpecSampling & sampling = {});
 
 }  // namespace dflash::common

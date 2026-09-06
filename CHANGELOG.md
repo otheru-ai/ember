@@ -11,6 +11,27 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Curated notes
+
+A model may legitimately put a whole DSML block inside a string tool argument.
+Ember refused those turns outright; with the vision model in production that
+refusal became frequent enough to stall an agent mid-task.
+
+### Fixed
+
+- **tool_parser:** capture balanced nested DSML inside a string tool argument
+  instead of refusing the turn. The parser took the first closing tag as the
+  value's own, which truncated it, so the block was rejected
+  (`report.contaminated`) and the request failed with HTTP 422
+  `invalid_tool_call`. Deployments saw the agent narrate its next step and then
+  stop. Closers are now matched by depth at all three levels, and the checks
+  asking whether a format was nested or mixed skip parameter *values*, since
+  those bytes are data rather than structure. Unbalanced nesting is still
+  refused: a silently-truncated argument is never emitted either way, which is
+  the property the contamination guard protects. Off by default; set
+  `EMBER_DSML_NESTED_VALUES=1` to enable. Both states are contracts, so the
+  parser suite runs twice (`tool_parser`, `tool_parser_nested`).
+
 ## 2026.9.3
 
 ### Curated notes

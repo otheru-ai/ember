@@ -2237,6 +2237,19 @@ int ds4_spec_context_budget(int committed) {
     return ceiling - committed;
 }
 
+// Stochastic acceptance (see SpecSampling in deepseek4_dspark.h). OFF by
+// default: it changes which tokens a temp>0 request emits from "none, spec
+// declined" to "drawn from the target", and it steers sampling, so it is opt-in
+// per the repo rule for risky parity features.
+//
+// Without it every temp>0 request declines to speculate. On the deployed agent
+// config (--default-temperature 0.6) that is every request: 833 of 833
+// generations over 24h logged spec=no, while a 10.9 GB drafter stayed resident.
+bool ds4_spec_sampled_accept_enabled() {
+    static const bool v = env_flag_enabled("DFLASH_DS4_SPEC_SAMPLED");
+    return v;
+}
+
 // committed = KV tokens already in cache (the context this request decodes on).
 bool ds4_spec_should_run(const GenerateRequest & req, bool spec_enabled,
                          bool have_drafter, bool sampling_requires_ar,
@@ -2271,7 +2284,11 @@ bool ds4_spec_should_run(const GenerateRequest & req, bool spec_enabled,
     // constrained requests through AR, the same way the thinking budget hook
     // already does. Masking drafts directly is the follow-up.
     else if (!reason && req.token_mask) reason = "token_mask";
-    else if (!reason && sampling_requires_ar) reason = "sampling";
+    // token_mask stays a hard block even with sampled acceptance: the grammar
+    // matcher's accept() would still be bypassed by the speculative commit
+    // path. Masking drafts is the separate follow-up the comment above names.
+    else if (!reason && sampling_requires_ar &&
+             !ds4_spec_sampled_accept_enabled()) reason = "sampling";
     else if (!reason && req.n_gen <= 0) reason = "empty_budget";
     else if (!reason && spec_budget < kDSparkMinSpecBudget) reason = "short_budget";
     if (!reason && !profitability_allowed) reason = "profitability_gate";
@@ -2441,10 +2458,27 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
             result.fail(GenerateErrorCode::DecodeFailed, "spec: no prefill logits");
             return result;
         }
+        // The seed is the first token of the generation, so it must come from
+        // the same distribution AR would have used. Greedy for a greedy request
+        // (unchanged), drawn for a sampled one -- an argmax seed here would
+        // silently make token 0 deterministic at temp>0.
+        std::vector<int32_t> spec_history;
+        const bool spec_sampled = sampling_requires_ar &&
+                                  ds4_spec_sampled_accept_enabled();
+        if (spec_sampled) {
+            spec_history = req.prompt;
+            spec_history.insert(spec_history.end(), gen.begin(), gen.end());
+        }
         int seed = 0;
-        { float mv = last_logits_[0];
-          for (int i = 1; i < w_.n_vocab; i++) if (last_logits_[i] > mv) { mv = last_logits_[i]; seed = i; } }
+        if (spec_sampled) {
+            seed = sample_logits(last_logits_.data(), w_.n_vocab, sampler_,
+                                 spec_history, sampler_rng_);
+        } else {
+            float mv = last_logits_[0];
+            for (int i = 1; i < w_.n_vocab; i++) if (last_logits_[i] > mv) { mv = last_logits_[i]; seed = i; }
+        }
         gen.push_back(seed);
+        if (spec_sampled) spec_history.push_back(seed);
         out_io.emit(seed);
         spec_degenerate = spec_progress.observe(seed);
         if (!out_io.cancelled && !deepseek4_is_eos_tok(seed, w_) && spec_budget > 1) {
@@ -2475,7 +2509,10 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
                             return false;
                         }
                         return !out_io.cancelled;
-                    })) {
+                    },
+                    spec_sampled
+                        ? SpecSampling{&sampler_, &sampler_rng_, &spec_history}
+                        : SpecSampling{})) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed");
                 return result;
@@ -2841,16 +2878,28 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
                             profitability_allowed)) {
+        // Same seed rule as the streaming path above: drawn when the request
+        // samples, argmax otherwise.
+        std::vector<int32_t> spec_history;
+        const bool spec_sampled = sampling_requires_ar &&
+                                  ds4_spec_sampled_accept_enabled();
         int seed = 0;
-        float max_value = last_logits_[0];
-        for (int i = 1; i < w_.n_vocab; ++i) {
-            if (last_logits_[i] > max_value) {
-                max_value = last_logits_[i];
-                seed = i;
+        if (spec_sampled) {
+            spec_history = req.prompt;
+            seed = sample_logits(last_logits_.data(), w_.n_vocab, sampler_,
+                                 spec_history, sampler_rng_);
+        } else {
+            float max_value = last_logits_[0];
+            for (int i = 1; i < w_.n_vocab; ++i) {
+                if (last_logits_[i] > max_value) {
+                    max_value = last_logits_[i];
+                    seed = i;
+                }
             }
         }
 
         generated.push_back(seed);
+        if (spec_sampled) spec_history.push_back(seed);
         out_io.emit(seed);
         spec_degenerate = spec_progress.observe(seed);
         if (!out_io.cancelled && !deepseek4_is_eos_tok(seed, w_) &&
@@ -2885,7 +2934,10 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
                             return false;
                         }
                         return !out_io.cancelled;
-                    })) {
+                    },
+                    spec_sampled
+                        ? SpecSampling{&sampler_, &sampler_rng_, &spec_history}
+                        : SpecSampling{})) {
                 result.fail(GenerateErrorCode::DecodeFailed,
                             "DSpark speculative decode failed after restore");
                 return result;

@@ -187,6 +187,7 @@ public:
     const std::vector<int> & capture_layer_ids() const override { return capture_ids_; }
 
     void set_keep_logits(bool b) { keep_logits_ = b; }
+    void set_sampling(const SpecSampling & s) { sampling_ = s; }
     void set_telemetry(DeepSeek4StepTelemetry * t) { telemetry_ = t; }
     void set_strict_verify(bool b) { strict_verify_ = b; }
     const std::vector<float> & last_features() const { return verify_features_; }
@@ -203,6 +204,13 @@ private:
         std::vector<float> feat_all;
         std::vector<float> logits_all;
         am_all.reserve(n);
+        // Sampled acceptance needs the per-position logits to draw from, and
+        // the draw has to happen HERE rather than in the caller: the loop below
+        // stops at the first disagreement, so a decision made after the fact
+        // would never see the positions sampling could still have accepted.
+        const bool sampled = sampling_.active();
+        const size_t history_base = sampled ? sampling_.history->size() : 0;
+        if (sampled) keep_logits_ = true;
         for (int t = 0; t < n; t++) {
             std::vector<int32_t> am1;
             std::vector<float> feat1;
@@ -214,15 +222,34 @@ private:
                     keep_logits_ ? &logits1 : nullptr, feat1, telemetry_,
                     /*allow_graph_reuse=*/true,
                     /*require_target_graph=*/true)) {
+                if (sampled) sampling_.history->resize(history_base);
                 return false;
             }
-            if (am1.empty()) return false;
-            am_all.push_back(am1[0]);
+            if (am1.empty()) { if (sampled) sampling_.history->resize(history_base); return false; }
+            // Draw from this position's target distribution. The chosen token
+            // replaces the argmax as BOTH the acceptance test and the token the
+            // caller commits, so a rejected position still emits a token drawn
+            // from the true target -- which is what keeps the output
+            // distribution identical to AR.
+            int32_t chosen = am1[0];
+            if (sampled) {
+                if (logits1.size() < (size_t) w_.n_vocab) {
+                    sampling_.history->resize(history_base);
+                    return false;
+                }
+                chosen = (int32_t) dflash::common::sample_logits(
+                    logits1.data(), w_.n_vocab, *sampling_.cfg,
+                    *sampling_.history, *sampling_.rng);
+            }
+            am_all.push_back(chosen);
             feat_all.insert(feat_all.end(), feat1.begin(), feat1.end());
             if (keep_logits_) {
                 logits_all.insert(logits_all.end(), logits1.begin(), logits1.end());
             }
-            if (t + 1 < n && tokens[(size_t) t + 1] != am1[0]) break;
+            if (t + 1 < n && tokens[(size_t) t + 1] != chosen) break;
+            // Accepted: the penalties at the next position must see this token,
+            // exactly as they would after an AR step.
+            if (sampled && t + 1 < n) sampling_.history->push_back(chosen);
             // No token after EOS belongs to the sequence.  Besides avoiding
             // pointless work, this prevents an accepted speculative block from
             // advancing resident KV beyond the terminal token.
@@ -233,6 +260,9 @@ private:
         last_tok = am_all.back();
         verify_n_ = (int) am_all.size();
         if (all_argmax) *all_argmax = std::move(am_all);
+        // Scratch only: the loop appends the tokens it actually COMMITS, which
+        // is not the same set (a cycle can shrink its accept on replay).
+        if (sampled) sampling_.history->resize(history_base);
         return true;
     }
 
@@ -247,6 +277,7 @@ private:
     DeepSeek4Snapshot snap_{};
     DeepSeek4StepTelemetry * telemetry_ = nullptr;
     bool keep_logits_ = false;
+    SpecSampling sampling_;   // inactive => greedy verifier, unchanged
     int verify_n_ = 0;
     std::vector<float> embed_buf_;
     std::vector<float> verify_logits_;
@@ -1152,7 +1183,8 @@ bool run_deepseek4_dspark_spec_decode(
         float * accept_rate_out,
         int * spec_cycles_out,
         XdnaDSparkDraftCompute * xdna_draft_compute,
-        const std::function<bool(int32_t)> & on_token) {
+        const std::function<bool(int32_t)> & on_token,
+        const SpecSampling & sampling) {
     if (spec_cycles_out) *spec_cycles_out = 0;
     const int n_embd = target_w.n_embd;
     const int n_tgt = drafter.n_target_layers;
@@ -1177,8 +1209,16 @@ bool run_deepseek4_dspark_spec_decode(
     const bool batch_verify_requested =
         spec_env_flag("DFLASH_DS4_BATCH_VERIFY") ||
         spec_env_flag("DFLASH_DS4_APPROX_VERIFY");
+    // Sampled acceptance is implemented on the exact-prefix (q=1) verifier
+    // only. The batched q-wide path commits through a snapshot/replay seam
+    // whose bonus token and shrink-on-replay both re-derive from argmax; making
+    // those stochastic without re-drawing on the replayed prefix would consume
+    // RNG draws for tokens that are then discarded, breaking the one-draw-per-
+    // emitted-token accounting the exactness argument rests on. Force strict
+    // and take the throughput loss until the batched seam is done properly.
     const bool force_strict_verify =
-        !batch_verify_requested || spec_env_flag("DFLASH_DS4_SEQ_VERIFY");
+        !batch_verify_requested || spec_env_flag("DFLASH_DS4_SEQ_VERIFY") ||
+        sampling.active();
     // Qualify the q-wide path on the request's own exact-prefix behavior. This
     // keeps short/fragile answers on the q=1 graph while allowing repetitive,
     // high-acceptance generation to amortize target weights. Zero restores the
@@ -1292,6 +1332,7 @@ bool run_deepseek4_dspark_spec_decode(
     DeepSeek4DFlashTarget target(target_w, target_cache, backend, device, snap_backend,
                                  drafter.capture_layer_ids, drafter.mask_token_id,
                                  /*strict_verify=*/batch_gate.strict_cycle());
+    target.set_sampling(sampling);
     DSparkHeadWeights dw = make_dspark_head_weights(drafter);
     DeepSeek4SpecRollback rollback;
     DeepSeek4StepTelemetry tel{};
@@ -1952,6 +1993,10 @@ bool run_deepseek4_dspark_spec_decode(
         for (int i = 1; i <= accept; i++) {
             const int t = (i < accept) ? draft_tok[i] : bonus;
             out_tokens.push_back(t);
+            // Penalties for the NEXT cycle must see everything committed by
+            // this one. The verifier's own appends are scratch that it unwinds,
+            // so this is the single place history grows.
+            if (sampling.active()) sampling.history->push_back(t);
             n_generated++;
             if (on_token && !on_token(t)) {
                 stop_requested = true;
