@@ -1,0 +1,99 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+#include "../src/server/metrics.h"
+
+static int g_pass = 0, g_fail = 0;
+#define CHECK(cond, msg)                                                    \
+    do { if (cond) g_pass++; else { g_fail++; printf("  FAIL: %s\n", msg); } } while (0)
+
+// Extract the integer value of a single-line `name value` sample.
+static long long sample(const char *text, const char *name) {
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\n%s ", name);
+    const char *p = strstr(text, needle);
+    if (!p) return -1;
+    return atoll(p + strlen(needle));
+}
+
+static void test_shape_and_counters(void) {
+    ember_metrics_record_generation("stop", 100, 20, 0.30, 1.20, false, 0.0, 0);
+    ember_metrics_record_generation("length", 5000, 400, 3.00, 20.0, true, 0.9, 2);
+    ember_metrics_record_prefix_cache(1000, 250);
+    ember_metrics_record_queue_wait(0.75);
+
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+
+    CHECK(strstr(t, "# HELP ember_generations_total") != NULL, "HELP line present");
+    CHECK(strstr(t, "# TYPE ember_generations_total counter") != NULL, "TYPE line present");
+    CHECK(sample(t, "ember_generations_total") == 2, "generations counted");
+    CHECK(sample(t, "ember_prompt_tokens_total") == 5100, "prompt tokens summed");
+    CHECK(sample(t, "ember_completion_tokens_total") == 420, "completion tokens summed");
+
+    // The counters the soak actually needed.
+    CHECK(sample(t, "ember_prefix_cache_prompt_tokens_total") == 1000, "cache prompt tokens");
+    CHECK(sample(t, "ember_prefix_cache_restored_tokens_total") == 250, "cache restored tokens");
+    CHECK(sample(t, "ember_spec_decode_eligible_total") == 2, "spec eligible counts every generation");
+    CHECK(sample(t, "ember_spec_decode_engaged_total") == 1, "spec engaged counted separately");
+
+    // Vision: a served image request must be distinguishable from none.
+    CHECK(sample(t, "ember_vision_requests_total") == 1, "vision requests counted");
+    CHECK(sample(t, "ember_vision_images_total") == 2, "vision images counted");
+
+    CHECK(strstr(t, "ember_generations_by_finish_reason_total{reason=\"stop\"} 1") != NULL,
+          "finish reason stop labelled");
+    CHECK(strstr(t, "ember_generations_by_finish_reason_total{reason=\"length\"} 1") != NULL,
+          "finish reason length labelled");
+
+    // Histograms must be cumulative and terminate at +Inf == count.
+    CHECK(strstr(t, "ember_queue_seconds_bucket{le=\"+Inf\"} 1") != NULL,
+          "queue histogram +Inf equals count");
+    CHECK(strstr(t, "ember_queue_seconds_count 1") != NULL, "queue histogram count");
+    CHECK(strstr(t, "ember_request_prompt_tokens_bucket{le=\"+Inf\"} 2") != NULL,
+          "prompt token histogram +Inf equals count");
+    ember_buf_free(&b);
+}
+
+static void test_unknown_reason_does_not_grow_cardinality(void) {
+    ember_metrics_record_generation("a_brand_new_reason", 1, 1, 0.0, 0.0, false, 0.0, 0);
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    CHECK(strstr(t, "reason=\"a_brand_new_reason\"") == NULL,
+          "an unrecognised reason does not mint a new series");
+    CHECK(strstr(t, "ember_generations_by_finish_reason_total{reason=\"other\"} 1") != NULL,
+          "unrecognised reason folds into other");
+    ember_buf_free(&b);
+}
+
+static void test_cumulative_buckets_are_monotonic(void) {
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    // Walk the queue histogram buckets; cumulative counts must never decrease.
+    const char *p = strstr(t, "ember_queue_seconds_bucket");
+    long long prev = -1; int checked = 0; bool ok = true;
+    while (p) {
+        const char *v = strstr(p, "} ");
+        if (!v) break;
+        long long cur = atoll(v + 2);
+        if (cur < prev) ok = false;
+        prev = cur; checked++;
+        p = strstr(v, "ember_queue_seconds_bucket");
+    }
+    CHECK(checked > 1 && ok, "queue histogram buckets are cumulative");
+    ember_buf_free(&b);
+}
+
+int main(void) {
+    printf("ember metrics tests\n");
+    test_shape_and_counters();
+    test_unknown_reason_does_not_grow_cardinality();
+    test_cumulative_buckets_are_monotonic();
+    printf("──────────────────────────────\n");
+    printf("  %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail == 0 ? 0 : 1;
+}

@@ -115,6 +115,7 @@ add_library(ember_core STATIC
   src/server/compaction.c
   src/server/http.c
   src/server/background_gate.c
+  src/server/metrics.c
   src/model/chat_template.c
   src/model/image_input.c
   src/model/vision_prompt.c
@@ -223,6 +224,10 @@ add_test(NAME api_adapters COMMAND test_api_adapters)
 add_executable(test_http test/test_http.c)
 target_link_libraries(test_http ember_core m)
 add_test(NAME http COMMAND test_http)
+
+add_executable(test_metrics test/test_metrics.c)
+target_link_libraries(test_metrics ember_core m)
+add_test(NAME metrics COMMAND test_metrics)
 
 add_executable(test_background_gate test/test_background_gate.c)
 target_link_libraries(test_background_gate ember_core m)
@@ -919,6 +924,7 @@ if(EMBER_ENGINE)
     src/model/tool_schema.c
     src/model/tool_grammar.c
     src/server/background_gate.c
+    src/server/metrics.c
     src/model/tool_memory.c
     src/model/continuation.c
     src/model/dsml_decode.c

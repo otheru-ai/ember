@@ -22,6 +22,7 @@
 #include "../common/json.h"
 #include "../common/json_util.h"  // ember_json_escape (error-path JSON)
 #include "../model/chat_template.h"
+#include "metrics.h"
 #include "../model/model_card.h"
 #include "../model/model_profile.h"
 #include "../model/kv_cache.h"
@@ -2154,7 +2155,8 @@ static void respond_generation_stalled(
     ember_buf_free(&e);
 }
 
-static void log_generation_performance(const ember_gen_result *res) {
+static void log_generation_performance(const ember_gen_result *res,
+                                       const ember_gen_request *greq) {
     if (!res) return;
     const double prefill_tps = res->prefill_s > 0.0
         ? res->prefill_tokens / res->prefill_s : 0.0;
@@ -2169,6 +2171,12 @@ static void log_generation_performance(const ember_gen_result *res) {
             res->prefill_tokens, res->prefill_s, prefill_tps,
             res->decode_s, decode_tps,
             res->spec_decode_ran ? "yes" : "no", res->accept_rate);
+    // Same values, aggregated. Printing them was never enough to answer a
+    // trend question; 833 consecutive spec=no went unnoticed for a day.
+    ember_metrics_record_generation(
+        res->finish_reason, res->prefill_tokens, res->n_generated,
+        res->prefill_s, res->decode_s, res->spec_decode_ran,
+        res->accept_rate, greq ? greq->n_vision : 0);
 }
 
 static void free_vision_runs(ember_vision_run *runs, int count) {
@@ -2362,7 +2370,13 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // getters return interior pointers that eviction can free, so callers must
     // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
+    // Ember serialises generation, so waiting on this lock is the queue. From
+    // outside, service time and wall time are otherwise indistinguishable --
+    // a co-located consumer once took 142 client timeouts in 31 minutes with
+    // nothing to attribute them to.
+    const double queue_start = monotonic_now();
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
+    ember_metrics_record_queue_wait(monotonic_now() - queue_start);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);
@@ -2919,6 +2933,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             n_prompt, restore_len,
             n_prompt > 0 ? 100.0 * restore_len / n_prompt : 0.0,
             restore_slot, snap_slot >= 0 ? snap_cut : -1);
+    ember_metrics_record_prefix_cache(n_prompt, restore_len);
 
     int max_stop_len = 0;
     for (int si = 0; si < req->n_stop; si++) {
@@ -3006,7 +3021,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             if (recovered)
                 ember_sse_reset_attempt(&st, started_thinking);
         }
-        log_generation_performance(&res);
+        log_generation_performance(&res, &greq);
         const int completion_tokens =
             hidden_recovery_tokens + res.n_generated;
         g.scratch.len = 0; if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
@@ -3249,7 +3264,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             if (recovered)
                 ember_sse_reset_attempt(&splitter, started_thinking);
         }
-        log_generation_performance(&res);
+        log_generation_performance(&res, &greq);
         const int completion_tokens =
             hidden_recovery_tokens + res.n_generated;
         g.scratch.len = 0;
@@ -3493,7 +3508,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // invalid-output boundary instead of returning an empty success.
         unclosed_think_tool =
             tool_started_in_unclosed_think(&g, started_thinking);
-        log_generation_performance(&res);
+        log_generation_performance(&res, &greq);
         const int completion_tokens =
             hidden_recovery_tokens + res.n_generated;
 
@@ -4119,6 +4134,15 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 "invalid_request_error", "invalid_request");
         }
         if (root) ember_json_free(root);
+        return;
+    }
+    if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/metrics") == 0) {
+        ember_buf m = {0};
+        ember_metrics_render(&m);
+        // text/plain with the exposition version is what scrapers content-negotiate.
+        respond(fd, 200, "text/plain; version=0.0.4; charset=utf-8",
+                m.ptr ? m.ptr : "");
+        ember_buf_free(&m);
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/status") == 0) {
