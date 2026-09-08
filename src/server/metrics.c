@@ -14,17 +14,17 @@ static const double kTokenBounds[] = {
 #define N_SECONDS_BUCKETS (sizeof(kSecondsBounds) / sizeof(kSecondsBounds[0]))
 #define N_TOKEN_BUCKETS   (sizeof(kTokenBounds) / sizeof(kTokenBounds[0]))
 
+// One histogram type carrying its own ladder. Two near-identical structs with
+// two observe and two render functions differed only by their bounds array,
+// which is the duplication this file exists to help find.
+#define MAX_BUCKETS 12
 typedef struct {
-    unsigned long long counts[N_SECONDS_BUCKETS + 1];  // +1 for +Inf
+    const double *bounds;
+    size_t n;
+    unsigned long long counts[MAX_BUCKETS + 1];  // +1 for +Inf
     double sum;
     unsigned long long total;
-} seconds_histogram;
-
-typedef struct {
-    unsigned long long counts[N_TOKEN_BUCKETS + 1];
-    double sum;
-    unsigned long long total;
-} token_histogram;
+} histogram;
 
 // A closed label set. An unrecognised reason maps to "other" rather than
 // minting a new series: an unbounded label is how a scrape target degrades a
@@ -35,6 +35,9 @@ static const char *const kFinishReasons[] = {
 };
 #define N_FINISH_REASONS (sizeof(kFinishReasons) / sizeof(kFinishReasons[0]))
 
+// ponytail: one global lock for every counter. Ceiling: contention once
+// generation stops serialising (batch_sessions > 1). Upgrade path: per-counter
+// atomics, or a per-thread shard summed at render.
 static struct {
     pthread_mutex_t lock;
     unsigned long long generations;
@@ -54,28 +57,24 @@ static struct {
     unsigned long long vision_requests;
     unsigned long long vision_images;
     // Distributions
-    seconds_histogram prefill_seconds;
-    seconds_histogram decode_seconds;
-    seconds_histogram queue_seconds;
-    token_histogram prompt_token_shape;
-    token_histogram completion_token_shape;
-} g = { .lock = PTHREAD_MUTEX_INITIALIZER };
+    histogram prefill_seconds;
+    histogram decode_seconds;
+    histogram queue_seconds;
+    histogram prompt_token_shape;
+    histogram completion_token_shape;
+} g = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    .prefill_seconds       = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .decode_seconds        = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .queue_seconds         = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .prompt_token_shape    = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
+    .completion_token_shape= {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
+};
 
-static void observe_seconds(seconds_histogram *h, double v) {
+static void observe(histogram *h, double v) {
     if (v < 0.0) return;
     size_t i = 0;
-    for (; i < N_SECONDS_BUCKETS; ++i)
-        if (v <= kSecondsBounds[i]) break;
-    h->counts[i]++;
-    h->sum += v;
-    h->total++;
-}
-
-static void observe_tokens(token_histogram *h, double v) {
-    if (v < 0.0) return;
-    size_t i = 0;
-    for (; i < N_TOKEN_BUCKETS; ++i)
-        if (v <= kTokenBounds[i]) break;
+    while (i < h->n && v > h->bounds[i]) i++;
     h->counts[i]++;
     h->sum += v;
     h->total++;
@@ -98,14 +97,14 @@ void ember_metrics_record_generation(const char *finish_reason,
     g.finish_reason[finish_reason_index(finish_reason)]++;
     if (prompt_tokens > 0) {
         g.prompt_tokens += (unsigned long long)prompt_tokens;
-        observe_tokens(&g.prompt_token_shape, prompt_tokens);
+        observe(&g.prompt_token_shape, prompt_tokens);
     }
     if (completion_tokens > 0) {
         g.completion_tokens += (unsigned long long)completion_tokens;
-        observe_tokens(&g.completion_token_shape, completion_tokens);
+        observe(&g.completion_token_shape, completion_tokens);
     }
-    observe_seconds(&g.prefill_seconds, prefill_s);
-    observe_seconds(&g.decode_seconds, decode_s);
+    observe(&g.prefill_seconds, prefill_s);
+    observe(&g.decode_seconds, decode_s);
     // Eligible counts every generation so the ratio answers "how often does
     // speculation actually engage", which is the question 833/833 raised.
     g.spec_eligible++;
@@ -131,7 +130,7 @@ void ember_metrics_record_prefix_cache(int prompt_tokens, int restored_tokens) {
 
 void ember_metrics_record_queue_wait(double seconds) {
     pthread_mutex_lock(&g.lock);
-    observe_seconds(&g.queue_seconds, seconds);
+    observe(&g.queue_seconds, seconds);
     pthread_mutex_unlock(&g.lock);
 }
 
@@ -141,35 +140,18 @@ static void render_counter(ember_buf *b, const char *name, const char *help,
                      name, help, name, name, v);
 }
 
-static void render_seconds_histogram(ember_buf *b, const char *name,
-                                     const char *help,
-                                     const seconds_histogram *h) {
+static void render_histogram(ember_buf *b, const char *name, const char *help,
+                             const histogram *h) {
     ember_buf_printf(b, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name);
     unsigned long long cumulative = 0;
-    for (size_t i = 0; i < N_SECONDS_BUCKETS; ++i) {
+    for (size_t i = 0; i < h->n; ++i) {
         cumulative += h->counts[i];
         ember_buf_printf(b, "%s_bucket{le=\"%g\"} %llu\n",
-                         name, kSecondsBounds[i], cumulative);
+                         name, h->bounds[i], cumulative);
     }
-    cumulative += h->counts[N_SECONDS_BUCKETS];
+    cumulative += h->counts[h->n];
     ember_buf_printf(b, "%s_bucket{le=\"+Inf\"} %llu\n", name, cumulative);
     ember_buf_printf(b, "%s_sum %.6f\n%s_count %llu\n", name, h->sum, name,
-                     h->total);
-}
-
-static void render_token_histogram(ember_buf *b, const char *name,
-                                   const char *help,
-                                   const token_histogram *h) {
-    ember_buf_printf(b, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name);
-    unsigned long long cumulative = 0;
-    for (size_t i = 0; i < N_TOKEN_BUCKETS; ++i) {
-        cumulative += h->counts[i];
-        ember_buf_printf(b, "%s_bucket{le=\"%g\"} %llu\n",
-                         name, kTokenBounds[i], cumulative);
-    }
-    cumulative += h->counts[N_TOKEN_BUCKETS];
-    ember_buf_printf(b, "%s_bucket{le=\"+Inf\"} %llu\n", name, cumulative);
-    ember_buf_printf(b, "%s_sum %.0f\n%s_count %llu\n", name, h->sum, name,
                      h->total);
 }
 
@@ -222,16 +204,16 @@ void ember_metrics_render(ember_buf *out) {
     render_counter(out, "ember_vision_images_total",
                    "Images accepted across all generations.", g.vision_images);
 
-    render_seconds_histogram(out, "ember_prefill_seconds",
+    render_histogram(out, "ember_prefill_seconds",
                              "Prefill duration.", &g.prefill_seconds);
-    render_seconds_histogram(out, "ember_decode_seconds",
+    render_histogram(out, "ember_decode_seconds",
                              "Decode duration.", &g.decode_seconds);
-    render_seconds_histogram(out, "ember_queue_seconds",
+    render_histogram(out, "ember_queue_seconds",
                              "Time a request waited before generation began.",
                              &g.queue_seconds);
-    render_token_histogram(out, "ember_request_prompt_tokens",
+    render_histogram(out, "ember_request_prompt_tokens",
                            "Prompt size distribution.", &g.prompt_token_shape);
-    render_token_histogram(out, "ember_request_completion_tokens",
+    render_histogram(out, "ember_request_completion_tokens",
                            "Completion size distribution.",
                            &g.completion_token_shape);
 
