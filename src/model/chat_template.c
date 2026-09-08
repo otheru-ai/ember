@@ -31,9 +31,10 @@ static bool role_is_user_like(const char *r) {
 }
 
 // DeepSeek-V4-Flash-Vision-Exp's processor replaces this exact placeholder
-// with the vocabulary-relative learned image block after tokenization. Only a
-// user turn may carry request media; images in system/assistant history fail
-// closed instead of being flattened out of the trained prompt structure.
+// with the vocabulary-relative learned image block after tokenization. Only
+// user-like turns may carry request media (user turns here, tool results via
+// append_tool_result_content); images in system/assistant history fail closed
+// instead of being flattened out of the trained prompt structure.
 static bool append_message_content(ember_buf *out,
                                    const ember_chat_msg *msg,
                                    bool allow_images) {
@@ -77,6 +78,34 @@ static void append_tool_result_text(ember_buf *b, const char *s) {
         if (!strncmp(s, end, endlen)) { ember_buf_puts(b, "&lt;"); s++; }
         else ember_buf_putc(b, *s++);
     }
+}
+
+// A tool result may carry media: an image-returning tool (a screenshot, a
+// rendered chart) delivers it as a tool message whose content is an ordered
+// part list rather than a flat string. "tool" is user-like (role_is_user_like)
+// and the processor substitutes the placeholder by token position, so the
+// marker is admissible inside <tool_result> exactly as in a user turn.
+// Reading only msg->content here dropped such parts entirely, leaving the
+// image counted by the request but absent from the rendered prompt -- the
+// mismatch surfaced as "rendered prompt has no complete image placeholder".
+// Text parts keep tool-result escaping; any other kind still fails closed.
+static bool append_tool_result_content(ember_buf *b,
+                                       const ember_chat_msg *msg) {
+    if (!msg || msg->n_parts <= 0) {
+        append_tool_result_text(b, msg && msg->content ? msg->content : "");
+        return true;
+    }
+    for (int i = 0; i < msg->n_parts; ++i) {
+        const ember_content_part *part = &msg->parts[i];
+        if (part->kind == EMBER_CONTENT_TEXT) {
+            append_tool_result_text(b, part->text ? part->text : "");
+        } else if (part->kind == EMBER_CONTENT_IMAGE) {
+            ember_buf_puts(b, IMAGE);
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Minimal DSML attribute escape (tool/param names). Mirrors ds4_server.c
@@ -304,7 +333,10 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
                    (!strcmp(m->role, "tool") || !strcmp(m->role, "function"))) {
             if (!pending_tool_result) ember_buf_puts(&b, USER);
             ember_buf_puts(&b, "<tool_result>");
-            append_tool_result_text(&b, content);
+            if (!append_tool_result_content(&b, m)) {
+                ember_buf_free(&b);
+                return NULL;
+            }
             ember_buf_puts(&b, "</tool_result>");
             pending_assistant = true;
             pending_tool_result = true;
