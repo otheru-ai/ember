@@ -31,19 +31,6 @@ RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libturbojpeg0-dev \
  && rm -rf /var/lib/apt/lists/*
 
-ARG EMBER_VERSION
-ARG EMBER_VCS_REF
-ARG EMBER_ROCMI4_W4A8_IU4=OFF
-ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF
-ARG EMBER_HIP_EXPORT_METRICS=OFF
-LABEL org.opencontainers.image.title="Ember development toolchain" \
-      org.opencontainers.image.description="ROCm development and profiling image for Ember on AMD Strix Halo" \
-      org.opencontainers.image.version="${EMBER_VERSION}" \
-      org.opencontainers.image.revision="${EMBER_VCS_REF}" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="OtherU" \
-      org.opencontainers.image.source="https://github.com/otheru-ai/ember"
-
 # Kernel profiling is a first-class dev-image capability (scripts/profile_gpu.sh,
 # and the rocprofv3 traces cited in quantize.cu and tools/bench_decode_attn.hip).
 # Both profilers arrive with the pinned ROCm full image rather than from apt.
@@ -100,12 +87,19 @@ ENV CCACHE_DIR=/root/.cache/ccache \
     CCACHE_COMPRESS=true \
     CCACHE_MAXSIZE=20G
 
+ARG EMBER_VCS_REF
+ARG EMBER_ROCMI4_W4A8_IU4=OFF
+ARG EMBER_ROCMI4_W4A8_IU4_PREPACK=OFF
+ARG EMBER_HIP_EXPORT_METRICS=OFF
 # Keep the complete current debug toolset in ember-dev. Only ember-dflash is
 # copied into the release runtime closure below.
 RUN --mount=type=cache,id=ember-gfx1151-ccache,target=/root/.cache/ccache,sharing=locked \
     cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
       -DEMBER_ENGINE=ON \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_HIP_COMPILER_LAUNCHER=ccache \
       -DEMBER_CONFIGURED_GIT_HEAD="${EMBER_VCS_REF}" \
       -DBUILD_SHARED_LIBS=OFF \
       -DGGML_HIP_ROCMI4_W4A8_IU4="${EMBER_ROCMI4_W4A8_IU4}" \
@@ -166,6 +160,16 @@ RUN install -Dm0644 /usr/share/doc/libturbojpeg0-dev/copyright /ember-licenses/l
       /ember-licenses/xgrammar/NOTICE
 
 CMD ["/bin/bash"]
+
+# Metadata varies between release/dev tags; keep it after compiled layers.
+ARG EMBER_VERSION
+LABEL org.opencontainers.image.title="Ember development toolchain" \
+      org.opencontainers.image.description="ROCm development and profiling image for Ember on AMD Strix Halo" \
+      org.opencontainers.image.version="${EMBER_VERSION}" \
+      org.opencontainers.image.revision="${EMBER_VCS_REF}" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="OtherU" \
+      org.opencontainers.image.source="https://github.com/otheru-ai/ember"
 
 FROM ${RUNTIME_IMAGE} AS release
 
