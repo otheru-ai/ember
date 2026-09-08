@@ -113,6 +113,35 @@ jobs:
             exit 1
           fi
 
+      # BEFORE the lock and the quiesce, deliberately. Nothing in this step
+      # needs the GPU, exclusivity, or production stopped, and all three of its
+      # failure modes are real: the runner's docker config has held a ghcr.io
+      # credential outliving its token, the tag may not exist because
+      # commit_sha is a free-form dispatch input, and the revision label may
+      # not match. Run after the quiesce, each of those stops and masks
+      # production first and fails second -- an avoidable Hermes and Telegram
+      # outage caused purely by step order. Running it first also shortens the
+      # window, because the pull no longer happens on the clock.
+      - name: Log in to GHCR and pull the exact candidate
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! login_output="$(echo "$GHCR_TOKEN" | \
+              docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin 2>&1)"; then
+            printf '%s\n' "$login_output"
+            exit 1
+          fi
+          echo 'GHCR login succeeded'
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
+          docker pull "$image"
+          revision="$(docker image inspect --format \
+            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+          test "$revision" = "$TARGET_SHA" || {
+            echo "candidate label identifies $revision, not $TARGET_SHA"
+            exit 1
+          }
+
       - name: Take the GPU lock
         # /root/GPU-LOCK.md is the protocol both agents on this box follow, and
         # certification was not following it. Two model-loading processes do not
@@ -151,26 +180,6 @@ jobs:
           # assertion error rather than quietly costing the run.
           sudo -n /usr/local/sbin/ember-cert-production mask
           echo 'blocked=yes' >>"$GITHUB_OUTPUT"
-
-      - name: Log in to GHCR and pull the exact candidate
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! login_output="$(echo "$GHCR_TOKEN" | \
-              docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin 2>&1)"; then
-            printf '%s\n' "$login_output"
-            exit 1
-          fi
-          echo 'GHCR login succeeded'
-          image="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${TARGET_SHA:0:12}"
-          docker pull "$image"
-          revision="$(docker image inspect --format \
-            '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
-          test "$revision" = "$TARGET_SHA" || {
-            echo "candidate label identifies $revision, not $TARGET_SHA"
-            exit 1
-          }
 
       - name: Verify the model artifact
         run: |
@@ -837,6 +846,38 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha || github.sha }}
           persist-credentials: false
+
+      # Same reason as the certify job, and this one has already happened:
+      # run 34222604917 stopped and masked production, then could not obtain
+      # the image, and only the if: always() restore brought production back.
+      # The credential cause is fixed; the ordering was not, so any future
+      # failure to obtain the image still landed after the outage began.
+      #
+      # There is no docker pull anywhere in this job or in
+      # scripts/benchmark_bundle.sh -- the image is fetched implicitly by the
+      # script's first docker run. Pulling here means the bundle finds it in
+      # the local store, so production is only ever stopped for work that can
+      # actually proceed, and the pull no longer runs on the clock.
+      - name: Resolve and fetch the released image
+        run: |
+          set -euo pipefail
+          # Promote failing normally skips this job through `needs`, so an empty
+          # version is a narrow window rather than a live bug -- but it yields
+          # the malformed tag "ghcr.io/otheru-ai/ember:" and costs one line to
+          # exclude.
+          test -n "$RELEASE_VERSION" || {
+            echo 'RELEASE_VERSION is empty; refusing to quiesce production' >&2
+            exit 1
+          }
+          # Private config for the same reason as the bundle step: a leftover
+          # ghcr.io entry in the runner's home does not expire when its token
+          # does, and docker keeps presenting it instead of pulling anonymously.
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$RELEASE_VERSION"
+          docker pull "$image"
+          echo "fetched $image"
 
       - name: Take the GPU lock and quiesce production
         run: |
