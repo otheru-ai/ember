@@ -23,6 +23,24 @@ using an ambiguous same-day suffix.
   until it was reset. Flat string content and text-only part lists render
   byte-identically to before; images in system/assistant history still fail
   closed. (#15)
+- **server:** a loop-breaker that survives DRY. The visible-cycle watchdog
+  fires only on an exact token cycle and the DRY sampler exists to penalise
+  exactly those sequences, so enabling DRY blinded it: measured on production
+  2026-09-05, `EMBER_DRY_MULTIPLIER=0.8` produced 12 no-progress rounds and 0
+  watchdog fires across 158 generations, one episode escalating 9 -> 20 rounds
+  on a single tool and never stopping. `--no-progress-stop N` suppresses tools
+  for one turn once more than N trailing tool rounds return nothing new, keying
+  on tool-result identity rather than token identity. It suppresses rather than
+  terminates, so the model answers from what it has instead of producing a
+  silent empty turn. Off by default. Ember now also warns at startup when DRY
+  is enabled and no loop-breaker is armed. `/status` gains
+  `no_progress.stop_after` and `no_progress.stopped`. (#8)
+- **tool parser:** a rejected non-string tool argument now reports where it
+  stopped parsing ("parsing stopped at byte N of M") instead of only that it
+  was invalid, so a retry can correct the break rather than regenerate the
+  whole document. `ember_json_parse_at` exposes the parser position that was
+  previously discarded; `ember_json_parse_n` delegates to it and parsing
+  behaviour is unchanged. (#10)
 
 ## 2026.9.5
 
