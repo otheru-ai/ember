@@ -11,6 +11,19 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Fixed
+
+- **chat template:** tool results carrying an image now render the DeepSeek
+  image marker. A tool returning media delivers its result as an ordered part
+  list, but the tool branch rendered only the flat string, so the image was
+  counted by the request and absent from the rendered prompt. The turn failed
+  with `HTTP 400 vision_not_available` ("rendered prompt has no complete image
+  placeholder"), and because the message stays in session history every later
+  turn in that session replayed it and failed identically, wedging the session
+  until it was reset. Flat string content and text-only part lists render
+  byte-identically to before; images in system/assistant history still fail
+  closed. (#15)
+
 ## 2026.9.5
 
 ### Curated notes
