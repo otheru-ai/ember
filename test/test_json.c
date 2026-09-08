@@ -158,7 +158,9 @@ static void test_parse_at_reports_position(void) {
     ember_json_free(v);
 
     // NULL out-param must be safe; parse_n delegates and must be unchanged.
-    CHECK(ember_json_parse_at("[1]", 3, NULL) != NULL, "parse_at tolerates NULL err_off");
+    ember_json *nul = ember_json_parse_at("[1]", 3, NULL);
+    CHECK(nul != NULL, "parse_at tolerates NULL err_off");
+    ember_json_free(nul);
     ember_json *n = ember_json_parse_n("[1,2,x]", 7);
     CHECK(n == NULL, "parse_n behaviour unchanged");
 }

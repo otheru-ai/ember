@@ -318,7 +318,6 @@ char *ember_render_prompt(const ember_chat_request *req, bool enable_thinking,
     bool pending_tool_result = false;
     for (int i = 0; i < req->n_messages; i++) {
         const ember_chat_msg *m = &req->messages[i];
-        const char *content = m->content ? m->content : "";
         if (role_is_system(m->role)) {
             continue;
         } else if (m->role && !strcmp(m->role, "user")) {
