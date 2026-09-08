@@ -22,57 +22,60 @@ from assemble_bundle import (  # noqa: E402
     summarise_context, summarise_groups, summarise_workloads)
 from publish_bundle import Invalid, REQUIRED, archive, validate  # noqa: E402
 
-IMAGE = "ghcr.io/otheru-ai/ember@sha256:" + "c" * 64
+DATA = ROOT / "test" / "data" / "perf-bundle"
+IMAGE = "ghcr.io/otheru-ai/ember:2026.9.8"
+INSPECT = DATA / "image-inspect.json"
+DIGEST = "d0a558b3836db77cdddbe00d9b19500487543f413e9c6f4c3155d0063bac6b6a"
+COMMIT = "d46ecc956c545f7bc70a0a7f450330aa1e6efa93"
+
+
+def rows_of_bundle(bundle, name):
+    return [json.loads(l) for l in (bundle / name).read_text().splitlines()
+            if l.strip()]
+
+
+def rows_of(name):
+    return [json.loads(l) for l in (DATA / name).read_text().splitlines()
+            if l.strip()]
 
 
 def make_bundle(directory: Path) -> Path:
     """A bundle that VALIDATES, so each test can break exactly one thing.
 
-    The summary is produced by the assembler's own summarisers rather than
-    hand-written, which is the point: publish_bundle recomputes it the same way
-    and compares, so a hand-written summary would only prove the fixture and
-    the tool agreed on a constant.
+    raw-results.jsonl and both workload files are the REAL 2026.9.8 measurement
+    (test/data/perf-bundle), not hand-written: a synthetic fixture would omit
+    the groups the validator is supposed to require and still pass, which is
+    the failure mode this whole file exists to avoid. summary.json is generated
+    by the assembler's own summarisers, so the comparison stays under test
+    rather than the fixture and the tool agreeing on a constant. Only the
+    context sweep is constructed, because no real one was available.
     """
     bundle = directory / "ember-2026-09-08"
     bundle.mkdir(parents=True)
-    rows = [{"group": "decode-256", "ok": True, "decode_tokens_per_second": 41.5,
-             "accept_rate": 0.7, "completion_tokens": 256},
-            {"group": "decode-256", "ok": True, "decode_tokens_per_second": 42.5,
-             "accept_rate": 0.8, "completion_tokens": 256},
-            {"group": "prefill-4k", "prefill_tokens_per_second": 900.0,
-             "evaluated_prefill_tokens": 4096},
-            {"kind": "summary", "vision": {"images": 4, "ok": True}}]
-    wl_on = [{"label": "chat", "decode_tps": 40.0, "prefill_tps": 800.0,
-              "accept_rate": 0.7, "spec_ran": True, "spec_cycles": 12},
-             {"label": "code", "decode_tps": 38.0, "prefill_tps": 780.0,
-              "accept_rate": 0.6, "spec_ran": True, "spec_cycles": 9}]
-    wl_off = [{"label": "chat", "decode_tps": 20.0, "prefill_tps": 790.0,
-               "accept_rate": 0.0, "spec_ran": False, "spec_cycles": 0},
-              {"label": "code", "decode_tps": 19.0, "prefill_tps": 770.0,
-               "accept_rate": 0.0, "spec_ran": False, "spec_cycles": 0}]
-    ctx = [{"config": c, "target": t, "prompt_tokens": t,
-            "prefill_tps": 900.0, "decode_tps": d, "accept": 0.7}
-           for t in (4096, 16384) for c, d in (("spec-on", 40.0),
-                                               ("spec-off", 20.0))]
+    for name in ("raw-results.jsonl", "workloads-spec-on.jsonl",
+                 "workloads-spec-off.jsonl"):
+        shutil.copy(DATA / name, bundle / name)
+    rows, wl_on, wl_off = (rows_of("raw-results.jsonl"),
+                           rows_of("workloads-spec-on.jsonl"),
+                           rows_of("workloads-spec-off.jsonl"))
 
-    def write(name, records):
-        (bundle / name).write_text(
-            "".join(json.dumps(r) + "\n" for r in records))
-
-    write("raw-results.jsonl", rows)
-    write("workloads-spec-on.jsonl", wl_on)
-    write("workloads-spec-off.jsonl", wl_off)
-    write("context-sweep.jsonl", ctx)
+    ctx = [{"config": c, "target": t, "prompt_tokens": max(t, 1),
+            "prefill_tps": 900.0 - t / 1000.0, "decode_tps": d, "accept": 0.7}
+           for t in pb.REQUIRED_DEPTHS
+           for c, d in (("spec-on", 40.0), ("spec-off", 20.0))]
+    (bundle / "context-sweep.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in ctx))
 
     summary = summarise_groups(rows)
     summary["by_workload"] = summarise_workloads(wl_on, wl_off)
     summary["by_context_depth"] = summarise_context(ctx)
-    summary["vision"] = rows[-1]["vision"]
     (bundle / "summary.json").write_text(json.dumps(summary))
     (bundle / "environment.json").write_text(json.dumps({
         "runtime": {"release": "2026.9.8", "container_image": IMAGE},
         "model": {"target_sha256": "a" * 64, "target_sha256_source": "computed",
-                  "drafter_sha256": "b" * 64, "drafter_sha256_source": "computed"},
+                  "drafter_sha256": "b" * 64,
+                  "drafter_sha256_source": "asserted",
+                  "drafter_sha256_asserted_by": "gfx1151 certify, run 1"},
     }))
     for name in REQUIRED:
         if not (bundle / name).exists():
@@ -88,8 +91,16 @@ class ValidateTest(unittest.TestCase):
         self.bundle = make_bundle(self.dir / "b")
         self.addCleanup(self.tmp.cleanup)
 
+    def ok(self, **kw):
+        kw.setdefault("inspect_path", INSPECT)
+        return validate(self.bundle, kw.pop("release", "v2026.9.8"), **kw)
+
     def rewrite(self, name, obj):
         (self.bundle / name).write_text(json.dumps(obj))
+
+    def write_rows(self, name, rows):
+        (self.bundle / name).write_text(
+            "".join(json.dumps(r) + "\n" for r in rows))
 
     def summary(self):
         return json.loads((self.bundle / "summary.json").read_text())
@@ -97,16 +108,46 @@ class ValidateTest(unittest.TestCase):
     def environment(self):
         return json.loads((self.bundle / "environment.json").read_text())
 
+    # ── the happy path ──
     def test_a_complete_bundle_validates(self):
-        env = validate(self.bundle, "v2026.9.8")
-        self.assertEqual(env["_publication"]["image_digest"], "c" * 64)
+        env = self.ok()
+        self.assertEqual(env["_publication"]["image_digest"], DIGEST)
+        self.assertEqual(env["_publication"]["image_revision"], COMMIT)
 
     def test_tag_may_carry_the_v_prefix_or_not(self):
-        validate(self.bundle, "2026.9.8")
+        self.ok(release="2026.9.8")
 
+    # ── identity ──
     def test_a_bundle_measured_on_another_release_is_refused(self):
         with self.assertRaisesRegex(Invalid, "did not measure"):
-            validate(self.bundle, "v2026.9.5")
+            self.ok(release="v2026.9.5")
+
+    def test_a_mutable_tag_with_no_captured_inspect_is_refused(self):
+        with self.assertRaisesRegex(Invalid, "mutable tag with no digest"):
+            validate(self.bundle, "v2026.9.8")
+
+    def test_the_image_must_be_built_from_the_release_commit(self):
+        with self.assertRaisesRegex(Invalid, "attribute one commit"):
+            self.ok(expected_commit="f" * 40)
+        self.ok(expected_commit=COMMIT)
+
+    def test_binding_a_commit_without_an_inspect_is_refused(self):
+        # Reachable only when the BUNDLE pins the digest itself, so there is an
+        # identity but no revision label to bind the release commit to. With a
+        # tag-only image the missing-digest refusal fires first.
+        env = self.environment()
+        env["runtime"]["container_image"] = f"ghcr.io/otheru-ai/ember@sha256:{DIGEST}"
+        self.rewrite("environment.json", env)
+        with self.assertRaisesRegex(Invalid, "nothing to bind"):
+            validate(self.bundle, "v2026.9.8", expected_commit=COMMIT)
+
+    def test_an_inspect_for_another_repository_is_refused(self):
+        other = self.dir / "other-inspect.json"
+        entry = json.loads(INSPECT.read_text())[0]
+        entry["RepoDigests"] = ["ghcr.io/someone/else@sha256:" + "9" * 64]
+        other.write_text(json.dumps([entry]))
+        with self.assertRaisesRegex(Invalid, "no entry for"):
+            self.ok(inspect_path=other)
 
     def test_every_required_file_is_required(self):
         for name in REQUIRED:
@@ -114,118 +155,142 @@ class ValidateTest(unittest.TestCase):
                 shutil.copy(self.bundle / name, self.dir / "held")
                 (self.bundle / name).unlink()
                 with self.assertRaisesRegex(Invalid, "incomplete bundle"):
-                    validate(self.bundle, "v2026.9.8")
+                    self.ok()
                 shutil.copy(self.dir / "held", self.bundle / name)
 
-    def test_a_mutable_tag_without_a_digest_is_refused(self):
-        env = self.environment()
-        env["runtime"]["container_image"] = "ghcr.io/otheru-ai/ember:v2026.9.8"
-        self.rewrite("environment.json", env)
-        with self.assertRaisesRegex(Invalid, "mutable tag with no digest"):
-            validate(self.bundle, "v2026.9.8")
-        # ...and accepted when the operator supplies the captured digest.
-        env2 = validate(self.bundle, "v2026.9.8", image_digest="sha256:" + "d" * 64)
-        self.assertEqual(env2["_publication"]["image_digest"], "d" * 64)
-
-    def test_a_supplied_digest_may_not_contradict_the_bundle(self):
-        with self.assertRaisesRegex(Invalid, "contradicts"):
-            validate(self.bundle, "v2026.9.8", image_digest="sha256:" + "e" * 64)
-
     def test_model_digests_must_be_real_sha256(self):
-        for value, expect in (("not-a-digest", "full lowercase hex"),
-                              ("A" * 64, "full lowercase hex"),
-                              ("a" * 63, "full lowercase hex")):
+        for value in ("not-a-digest", "A" * 64, "a" * 63):
             with self.subTest(value=value):
                 env = self.environment()
                 env["model"]["target_sha256"] = value
                 self.rewrite("environment.json", env)
-                with self.assertRaisesRegex(Invalid, expect):
-                    validate(self.bundle, "v2026.9.8")
+                with self.assertRaisesRegex(Invalid, "full lowercase hex"):
+                    self.ok()
+                self.setUp()
 
     def test_asserted_digest_needs_evidence(self):
         env = self.environment()
-        env["model"]["drafter_sha256_source"] = "asserted"
+        del env["model"]["drafter_sha256_asserted_by"]
         self.rewrite("environment.json", env)
         with self.assertRaisesRegex(Invalid, "evidence reference"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
+    # ── the throughput suite must be complete and self-consistent ──
+    def test_a_missing_throughput_group_is_refused(self):
+        for group in ("decode-256", "prefill-128", "prefill-32768"):
+            with self.subTest(group=group):
+                rows = [r for r in rows_of("raw-results.jsonl")
+                        if r.get("group") != group]
+                self.write_rows("raw-results.jsonl", rows)
+                with self.assertRaisesRegex(Invalid, "missing the throughput"):
+                    self.ok()
+                self.setUp()
+
+    def test_a_group_count_that_disagrees_with_its_record_is_refused(self):
+        kept, dropped = [], False
+        for r in rows_of("raw-results.jsonl"):
+            if not dropped and r.get("group") == "prefill-512":
+                dropped = True
+                continue
+            kept.append(r)
+        self.write_rows("raw-results.jsonl", kept)
+        with self.assertRaisesRegex(Invalid, "declares 3 samples"):
+            self.ok()
+
+    def test_vision_is_counted_from_raw_requests_not_read_off_the_summary(self):
+        kept, removed = [], False
+        for r in rows_of("raw-results.jsonl"):
+            if not removed and r.get("group") == "vision":
+                removed = True
+                continue
+            kept.append(r)
+        self.write_rows("raw-results.jsonl", kept)
+        # The summary row still CLAIMS its original sample count, so a
+        # truthiness check on summary["vision"] would pass this.
+        with self.assertRaisesRegex(Invalid, "declares"):
+            self.ok()
+
+    # ── aggregates ──
     def test_an_invented_aggregate_with_matching_counts_is_refused(self):
-        # The count check alone passed this: same samples, fabricated median.
         summary = self.summary()
         summary["decode"]["median_tps"] = 99.0
         self.rewrite("summary.json", summary)
         with self.assertRaisesRegex(Invalid, "not derived from these rows"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
     def test_an_invented_workload_table_is_refused(self):
         summary = self.summary()
-        summary["by_workload"]["chat"]["speedup"] = 9.9
+        summary["by_workload"]["code"]["speedup"] = 9.9
         self.rewrite("summary.json", summary)
         with self.assertRaisesRegex(Invalid, "by_workload"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
     def test_an_invented_depth_series_is_refused(self):
         summary = self.summary()
         summary["by_context_depth"][0]["decode_tok_s"] = 999.0
         self.rewrite("summary.json", summary)
         with self.assertRaisesRegex(Invalid, "by_context_depth"):
-            validate(self.bundle, "v2026.9.8")
-
-    def test_a_missing_prefill_group_is_refused(self):
-        rows = [json.loads(l) for l in
-                (self.bundle / "raw-results.jsonl").read_text().splitlines()]
-        keep = [r for r in rows if r.get("group") != "prefill-4k"]
-        (self.bundle / "raw-results.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in keep))
-        with self.assertRaisesRegex(Invalid, "no usable prefill"):
-            validate(self.bundle, "v2026.9.8")
-
-    def test_a_missing_vision_result_is_refused(self):
-        summary = self.summary()
-        del summary["vision"]
-        self.rewrite("summary.json", summary)
-        with self.assertRaisesRegex(Invalid, "no vision results"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
     def test_a_non_finite_raw_row_is_refused(self):
-        # A NaN that the median averages away still means a broken run, so the
-        # raw rows are checked and not only the aggregate.
         raw = (self.bundle / "workloads-spec-on.jsonl").read_text()
+        old = json.loads(raw.splitlines()[0])["accept_rate"]
         (self.bundle / "workloads-spec-on.jsonl").write_text(
-            raw.replace('"accept_rate": 0.7', '"accept_rate": NaN'))
+            raw.replace(f'"accept_rate": {old}', '"accept_rate": NaN', 1))
         with self.assertRaisesRegex(Invalid, "not a finite measurement"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
     def test_an_errored_workload_row_is_refused(self):
-        rows = [json.loads(l) for l in
-                (self.bundle / "workloads-spec-on.jsonl").read_text().splitlines()]
-        rows[0] = {"label": "chat", "error": "connection refused"}
-        (self.bundle / "workloads-spec-on.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in rows))
+        rows = rows_of("workloads-spec-on.jsonl")
+        rows[0] = {"label": rows[0]["label"], "error": "connection refused"}
+        self.write_rows("workloads-spec-on.jsonl", rows)
         with self.assertRaisesRegex(Invalid, "workload sweep"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
-    def test_a_short_workload_sweep_is_refused_when_the_count_is_declared(self):
+    def test_the_workload_count_is_declared_not_derived(self):
+        # Ten is the suite. A sweep that lost rows before assembly must fail
+        # even though the file left behind is internally consistent.
+        on = rows_of("workloads-spec-on.jsonl")[:8]
+        labels = {r["label"] for r in on}
+        off = [r for r in rows_of("workloads-spec-off.jsonl")
+               if r["label"] in labels]
+        self.write_rows("workloads-spec-on.jsonl", on)
+        self.write_rows("workloads-spec-off.jsonl", off)
+        summary = self.summary()
+        summary["by_workload"] = summarise_workloads(on, off)
+        self.rewrite("summary.json", summary)
         with self.assertRaisesRegex(Invalid, "workload sweep"):
-            validate(self.bundle, "v2026.9.8", expected_workloads=5)
+            self.ok()
 
+    # ── the context sweep must be the whole sweep ──
     def test_a_single_arm_context_sweep_is_refused(self):
-        rows = [json.loads(l) for l in
-                (self.bundle / "context-sweep.jsonl").read_text().splitlines()]
-        keep = [r for r in rows if r["config"] != "spec-off"]
-        (self.bundle / "context-sweep.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in keep))
+        rows = [r for r in rows_of_bundle(self.bundle, "context-sweep.jsonl")
+                if r["config"] != "spec-off"]
+        self.write_rows("context-sweep.jsonl", rows)
         with self.assertRaisesRegex(Invalid, "no spec-off rows"):
-            validate(self.bundle, "v2026.9.8")
+            self.ok()
 
-    def test_a_one_point_context_sweep_is_refused(self):
-        rows = [json.loads(l) for l in
-                (self.bundle / "context-sweep.jsonl").read_text().splitlines()]
-        keep = [r for r in rows if r["target"] == 4096]
-        (self.bundle / "context-sweep.jsonl").write_text(
-            "".join(json.dumps(r) + "\n" for r in keep))
-        with self.assertRaisesRegex(Invalid, "at least two"):
-            validate(self.bundle, "v2026.9.8")
+    def test_every_required_depth_is_required_in_both_arms(self):
+        for depth in pb.REQUIRED_DEPTHS:
+            with self.subTest(depth=depth):
+                rows = [r for r in
+                        rows_of_bundle(self.bundle, "context-sweep.jsonl")
+                        if not (r["target"] == depth and r["config"] == "spec-on")]
+                self.write_rows("context-sweep.jsonl", rows)
+                with self.assertRaisesRegex(Invalid, "missing depth"):
+                    self.ok()
+                self.setUp()
+
+    def test_an_errored_or_non_positive_depth_row_is_refused(self):
+        for mutate in ({"error": "timeout"}, {"decode_tps": 0.0},
+                       {"prefill_tps": -1.0}):
+            with self.subTest(mutate=mutate):
+                rows = rows_of_bundle(self.bundle, "context-sweep.jsonl")
+                rows[0].update(mutate)
+                self.write_rows("context-sweep.jsonl", rows)
+                with self.assertRaisesRegex(Invalid, "non-positive timing"):
+                    self.ok()
+                self.setUp()
 
 
 class ArchiveTest(unittest.TestCase):

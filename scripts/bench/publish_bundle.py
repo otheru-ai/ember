@@ -26,6 +26,7 @@ dependencies, no credentials of its own -- gh supplies the auth.
 import argparse
 import gzip
 import hashlib
+import io as _io
 import json
 import math
 import re
@@ -45,8 +46,16 @@ from assemble_bundle import (  # noqa: E402
 
 # Bumped whenever the rules below get stricter, and recorded in the sidecar so a
 # published bundle says which contract it passed.
-VALIDATOR_VERSION = 2
+VALIDATOR_VERSION = 3
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+# The context sweep these releases are measured with. Depths are the sweep's
+# REQUESTED targets, not the measured prompt lengths, which drift at depth.
+REQUIRED_DEPTHS = (0, 1024, 4096, 16384, 32768, 65536, 98304)
+# benchmark.py's throughput suite. A bundle missing one of these is a partial
+# run, and a partial run published as a release baseline is a false comparison.
+REQUIRED_GROUPS = ("decode-256", "prefill-128", "prefill-512", "prefill-2048",
+                   "prefill-8192", "prefill-16384", "prefill-32768")
+DEFAULT_WORKLOADS = 10
 # registry/name:tag or registry/name@sha256:...
 IMAGE_RE = re.compile(r"\A[a-z0-9.\-_/]+(:[\w.\-]+)?(@sha256:[0-9a-f]{64})?\Z")
 
@@ -98,6 +107,47 @@ def _read_json(bundle, name):
         raise Invalid(f"{name} is missing or not valid JSON: {exc}") from exc
 
 
+def _from_inspect(path, image, pinned):
+    """Digest and source commit from a docker inspect captured at run time.
+
+    Accepts the raw `docker inspect` array so the operator records evidence
+    rather than transcribing a digest by hand. Matches the entry by repository,
+    since one file can carry both releases' images.
+    """
+    try:
+        entries = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Invalid(f"--image-inspect {path}: {exc}") from exc
+    if isinstance(entries, dict):
+        entries = [entries]
+    repo = str(image).split("@")[0].split(":")[0]
+    version = str(image).split("@")[0].rsplit(":", 1)
+    want_version = version[1] if len(version) == 2 else None
+    for entry in entries:
+        labels = ((entry.get("Config") or {}).get("Labels") or {})
+        digests = [d for d in (entry.get("RepoDigests") or [])
+                   if d.split("@")[0] == repo]
+        if want_version and labels.get("org.opencontainers.image.version") \
+                not in (None, want_version):
+            continue
+        if not digests:
+            continue
+        found = digests[0].split("@sha256:")[-1]
+        if not SHA256_RE.match(found):
+            raise Invalid(f"--image-inspect RepoDigest {digests[0]!r} is not a "
+                          f"SHA-256")
+        if pinned and pinned != found:
+            raise Invalid(f"the captured inspect digest {found} contradicts the "
+                          f"digest pinned in the bundle ({pinned})")
+        revision = labels.get("org.opencontainers.image.revision")
+        if revision and not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise Invalid(f"image revision label {revision!r} is not a commit")
+        return found, revision
+    raise Invalid(f"--image-inspect carries no entry for {repo} with a "
+                  f"RepoDigest; a locally built image has none, and an image "
+                  f"with no registry identity cannot be published as evidence")
+
+
 def _digest(model, part):
     value = model.get(f"{part}_sha256")
     if not value or not SHA256_RE.match(str(value)):
@@ -112,8 +162,8 @@ def _digest(model, part):
                       f"reference; an unsourced constant is not provenance")
 
 
-def validate(bundle: Path, release: str, image_digest=None,
-             expected_workloads=None) -> dict:
+def validate(bundle: Path, release: str, inspect_path=None,
+             expected_workloads=None, expected_commit=None) -> dict:
     """Return the bundle's environment, or raise Invalid with the reason."""
     if not bundle.is_dir():
         raise Invalid(f"{bundle} is not a directory")
@@ -139,24 +189,30 @@ def validate(bundle: Path, release: str, image_digest=None,
     if not image or not IMAGE_RE.match(str(image)):
         raise Invalid(f"runtime.container_image is {image!r}; the measured "
                       f"image must be a well-formed reference")
-    # A tag is mutable, so a tag alone does not identify what ran. Take the
-    # digest from the bundle when it pinned one, otherwise require the operator
-    # to supply the digest they captured. Never synthesise one.
+    # A tag is mutable, so a tag alone does not identify what ran. The identity
+    # comes from a `docker inspect` captured at measurement time -- not from
+    # resolving the tag afterwards, which reports what it points at NOW and is
+    # the very mutability this check exists to close.
     pinned = str(image).split("@sha256:")[1] if "@sha256:" in str(image) else None
-    if image_digest:
-        supplied = image_digest.split("sha256:")[-1]
-        if not SHA256_RE.match(supplied):
-            raise Invalid(f"--image-digest {image_digest!r} is not a SHA-256")
-        if pinned and pinned != supplied:
-            raise Invalid(f"--image-digest {supplied} contradicts the digest "
-                          f"pinned in the bundle ({pinned})")
-        pinned = supplied
+    revision = None
+    if inspect_path:
+        pinned, revision = _from_inspect(inspect_path, image, pinned)
     if not pinned:
         raise Invalid(
             f"runtime.container_image ({image}) names a mutable tag with no "
             f"digest, so it does not identify what was measured. Pass "
-            f"--image-digest sha256:... with the digest captured at "
-            f"measurement time; it will be recorded, not invented.")
+            f"--image-inspect with the docker inspect captured at measurement "
+            f"time; its identity is recorded, never synthesised.")
+    if expected_commit:
+        if not revision:
+            raise Invalid("--expected-commit needs an --image-inspect carrying "
+                          "org.opencontainers.image.revision; there is nothing "
+                          "to bind the release commit to")
+        if revision != expected_commit:
+            raise Invalid(
+                f"the measured image was built from {revision}, but "
+                f"{release} is {expected_commit}. Publishing this would "
+                f"attribute one commit's performance to another.")
 
     model = env.get("model") or {}
     _digest(model, "target")
@@ -185,26 +241,82 @@ def validate(bundle: Path, release: str, image_digest=None,
 
     # The assembler's own row validator: unique labels, no error rows, usable
     # speculative evidence, identical workload identities across both arms, and
-    # a spec_cycles counter that is not inert.
+    # a spec_cycles counter that is not inert. The expected count is DECLARED,
+    # never derived from the file: deriving it from what is present cannot
+    # notice a sweep that lost rows before assembly.
     try:
         validate_workload_rows(wl_on, wl_off,
-                               expected_workloads or len(wl_on))
+                               expected_workloads or DEFAULT_WORKLOADS)
     except SystemExit as exc:
         raise Invalid(f"workload sweep: {exc}") from exc
 
-    # Both context-sweep arms, and a depth series worth plotting.
-    configs = {r.get("config") for r in ctx}
+    # ── the throughput suite must be complete, and match its own record ──
+    requests = [r for r in rows if r.get("kind") in (None, "request")]
+    seen = {r.get("group") for r in requests}
+    absent = [g for g in REQUIRED_GROUPS if g not in seen]
+    if absent:
+        raise Invalid(f"raw-results.jsonl is missing the throughput group(s) "
+                      f"{', '.join(absent)}; this is a partial run, and a "
+                      f"partial run published as a baseline is a false "
+                      f"comparison")
+    summary_rows = [r for r in rows if r.get("kind") == "summary"]
+    if not summary_rows:
+        raise Invalid("raw-results.jsonl carries no summary row")
+    declared = summary_rows[-1].get("groups") or {}
+    if not declared:
+        raise Invalid("the summary row declares no per-group results")
+    for name, block in declared.items():
+        counted = sum(1 for r in requests if r.get("group") == name)
+        if counted != block.get("samples"):
+            raise Invalid(
+                f"group {name} declares {block.get('samples')} samples but "
+                f"raw-results.jsonl holds {counted} request rows")
+
+    # ── vision, recomputed from the raw requests ──
+    # summary.get("vision") being truthy proves only that a key exists.
+    vision_rows = [r for r in requests if r.get("group") == "vision"]
+    declared_vision = (summary_rows[-1].get("vision") or {})
+    if not vision_rows or not declared_vision:
+        raise Invalid("no vision requests in raw-results.jsonl; these releases "
+                      "ship a vision tower and a bundle without it is not a "
+                      "complete measurement of them")
+    if len(vision_rows) != declared_vision.get("samples"):
+        raise Invalid(
+            f"vision declares {declared_vision.get('samples')} samples but "
+            f"raw-results.jsonl holds {len(vision_rows)} vision requests")
+    if not any(r.get("kind") == "vision_summary" for r in rows):
+        raise Invalid("raw-results.jsonl carries no vision_summary row")
+
+    # ── the context sweep must be the whole sweep, in both arms ──
     for arm in ("spec-on", "spec-off"):
-        if arm not in configs:
+        arm_rows = [r for r in ctx if r.get("config") == arm]
+        if not arm_rows:
             raise Invalid(f"context-sweep.jsonl has no {arm} rows")
+        bad = [r for r in arm_rows if r.get("error")
+               or not isinstance(r.get("prefill_tps"), (int, float))
+               or isinstance(r.get("prefill_tps"), bool)
+               or not isinstance(r.get("decode_tps"), (int, float))
+               or isinstance(r.get("decode_tps"), bool)
+               or not math.isfinite(float(r.get("prefill_tps") or 0))
+               or not math.isfinite(float(r.get("decode_tps") or 0))
+               or float(r.get("prefill_tps") or 0) <= 0
+               or float(r.get("decode_tps") or 0) <= 0]
+        if bad:
+            raise Invalid(f"context sweep {arm} has {len(bad)} row(s) with an "
+                          f"error or a non-positive timing; first target="
+                          f"{bad[0].get('target')}")
+        targets = [r.get("target") for r in arm_rows]
+        if len(targets) != len(set(targets)):
+            raise Invalid(f"context sweep {arm} repeats a depth")
+        missing = [d for d in REQUIRED_DEPTHS if d not in set(targets)]
+        if missing:
+            raise Invalid(
+                f"context sweep {arm} is missing depth(s) "
+                f"{', '.join(str(d) for d in missing)}; the published curve "
+                f"must cover the whole suite, not the part that succeeded")
     depths = summarise_context(ctx)
-    if len(depths) < 2:
-        raise Invalid(f"context sweep has {len(depths)} usable depth(s); a "
-                      f"scaling curve needs at least two")
 
     # ── aggregates must be the ones these rows produce ──
-    # Counts alone cannot catch an invented median. Recompute with the
-    # assembler's own summarisers and compare.
     recomputed = summarise_groups(rows)
     if not recomputed.get("decode"):
         raise Invalid("no usable decode-256 rows in raw-results.jsonl")
@@ -221,18 +333,19 @@ def validate(bundle: Path, release: str, image_digest=None,
     if summary.get("by_context_depth") != depths:
         raise Invalid("summary.json by_context_depth does not match "
                       "context-sweep.jsonl")
-    if not summary.get("vision"):
-        raise Invalid("summary.json carries no vision results; these releases "
-                      "ship a vision tower and a bundle without it is not a "
-                      "complete measurement of them")
     _finite(summary, "summary.json")
 
-    env["_publication"] = {"image_digest": pinned,
-                           "validator_version": VALIDATOR_VERSION}
+    env["_publication"] = {
+        "image_digest": pinned,
+        "image_revision": revision,
+        "release": release,
+        "validator_version": VALIDATOR_VERSION,
+        "workloads_expected": expected_workloads or DEFAULT_WORKLOADS,
+    }
     return env
 
 
-def archive(bundle: Path, out_dir: Path, release: str) -> tuple:
+def archive(bundle: Path, out_dir: Path, release: str, sidecar=None) -> tuple:
     """Write a deterministic .tar.gz and its .sha256 next to each other."""
     tag = release.lstrip("v")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -272,6 +385,17 @@ def archive(bundle: Path, out_dir: Path, release: str) -> tuple:
                     tar.add(path, arcname=f"ember-{tag}-perf-bundle/"
                                           f"{path.relative_to(bundle)}",
                             filter=reset)
+                if sidecar is not None:
+                    # Written into the ARCHIVE, never into the operator's
+                    # bundle: the captured identity and the contract version
+                    # must travel with what is published, and the raw
+                    # measurement directory stays exactly as it was measured.
+                    blob = (json.dumps(sidecar, indent=2, sort_keys=True)
+                            + "\n").encode()
+                    info = tarfile.TarInfo(
+                        f"ember-{tag}-perf-bundle/publication.json")
+                    info.size = len(blob)
+                    tar.addfile(reset(info), _io.BytesIO(blob))
 
     digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
     checksum = out_dir / (tarball.name + ".sha256")
@@ -288,6 +412,19 @@ def gh_json(args, repo):
 def existing_assets(release, repo):
     data = gh_json(["release", "view", release, "--json", "assets"], repo)
     return {a["name"]: a for a in data.get("assets") or []}
+
+
+def release_commit(release, repo):
+    """The commit the release tag points at, resolved online."""
+    out = subprocess.run(["gh", "api", f"repos/{repo}/commits/{release}",
+                          "--jq", ".sha"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise Invalid(f"could not resolve {release} to a commit: "
+                      f"{out.stderr.strip()[:200]}")
+    sha = out.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise Invalid(f"{release} resolved to {sha!r}, not a commit")
+    return sha
 
 
 def _downloaded(release, repo, name, work: Path):
@@ -333,39 +470,56 @@ def main() -> int:
                          "exist; this never creates a release or edits its notes")
     ap.add_argument("--repo", default="otheru-ai/ember",
                     help="owner/name (default otheru-ai/ember)")
-    ap.add_argument("--image-digest", default=None,
-                    help="sha256:... for the measured image, when the bundle "
-                         "recorded only a mutable tag. Supply the digest you "
-                         "captured at measurement time; it is recorded, never "
-                         "synthesised")
-    ap.add_argument("--expected-workloads", type=int, default=None,
-                    help="how many workloads the sweep should carry. Without "
-                         "it the count is taken from the file itself, which "
-                         "cannot detect a sweep that lost rows before assembly")
+    ap.add_argument("--image-inspect", type=Path, default=None,
+                    help="`docker inspect` output captured at measurement time, "
+                         "when the bundle recorded only a mutable tag. Its "
+                         "RepoDigest and image.revision label are recorded; "
+                         "nothing is synthesised and the tag is never resolved "
+                         "after the fact")
+    ap.add_argument("--expected-commit", default=None,
+                    help="bind the measured image to this commit offline. "
+                         "Online, the release tag is resolved with gh and used "
+                         "instead, so this is for --dry-run and for hosts with "
+                         "no network")
+    ap.add_argument("--expected-workloads", type=int, default=DEFAULT_WORKLOADS,
+                    help=f"how many workloads the sweep must carry "
+                         f"(default {DEFAULT_WORKLOADS})")
     ap.add_argument("--dry-run", action="store_true",
                     help="validate and build the archive, upload nothing, and "
                          "print the digest")
     args = ap.parse_args()
 
+    expected = args.expected_commit
+    if not args.dry_run and not expected:
+        # Online, the release itself is the authority for what commit this
+        # version is, so the operator does not get to assert it.
+        try:
+            expected = release_commit(args.release, args.repo)
+        except Invalid as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
     try:
-        env = validate(args.bundle, args.release, args.image_digest,
-                       args.expected_workloads)
+        env = validate(args.bundle, args.release, args.image_inspect,
+                       args.expected_workloads, expected)
     except Invalid as exc:
         print(f"refusing to publish {args.bundle}: {exc}", file=sys.stderr)
         return 1
 
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
+        pub = env["_publication"]
         try:
-            tarball, checksum = archive(args.bundle, work / "out", args.release)
+            tarball, checksum = archive(args.bundle, work / "out",
+                                        args.release, sidecar=pub)
         except Invalid as exc:
             print(f"refusing to publish {args.bundle}: {exc}", file=sys.stderr)
             return 1
         digest = checksum.read_text().split()[0]
-        pub = env["_publication"]
         print(f"{tarball.name}  sha256 {digest}")
         print(f"measured release {env['runtime']['release']}  "
               f"image sha256:{pub['image_digest']}  "
+              f"revision {pub['image_revision']}  "
               f"validator v{pub['validator_version']}")
         if args.dry_run:
             print("dry run: nothing uploaded")

@@ -39,17 +39,29 @@ produced it, and then disagrees silently.
   digests must be full lowercase SHA-256, each marked `computed` or `asserted`
   with an evidence reference when asserted. The container image must be a
   well-formed reference **pinned by digest**: a tag is mutable and does not
-  identify what ran. If the bundle recorded only a tag, pass the digest you
-  captured at measurement time as `--image-digest sha256:…`; it is recorded, and
-  a value that contradicts the bundle is refused. Nothing is ever synthesised.
+  identify what ran. Real bundles record only a tag, so pass
+  `--image-inspect <file>` — the `docker inspect` output captured at
+  measurement time. Its `RepoDigest` becomes the recorded identity and its
+  `org.opencontainers.image.revision` label is bound to the release commit,
+  which the tool resolves from the release itself with `gh` (offline, use
+  `--expected-commit`). Resolving the tag afterwards is refused by
+  construction: that reports what it points at *now*, which is the mutability
+  this check exists to close. Nothing is ever synthesised, and an inspect that
+  contradicts the bundle is refused.
 - **Completeness.** All eleven required files, including `context-sweep.jsonl`
   and the three harness sources — a measurement whose harness cannot be re-read
   is not reproducible. The workload sweep goes through
   `validate_workload_rows`: unique labels, no error rows, usable speculative
   evidence, identical workload identities in both arms, and a `spec_cycles`
-  counter that is not inert. The context sweep must carry both arms and at
-  least two depths, since one point is not a curve. Decode **and** prefill
-  results are both required, and so is a vision result.
+  counter that is not inert. The throughput suite must be whole — every one of
+  `decode-256`, `prefill-128/512/2048/8192/16384/32768` — and each group's row
+  count must equal the count its own summary record declares. The context
+  sweep must carry every depth of the suite (0, 1024, 4096, 16384, 32768,
+  65536, 98304) in **both** arms, with no error rows and no non-positive
+  timing: a curve published with the depths that happened to succeed is a
+  false comparison. Vision is counted from the raw requests and checked
+  against the declared sample count, because a truthy `summary["vision"]`
+  proves only that a key exists.
 - **Aggregates must be the ones these rows produce.** Sample counts cannot
   catch a fabricated median, so `summary.json`'s `decode`, `prefill`,
   `by_workload` and `by_context_depth` are recomputed from the raw files with
@@ -57,9 +69,14 @@ produced it, and then disagrees silently.
 - **Finiteness.** A `NaN` or infinity in `summary.json` *or in any raw row* is
   refused. A NaN the median averages away still means the run was broken.
 
-`--expected-workloads N` makes the sweep's row count a real check. Without it
-the count is taken from the file itself, which cannot detect a sweep that lost
-rows before assembly.
+The workload count is **declared, not derived** — 10 by default, overridable
+with `--expected-workloads N`. Deriving it from the rows present cannot detect
+a sweep that lost rows before assembly, which is exactly the case it exists to
+catch.
+
+The archive carries a generated `publication.json` recording the image digest,
+the bound revision, the release and the validator version. It is written into
+the archive only; the measured bundle directory is never modified.
 
 ## Re-running is safe; overwriting is not
 
