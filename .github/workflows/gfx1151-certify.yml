@@ -258,7 +258,8 @@ jobs:
             --ipc host --security-opt seccomp=unconfined
             --ulimit memlock=-1:-1
           )
-          docker run --rm "${gpu_args[@]}" \
+          docker run --rm --name "ember-cert-gemm-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${gpu_args[@]}" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
             --validate-gemm-batch 64
 
@@ -321,7 +322,9 @@ jobs:
           docker volume create "$cache_volume" >/dev/null
           cleanup_validator() { docker volume rm -f "$cache_volume" >/dev/null 2>&1 || true; }
           trap cleanup_validator EXIT
-          spec_report="$(docker run --rm "${gpu_args[@]}" "${mounts[@]}" "${env_args[@]}" \
+          spec_report="$(docker run --rm \
+            --name "ember-cert-spec-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${gpu_args[@]}" "${mounts[@]}" "${env_args[@]}" \
             -v "$cache_volume:/cache" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
             -m "/cert-model/$model_file" \
@@ -340,7 +343,9 @@ jobs:
           assert report["spec"]["checked"] and report["spec"]["exact"], report
           ' <<<"$spec_report"
 
-          disk_report="$(docker run --rm "${gpu_args[@]}" "${mounts[@]}" \
+          disk_report="$(docker run --rm \
+            --name "ember-cert-disk-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "${gpu_args[@]}" "${mounts[@]}" \
             -v "$cache_volume:/cache" \
             --entrypoint /usr/local/bin/ember-dflash "$image" \
             -m "/cert-model/$model_file" \
@@ -647,6 +652,20 @@ jobs:
       - name: Release the GPU lock
         if: ${{ always() }}
         run: sudo -n /usr/local/sbin/ember-gpu-lock release
+
+      # Cancelling a step kills the docker CLI, not the container it started, and
+      # --rm only removes a container once it exits -- so a cancelled validator
+      # keeps running and holds the model in memory. Run 34221406217 left one
+      # behind holding 88 GiB, which is most of this host, and production could
+      # not load its own model until it was removed by hand. Names carry the run
+      # id so this sweeps only this run's containers.
+      - name: Remove leftover certification containers
+        if: ${{ always() }}
+        run: |
+          for c in gemm spec disk; do
+            docker rm -f "ember-cert-$c-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              >/dev/null 2>&1 || true
+          done
 
       - name: Remove generated validation prompts
         if: ${{ always() }}
