@@ -115,6 +115,7 @@ add_library(ember_core STATIC
   src/server/compaction.c
   src/server/http.c
   src/server/background_gate.c
+  src/server/metrics.c
   src/model/chat_template.c
   src/model/image_input.c
   src/model/vision_prompt.c
@@ -223,6 +224,10 @@ add_test(NAME api_adapters COMMAND test_api_adapters)
 add_executable(test_http test/test_http.c)
 target_link_libraries(test_http ember_core m)
 add_test(NAME http COMMAND test_http)
+
+add_executable(test_metrics test/test_metrics.c)
+target_link_libraries(test_metrics ember_core m)
+add_test(NAME metrics COMMAND test_metrics)
 
 add_executable(test_background_gate test/test_background_gate.c)
 target_link_libraries(test_background_gate ember_core m)
@@ -469,7 +474,7 @@ ember_strict(test_xdna_q8_model_weights)
 set(EMBER_C_TESTS
   sse sse_nested tool_parser tool_parser_nested tool_schema tool_grammar tool_grammar_match tool_memory
   continuation dsml_decode json
-  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template
+  chat_api prefill_policy ds4_vision_contract ds4_vision_native_contract ds4_vision_oracle ds4_vision_artifact api_adapters http background_gate chat_template metrics
   compaction gguf model_card model_profile image_input vision_prompt kv_cache qa rocmfp_scale rocmfp2_unpack rocmfp2_offset ds4_imatrix rocmi4 rocmi4_q8_i4_exact dspark_scheduler thinking_budget
   progress_cycle_detector sampler pre_tokenizer
  activation_dump
@@ -507,7 +512,7 @@ set(EMBER_STRICT_TARGETS
   test_continuation test_dsml_decode test_json test_chat_api
   test_api_adapters test_http test_background_gate test_chat_template
   test_compaction test_gguf test_model_card test_model_profile test_image_input
-  test_vision_prompt test_kv_cache test_qa test_server_helpers)
+  test_vision_prompt test_kv_cache test_qa test_server_helpers test_metrics)
 foreach(t IN LISTS EMBER_STRICT_TARGETS)
   ember_strict(${t})
 endforeach()
@@ -919,6 +924,7 @@ if(EMBER_ENGINE)
     src/model/tool_schema.c
     src/model/tool_grammar.c
     src/server/background_gate.c
+    src/server/metrics.c
     src/model/tool_memory.c
     src/model/continuation.c
     src/model/dsml_decode.c

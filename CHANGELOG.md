@@ -11,6 +11,23 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Added
+
+- **metrics:** a Prometheus `/metrics` endpoint. `/status` answers "what is
+  true now"; a scraper needs monotonic series it can difference. Every value
+  exposed was already computed per request and only printed, which is why
+  establishing prefix-cache behaviour during the 2026-09-05 soak meant parsing
+  3,495 log lines across four boots, and why 833 consecutive generations
+  declining speculation went unnoticed for a day. Exposes prefix-cache
+  presented/restored tokens, speculative-decode eligible/engaged and summed
+  accept rate, generations by termination reason, prefill/decode/queue-time
+  histograms, prompt/completion size histograms, and vision request/image
+  counters so a served image request is no longer indistinguishable from none.
+  Queue time is measured across the serialising generation lock, which is the
+  dominant latency term while `batch_sessions=1`. Termination reasons map onto
+  a closed label set so an unrecognised reason cannot grow series cardinality.
+  (#9)
+
 ### Fixed
 
 - **chat template:** tool results carrying an image now render the DeepSeek
