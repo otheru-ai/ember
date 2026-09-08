@@ -2370,6 +2370,28 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         ember_chat_request_tool_loop_calls(req);
     const char *observed_tool_loop_tool =
         ember_chat_request_tool_loop_tool(req);
+    // Issue #12: history-wide diagnostics are useful, but using an old stall
+    // to suppress tools after a new user request permanently degrades the
+    // session. Borrow only the current user turn for behavioural decisions.
+    // With no user message, deliberately retain the full history. Consume
+    // this borrowed view before appending instructions can reallocate it.
+    ember_chat_request recovery_turn = *req;
+    for (int i = req->n_messages - 1; i >= 0; --i) {
+        if (req->messages[i].role && !strcmp(req->messages[i].role, "user")) {
+            recovery_turn.messages = req->messages + i;
+            recovery_turn.n_messages = req->n_messages - i;
+            break;
+        }
+    }
+    const int recovery_loop_calls =
+        srv->auto_answer_after_loop > 0
+            ? ember_chat_request_tool_loop_calls(&recovery_turn) : 0;
+    const char *recovery_loop_tool =
+        srv->auto_answer_after_loop > 0
+            ? ember_chat_request_tool_loop_tool(&recovery_turn) : NULL;
+    const int recovery_no_progress =
+        srv->no_progress_stop > 0
+            ? ember_chat_request_progress_lease(&recovery_turn, NULL) : 0;
     // Two signals, one report. The strict one (identical calls AND identical
     // results) is the stronger claim, so it wins when both fire; the weaker
     // call-signature one exists because regression testing showed
@@ -2398,14 +2420,14 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // break the caller's contract rather than the model's loop.
     const bool auto_answer =
         srv->auto_answer_after_loop > 0 &&
-        observed_tool_loop_calls > srv->auto_answer_after_loop &&
+        recovery_loop_calls > srv->auto_answer_after_loop &&
         req->has_tools && !req->tool_choice_required;
     if (auto_answer) {
         fprintf(stderr,
                 "[ember] auto-answer: %d identical \"%s\" calls > %d; "
                 "suppressing tools for this turn\n",
-                observed_tool_loop_calls,
-                observed_tool_loop_tool ? observed_tool_loop_tool : "",
+                recovery_loop_calls,
+                recovery_loop_tool ? recovery_loop_tool : "",
                 srv->auto_answer_after_loop);
         req->has_tools = false;      // before any render; grammar gates on this
         if (!append_auto_answer_instruction(req))
@@ -2416,7 +2438,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         srv->last_auto_answer_at = now_unix();
         snprintf(srv->last_auto_answer_tool,
                  sizeof(srv->last_auto_answer_tool), "%s",
-                 observed_tool_loop_tool ? observed_tool_loop_tool : "");
+                 recovery_loop_tool ? recovery_loop_tool : "");
         pthread_mutex_unlock(&srv->state_lock);
     }
 
@@ -2484,12 +2506,12 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // sent, never server-side memory, so the same request always decides the
     // same way. Never overrides an explicit client demand for a tool call.
     if (srv->no_progress_stop > 0 &&
-        observed_no_progress > srv->no_progress_stop &&
+        recovery_no_progress > srv->no_progress_stop &&
         req->has_tools && !req->tool_choice_required) {
         fprintf(stderr,
                 "[ember] no-progress stop: %d tool rounds returned nothing new "
                 "> %d; suppressing tools for this turn\n",
-                observed_no_progress, srv->no_progress_stop);
+                recovery_no_progress, srv->no_progress_stop);
         req->has_tools = false;      // before any render; grammar gates on this
         if (!append_auto_answer_instruction(req))
             fprintf(stderr, "[ember] no-progress stop: instruction not "

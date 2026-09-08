@@ -13,6 +13,10 @@ using an ambiguous same-day suffix.
 
 ### Fixed
 
+- **server:** both opt-in tool loop breakers reset at a new user message,
+  allowing a fresh task to use tools after an earlier stall. Historical
+  diagnostic counters retain their existing scope. Addresses the permanent
+  tool-suppression portion of #12.
 - **chat template:** tool results carrying an image now render the DeepSeek
   image marker. A tool returning media delivers its result as an ordered part
   list, but the tool branch rendered only the flat string, so the image was
