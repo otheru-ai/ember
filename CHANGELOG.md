@@ -31,6 +31,11 @@ using an ambiguous same-day suffix.
   dominant latency term while `batch_sessions=1`. Termination reasons map onto
   a closed label set so an unrecognised reason cannot grow series cardinality.
   (#9)
+### Changed
+
+- **server:** consolidate Chat, native streaming, and buffered generation into
+  one lifecycle with shared snapshot/recovery handling and resource cleanup.
+  Protocol-specific output, validation, and error behavior remain unchanged.
 
 ### Fixed
 

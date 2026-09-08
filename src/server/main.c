@@ -196,11 +196,6 @@ static uint64_t request_image_digest(const ember_chat_request *req) {
     return req ? req->image_digest : 0;
 }
 
-// JSON-escape `s` into `b` (no surrounding quotes).
-static void json_escape_str(ember_buf *b, const char *s) {
-    ember_json_escape_content(b, s);
-}
-
 static void append_tool_loop_json(ember_buf *b, int rounds,
                                   const char *tool, bool identical_results) {
     if (rounds <= 0) return;
@@ -2370,17 +2365,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // getters return interior pointers that eviction can free, so callers must
     // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
-    // Ember serialises generation, so waiting on this lock is the queue. From
-    // outside, service time and wall time are otherwise indistinguishable --
-    // a co-located consumer once took 142 client timeouts in 31 minutes with
-    // nothing to attribute them to.
-    const double queue_start = monotonic_now();
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
-    // Only when generation actually serialises. With batching there is no lock
-    // to wait on, so recording it anyway would bury the real distribution
-    // under zeros and quietly misreport the batching path as having no queue.
-    if (serialize)
-        ember_metrics_record_queue_wait(monotonic_now() - queue_start);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);
@@ -2959,7 +2944,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             n_prompt, restore_len,
             n_prompt > 0 ? 100.0 * restore_len / n_prompt : 0.0,
             restore_slot, snap_slot >= 0 ? snap_cut : -1);
-    ember_metrics_record_prefix_cache(n_prompt, restore_len);
 
     int max_stop_len = 0;
     for (int si = 0; si < req->n_stop; si++) {
@@ -2967,90 +2951,101 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         if (l > max_stop_len) max_stop_len = l;
     }
 
-    if (req->stream && req->api == EMBER_API_CHAT) {
+    // One generation lifecycle; only protocol setup and rendering differ.
+    ember_sse_stream st = {0};
+    ember_protocol_stream protocol = {0};
+    ember_tool_calls tc = {0};
+    char *reasoning = NULL, *content_stop = NULL, *content_trimmed = NULL;
+    const bool native_stream = req->stream && req->api != EMBER_API_CHAT;
+    gen_ctx g = {
+        .be = be, .fd = fd, .has_tools = req->has_tools,
+        .prompt_ids = ids, .n_prompt_ids = n_prompt,
+        .stops = req->stop, .n_stops = req->n_stop,
+        .started_thinking = started_thinking,
+        // Native terminal objects repeat full output. Buffer tool-bearing
+        // attempts so hidden recovery cannot contradict already-sent deltas.
+        .collect_only = !req->stream || (native_stream && req->has_tools),
+        .keepalive_while_collecting = native_stream && req->has_tools,
+        .dsml_active = req->has_tools && eff_temp > 0.0,
+    };
+    if (req->stream) {
         ember_buf hdr = {0};
         ember_sse_headers(&hdr, g_enable_cors);
         bool header_ok = ember_send_all(fd, hdr.ptr, hdr.len) == 0;
         ember_buf_free(&hdr);
-        if (!header_ok) {
-            finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason,
-                                   image_digest, image_span_start);
-            goto run_done;
-        }
+        if (!header_ok) goto stream_open_failed;
 
-        ember_sse_stream st;
         ember_sse_init(&st, id, req->model, created, req->has_tools,
                        started_thinking, false);
-        ember_sse_set_reasoning_filter(
-            &st, srv->card.thinking_terminator_hint);
-        st.include_usage = req->stream_include_usage;
-        st.cached_tokens = restore_len;
-        // Report compaction in the streaming usage chunk too. Note this rides on
-        // stream_options.include_usage: a client that opts out of usage will not
-        // see it, so the stderr line above remains the server's own record.
-        if (crep.applied || crep.error[0]) {
-            ember_compaction_append_json(&compaction_json, &crep);
-            st.compaction_json = compaction_json.ptr;
+        ember_sse_set_reasoning_filter(&st, srv->card.thinking_terminator_hint);
+        st.stops = req->stop;
+        st.n_stops = req->n_stop;
+        st.max_stop_len = max_stop_len;
+        g.st = &st;
+        ember_buf opening = {0};
+        if (native_stream) {
+            ember_protocol_stream_init(
+                &protocol, req, id, req->model, created, client_prompt_tokens);
+            ember_protocol_stream_bind(&protocol, &st);
+            ember_protocol_stream_begin(&protocol, &opening);
+        } else {
+            st.include_usage = req->stream_include_usage;
+            st.cached_tokens = restore_len;
+            // Compaction metadata rides on the optional streaming usage chunk.
+            if (crep.applied || crep.error[0]) {
+                ember_compaction_append_json(&compaction_json, &crep);
+                st.compaction_json = compaction_json.ptr;
+            }
+            ember_sse_role_chunk(&st, &opening);
         }
-        st.stops = req->stop; st.n_stops = req->n_stop; st.max_stop_len = max_stop_len;
-        // Initial role primer chunk (ds4), before any content delta.
-        ember_buf rc = {0};
-        ember_sse_role_chunk(&st, &rc);
-        bool role_ok = ember_send_all(fd, rc.ptr, rc.len) == 0;
-        ember_buf_free(&rc);
-        if (!role_ok) {
-            ember_sse_free(&st);
-            finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason,
-                                   image_digest, image_span_start);
-            goto run_done;
-        }
-        gen_ctx g = {0};
-        g.be = be; g.st = &st; g.fd = fd; g.has_tools = req->has_tools;
-        g.prompt_ids = ids; g.n_prompt_ids = n_prompt;
-        g.stops = req->stop; g.n_stops = req->n_stop;
-        g.started_thinking = started_thinking;  // B#1: gate markers on thinking
+        bool opening_ok = !opening.len ||
+            ember_send_all(fd, opening.ptr, opening.len) == 0;
+        ember_buf_free(&opening);
+        if (!opening_ok) goto stream_open_failed;
+    }
 
-        greq.on_token = on_token;
-        greq.on_prefill = on_prefill;
-        greq.ud = &g;
-        // B6: only arm structural-greedy when sampling could actually corrupt the
-        // DSML (temp > 0 with tools); greedy runs already argmax everything.
-        g.dsml_active = req->has_tools && eff_temp > 0.0;
-        if (g.dsml_active) {
-            ember_dsml_tracker_init(&g.dsml);
-            greq.force_greedy = gen_force_greedy;
-            greq.fg_ud = &g;
-        }
-        ember_gen_result res = ember_backend_generate(be, &greq);
-        // #2: commit the logical prefix ONLY when the backend actually saved the
-        // snapshot. Gating on !res.cancelled instead poisons the cache — a failed
-        // save still "succeeds" the generation, so the next lookup reports a hit
-        // the backend can't honor (full re-prefill, no repair snapshot reserved).
-        finish_prompt_snapshot(
-            srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
-            image_digest, image_span_start);
-        (void)continue_tool_started_in_think(
-            srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
-        bool unclosed_think_tool =
-            tool_started_in_unclosed_think(&g, started_thinking);
-        int hidden_recovery_tokens = 0;
-        bool recovery_attempted = false;
-        bool recovered = false;
-        if (res.ok && !g.disconnected) {
-            recovered = retry_malformed_tool_call(
-                srv, be, req, &greq, &ids, &n_prompt,
-                &started_thinking, &g, &res,
-                &hidden_recovery_tokens, &recovery_attempted);
-            if (recovered)
-                ember_sse_reset_attempt(&st, started_thinking);
-        }
-        log_generation_performance(&res, &greq);
-        const int completion_tokens =
-            hidden_recovery_tokens + res.n_generated;
-        g.scratch.len = 0; if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
+    greq.on_token = on_token;
+    // Atomic requests need the prefill disconnect check too; collect_only
+    // prevents SSE comments from leaking into their JSON response.
+    greq.on_prefill = on_prefill;
+    greq.ud = &g;
+    // B6: greedy runs already argmax; arm DSML tracking only for sampled tools.
+    if (g.dsml_active) {
+        ember_dsml_tracker_init(&g.dsml);
+        greq.force_greedy = gen_force_greedy;
+        greq.fg_ud = &g;
+    }
+    ember_gen_result res = ember_backend_generate(be, &greq);
+    // Commit only an actual backend snapshot, never merely an uncancelled run.
+    finish_prompt_snapshot(
+        srv, be, snap_slot, ids, snap_cut,
+        res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
+        image_digest, image_span_start);
+    if (!req->stream && !res.ok) goto atomic_backend_failed;
+    (void)continue_tool_started_in_think(
+        srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
+    if (!req->stream && !res.ok) goto atomic_backend_failed;
+    bool unclosed_think_tool = tool_started_in_unclosed_think(&g, started_thinking);
+    int hidden_recovery_tokens = 0;
+    bool recovery_attempted = false;
+    if (res.ok && (!req->stream || !g.disconnected)) {
+        bool recovered = retry_malformed_tool_call(
+            srv, be, req, &greq, &ids, &n_prompt, &started_thinking,
+            &g, &res, &hidden_recovery_tokens, &recovery_attempted);
+        if (recovered && req->stream)
+            ember_sse_reset_attempt(&st, started_thinking);
+    }
+    if (!req->stream) {
+        if (!res.ok) goto atomic_backend_failed;
+        // Atomic replacement attempts are fresh decodes; recheck their close.
+        unclosed_think_tool = tool_started_in_unclosed_think(&g, started_thinking);
+    }
+    log_generation_performance(&res, &greq);
+    const int completion_tokens = hidden_recovery_tokens + res.n_generated;
+    g.scratch.len = 0;
+    if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
+
+    if (req->stream && !native_stream) {
         const char *stream_scan = g.acc.ptr ? g.acc.ptr : "";
         if (started_thinking) {
             const char *close = last_substr(stream_scan, "</think>");
@@ -3198,110 +3193,13 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                     srv, req, ids, n_prompt, &g,
                     (const char *const *)st.tool_ids, st.n_tool_ids, NULL);
         }
-        ember_sse_free(&st);
-        ember_buf_free(&g.acc);
-        free(g.gen_ids);  // B3 L2
-        ember_buf_free(&g.scratch);
-    } else if (req->stream) {
-        // Responses, Anthropic Messages, and legacy Completions share Chat's
-        // buffer-and-resplit parser, but a protocol sink emits their native
-        // event taxonomy token-by-token instead of synthesizing it after the
-        // model turn has completed.
-        ember_buf hdr = {0};
-        ember_sse_headers(&hdr, g_enable_cors);
-        bool header_ok = ember_send_all(fd, hdr.ptr, hdr.len) == 0;
-        ember_buf_free(&hdr);
-        if (!header_ok) {
-            finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason,
-                                   image_digest, image_span_start);
-            goto run_done;
-        }
 
-        ember_sse_stream splitter;
-        ember_sse_init(&splitter, id, req->model, created, req->has_tools,
-                       started_thinking, false);
-        ember_sse_set_reasoning_filter(
-            &splitter, srv->card.thinking_terminator_hint);
-        splitter.stops = req->stop;
-        splitter.n_stops = req->n_stop;
-        splitter.max_stop_len = max_stop_len;
-
-        ember_protocol_stream protocol;
-        ember_protocol_stream_init(
-            &protocol, req, id, req->model, created, client_prompt_tokens);
-        ember_protocol_stream_bind(&protocol, &splitter);
-        ember_buf opening = {0};
-        ember_protocol_stream_begin(&protocol, &opening);
-        bool opening_ok = !opening.len ||
-            ember_send_all(fd, opening.ptr, opening.len) == 0;
-        ember_buf_free(&opening);
-        if (!opening_ok) {
-            ember_protocol_stream_free(&protocol);
-            ember_sse_free(&splitter);
-            finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
-                                   false, snap_reason,
-                                   image_digest, image_span_start);
-            goto run_done;
-        }
-
-        gen_ctx g = {0};
-        g.be = be;
-        g.st = &splitter;
-        g.fd = fd;
-        g.has_tools = req->has_tools;
-        g.prompt_ids = ids;
-        g.n_prompt_ids = n_prompt;
-        g.stops = req->stop;
-        g.n_stops = req->n_stop;
-        g.started_thinking = started_thinking;
-        // Native protocol terminal objects repeat the complete output. Buffer
-        // tool-bearing attempts so a hidden replacement cannot make their live
-        // deltas disagree with the terminal response.
-        g.collect_only = req->has_tools;
-        g.keepalive_while_collecting = req->has_tools;
-        greq.on_token = on_token;
-        greq.on_prefill = on_prefill;
-        greq.ud = &g;
-        g.dsml_active = req->has_tools && eff_temp > 0.0;
-        if (g.dsml_active) {
-            ember_dsml_tracker_init(&g.dsml);
-            greq.force_greedy = gen_force_greedy;
-            greq.fg_ud = &g;
-        }
-
-        ember_gen_result res = ember_backend_generate(be, &greq);
-        finish_prompt_snapshot(
-            srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
-            image_digest, image_span_start);
-        (void)continue_tool_started_in_think(
-            srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
-        bool unclosed_think_tool =
-            tool_started_in_unclosed_think(&g, started_thinking);
-        int hidden_recovery_tokens = 0;
-        bool recovery_attempted = false;
-        bool recovered = false;
-        if (res.ok && !g.disconnected) {
-            recovered = retry_malformed_tool_call(
-                srv, be, req, &greq, &ids, &n_prompt,
-                &started_thinking, &g, &res,
-                &hidden_recovery_tokens, &recovery_attempted);
-            if (recovered)
-                ember_sse_reset_attempt(&splitter, started_thinking);
-        }
-        log_generation_performance(&res, &greq);
-        const int completion_tokens =
-            hidden_recovery_tokens + res.n_generated;
-        g.scratch.len = 0;
-        if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
-
+    } else if (native_stream) {
         // Build the terminal native response from the same final split used by
         // atomic requests. Validation happens before any buffered tool attempt
         // is projected onto the protocol stream.
         const char *full = g.acc.ptr ? g.acc.ptr : "";
         const char *content = full;
-        char *reasoning = NULL;
         if (started_thinking) {
             const char *close = strstr(full, "</think>");
             if (close) {
@@ -3313,7 +3211,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             }
         }
         strip_forced_close_hint(srv, reasoning, res.budget_forced_close);
-        ember_tool_calls tc = {0};
         const char *native_tool_error = NULL;
         bool native_tools_valid =
             parse_executable_tool_calls(
@@ -3322,13 +3219,13 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         if (res.ok && !generation_stalled(&res) && !unclosed_think_tool &&
             native_tools_valid && !g.disconnected) {
             ember_sse_update(
-                &splitter, g.acc.ptr, g.acc.len, true, &g.scratch);
+                &st, g.acc.ptr, g.acc.len, true, &g.scratch);
             had_tools = ember_sse_emit_tools(
-                &splitter, g.acc.ptr, g.acc.len, &g.scratch);
+                &st, g.acc.ptr, g.acc.len, &g.scratch);
         }
         for (int i = 0; i < tc.len; ++i) {
             const char *stream_id =
-                i < splitter.n_tool_ids ? splitter.tool_ids[i] : NULL;
+                i < st.n_tool_ids ? st.tool_ids[i] : NULL;
             char fallback[40];
             if (!stream_id) {
                 mint_tool_id(fallback);
@@ -3337,10 +3234,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             free(tc.calls[i].id);
             tc.calls[i].id = strdup(stream_id);
         }
-        char *content_trimmed = NULL;
         const char *emit_content = content;
         // A rejected block is dropped from the terminal object too, so it agrees
-        // with the deltas: the splitter suppressed everything from the tool
+        // with the deltas: the st suppressed everything from the tool
         // marker on (ember_sse_discard_tool_block), and untrimmed terminal
         // content would leak exactly the contaminated bytes validation refused.
         if (!native_tools_valid) ember_tool_calls_free(&tc);
@@ -3408,9 +3304,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         } else if (!g.disconnected) {
             // Same ds4 recovery as the chat path.
             if (!native_tools_valid) {
-                dump_rejected_block(g.acc.ptr, g.acc.len, splitter.tool_start,
+                dump_rejected_block(g.acc.ptr, g.acc.len, st.tool_start,
                                     native_tool_error);
-                ember_sse_discard_tool_block(&splitter, g.acc.len);
+                ember_sse_discard_tool_block(&st, g.acc.len);
                 pr.finish_reason =
                     ember_tool_parse_failure_finish(pr.finish_reason);
                 fprintf(stderr,
@@ -3430,121 +3326,24 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             !res.degenerate_decode_close) {
             if (tc.len > 0)
                 snapshot_post_toolcall(srv, be, req, ids, n_prompt, &g);
-            for (int i = 0; i < splitter.n_tool_ids; ++i) {
+            for (int i = 0; i < st.n_tool_ids; ++i) {
                 remember_tool_block(
-                    srv, be, splitter.tool_ids[i], &g);
+                    srv, be, st.tool_ids[i], &g);
             }
             if (had_tools)
                 remember_continuation(
                     srv, req, ids, n_prompt, &g,
-                    (const char *const *)splitter.tool_ids,
-                    splitter.n_tool_ids,
+                    (const char *const *)st.tool_ids,
+                    st.n_tool_ids,
                     req->api == EMBER_API_RESPONSES ? id : NULL);
         }
-        ember_tool_calls_free(&tc);
-        free(content_trimmed);
-        free(reasoning);
-        ember_protocol_stream_free(&protocol);
-        ember_sse_free(&splitter);
-        ember_buf_free(&g.acc);
-        free(g.gen_ids);
-        ember_buf_free(&g.scratch);
+
     } else {
-        // Non-stream: collect all tokens, then split reasoning vs content and
-        // build one chat.completion. (Tool-call structuring is a follow-on.)
-        gen_ctx g = {0};
-        g.be = be; g.fd = fd; g.collect_only = true; g.has_tools = req->has_tools;
-        g.prompt_ids = ids; g.n_prompt_ids = n_prompt;
-        g.stops = req->stop; g.n_stops = req->n_stop;
-        g.started_thinking = started_thinking;  // B#1: gate markers on thinking
-        greq.on_token = on_token;
-        // Installed for the disconnect check only — it returns before writing
-        // when collect_only is set, so no SSE comment can leak into the JSON
-        // body. Without it, a non-streaming request has NO liveness signal
-        // during prefill, which is its longest phase; an abandoned 50k-token
-        // prefill then ran to completion holding the only generation slot.
-        greq.on_prefill = on_prefill;
-        greq.ud = &g;
-        g.dsml_active = req->has_tools && eff_temp > 0.0;  // B6 (see streaming path)
-        if (g.dsml_active) {
-            ember_dsml_tracker_init(&g.dsml);
-            greq.force_greedy = gen_force_greedy;
-            greq.fg_ud = &g;
-        }
-        ember_gen_result res = ember_backend_generate(be, &greq);
-        // #2: commit only on a real backend snapshot save (see streaming path).
-        finish_prompt_snapshot(
-            srv, be, snap_slot, ids, snap_cut,
-            res.ok && !g.disconnected && res.snapshot_saved, snap_reason,
-            image_digest, image_span_start);
-        // Non-stream responses are atomic: never present partial output as a
-        // successful completion or retain it in exact-tool replay memory.
-        if (!res.ok) {
-            respond_api_error(
-                fd, req->api, 500,
-                res.error_detail[0] ? res.error_detail
-                                    : "backend generation failed",
-                "server_error",
-                res.error_code[0] ? res.error_code : "internal_error");
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);  // B3 L2
-            ember_buf_free(&g.scratch);
-            goto ns_done;
-        }
-
-        (void)continue_tool_started_in_think(
-            srv, be, req, &greq, ids, n_prompt, started_thinking, &g, &res);
-        // The continuation is a second backend call. Preserve the atomic error
-        // contract if that call itself fails.
-        if (!res.ok) {
-            respond_api_error(
-                fd, req->api, 500,
-                res.error_detail[0] ? res.error_detail
-                                    : "backend generation failed",
-                "server_error",
-                res.error_code[0] ? res.error_code : "internal_error");
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
-        }
-        bool unclosed_think_tool =
-            tool_started_in_unclosed_think(&g, started_thinking);
-
-        int hidden_recovery_tokens = 0;
-        bool recovery_attempted = false;
-        (void)retry_malformed_tool_call(
-            srv, be, req, &greq, &ids, &n_prompt, &started_thinking,
-            &g, &res, &hidden_recovery_tokens, &recovery_attempted);
-        if (!res.ok) {
-            respond_api_error(
-                fd, req->api, 500,
-                res.error_detail[0] ? res.error_detail
-                                    : "backend generation failed",
-                "server_error",
-                res.error_code[0] ? res.error_code : "internal_error");
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
-        }
-        // A replacement attempt is a fresh decode and can itself start its
-        // tool stanza before </think>. retry_malformed_tool_call applies the
-        // bounded close continuation; if it could not, preserve the typed
-        // invalid-output boundary instead of returning an empty success.
-        unclosed_think_tool =
-            tool_started_in_unclosed_think(&g, started_thinking);
-        log_generation_performance(&res, &greq);
-        const int completion_tokens =
-            hidden_recovery_tokens + res.n_generated;
-
         if (generation_stalled(&res)) {
             respond_generation_stalled(
                 fd, req, &res, client_prompt_tokens, completion_tokens);
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
+
+            goto run_done;
         }
         if (unclosed_think_tool) {
             if (req->api == EMBER_API_ANTHROPIC) {
@@ -3554,10 +3353,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                     "block and could not complete Ember's bounded </think> "
                     "continuation; no tool call was emitted.",
                     "model_output_error", "invalid_tool_call");
-                ember_buf_free(&g.acc);
-                free(g.gen_ids);
-                ember_buf_free(&g.scratch);
-                goto ns_done;
+
+                goto run_done;
             }
             ember_buf e = {0};
             ember_buf_puts(&e,
@@ -3573,17 +3370,14 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                 client_prompt_tokens + completion_tokens);
             respond(fd, 422, "application/json", e.ptr);
             ember_buf_free(&e);
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
+
+            goto run_done;
         }
 
         // Separate a leading <think>…</think> (or prompt-opened thinking) from
         // the visible content.
         const char *full = g.acc.ptr ? g.acc.ptr : "";
         const char *content = full;
-        char *reasoning = NULL;
         if (started_thinking) {
             const char *close = strstr(full, "</think>");
             if (close) {
@@ -3598,7 +3392,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
 
         // stop sequences (ds4): truncate visible content at the earliest stop
         // hit and report finish="stop".
-        char *content_stop = NULL;
         bool hit_stop = g.hit_stop;
         const char *matched_stop = g.hit_stop_sequence;
         for (int si = 0; si < req->n_stop; si++) {
@@ -3607,6 +3400,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             size_t clen = (size_t)(h - content);
             if (!content_stop || clen < strlen(content_stop)) {
                 free(content_stop);
+
                 content_stop = strndup(content, clen);
                 matched_stop = req->stop[si];
             }
@@ -3617,7 +3411,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // Tool calls: parse the post-think text; if any, strip the DSML block
         // from content and set finish="tool_calls" (ds4 non-stream parity —
         // previously the raw DSML leaked into content with finish="stop").
-        ember_tool_calls tc = {0};
         const char *tool_error = NULL;
         if (!parse_executable_tool_calls(req, content, &tc, &tool_error)) {
             // The bounded model-visible repair also failed. Never turn its
@@ -3634,13 +3427,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                     tool_error ? tool_error : "invalid tool output");
                 respond_api_error(fd, req->api, 422, detail,
                                   "model_output_error", "invalid_tool_call");
-                ember_tool_calls_free(&tc);
-                free(content_stop);
-                free(reasoning);
-                ember_buf_free(&g.acc);
-                free(g.gen_ids);
-                ember_buf_free(&g.scratch);
-                goto ns_done;
+
+                goto run_done;
             }
             ember_buf e = {0};
             ember_buf_puts(&e,
@@ -3649,7 +3437,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                       "incomplete tool call after one recovery attempt: "
                     : "{\"error\":{\"message\":\"The model generated an unsafe or "
                       "incomplete tool call and recovery could not be started: ");
-            json_escape_str(&e, tool_error ? tool_error :
+            ember_json_escape_content(&e, tool_error ? tool_error :
                                            "invalid tool output");
             ember_buf_puts(&e,
                 "\",\"type\":\"model_output_error\","
@@ -3664,13 +3452,8 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                 res.degenerate_decode_close ? "true" : "false");
             respond(fd, 422, "application/json", e.ptr);
             ember_buf_free(&e);
-            ember_tool_calls_free(&tc);
-            free(content_stop);
-            free(reasoning);
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
+
+            goto run_done;
         }
         // B3: mint every id before building the response. Durable replay state
         // is committed only after that response is successfully delivered.
@@ -3679,7 +3462,6 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             free(tc.calls[i].id);
             tc.calls[i].id = strdup(tid);
         }
-        char *content_trimmed = NULL;
         const char *emit_content = content;
         const char *finish = hit_stop ? "stop"
                            : (res.degenerate_decode_close ? "length" : res.finish_reason);
@@ -3728,29 +3510,23 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                 !res.degenerate_decode_close)
                 persist_atomic_tool_frontier(
                     srv, be, req, ids, n_prompt, &g, &tc, id);
-            ember_tool_calls_free(&tc);
-            free(content_trimmed);
-            free(content_stop);
-            free(reasoning);
-            ember_buf_free(&g.acc);
-            free(g.gen_ids);
-            ember_buf_free(&g.scratch);
-            goto ns_done;
+
+            goto run_done;
         }
 
         ember_buf b = {0};
         ember_buf_printf(&b,
             "{\"id\":\"%s\",\"object\":\"chat.completion\",\"created\":%ld,\"model\":",
             id, created);
-        ember_buf_putc(&b, '"'); json_escape_str(&b, req->model); ember_buf_putc(&b, '"');
+        ember_buf_putc(&b, '"'); ember_json_escape_content(&b, req->model); ember_buf_putc(&b, '"');
         ember_buf_puts(&b, ",\"choices\":[{\"index\":0,\"message\":"
                           "{\"role\":\"assistant\",\"content\":");
         ember_buf_putc(&b, '"');
-        json_escape_str(&b, emit_content);
+        ember_json_escape_content(&b, emit_content);
         ember_buf_putc(&b, '"');
         if (reasoning) {
             ember_buf_puts(&b, ",\"reasoning_content\":\"");
-            json_escape_str(&b, reasoning);
+            ember_json_escape_content(&b, reasoning);
             ember_buf_putc(&b, '"');
         }
         if (tc.len > 0) {
@@ -3761,9 +3537,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
                     "{\"index\":%d,\"id\":\"%s\",\"type\":\"function\","      // B3: minted id
                     "\"function\":{\"name\":\"", i,
                     tc.calls[i].id ? tc.calls[i].id : id);
-                json_escape_str(&b, tc.calls[i].name ? tc.calls[i].name : "");
+                ember_json_escape_content(&b, tc.calls[i].name ? tc.calls[i].name : "");
                 ember_buf_puts(&b, "\",\"arguments\":\"");
-                json_escape_str(&b, tc.calls[i].arguments ? tc.calls[i].arguments : "{}");
+                ember_json_escape_content(&b, tc.calls[i].arguments ? tc.calls[i].arguments : "{}");
                 ember_buf_puts(&b, "\"}}");
             }
             ember_buf_putc(&b, ']');
@@ -3832,16 +3608,30 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             persist_atomic_tool_frontier(
                 srv, be, req, ids, n_prompt, &g, &tc, id);
         ember_buf_free(&b);
-        ember_tool_calls_free(&tc);
-        free(content_trimmed);
-        free(content_stop);
-        free(reasoning);
-        ember_buf_free(&g.acc);
-        free(g.gen_ids);  // B3 L2
-        ember_buf_free(&g.scratch);
-    ns_done: ;
+
     }
+    goto run_done;
+
+stream_open_failed:
+    finish_prompt_snapshot(srv, be, snap_slot, ids, snap_cut,
+                           false, snap_reason, image_digest, image_span_start);
+    goto run_done;
+atomic_backend_failed:
+    // All atomic backend failures share one error and cleanup boundary.
+    respond_api_error(fd, req->api, 500,
+        res.error_detail[0] ? res.error_detail : "backend generation failed",
+        "server_error", res.error_code[0] ? res.error_code : "internal_error");
+
 run_done:
+    ember_tool_calls_free(&tc);
+    free(content_trimmed);
+    free(content_stop);
+    free(reasoning);
+    ember_protocol_stream_free(&protocol);
+    ember_sse_free(&st);
+    ember_buf_free(&g.acc);
+    free(g.gen_ids);
+    ember_buf_free(&g.scratch);
     free(tool_grammar);
     free_vision_runs(vision_runs, n_vision_runs);
     atomic_fetch_sub(&srv->busy, 1);
@@ -4160,15 +3950,6 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 "invalid_request_error", "invalid_request");
         }
         if (root) ember_json_free(root);
-        return;
-    }
-    if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/metrics") == 0) {
-        ember_buf m = {0};
-        ember_metrics_render(&m);
-        // text/plain with the exposition version is what scrapers content-negotiate.
-        respond(fd, 200, "text/plain; version=0.0.4; charset=utf-8",
-                m.ptr ? m.ptr : "");
-        ember_buf_free(&m);
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/status") == 0) {
