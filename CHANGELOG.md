@@ -11,6 +11,10 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.9.8
+
+### Curated notes
+
 ### Added
 
 - **metrics:** a Prometheus `/metrics` endpoint. `/status` answers "what is
@@ -59,6 +63,44 @@ using an ambiguous same-day suffix.
   previously discarded; `ember_json_parse_n` delegates to it and parsing
   behaviour is unchanged. (#10)
 
+### Added
+
+- **metrics:** add a Prometheus /metrics endpoint (#19) (`d7563854`)
+- **metrics:** add a Prometheus /metrics endpoint (`a48914bf`)
+
+### Fixed
+
+- **ci:** register test_metrics with the timeout and strict-warning sets (`f8bb3aae`)
+- **metrics:** correct three series that claimed more than they measured (`bccada9b`)
+- **xdna2:** guard bf16 conversion against NaN, and share one definition (`efc76b62`)
+- **build:** include <climits> for UINT_MAX (`95b73e6b`)
+- **ci:** drop dead binding, free parse_at probe (#18) (`f34094ef`)
+- **ci:** drop the dead content binding and free the parse_at probe (`60d8d288`)
+- tool-result images, DRY loop-breaker, JSON error position (#17) (`20957583`)
+- **tool_parser:** report where a non-string tool argument stopped parsing (`317c2765`)
+- **server:** give the progress lease a loop-breaker that survives DRY (`9825ff4a`)
+- **chat_template:** render image parts in tool results (`c30fd513`)
+
+### Changed
+
+- **metrics:** one histogram type instead of two near-identical ones (`ed6b55fc`)
+- **common:** share the little-endian and FNV helpers (#20) (`73ab6d3d`)
+- **common:** share the little-endian and FNV helpers (`fac4d394`)
+
+### Build and CI
+
+- **certify:** remove leftover validator containers on cancel (`6b593163`)
+- **certify:** make the vision behavioural gate opt-in (`f2ecd3bf`)
+- record floors for the new files, rebaseline the two the refactor shrank (`2e931120`)
+
+### Documentation
+
+- **changelog:** record the DRY loop-breaker and JSON position fixes (`59731439`)
+- **changelog:** record the tool-result image placeholder fix (`71676f80`)
+
+### Maintenance
+
+- cleanup pass — fix the build break and the bf16 NaN guard (#22) (`ef4eb026`)
 ## 2026.9.5
 
 ### Curated notes
