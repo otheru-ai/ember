@@ -61,11 +61,25 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/otheru-forgejo-root.crt || {
-            echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
-            exit 1
-          }
+          # Checks the paths the TLS clients are actually POINTED AT, rather
+          # than a path that merely happens to exist. The first version of this
+          # guard hardcoded the mount destination and passed while
+          # GIT_SSL_CAINFO named a host path absent inside the container: it
+          # proved the file was mounted and proved nothing about whether git or
+          # node could find it, which is the only question that matters.
+          for var in GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS; do
+            path="$(printenv "$var" || true)"
+            test -n "$path" || {
+              echo "$var is unset; container TLS would silently fall back to the system store" >&2
+              exit 1
+            }
+            test -f "$path" || {
+              echo "$var points at $path, which is not a regular file here:" >&2
+              ls -ld "$path" >&2 || true
+              exit 1
+            }
+            echo "$var -> $path OK"
+          done
       - uses: actions/checkout@v5
       - name: Check repo invariants
         run: python3 ci/check_invariants.py
@@ -94,11 +108,25 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/otheru-forgejo-root.crt || {
-            echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
-            exit 1
-          }
+          # Checks the paths the TLS clients are actually POINTED AT, rather
+          # than a path that merely happens to exist. The first version of this
+          # guard hardcoded the mount destination and passed while
+          # GIT_SSL_CAINFO named a host path absent inside the container: it
+          # proved the file was mounted and proved nothing about whether git or
+          # node could find it, which is the only question that matters.
+          for var in GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS; do
+            path="$(printenv "$var" || true)"
+            test -n "$path" || {
+              echo "$var is unset; container TLS would silently fall back to the system store" >&2
+              exit 1
+            }
+            test -f "$path" || {
+              echo "$var points at $path, which is not a regular file here:" >&2
+              ls -ld "$path" >&2 || true
+              exit 1
+            }
+            echo "$var -> $path OK"
+          done
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
@@ -138,11 +166,25 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/otheru-forgejo-root.crt || {
-            echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
-            exit 1
-          }
+          # Checks the paths the TLS clients are actually POINTED AT, rather
+          # than a path that merely happens to exist. The first version of this
+          # guard hardcoded the mount destination and passed while
+          # GIT_SSL_CAINFO named a host path absent inside the container: it
+          # proved the file was mounted and proved nothing about whether git or
+          # node could find it, which is the only question that matters.
+          for var in GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS; do
+            path="$(printenv "$var" || true)"
+            test -n "$path" || {
+              echo "$var is unset; container TLS would silently fall back to the system store" >&2
+              exit 1
+            }
+            test -f "$path" || {
+              echo "$var points at $path, which is not a regular file here:" >&2
+              ls -ld "$path" >&2 || true
+              exit 1
+            }
+            echo "$var -> $path OK"
+          done
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
@@ -182,11 +224,25 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/otheru-forgejo-root.crt || {
-            echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
-            exit 1
-          }
+          # Checks the paths the TLS clients are actually POINTED AT, rather
+          # than a path that merely happens to exist. The first version of this
+          # guard hardcoded the mount destination and passed while
+          # GIT_SSL_CAINFO named a host path absent inside the container: it
+          # proved the file was mounted and proved nothing about whether git or
+          # node could find it, which is the only question that matters.
+          for var in GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS; do
+            path="$(printenv "$var" || true)"
+            test -n "$path" || {
+              echo "$var is unset; container TLS would silently fall back to the system store" >&2
+              exit 1
+            }
+            test -f "$path" || {
+              echo "$var points at $path, which is not a regular file here:" >&2
+              ls -ld "$path" >&2 || true
+              exit 1
+            }
+            echo "$var -> $path OK"
+          done
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
