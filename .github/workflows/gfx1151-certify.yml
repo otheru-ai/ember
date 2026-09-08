@@ -181,6 +181,18 @@ jobs:
           sudo -n /usr/local/sbin/ember-cert-production mask
           echo 'blocked=yes' >>"$GITHUB_OUTPUT"
 
+      # CHECKED AND CORRECT AFTER THE QUIESCE -- do not "optimise" this earlier.
+      # This is the only step between the quiesce and the first real GPU use,
+      # so it looks like non-GPU work sitting inside the outage window, and the
+      # two reorders in 2d7012f make that an inviting thing to move. It is not
+      # non-GPU work: it is coupled to gfx1151 through DRAM rather than through
+      # /dev/kfd. Running the 96 GiB read while production still holds the
+      # model resident contends for the same UMA budget, which is precisely the
+      # HIP allocation failure the O_DIRECT comment below exists to prevent --
+      # moving it ahead of the quiesce makes it worse, not better. The common
+      # case also costs nothing: the 7-day integrity cache below means an
+      # unchanged artifact reads zero bytes.
+      # Swept and cleared by claude-751387, 2026-09-08.
       - name: Verify the model artifact
         run: |
           set -euo pipefail
