@@ -88,12 +88,12 @@ int main() {
         };
         for (const char *value : {"[]", " [ {\"action\":\"replace\",\"n\":-1.25e+2,\"ok\":true,\"x\":null} ] ",
                                   R"(["i < n", "quote: \"", "slash: \\", "\u0041", "\uD83D\uDE00"])",
-                                  "[false,0,{},[1,2]]"}) {
+                                  "[false,0,{},[1,2]]", R"(["<", "<<", "a << b", "<\n", "<\/tag>"])"}) {
             CHECK(accepts(json_cg, call(value)));
         }
         for (const char *value : {"", "not JSON", "[{\"action\":}]", "[{\"action\":\"replace\"}",
                                   "[1,]", "[01]", "[NaN]", "[true false]", "[] trailing",
-                                  "[\"literal\nnewline\"]", R"(["\q"])", R"(["\uD800"])", R"(["\uDC00"])"}) {
+                                  "[\"literal\nnewline\"]", R"(["\q"])", R"(["\uD800"])", R"(["\uDC00"])", R"(["</tag>"])", R"(["<</tag>"])"}) {
             CHECK(!accepts(json_cg, call(value)));
         }
     }

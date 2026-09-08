@@ -339,13 +339,18 @@ char *ember_tool_grammar_build(const char *tools_json, bool allow_parallel) {
     // #11/#10: raw text admitted malformed JSON even while the mask was
     // active. Match JSON syntax here; tool_schema.c still checks schema
     // semantics. Surrogate escapes match json.c: lone halves are rejected.
+    // Keep raw DSML closing tags out of strings; escape their slash or less-
+    // than sign. Ordinary code comparisons and trailing less-than stay legal.
     ember_buf_puts(&out,
         "jsonval ::= ws jvalue ws\n"
         "jvalue ::= jobject | jarray | jstring | jnumber | \"true\" | \"false\" | \"null\"\n"
         "jobject ::= \"{\" ws (jstring ws \":\" ws jvalue (ws \",\" ws jstring ws \":\" ws jvalue)*)? ws \"}\"\n"
         "jarray ::= \"[\" ws (jvalue (ws \",\" ws jvalue)*)? ws \"]\"\n"
         "jnumber ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [+-]? [0-9]+)?\n"
-        "jstring ::= \"\\\"\" ([^\"\\\\\\x00-\\x1f] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" junicode))* \"\\\"\"\n"
+        "jstring ::= \"\\\"\" (jchar | \"<\"+ jafterlt)* \"<\"* \"\\\"\"\n"
+        "jchar ::= [^\"\\\\<\\x00-\\x1f] | jescape\n"
+        "jafterlt ::= [^\"\\\\</\\x00-\\x1f] | jescape\n"
+        "jescape ::= \"\\\\\" ([\"\\\\/bfnrt] | \"u\" junicode)\n"
         "jhex ::= [0-9a-fA-F]\n"
         "junicode ::= [0-9a-cA-Ce-fE-F] jhex jhex jhex | [dD] [0-7] jhex jhex | [dD] [89abAB] jhex jhex \"\\\\u\" [dD] [cdefCDEF] jhex jhex\n"
     );
