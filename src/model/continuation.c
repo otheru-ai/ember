@@ -10,39 +10,12 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "../common/bytes.h"
 
 #define ECT_HEADER_SIZE 64u
 #define ECT_VERSION 1u
 #define ECT_SUFFIX ".ect"
 #define ECT_MAX_ID 128u
-
-static uint32_t get_u32le(const uint8_t *p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
-           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static uint64_t get_u64le(const uint8_t *p) {
-    uint64_t v = 0;
-    for (int i = 7; i >= 0; --i) v = (v << 8) | p[i];
-    return v;
-}
-
-static void put_u32le(uint8_t *p, uint32_t v) {
-    for (int i = 0; i < 4; ++i) p[i] = (uint8_t)(v >> (i * 8));
-}
-
-static void put_u64le(uint8_t *p, uint64_t v) {
-    for (int i = 0; i < 8; ++i) p[i] = (uint8_t)(v >> (i * 8));
-}
-
-static uint64_t hash_update(uint64_t h, const void *data, size_t n) {
-    const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= UINT64_C(1099511628211);
-    }
-    return h;
-}
 
 static bool valid_id(const char *id) {
     size_t n = id ? strlen(id) : 0;
@@ -161,20 +134,20 @@ static uint64_t payload_hash(ember_api_kind api,
                              const char *visible, const char *tools) {
     uint64_t h = UINT64_C(1469598103934665603);
     uint8_t le[4];
-    put_u32le(le, (uint32_t)api);
-    h = hash_update(h, le, sizeof(le));
+    ember_put_u32le(le, (uint32_t)api);
+    h = ember_fnv1a_update(h, le, sizeof(le));
     for (int i = 0; i < n_call_ids; ++i) {
         uint8_t lenle[4];
-        put_u32le(lenle, (uint32_t)strlen(call_ids[i]));
-        h = hash_update(h, lenle, sizeof(lenle));
-        h = hash_update(h, call_ids[i], strlen(call_ids[i]));
+        ember_put_u32le(lenle, (uint32_t)strlen(call_ids[i]));
+        h = ember_fnv1a_update(h, lenle, sizeof(lenle));
+        h = ember_fnv1a_update(h, call_ids[i], strlen(call_ids[i]));
     }
     for (int i = 0; i < n_frontier; ++i) {
-        put_u32le(le, (uint32_t)frontier[i]);
-        h = hash_update(h, le, sizeof(le));
+        ember_put_u32le(le, (uint32_t)frontier[i]);
+        h = ember_fnv1a_update(h, le, sizeof(le));
     }
-    if (visible) h = hash_update(h, visible, strlen(visible));
-    if (tools) h = hash_update(h, tools, strlen(tools));
+    if (visible) h = ember_fnv1a_update(h, visible, strlen(visible));
+    if (tools) h = ember_fnv1a_update(h, tools, strlen(tools));
     return h;
 }
 
@@ -201,27 +174,27 @@ static bool persist_write(const ember_continuation_store *s,
     const char *tools = e->tools_json ? e->tools_json : "";
     uint8_t hdr[ECT_HEADER_SIZE] = {0};
     memcpy(hdr, "ECT1", 4);
-    put_u32le(hdr + 4, ECT_VERSION);
+    ember_put_u32le(hdr + 4, ECT_VERSION);
     memcpy(hdr + 8, s->persist_identity, 16);
-    put_u32le(hdr + 24, (uint32_t)e->api);
-    put_u32le(hdr + 28, (uint32_t)e->n_call_ids);
-    put_u32le(hdr + 32, (uint32_t)e->n_frontier);
-    put_u64le(hdr + 40, strlen(visible));
-    put_u64le(hdr + 48, strlen(tools));
-    put_u64le(hdr + 56,
+    ember_put_u32le(hdr + 24, (uint32_t)e->api);
+    ember_put_u32le(hdr + 28, (uint32_t)e->n_call_ids);
+    ember_put_u32le(hdr + 32, (uint32_t)e->n_frontier);
+    ember_put_u64le(hdr + 40, strlen(visible));
+    ember_put_u64le(hdr + 48, strlen(tools));
+    ember_put_u64le(hdr + 56,
               payload_hash(e->api, (const char *const *)e->call_ids,
                            e->n_call_ids, e->frontier_ids, e->n_frontier,
                            visible, tools));
     bool ok = write_all(fd, hdr, sizeof(hdr));
     for (int i = 0; ok && i < e->n_call_ids; ++i) {
         uint8_t lenle[4];
-        put_u32le(lenle, (uint32_t)strlen(e->call_ids[i]));
+        ember_put_u32le(lenle, (uint32_t)strlen(e->call_ids[i]));
         ok = write_all(fd, lenle, sizeof(lenle)) &&
              write_all(fd, e->call_ids[i], strlen(e->call_ids[i]));
     }
     for (int i = 0; ok && i < e->n_frontier; ++i) {
         uint8_t le[4];
-        put_u32le(le, (uint32_t)e->frontier_ids[i]);
+        ember_put_u32le(le, (uint32_t)e->frontier_ids[i]);
         ok = write_all(fd, le, sizeof(le));
     }
     if (ok) ok = write_all(fd, visible, strlen(visible));
@@ -379,17 +352,17 @@ static bool load_file(ember_continuation_store *s, const char *path) {
     bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
               read_all(fd, hdr, sizeof(hdr));
     if (!ok || memcmp(hdr, "ECT1", 4) != 0 ||
-        get_u32le(hdr + 4) != ECT_VERSION ||
+        ember_get_u32le(hdr + 4) != ECT_VERSION ||
         memcmp(hdr + 8, s->persist_identity, 16) != 0) {
         close(fd);
         return false;
     }
-    ember_api_kind api = (ember_api_kind)get_u32le(hdr + 24);
-    uint32_t nc = get_u32le(hdr + 28);
-    uint32_t nt = get_u32le(hdr + 32);
-    uint64_t nv = get_u64le(hdr + 40);
-    uint64_t nj = get_u64le(hdr + 48);
-    uint64_t expected = get_u64le(hdr + 56);
+    ember_api_kind api = (ember_api_kind)ember_get_u32le(hdr + 24);
+    uint32_t nc = ember_get_u32le(hdr + 28);
+    uint32_t nt = ember_get_u32le(hdr + 32);
+    uint64_t nv = ember_get_u64le(hdr + 40);
+    uint64_t nj = ember_get_u64le(hdr + 48);
+    uint64_t expected = ember_get_u64le(hdr + 56);
     uint64_t id_prefix_bytes = (uint64_t)nc * 4u;
     bool file_bound_overflow =
         (uint64_t)s->max_bytes > UINT64_MAX - ECT_HEADER_SIZE - id_prefix_bytes;
@@ -414,7 +387,7 @@ static bool load_file(ember_continuation_store *s, const char *path) {
     for (uint32_t i = 0; ok && i < nc; ++i) {
         uint8_t le[4];
         ok = read_all(fd, le, 4);
-        uint32_t n = ok ? get_u32le(le) : 0;
+        uint32_t n = ok ? ember_get_u32le(le) : 0;
         if (!ok || n == 0 || n > ECT_MAX_ID) {
             ok = false;
             break;
@@ -430,7 +403,7 @@ static bool load_file(ember_continuation_store *s, const char *path) {
     for (uint32_t i = 0; ok && i < nt; ++i) {
         uint8_t le[4];
         if (!(ok = read_all(fd, le, 4))) break;
-        tokens[i] = (int32_t)get_u32le(le);
+        tokens[i] = (int32_t)ember_get_u32le(le);
     }
     if (ok) ok = read_all(fd, visible, (size_t)nv);
     if (ok) ok = read_all(fd, tools, (size_t)nj);

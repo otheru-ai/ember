@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include "../common/bytes.h"
 
 #define ETM_HEADER_SIZE 48u
 #define ETM_VERSION 2u
@@ -24,34 +25,6 @@ typedef struct {
     char *id;
     struct timespec mtime;
 } persisted_candidate;
-
-static uint32_t get_u32le(const uint8_t *p) {
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
-           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static uint64_t get_u64le(const uint8_t *p) {
-    uint64_t v = 0;
-    for (int i = 7; i >= 0; --i) v = (v << 8) | p[i];
-    return v;
-}
-
-static void put_u32le(uint8_t *p, uint32_t v) {
-    for (int i = 0; i < 4; ++i) p[i] = (uint8_t)(v >> (i * 8));
-}
-
-static void put_u64le(uint8_t *p, uint64_t v) {
-    for (int i = 0; i < 8; ++i) p[i] = (uint8_t)(v >> (i * 8));
-}
-
-static uint64_t hash_update(uint64_t h, const void *data, size_t n) {
-    const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= UINT64_C(1099511628211);
-    }
-    return h;
-}
 
 static bool valid_persisted_id(const char *id) {
     size_t n = id ? strlen(id) : 0;
@@ -154,12 +127,12 @@ static int lru_idx(const ember_tool_memory *tm) {
 static uint64_t payload_hash(const char *id, const char *bytes, size_t len,
                              const int32_t *ids, int n_ids) {
     uint64_t h = UINT64_C(1469598103934665603);
-    h = hash_update(h, id, strlen(id));
-    h = hash_update(h, bytes, len);
+    h = ember_fnv1a_update(h, id, strlen(id));
+    h = ember_fnv1a_update(h, bytes, len);
     for (int i = 0; i < n_ids; ++i) {
         uint8_t le[4];
-        put_u32le(le, (uint32_t)ids[i]);
-        h = hash_update(h, le, sizeof(le));
+        ember_put_u32le(le, (uint32_t)ids[i]);
+        h = ember_fnv1a_update(h, le, sizeof(le));
     }
     return h;
 }
@@ -190,17 +163,17 @@ static bool persist_write(const ember_tool_memory *tm,
 
     uint8_t hdr[ETM_HEADER_SIZE] = {0};
     memcpy(hdr, "ETM1", 4);
-    put_u32le(hdr + 4, ETM_VERSION);
+    ember_put_u32le(hdr + 4, ETM_VERSION);
     memcpy(hdr + 8, tm->persist_identity, 16);
-    put_u64le(hdr + 24, (uint64_t)len);
-    put_u32le(hdr + 32, (uint32_t)n_ids);
-    put_u64le(hdr + 36, payload_hash(id, bytes, len, ids, n_ids));
+    ember_put_u64le(hdr + 24, (uint64_t)len);
+    ember_put_u32le(hdr + 32, (uint32_t)n_ids);
+    ember_put_u64le(hdr + 36, payload_hash(id, bytes, len, ids, n_ids));
 
     bool ok = write_all_fd(fd, hdr, sizeof(hdr)) &&
               write_all_fd(fd, bytes, len);
     for (int i = 0; ok && i < n_ids; ++i) {
         uint8_t le[4];
-        put_u32le(le, (uint32_t)ids[i]);
+        ember_put_u32le(le, (uint32_t)ids[i]);
         ok = write_all_fd(fd, le, sizeof(le));
     }
     if (ok) ok = fsync(fd) == 0;
@@ -320,15 +293,15 @@ static bool load_persisted_file(ember_tool_memory *tm,
     bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
               read_all_fd(fd, hdr, sizeof(hdr));
     if (!ok || memcmp(hdr, "ETM1", 4) != 0 ||
-        get_u32le(hdr + 4) != ETM_VERSION ||
+        ember_get_u32le(hdr + 4) != ETM_VERSION ||
         memcmp(hdr + 8, tm->persist_identity, 16) != 0) {
         close(fd);
         return false;
     }
 
-    uint64_t raw64 = get_u64le(hdr + 24);
-    uint32_t n_ids32 = get_u32le(hdr + 32);
-    uint64_t expected_hash = get_u64le(hdr + 36);
+    uint64_t raw64 = ember_get_u64le(hdr + 24);
+    uint32_t n_ids32 = ember_get_u32le(hdr + 32);
+    uint64_t expected_hash = ember_get_u64le(hdr + 36);
     if (raw64 > tm->max_bytes ||
         n_ids32 > INT_MAX ||
         (uint64_t)n_ids32 > tm->max_bytes / sizeof(int32_t) ||
@@ -360,9 +333,9 @@ static bool load_persisted_file(ember_tool_memory *tm,
     raw[raw_len] = '\0';
 
     uint64_t h = UINT64_C(1469598103934665603);
-    h = hash_update(h, id, strlen(id));
-    h = hash_update(h, raw, raw_len);
-    h = hash_update(h, token_bytes, (size_t)n_ids32 * 4u);
+    h = ember_fnv1a_update(h, id, strlen(id));
+    h = ember_fnv1a_update(h, raw, raw_len);
+    h = ember_fnv1a_update(h, token_bytes, (size_t)n_ids32 * 4u);
     if (h != expected_hash) {
         free(raw);
         free(token_bytes);
@@ -378,7 +351,7 @@ static bool load_persisted_file(ember_tool_memory *tm,
         return false;
     }
     for (uint32_t i = 0; i < n_ids32; ++i)
-        ids[i] = (int32_t)get_u32le(token_bytes + (size_t)i * 4u);
+        ids[i] = (int32_t)ember_get_u32le(token_bytes + (size_t)i * 4u);
     bool inserted = put_internal(tm, id, raw, raw_len, ids, (int)n_ids32, false);
     free(ids);
     free(raw);
