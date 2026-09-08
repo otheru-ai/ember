@@ -446,7 +446,7 @@ class ReleaseScriptTests(unittest.TestCase):
                     f"{job_name} / {step.get('name')} uses undefined "
                     f"{missing}; add it to the job or step env")
 
-    def test_github_release_candidate_is_gated_and_automatic(self) -> None:
+    def test_github_release_candidate_is_gated_and_certification_is_manual(self) -> None:
         ci = GITHUB_CI.read_text()
         container = GITHUB_CONTAINER.read_text()
         release_notes = GITHUB_RELEASE_NOTES.read_text()
@@ -473,11 +473,27 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("ci/release_changelog.py notes", release_notes)
         self.assertIn("gh release create", release_notes)
         self.assertIn("!startsWith(github.event.head_commit.message", ci)
-        self.assertIn("certify-and-release:", ci)
-        self.assertIn("needs: [publish-candidate, scope]", ci)
-        self.assertIn("uses: ./.github/workflows/gfx1151-certify.yml", ci)
-        self.assertIn("commit_sha: ${{ github.sha }}", ci)
-        self.assertIn("secrets: inherit", ci)
+
+        # Certification is deliberately NOT automatic. It quiesces production
+        # for exclusive GPU access, so certifying on every main push took
+        # Hermes down on every merge, and -- because certifying also releases
+        # -- a second certification in a day collided on the date-derived
+        # version. Guarding the absence matters as much as the old assertion
+        # guarded the presence: re-adding this call would silently restore an
+        # outage per merge.
+        certify = GITHUB_CERTIFY.read_text()
+        self.assertNotIn("./.github/workflows/gfx1151-certify.yml", ci)
+        self.assertIn("workflow_dispatch:", certify)
+        # Optional, so releasing from main needs no argument. A required
+        # 40-character SHA is the friction that makes a manual path get
+        # worked around.
+        self.assertIn("inputs.commit_sha || github.sha", certify)
+        self.assertNotIn("required: true", certify.split("workflow_dispatch:")[1])
+        # `secrets: inherit` went with the removed call. The certify workflow
+        # now reads its release secrets directly, which is what makes the
+        # manual dispatch able to push a tag at all.
+        self.assertNotIn("secrets: inherit", ci)
+        self.assertIn("secrets.FORGEJO_RELEASE_SSH_KEY", certify)
         self.assertIn("actions/cache@caa296126883cff596d87d8935842f9db880ef25", ci)
         self.assertIn("actions/cache@caa296126883cff596d87d8935842f9db880ef25", container)
         self.assertIn("EMBER_BUILDX_BUILDER", container)
