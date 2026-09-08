@@ -20,11 +20,16 @@
 // Schema requires properties to be PRESENT but leaves their order free, and
 // "all of these in any order" needs a permutation expansion that is factorial
 // in the property count. So this emits a canonical order instead: required
-// properties in schema order, then optional ones, each skippable. Every string
-// the grammar accepts is schema-valid; the cost is refusing an ordering the
+// properties in schema order, then optional ones, each skippable. This enforces
+// the top-level required set; the cost is refusing an ordering the
 // model might have preferred. With most tools carrying one or two required
 // properties that is a good trade -- revisit if a tool appears where order
 // genuinely varies.
+//
+// JSON-form values obey JSON syntax (including paired surrogate escapes).
+// This is not a complete JSON Schema compiler: enums, nested required fields,
+// numeric bounds and other semantic constraints still require tool_schema.c.
+// Grammar engagement alone is not evidence that the final call is schema-valid.
 //
 // A property whose schema declares no type is left unconstrained between the
 // string and JSON forms (both string="true" and string="false" are accepted),

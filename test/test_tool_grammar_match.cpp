@@ -72,6 +72,32 @@ int main() {
     xgrammar::GrammarCompiler compiler(ti);
     xgrammar::CompiledGrammar cg = compiler.CompileGrammar(g);
 
+    // #11/#10: string=false is JSON, not arbitrary raw text. Exercise the
+    // compiled grammar, including a complete closing block, so a valid prefix
+    // of an unfinished JSON value cannot masquerade as a complete argument.
+    {
+        const char *json_tools = R"([{"type":"function","function":{"name":"edit","parameters":{"type":"object","required":["operations"],"properties":{"operations":{"type":"array"}}}}}])";
+        char *json_ebnf = ember_tool_grammar_build(json_tools, false);
+        CHECK(json_ebnf != nullptr);
+        if (!json_ebnf) return 1;
+        auto json_cg = compiler.CompileGrammar(xgrammar::Grammar::FromEBNF(json_ebnf));
+        free(json_ebnf);
+        auto call = [&](const std::string &value) {
+            return P("<|DSML|tool_calls><|DSML|invoke name=\"edit\"><|DSML|parameter name=\"operations\" string=\"false\">") + value +
+                   P("</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>");
+        };
+        for (const char *value : {"[]", " [ {\"action\":\"replace\",\"n\":-1.25e+2,\"ok\":true,\"x\":null} ] ",
+                                  R"(["i < n", "quote: \"", "slash: \\", "\u0041", "\uD83D\uDE00"])",
+                                  "[false,0,{},[1,2]]"}) {
+            CHECK(accepts(json_cg, call(value)));
+        }
+        for (const char *value : {"", "not JSON", "[{\"action\":}]", "[{\"action\":\"replace\"}",
+                                  "[1,]", "[01]", "[NaN]", "[true false]", "[] trailing",
+                                  "[\"literal\nnewline\"]", R"(["\q"])", R"(["\uD800"])", R"(["\uDC00"])"}) {
+            CHECK(!accepts(json_cg, call(value)));
+        }
+    }
+
     const std::string blk  = P("<|DSML|tool_calls>");
     const std::string term = blk + P("<|DSML|invoke name=\"terminal\">");
 

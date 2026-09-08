@@ -336,7 +336,19 @@ char *ember_tool_grammar_build(const char *tools_json, bool allow_parallel) {
     // allowing everything real code contains. A trailing '<' is allowed
     // explicitly, since a value may legitimately end with one.
     ember_buf_puts(&out, "strval ::= ([^<] | \"<\" [^/])* (\"<\")?\n");
-    ember_buf_puts(&out, "jsonval ::= ([^<] | \"<\" [^/])* (\"<\")?\n");
+    // #11/#10: raw text admitted malformed JSON even while the mask was
+    // active. Match JSON syntax here; tool_schema.c still checks schema
+    // semantics. Surrogate escapes match json.c: lone halves are rejected.
+    ember_buf_puts(&out,
+        "jsonval ::= ws jvalue ws\n"
+        "jvalue ::= jobject | jarray | jstring | jnumber | \"true\" | \"false\" | \"null\"\n"
+        "jobject ::= \"{\" ws (jstring ws \":\" ws jvalue (ws \",\" ws jstring ws \":\" ws jvalue)*)? ws \"}\"\n"
+        "jarray ::= \"[\" ws (jvalue (ws \",\" ws jvalue)*)? ws \"]\"\n"
+        "jnumber ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [+-]? [0-9]+)?\n"
+        "jstring ::= \"\\\"\" ([^\"\\\\\\x00-\\x1f] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" junicode))* \"\\\"\"\n"
+        "jhex ::= [0-9a-fA-F]\n"
+        "junicode ::= [0-9a-cA-Ce-fE-F] jhex jhex jhex | [dD] [0-7] jhex jhex | [dD] [89abAB] jhex jhex \"\\\\u\" [dD] [cdefCDEF] jhex jhex\n"
+    );
     ember_buf_puts(&out, rules.ptr);
 
     ember_buf_free(&rules);
