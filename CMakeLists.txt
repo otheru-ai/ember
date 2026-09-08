@@ -602,6 +602,11 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_profile_scripts.py)
   set_tests_properties(profile_scripts PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME publish_bundle
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_publish_bundle.py)
+  set_tests_properties(publish_bundle PROPERTIES TIMEOUT 20)
 
   add_test(
     NAME rocmi4_w4a8_isa_gate
