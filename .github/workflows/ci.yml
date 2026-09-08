@@ -216,20 +216,21 @@ jobs:
       actions: read
     uses: ./.github/workflows/container.yml
 
-  certify-and-release:
-    # Only a trusted main push can reach this point. The reusable container
-    # workflow has already published and scanned the immutable sha-* candidate.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):') && needs.scope.outputs.code == 'true' }}
-    needs: [publish-candidate, scope]
-    # Keep this the narrowest grant the certify workflow actually needs. A
-    # called workflow can never exceed its caller's grant and GitHub enforces
-    # that statically, so a single nested job asking for more invalidates the
-    # whole of ci.yml before any job starts -- which is exactly how a set of
-    # nested attestation jobs took CI down for nine days.
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/gfx1151-certify.yml
-    with:
-      commit_sha: ${{ github.sha }}
-    secrets: inherit
+  # Certification is NOT here any more, deliberately. It used to run on every
+  # main push that touched code, and certifying means stopping production: the
+  # job quiesces ember-server for exclusive GPU access, so an ordinary merge
+  # took Hermes and Telegram down for the length of a GPU validation. It also
+  # released on every such push, which is why two certifications in one day
+  # collide on the date-derived version.
+  #
+  # Certification and release are now one deliberate act: run the
+  # "gfx1151 certification" workflow manually against the commit you want to
+  # release. publish-candidate above still runs on every push, so the immutable
+  # sha-* candidate is always waiting and a release certifies an image that
+  # already exists rather than building one.
+  #
+  # The trade-off, stated plainly: main can now accumulate uncertified commits,
+  # and a release certifies the batch rather than each commit on its own. That
+  # is a real loss of attribution when a release fails on hardware -- the cure
+  # is to certify deliberately after a risky engine change, not to go back to
+  # paying an outage per merge.

@@ -21,11 +21,17 @@ on:
         required: true
       FORGEJO_SSH_HOST_KEYS:
         required: true
+  # This is now the ONLY way a certification and release happens: ci.yml no
+  # longer calls it on every main push, because certifying stops production.
+  # Run it against the commit you want to release.
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: Full 40-character commit SHA whose sha-* image will be certified
-        required: true
+        description: >-
+          Commit SHA whose sha-* candidate image will be certified.
+          Leave empty to use the head of the branch this is run from.
+        required: false
+        default: ''
         type: string
       release_version:
         description: Optional YEAR.M.D override; defaults to the current UTC date
@@ -54,7 +60,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, gfx1151]
     timeout-minutes: 180
     env:
-      TARGET_SHA: ${{ inputs.commit_sha }}
+      TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
       MODEL_PATH: ${{ vars.EMBER_CERT_MODEL_PATH }}
       MMPROJ_PATH: ${{ vars.EMBER_CERT_MMPROJ_PATH }}
       DRAFT_PATH: ${{ vars.EMBER_CERT_DRAFT_PATH }}
@@ -730,14 +736,14 @@ jobs:
           fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ inputs.commit_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Generate release metadata and publish the source-of-truth tag
         id: promote
         env:
-          TARGET_SHA: ${{ inputs.commit_sha }}
+          TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
           REQUESTED_VERSION: ${{ inputs.release_version }}
           FORGEJO_RELEASE_SSH_KEY: ${{ secrets.FORGEJO_RELEASE_SSH_KEY }}
           FORGEJO_SSH_HOST_KEYS: ${{ secrets.FORGEJO_SSH_HOST_KEYS }}
@@ -829,7 +835,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ inputs.commit_sha || github.sha }}
           persist-credentials: false
 
       - name: Take the GPU lock and quiesce production
@@ -940,6 +946,6 @@ jobs:
         if: ${{ always() && env.BENCH_BUNDLE != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: performance-bundle-${{ inputs.commit_sha }}
+          name: performance-bundle-${{ inputs.commit_sha || github.sha }}
           path: ${{ env.BENCH_BUNDLE }}
           retention-days: 90

@@ -45,11 +45,26 @@ The hosted workflows cannot execute these checks by themselves:
 | End-to-end runtime validation | Needs exclusive access to a gfx1151 GPU and model weights; `gfx1151-certify.yml` runs it on the dedicated Halo runner. |
 | Differential validator | Needs the GPU and the 85 GiB GGUF; `gfx1151-certify.yml` runs exact, batched, and optional DSpark validation. |
 
-Target-hardware certification starts automatically after the immutable
-candidate passes the hosted and container gates. The source invariant gate
-checks drift between the two hand-maintained CMake lists; container compilation
-and the CPU-capable engine tests add separate coverage. None establishes HIP
-kernel arithmetic correctness.
+Target-hardware certification is a deliberate act, not an automatic one. Run
+the `gfx1151 certification` workflow by hand against the commit you want to
+release; leaving its `commit_sha` input empty certifies the head of the branch
+you run it from. Certification and release are the same operation, so running
+it publishes a release.
+
+It is manual because certifying stops production: the job quiesces
+`ember-server` for exclusive GPU access, so certifying on every merge took
+Hermes and Telegram down for the length of a GPU validation. The immutable
+`sha-*` candidate is still published on every main push, so a release certifies
+an image that already exists rather than building one.
+
+The consequence to keep in mind: main can accumulate uncertified commits, and a
+release then certifies the batch rather than each commit separately. After a
+risky engine change, certify deliberately rather than waiting for the next
+release, so a hardware failure still points at one change.
+
+The source invariant gate checks drift between the two hand-maintained CMake
+lists; container compilation and the CPU-capable engine tests add separate
+coverage. None establishes HIP kernel arithmetic correctness.
 
 The saved-ISA ROCMI4 W4A8 compile-evidence gate is intentionally GitHub-only.
 It builds both packing variants in AMD's pinned ROCm 10.0 development container
