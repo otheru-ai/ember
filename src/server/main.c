@@ -1302,8 +1302,19 @@ static bool parse_executable_tool_calls(const ember_chat_request *req,
     const char *detail = NULL;
     if (report.contaminated)
         detail = "nested DSML appeared inside a string tool argument";
-    else if (report.invalid_json)
-        detail = "a non-string tool argument was not valid JSON";
+    else if (report.invalid_json) {
+        // Give the position, not just the verdict: a retry that knows where the
+        // document broke can correct it instead of regenerating it blind.
+        if (report.invalid_json_len > 0) {
+            snprintf(tool_validation_detail, sizeof(tool_validation_detail),
+                     "a non-string tool argument was not valid JSON "
+                     "(parsing stopped at byte %zu of %zu)",
+                     report.invalid_json_offset, report.invalid_json_len);
+            detail = tool_validation_detail;
+        } else {
+            detail = "a non-string tool argument was not valid JSON";
+        }
+    }
     else if (report.mixed_syntax)
         detail = "mixed DSML syntax families were generated";
     else if (report.malformed)

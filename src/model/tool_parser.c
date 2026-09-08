@@ -249,6 +249,24 @@ const ember_dsml_syntax *ember_dsml_syntaxes(int *n) {
     return SYNTAX;
 }
 
+// Where the last string="false" payload stopped parsing. append_arg has three
+// callers and a published signature, so a thread-local carries this diagnostic
+// rather than churning the API for it. Written on failure; read by the caller
+// that sets report->invalid_json for the same call, on the same thread.
+static _Thread_local size_t tp_last_json_err_off;
+static _Thread_local size_t tp_last_json_err_len;
+
+void ember_tool_parser_last_json_error(size_t off, size_t len) {
+    tp_last_json_err_off = off;
+    tp_last_json_err_len = len;
+}
+
+static void tp_record_json_error(ember_tool_parse_report *report) {
+    if (!report || report->invalid_json) return;   // keep the first failure
+    report->invalid_json_offset = tp_last_json_err_off;
+    report->invalid_json_len = tp_last_json_err_len;
+}
+
 bool ember_dsml_append_arg(ember_buf *b, const char *key, const char *val,
                            size_t val_len, const char *is_str) {
     bool valid = true;
@@ -270,7 +288,8 @@ bool ember_dsml_append_arg(ember_buf *b, const char *key, const char *val,
             // null coercion is unsafe when the advertised schema expects a
             // number/object/string and the client will execute this result.
             char *raw = xstrndup(v, vl);
-            ember_json *parsed = ember_json_parse(raw);
+            size_t err_off = 0;
+            ember_json *parsed = ember_json_parse_at(raw, vl, &err_off);
             free(raw);
             if (parsed) {
                 char *compact = ember_json_dump(parsed);
@@ -280,6 +299,7 @@ bool ember_dsml_append_arg(ember_buf *b, const char *key, const char *val,
             } else {
                 ember_buf_puts(b, "null");
                 valid = false;
+                ember_tool_parser_last_json_error(err_off, vl);
             }
         }
     } else {
@@ -357,7 +377,7 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
                 if (!ember_dsml_append_arg(
                         &args, key, ptag + 1,
                         (size_t)(pclose - (ptag + 1)), is_str) && report)
-                    report->invalid_json = true;
+                    { tp_record_json_error(report); report->invalid_json = true; }
             }
             free(key); free(is_str);
             p = pclose + strlen(DSE_PROP_C);
@@ -554,7 +574,7 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                 if (nparam++) ember_buf_putc(&args, ',');
                 if (!ember_dsml_append_arg(
                         &args, key, val, val_len, is_str) && report)
-                    report->invalid_json = true;
+                    { tp_record_json_error(report); report->invalid_json = true; }
             }
             free(key);
             free(is_str);

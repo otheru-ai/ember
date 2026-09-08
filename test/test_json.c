@@ -139,8 +139,33 @@ static void test_json_output_utf8(void) {
     ember_buf_free(&content);
 }
 
+static void test_parse_at_reports_position(void) {
+    // A generator that is told only "invalid" must regenerate; one told where
+    // the document broke can correct it.
+    size_t off = 12345;
+    ember_json *v = ember_json_parse_at("[1,2,x]", 7, &off);
+    CHECK(v == NULL, "parse_at rejects malformed array");
+    CHECK(off == 5, "parse_at points at the offending token in an array");
+
+    off = 12345;
+    v = ember_json_parse_at("{} x", 4, &off);
+    CHECK(v == NULL, "parse_at rejects trailing garbage");
+    CHECK(off == 3, "parse_at points at the first trailing byte");
+
+    off = 12345;
+    v = ember_json_parse_at("{\"a\":1}", 7, &off);
+    CHECK(v != NULL, "parse_at accepts valid JSON");
+    ember_json_free(v);
+
+    // NULL out-param must be safe; parse_n delegates and must be unchanged.
+    CHECK(ember_json_parse_at("[1]", 3, NULL) != NULL, "parse_at tolerates NULL err_off");
+    ember_json *n = ember_json_parse_n("[1,2,x]", 7);
+    CHECK(n == NULL, "parse_n behaviour unchanged");
+}
+
 int main(void) {
     printf("ember json tests\n");
+    test_parse_at_reports_position();
     test_chat_request();
     test_edge_cases();
     test_json_output_utf8();

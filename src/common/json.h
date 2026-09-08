@@ -40,6 +40,12 @@ ember_json *ember_json_parse(const char *text);
 // Length-delimited variant for untrusted wire input. Embedded NUL bytes remain
 // visible and are rejected instead of truncating the document as a C string.
 ember_json *ember_json_parse_n(const char *text, size_t len);
+
+// As ember_json_parse_n, but on failure stores the byte offset the parser
+// stopped at in `*err_off` (0 when `text` is NULL). Callers that must tell a
+// generator WHERE its JSON broke need the position; returning only NULL makes a
+// retry a fresh guess at the whole document rather than a correction.
+ember_json *ember_json_parse_at(const char *text, size_t len, size_t *err_off);
 void        ember_json_free(ember_json *v);
 
 // Object member lookup (NULL if not an object or key absent).

@@ -47,6 +47,11 @@ typedef struct {
     bool repaired;      // missing closing tags were synthesized
     bool contaminated;  // a string payload contained nested protocol markup
     bool invalid_json;  // string=false payload was not one complete JSON value
+    // Where that payload stopped parsing, and how long it was. Reported to the
+    // model so a retry can correct the break instead of regenerating a long
+    // document from scratch. Meaningful only when invalid_json is set.
+    size_t invalid_json_offset;
+    size_t invalid_json_len;
     bool trailing;      // non-whitespace followed a complete DSML wrapper
     bool mixed_syntax;  // another DSML spelling appeared inside the wrapper
     bool malformed;     // nested/mismatched tags or invalid attributes
@@ -101,6 +106,10 @@ const char *ember_dsml_matching_close(const char *from, const char *open_tag,
 // Append one parameter as a JSON member `"key":value` into `b` (no comma/brace).
 // string="true"/unset → DSML-unescaped then JSON-string; string="false" → raw
 // JSON (null if empty). `is_str` is the raw `string="..."` attribute or NULL.
+// Internal: records where a string="false" payload stopped parsing so the
+// enclosing parse can report the position. Not part of the stable surface.
+void ember_tool_parser_last_json_error(size_t off, size_t len);
+
 bool ember_dsml_append_arg(ember_buf *b, const char *key,
                            const char *val, size_t val_len, const char *is_str);
 
