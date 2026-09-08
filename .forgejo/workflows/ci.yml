@@ -29,6 +29,9 @@ on:
 
 env:
   DEBIAN_FRONTEND: noninteractive
+  # Runner defaults name the host path; jobs mount the CA under certs/.
+  GIT_SSL_CAINFO: /etc/ssl/certs/otheru-forgejo-root.crt
+  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/otheru-forgejo-root.crt
   CCACHE_COMPRESS: 'true'
   CCACHE_MAXSIZE: 2G
 
