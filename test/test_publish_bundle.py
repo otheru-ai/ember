@@ -67,6 +67,9 @@ def make_bundle(directory: Path) -> Path:
         "".join(json.dumps(r) + "\n" for r in ctx))
 
     summary = summarise_groups(rows)
+    # assemble_bundle copies the raw summary row's vision block verbatim; the
+    # fixture must do the same or the equality check has nothing to compare.
+    summary["vision"] = [r for r in rows if r.get("kind") == "summary"][-1]["vision"]
     summary["by_workload"] = summarise_workloads(wl_on, wl_off)
     summary["by_context_depth"] = summarise_context(ctx)
     (bundle / "summary.json").write_text(json.dumps(summary))
@@ -208,6 +211,41 @@ class ValidateTest(unittest.TestCase):
         # The summary row still CLAIMS its original sample count, so a
         # truthiness check on summary["vision"] would pass this.
         with self.assertRaisesRegex(Invalid, "declares"):
+            self.ok()
+
+    def test_an_edited_vision_metric_is_refused(self):
+        # Counting samples alone left every other vision figure free.
+        summary = self.summary()
+        summary["vision"]["warm_decode_tps"] = 999999
+        self.rewrite("summary.json", summary)
+        with self.assertRaisesRegex(Invalid, "not derived from the measurement"):
+            self.ok()
+
+    def test_a_summary_row_vision_block_that_drifted_is_refused(self):
+        # Both the summary row and summary.json are edited consistently, so the
+        # only remaining disagreement is with the vision_summary row the block
+        # should have been built from. Editing one alone trips the earlier
+        # check and would not reach this one.
+        rows = rows_of("raw-results.jsonl")
+        drifted = None
+        for r in rows:
+            if r.get("kind") == "summary":
+                drifted = dict(r["vision"], warm_decode_tps=123.0)
+                r["vision"] = drifted
+        self.write_rows("raw-results.jsonl", rows)
+        summary = self.summary()
+        summary["vision"] = drifted
+        self.rewrite("summary.json", summary)
+        with self.assertRaisesRegex(Invalid, "vision_summary row"):
+            self.ok()
+
+    def test_an_undeclared_required_group_is_refused(self):
+        rows = rows_of("raw-results.jsonl")
+        for r in rows:
+            if r.get("kind") == "summary":
+                r["groups"].pop("prefill-2048")
+        self.write_rows("raw-results.jsonl", rows)
+        with self.assertRaisesRegex(Invalid, "declares no result for"):
             self.ok()
 
     # ── aggregates ──
@@ -396,3 +434,38 @@ class PublicationStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommitBindingTest(unittest.TestCase):
+    """--expected-commit must never substitute for the online resolution."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.bundle = make_bundle(self.dir / "b")
+        self.addCleanup(self.tmp.cleanup)
+
+    def run_cli(self, resolved, extra=()):
+        argv = ["publish_bundle.py", "--bundle", str(self.bundle),
+                "--release", "v2026.9.8", "--image-inspect", str(INSPECT),
+                *extra]
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(pb, "release_commit", return_value=resolved) \
+                 as resolver, \
+             mock.patch.object(pb, "publication_state",
+                               return_value="complete"):
+            return pb.main(), resolver
+
+    def test_the_release_is_resolved_even_when_a_commit_is_supplied(self):
+        rc, resolver = self.run_cli(COMMIT, ["--expected-commit", COMMIT])
+        self.assertEqual(rc, 0)
+        resolver.assert_called_once()
+
+    def test_a_supplied_commit_that_disagrees_is_refused(self):
+        rc, resolver = self.run_cli(COMMIT, ["--expected-commit", "f" * 40])
+        self.assertEqual(rc, 1)
+        resolver.assert_called_once()
+
+    def test_an_image_from_another_commit_is_refused_online(self):
+        rc, _ = self.run_cli("a" * 40)
+        self.assertEqual(rc, 1)

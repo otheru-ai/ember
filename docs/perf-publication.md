@@ -11,14 +11,29 @@ exist. It measures nothing, starts no server, and needs no GPU.
 
 ## Publish one bundle
 
+Capture the image identity **while the measurement container is alive** —
+afterwards the tag may have moved, and resolving it later answers a different
+question:
+
+```sh
+docker inspect ghcr.io/otheru-ai/ember:2026.9.8 > /tmp/image-inspect.json
+```
+
 ```sh
 # Validate and build the archive without uploading. Always do this first.
+# Offline, the release commit is asserted with --expected-commit.
 python3 scripts/bench/publish_bundle.py \
-  --bundle benchmarks/ember-2026-09-08 --release v2026.9.8 --dry-run
+  --bundle benchmarks/ember-2026-09-08 --release v2026.9.8 \
+  --image-inspect /tmp/image-inspect.json \
+  --expected-commit d46ecc956c545f7bc70a0a7f450330aa1e6efa93 \
+  --dry-run
 
-# Upload to the existing release.
+# Upload to the existing release. The commit is ALWAYS resolved from the
+# release itself here; --expected-commit may only agree with it, never
+# substitute for it.
 python3 scripts/bench/publish_bundle.py \
-  --bundle benchmarks/ember-2026-09-08 --release v2026.9.8
+  --bundle benchmarks/ember-2026-09-08 --release v2026.9.8 \
+  --image-inspect /tmp/image-inspect.json
 ```
 
 It uploads two assets: `ember-<version>-perf-bundle.tar.gz` and its `.sha256`.
@@ -103,7 +118,6 @@ python3 scripts/bench/build_perf_site_data.py \
   --bundle benchmarks/<the v2026.9.5 bundle> \
   --bundle benchmarks/<the v2026.9.8 bundle> \
   --merge-into docs/perf/data.json \
-  --certified \
   --id <bundle-id>=2026.9.5 \
   --id <bundle-id>=2026.9.8 \
   --out docs/perf/data.json
@@ -115,8 +129,11 @@ python3 scripts/bench/build_perf_site_data.py \
 and the earlier releases are lost.
 
 `--id OLD=NEW` renames a bundle whose id is a commit SHA to the release version;
-omit it when the bundle already carries the version. `--certified` marks these
-as coming from release certification rather than a manual run. The merge line
+omit it when the bundle already carries the version. **Do not pass
+`--certified` for a manual backfill.** It marks a bundle as having come from
+release certification, and a hand-run measurement has no certification evidence
+behind it; claiming otherwise on the perf page is the same class of error as
+publishing an unvalidated bundle. The merge line
 prints how many releases were kept, added and replaced — read it before
 committing the result.
 

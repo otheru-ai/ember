@@ -265,6 +265,11 @@ def validate(bundle: Path, release: str, inspect_path=None,
     declared = summary_rows[-1].get("groups") or {}
     if not declared:
         raise Invalid("the summary row declares no per-group results")
+    undeclared = [g for g in REQUIRED_GROUPS if g not in declared]
+    if undeclared:
+        raise Invalid(f"the summary row declares no result for "
+                      f"{', '.join(undeclared)}; iterating only the entries "
+                      f"that exist would let a dropped group pass unnoticed")
     for name, block in declared.items():
         counted = sum(1 for r in requests if r.get("group") == name)
         if counted != block.get("samples"):
@@ -284,8 +289,21 @@ def validate(bundle: Path, release: str, inspect_path=None,
         raise Invalid(
             f"vision declares {declared_vision.get('samples')} samples but "
             f"raw-results.jsonl holds {len(vision_rows)} vision requests")
-    if not any(r.get("kind") == "vision_summary" for r in rows):
+    vision_summary = [r for r in rows if r.get("kind") == "vision_summary"]
+    if not vision_summary:
         raise Invalid("raw-results.jsonl carries no vision_summary row")
+    # assemble_bundle copies the raw declaration into summary.json verbatim, so
+    # anything else there was edited afterwards. Counting samples alone left
+    # every other vision figure -- warm_decode_tps included -- free to be
+    # anything at all.
+    if summary.get("vision") != declared_vision:
+        raise Invalid("summary.json vision does not match the vision block in "
+                      "raw-results.jsonl; it was not derived from the "
+                      "measurement")
+    from_row = {k: v for k, v in vision_summary[-1].items() if k != "kind"}
+    if declared_vision != from_row:
+        raise Invalid("the summary row's vision block does not match the "
+                      "vision_summary row it should have been built from")
 
     # ── the context sweep must be the whole sweep, in both arms ──
     for arm in ("spec-on", "spec-off"):
@@ -490,14 +508,21 @@ def main() -> int:
     args = ap.parse_args()
 
     expected = args.expected_commit
-    if not args.dry_run and not expected:
-        # Online, the release itself is the authority for what commit this
-        # version is, so the operator does not get to assert it.
+    if not args.dry_run:
+        # The release is the authority for what commit this version is, so the
+        # resolution ALWAYS happens online. --expected-commit may only agree
+        # with it; letting it substitute would have made the binding
+        # operator-assertable, which is the opposite of the point.
         try:
-            expected = release_commit(args.release, args.repo)
+            resolved = release_commit(args.release, args.repo)
         except Invalid as exc:
             print(str(exc), file=sys.stderr)
             return 1
+        if expected and expected != resolved:
+            print(f"--expected-commit {expected} disagrees with {args.release}, "
+                  f"which is {resolved}", file=sys.stderr)
+            return 1
+        expected = resolved
 
     try:
         env = validate(args.bundle, args.release, args.image_inspect,
