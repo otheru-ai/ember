@@ -7182,11 +7182,7 @@ static void ggml_compute_forward_conv_2d_dw_cwhn(
     const int64_t row_end = MIN(row_start + rows_per_thread, rows_total);
 
 #ifdef GGML_SIMD
-    #if defined(__ARM_FEATURE_SVE)
-        const int64_t pkg_size = svcntw();
-    #else
         const int64_t pkg_size = GGML_F32_EPR;
-    #endif
     const int64_t pkg_count = c / pkg_size;
     const int64_t c_pkg_end = pkg_count * pkg_size;
 #else
@@ -9480,40 +9476,6 @@ static void ggml_compute_forward_ssm_scan_f32(
                         const float x_dt = x[ii] * dt_soft_plus;
                         float sumf = 0.0f;
 #if defined(GGML_SIMD)
-    #if defined(__ARM_FEATURE_SVE)
-                        const int ggml_f32_epr = svcntw();
-                        const int ggml_f32_step = 1 * ggml_f32_epr;
-
-                        const int np = (nc & ~(ggml_f32_step - 1));
-
-                        GGML_F32_VEC sum = GGML_F32_VEC_ZERO;
-
-                        GGML_F32_VEC adA = GGML_F32_VEC_SET1(dA);
-                        GGML_F32_VEC axdt = GGML_F32_VEC_SET1(x_dt);
-
-                        for (int i = 0; i < np; i += ggml_f32_step) {
-                            // TODO: maybe unroll more?
-                            for (int j = 0; j < 1; j++) {
-                                GGML_F32_VEC t0 = GGML_F32_VEC_LOAD(s0 + i + j*ggml_f32_epr + ii*nc);
-                                GGML_F32_VEC t1 = GGML_F32_VEC_LOAD(B + i + j*ggml_f32_epr + g*nc);
-                                GGML_F32_VEC t2 = GGML_F32_VEC_LOAD(C + i + j*ggml_f32_epr + g*nc);
-
-                                t0 = GGML_F32_VEC_MUL(t0, adA);
-                                t1 = GGML_F32_VEC_MUL(t1, axdt);
-
-                                t0 = GGML_F32_VEC_ADD(t0, t1);
-
-                                sum = GGML_F32_VEC_FMA(sum, t0, t2);
-
-                                GGML_F32_VEC_STORE(s + i + j*ggml_f32_epr + ii*nc, t0);
-                            }
-                        }
-
-                        sumf = GGML_F32xt_REDUCE_ONE(sum);
-    #elif defined(__riscv_v_intrinsic)
-                        // todo: RVV implementation
-                        const int np = 0;
-    #else
                         const int np = (nc & ~(GGML_F32_STEP - 1));
 
                         GGML_F32_VEC sum[GGML_F32_ARR] = { GGML_F32_VEC_ZERO };
@@ -9544,7 +9506,6 @@ static void ggml_compute_forward_ssm_scan_f32(
 
                         // reduce sum0..sum3 to sum0
                         GGML_F32_VEC_REDUCE(sumf, sum);
-    #endif
 #else
                         const int np = 0;
 #endif
@@ -9574,30 +9535,6 @@ static void ggml_compute_forward_ssm_scan_f32(
                     for (int i1 = 0; i1 < nr; ++i1) {
                         const int ii = i1 + h*nr;
                         const float x_dt = x[ii] * dt_soft_plus;
-#if defined(__ARM_FEATURE_SVE)
-                        svfloat32_t vx_dt = GGML_F32_VEC_SET1(x_dt);
-                        svfloat32_t vdt_soft_plus = GGML_F32_VEC_SET1(dt_soft_plus);
-                        svfloat32_t r1_vector = GGML_F32_VEC_ZERO;
-
-                        // d_state
-                        // TODO: what happens when (d_state % svcntw()) != 0?
-                        for (int64_t k = 0; k < nc; k += svcntw()) {
-                            svfloat32_t vA = GGML_F32_VEC_LOAD(&A[h*nc + k]);
-                            svfloat32_t vB = GGML_F32_VEC_LOAD(&B[k + g*nc]);
-                            svfloat32_t vC = GGML_F32_VEC_LOAD(&C[k + g*nc]);
-                            svfloat32_t vs0 = GGML_F32_VEC_LOAD(&s0[ii*nc + k]);
-
-                            svfloat32_t t1 = GGML_F32_VEC_MUL(vdt_soft_plus, vA);
-                            t1 = exp_ps_sve(svptrue_b32(), t1);
-                            svfloat32_t t2 = GGML_F32_VEC_MUL(vx_dt, vB);
-
-                            vs0 = GGML_F32_VEC_FMA(t2, vs0, t1);
-                            r1_vector = GGML_F32_VEC_ADD(GGML_F32_VEC_MUL(vs0, vC), r1_vector);
-
-                            GGML_F32_VEC_STORE(&s[ii*nc + k], vs0);
-                        }
-                        y[ii] = GGML_F32xt_REDUCE_ONE(r1_vector);
-#else
                         float sumf = 0.0f;
                         // NOTE: can't really use GGML_SIMD here because d_state is usually 16
                         //       and also because expf is used within the loop.
@@ -9612,7 +9549,6 @@ static void ggml_compute_forward_ssm_scan_f32(
                             s[i] = state;
                         }
                         y[ii] = sumf;
-#endif
                     }
                 }
             }
@@ -10092,31 +10028,11 @@ static void ggml_compute_forward_rwkv_wkv6_f32(
         #define GGML_F32X_MUL GGML_F32x16_MUL
         #define GGML_F32X_FMA GGML_F32x16_FMA
         #define WKV_VECTOR_SIZE 16
-    #elif defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
-        #define GGML_F32X GGML_F32xt
-        #define GGML_F32X_SET1 GGML_F32xt_SET1
-        #define GGML_F32X_LOAD GGML_F32xt_LOAD
-        #define GGML_F32X_STORE GGML_F32xt_STORE
-        #define GGML_F32X_MUL GGML_F32xt_MUL
-        #define GGML_F32X_FMA GGML_F32xt_FMA
-        #define WKV_VECTOR_SIZE 8
-    #elif defined(__ARM_NEON) && defined(__aarch64__)
-        #define GGML_F32X GGML_F32x4
-        #define GGML_F32X_SET1 GGML_F32x4_SET1
-        #define GGML_F32X_LOAD GGML_F32x4_LOAD
-        #define GGML_F32X_STORE GGML_F32x4_STORE
-        #define GGML_F32X_MUL GGML_F32x4_MUL
-        #define GGML_F32X_FMA GGML_F32x4_FMA
-        #define WKV_VECTOR_SIZE 4
     #endif
 
     #ifdef WKV_VECTOR_SIZE
         int wkv_vector_size;
-        #if defined(__ARM_FEATURE_SVE)
-            wkv_vector_size = svcntw();
-        #else
             wkv_vector_size = WKV_VECTOR_SIZE;
-        #endif
         const int64_t vec_count = head_size / wkv_vector_size;
 
         for (int64_t t = 0; t < T; t++) {
@@ -10304,31 +10220,11 @@ static void ggml_compute_forward_gla_f32(
         #define GGML_F32X_MUL GGML_F32x16_MUL
         #define GGML_F32X_FMA GGML_F32x16_FMA
         #define GLA_VECTOR_SIZE 16
-    #elif defined(__ARM_FEATURE_SVE) && defined(__aarch64__)
-        #define GGML_F32X GGML_F32xt
-        #define GGML_F32X_SET1 GGML_F32xt_SET1
-        #define GGML_F32X_LOAD GGML_F32xt_LOAD
-        #define GGML_F32X_STORE GGML_F32xt_STORE
-        #define GGML_F32X_MUL GGML_F32xt_MUL
-        #define GGML_F32X_FMA GGML_F32xt_FMA
-        #define GLA_VECTOR_SIZE 8
-    #elif defined(__ARM_NEON) && defined(__aarch64__)
-        #define GGML_F32X GGML_F32x4
-        #define GGML_F32X_SET1 GGML_F32x4_SET1
-        #define GGML_F32X_LOAD GGML_F32x4_LOAD
-        #define GGML_F32X_STORE GGML_F32x4_STORE
-        #define GGML_F32X_MUL GGML_F32x4_MUL
-        #define GGML_F32X_FMA GGML_F32x4_FMA
-        #define GLA_VECTOR_SIZE 4
     #endif
 
     #ifdef GLA_VECTOR_SIZE
         int gla_vector_size;
-        #if defined(__ARM_FEATURE_SVE)
-            gla_vector_size = svcntw();
-        #else
             gla_vector_size = GLA_VECTOR_SIZE;
-        #endif
         const int64_t vec_count = head_size / gla_vector_size;
 
         for (int64_t t = 0; t < T; t++) {
@@ -10744,48 +10640,6 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
     int64_t h_stride_2d = head_size * head_size;
 
     #if defined(GGML_SIMD)
-        #if defined(__ARM_FEATURE_SVE) || defined(__riscv_v_intrinsic)
-            // scalar Route to scalar implementation       //TODO: Write SVE code and RVV code
-            for (int64_t t = 0; t < T; t++) {
-                int64_t t_offset = t * t_stride;
-                int64_t state_offset = head_size * C * (t / (T / n_seqs));
-                float * state_cur = state + state_offset;
-                float * state_prev = t % (T / n_seqs) ? state_cur : (float*)dst->src[6]->data + state_offset;
-
-                for (int64_t h = h_start; h < h_end; h++) {
-                    int64_t h_offset = h * h_stride;
-                    int64_t t_h_offset = t_offset + h_offset;
-                    int64_t h_2d_offset = h * h_stride_2d;
-
-                    for (int64_t i = 0; i < head_size; i++) {
-                        int64_t t_h_i_offset = t_h_offset + i;
-                        int64_t h_2d_i_offset = h_2d_offset + i * h_stride;
-
-                        float v_val = v[t_h_i_offset];
-
-                        float sa = 0, result = 0;
-                        for (int64_t j = 0; j < head_size; j++) {
-                            sa += a[t_h_offset + j] * state_prev[h_2d_i_offset + j];
-                        }
-
-                        for (int64_t j = 0; j < head_size; j++) {
-                            int64_t t_h_j_offset = t_h_offset + j;
-                            int64_t h_2d_i_j_offset = h_2d_i_offset + j;
-
-                            float r_val = r[t_h_j_offset];
-                            float w_val = w[t_h_j_offset];
-                            float k_val = k[t_h_j_offset];
-                            float b_val = b[t_h_j_offset];
-                            float kv_val = v_val * k_val;
-                            float prev_state_val = state_prev[h_2d_i_j_offset];
-                            state_cur[h_2d_i_j_offset] = prev_state_val * w_val + kv_val + sa * b_val;
-                            result += state_cur[h_2d_i_j_offset] * r_val;
-                        }
-                        dst_data[t_h_i_offset] = result;
-                    }
-                }
-            }
-        #else
             for (int64_t t = 0; t < T; t++) {
                 int64_t t_offset = t * t_stride;
                 int64_t state_offset = head_size * C * (t / (T / n_seqs));
@@ -10863,7 +10717,6 @@ static void ggml_compute_forward_rwkv_wkv7_f32(
                     }
                 }
             }
-        #endif
     #else
         for (int64_t t = 0; t < T; t++) {
             int64_t t_offset = t * t_stride;

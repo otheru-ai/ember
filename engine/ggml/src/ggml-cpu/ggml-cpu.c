@@ -43,10 +43,6 @@
 #include <omp.h>
 #endif
 
-#if defined(__ARM_FEATURE_SVE) || defined(__ARM_FEATURE_MATMUL_INT8)
-#undef GGML_USE_LLAMAFILE
-#endif
-
 #ifdef GGML_USE_LLAMAFILE
 #include "llamafile/sgemm.h"
 #endif
@@ -241,18 +237,6 @@ static void ggml_compute_forward_ds4_indexer_mask(
     }
 }
 
-#if defined(__ARM_ARCH)
-struct ggml_arm_arch_features_type {
-    int sve_cnt;
-} ggml_arm_arch_features = { 0 };
-#endif
-
-#if defined(__riscv)
-struct ggml_riscv_arch_features_type {
-    int rvv_vlen;
-} ggml_riscv_arch_features = { 0 };
-#endif
-
 #if defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
@@ -415,11 +399,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_q4_0,
         .vec_dot                  = ggml_vec_dot_q4_0_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
-#if defined (__ARM_FEATURE_MATMUL_INT8)
-        .nrows                    = 2,
-#else
         .nrows                    = 1,
-#endif
     },
     [GGML_TYPE_Q4_0_ROCMI4] = {
         .from_float               = rocmfpx_quantize_row_i4,
@@ -431,11 +411,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_q4_1,
         .vec_dot                  = ggml_vec_dot_q4_1_q8_1,
         .vec_dot_type             = GGML_TYPE_Q8_1,
-#if defined (__ARM_FEATURE_MATMUL_INT8)
-        .nrows                    = 2,
-#else
         .nrows                    = 1,
-#endif
     },
     [GGML_TYPE_Q5_0] = {
         .from_float               = quantize_row_q5_0,
@@ -453,11 +429,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_q8_0,
         .vec_dot                  = ggml_vec_dot_q8_0_q8_0,
         .vec_dot_type             = GGML_TYPE_Q8_0,
-#if defined (__ARM_FEATURE_MATMUL_INT8)
-        .nrows                    = 2,
-#else
         .nrows                    = 1,
-#endif
     },
     [GGML_TYPE_Q8_1] = {
         .from_float               = quantize_row_q8_1,
@@ -492,11 +464,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_q4_K,
         .vec_dot                  = ggml_vec_dot_q4_K_q8_K,
         .vec_dot_type             = GGML_TYPE_Q8_K,
-#if defined (__ARM_FEATURE_MATMUL_INT8)
-        .nrows                    = 2,
-#else
         .nrows                    = 1,
-#endif
     },
     [GGML_TYPE_Q5_K] = {
         .from_float               = quantize_row_q5_K,
@@ -508,11 +476,7 @@ static const struct ggml_type_traits_cpu type_traits_cpu[GGML_TYPE_COUNT] = {
         .from_float               = quantize_row_q6_K,
         .vec_dot                  = ggml_vec_dot_q6_K_q8_K,
         .vec_dot_type             = GGML_TYPE_Q8_K,
-#if defined (__ARM_FEATURE_MATMUL_INT8)
-        .nrows                    = 2,
-#else
         .nrows                    = 1,
-#endif
     },
     [GGML_TYPE_IQ2_XXS] = {
         .from_float               = NULL,
@@ -697,22 +661,9 @@ struct ggml_compute_state {
 };
 
 // Helpers for polling loops
-#if defined(__aarch64__) && ( defined(__clang__) || defined(__GNUC__) )
-static inline void ggml_thread_cpu_relax(void) {
-    __asm__ volatile("yield" ::: "memory");
-}
-#elif defined(__x86_64__)
+#if   defined(__x86_64__)
 static inline void ggml_thread_cpu_relax(void) {
     _mm_pause();
-}
-#elif defined(__riscv)
-static inline void ggml_thread_cpu_relax(void) {
-    #ifdef __riscv_zihintpause
-        __asm__ __volatile__ ("pause");
-    #else
-        /* Encoding of the pause instruction */
-        __asm__ __volatile__ (".4byte 0x100000F");
-    #endif
 }
 #else
 static inline void ggml_thread_cpu_relax(void) {;}
@@ -906,25 +857,7 @@ bool ggml_is_numa(void) {
     return g_state.numa.n_nodes > 1;
 }
 
-#if defined(__ARM_ARCH)
-#if defined(__aarch64__) && defined(__ARM_FEATURE_SVE)
-#include <arm_sve.h>
-static void ggml_init_arm_arch_features(void) {
-    ggml_arm_arch_features.sve_cnt = svcntb();
-}
-#else
-static void ggml_init_arm_arch_features(void) {}
-#endif
-#endif // __ARM_ARCH
-
-#if defined(__riscv) && defined(__riscv_v_intrinsic)
-#include <riscv_vector.h>
-static void ggml_init_riscv_arch_features(void) {
-    ggml_riscv_arch_features.rvv_vlen = __riscv_vlenb();
-}
-#else
 static void ggml_init_riscv_arch_features(void) {}
-#endif
 
 struct ggml_tensor * ggml_new_i32(struct ggml_context * ctx, int32_t value) {
     GGML_ASSERT(!ggml_get_no_alloc(ctx));
@@ -3606,13 +3539,6 @@ void ggml_cpu_fp32_to_fp16(const float * x, ggml_fp16_t * y, int64_t n) {
         __m128i y_vec = _mm_cvtps_ph(x_vec, _MM_FROUND_TO_NEAREST_INT);
         _mm_storel_epi64((__m128i *)(y + i), y_vec);
     }
-#elif defined(__riscv_zvfh)
-    for (int vl; i < n; i += vl) {
-        vl = __riscv_vsetvl_e32m2(n - i);
-        vfloat32m2_t vx = __riscv_vle32_v_f32m2(&x[i], vl);
-        vfloat16m1_t vy = __riscv_vfncvt_f_f_w_f16m1(vx, vl);
-        __riscv_vse16_v_f16m1((_Float16 *)&y[i], vy, vl);
-    }
 #endif
     for (; i < n; ++i) {
         y[i] = GGML_CPU_FP32_TO_FP16(x[i]);
@@ -3638,32 +3564,6 @@ void ggml_cpu_fp16_to_fp32(const ggml_fp16_t * x, float * y, int64_t n) {
         __m128i x_vec = _mm_loadl_epi64((const __m128i *)(x + i));
         __m128 y_vec = _mm_cvtph_ps(x_vec);
         _mm_storeu_ps(y + i, y_vec);
-    }
-
-#elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfhmin)
-    // calculate step size
-    const int epr = __riscv_vsetvlmax_e16m2();
-    const int step = epr * 2;
-    const int np = (n & ~(step - 1));
-
-    // unroll by 2
-    for (; i < np; i += step) {
-        vfloat16m2_t ax0 = __riscv_vle16_v_f16m2((const _Float16*)x + i, epr);
-        vfloat32m4_t ay0 = __riscv_vfwcvt_f_f_v_f32m4(ax0, epr);
-        __riscv_vse32_v_f32m4(y + i, ay0, epr);
-
-        vfloat16m2_t ax1 = __riscv_vle16_v_f16m2((const _Float16*)x + i + epr, epr);
-        vfloat32m4_t ay1 = __riscv_vfwcvt_f_f_v_f32m4(ax1, epr);
-        __riscv_vse32_v_f32m4(y + i + epr, ay1, epr);
-    }
-
-    // leftovers
-    int vl;
-    for (i = np; i < n; i += vl) {
-        vl = __riscv_vsetvl_e16m2(n - i);
-        vfloat16m2_t ax0 = __riscv_vle16_v_f16m2((const _Float16*)x + i, vl);
-        vfloat32m4_t ay0 = __riscv_vfwcvt_f_f_v_f32m4(ax0, vl);
-        __riscv_vse32_v_f32m4(y + i, ay0, vl);
     }
 
 #endif
@@ -3709,31 +3609,6 @@ void ggml_cpu_bf16_to_fp32(const ggml_bf16_t * x, float * y, int64_t n) {
                                     _mm_loadu_si128(
                                         (const __m128i *)(x + i))),
                                 16)));
-    }
-#elif defined(__riscv_v_intrinsic) && defined(__riscv_zvfbfmin)
-    // calculate step size
-    const int epr = __riscv_vsetvlmax_e16m2();
-    const int step = epr * 2;
-    const int np = (n & ~(step - 1));
-
-    // unroll by 2
-    for (; i < np; i += step) {
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16*)x + i, epr);
-        vfloat32m4_t ay0 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax0, epr);
-        __riscv_vse32_v_f32m4(y + i, ay0, epr);
-
-        vbfloat16m2_t ax1 = __riscv_vle16_v_bf16m2((const __bf16*)x + i + epr, epr);
-        vfloat32m4_t ay1 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax1, epr);
-        __riscv_vse32_v_f32m4(y + i + epr, ay1, epr);
-    }
-
-    // leftovers
-    int vl;
-    for (i = np; i < n; i += vl) {
-        vl = __riscv_vsetvl_e16m2(n - i);
-        vbfloat16m2_t ax0 = __riscv_vle16_v_bf16m2((const __bf16*)x + i, vl);
-        vfloat32m4_t ay0 = __riscv_vfwcvtbf16_f_f_v_f32m4(ax0, vl);
-        __riscv_vse32_v_f32m4(y + i, ay0, vl);
     }
 #endif
     for (; i < n; i++) {
@@ -3814,27 +3689,15 @@ int ggml_cpu_has_fma(void) {
 }
 
 int ggml_cpu_has_arm_fma(void) {
-#if defined(__ARM_FEATURE_FMA)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_riscv_v(void) {
-#if defined(__riscv_v_intrinsic)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_get_rvv_vlen(void) {
-#if defined(__riscv) && defined(__riscv_v_intrinsic)
-    return ggml_riscv_arch_features.rvv_vlen;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_f16c(void) {
@@ -3846,19 +3709,11 @@ int ggml_cpu_has_f16c(void) {
 }
 
 int ggml_cpu_has_fp16_va(void) {
-#if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_wasm_simd(void) {
-#if defined(__wasm_simd128__)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_llamafile(void) {
@@ -3886,67 +3741,35 @@ int ggml_cpu_has_ssse3(void) {
 }
 
 int ggml_cpu_has_vsx(void) {
-#if defined(__POWER9_VECTOR__)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_vxe(void) {
-#if defined(__VXE__) || defined(__VXE2__)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_neon(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_NEON)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_dotprod(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_FEATURE_DOTPROD)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_sve(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_FEATURE_SVE)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_matmul_int8(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_FEATURE_MATMUL_INT8)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_get_sve_cnt(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_FEATURE_SVE)
-    return ggml_arm_arch_features.sve_cnt;
-#else
     return 0;
-#endif
 }
 
 int ggml_cpu_has_sme(void) {
-#if defined(__ARM_ARCH) && defined(__ARM_FEATURE_SME)
-    return 1;
-#else
     return 0;
-#endif
 }
 
 void ggml_cpu_init(void) {
@@ -4003,14 +3826,6 @@ void ggml_cpu_init(void) {
             }
 #endif
         }
-
-#if defined(__ARM_ARCH)
-        ggml_init_arm_arch_features();
-#endif
-
-#if defined(__riscv)
-        ggml_init_riscv_arch_features();
-#endif
 
         is_first_call = false;
     }
