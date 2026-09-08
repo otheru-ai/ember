@@ -575,6 +575,12 @@ if(Python3_Interpreter_FOUND)
             $<TARGET_FILE:ember-server>)
   set_tests_properties(tool_safety_server PROPERTIES TIMEOUT 20)
   add_test(
+    NAME metrics_server
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_metrics_server.py
+            $<TARGET_FILE:ember-server>)
+  set_tests_properties(metrics_server PROPERTIES TIMEOUT 20)
+  add_test(
     NAME request_budgets_server
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_request_budgets_server.py

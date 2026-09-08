@@ -2365,7 +2365,13 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // getters return interior pointers that eviction can free, so callers must
     // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
+    const double queue_start = monotonic_now();
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
+    // Only when generation actually serialises. With batching there is no lock
+    // to wait on, so recording it anyway would bury the real distribution
+    // under zeros and quietly misreport the batching path as having no queue.
+    if (serialize)
+        ember_metrics_record_queue_wait(monotonic_now() - queue_start);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);
@@ -2944,6 +2950,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
             n_prompt, restore_len,
             n_prompt > 0 ? 100.0 * restore_len / n_prompt : 0.0,
             restore_slot, snap_slot >= 0 ? snap_cut : -1);
+    ember_metrics_record_prefix_cache(n_prompt, restore_len);
 
     int max_stop_len = 0;
     for (int si = 0; si < req->n_stop; si++) {
@@ -3950,6 +3957,15 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 "invalid_request_error", "invalid_request");
         }
         if (root) ember_json_free(root);
+        return;
+    }
+    if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/metrics") == 0) {
+        ember_buf m = {0};
+        ember_metrics_render(&m);
+        // text/plain with the exposition version is what scrapers content-negotiate.
+        respond(fd, 200, "text/plain; version=0.0.4; charset=utf-8",
+                m.ptr ? m.ptr : "");
+        ember_buf_free(&m);
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/status") == 0) {
