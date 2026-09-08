@@ -3739,149 +3739,36 @@ template <typename BLOC_TYPE, int64_t INTER_SIZE, int64_t NB_COLS, ggml_type PAR
 }  // namespace ggml::cpu::repack
 
 static const ggml::cpu::tensor_traits * ggml_repack_get_optimal_repack_type(const struct ggml_tensor * cur) {
-    // instance for Q4
-    static const ggml::cpu::repack::tensor_traits<block_q4_0, 4, 4, GGML_TYPE_Q8_0> q4_0_4x4_q8_0;
-    static const ggml::cpu::repack::tensor_traits<block_q4_0, 8, 4, GGML_TYPE_Q8_0> q4_0_4x8_q8_0;
-    static const ggml::cpu::repack::tensor_traits<block_q4_0, 8, 8, GGML_TYPE_Q8_0> q4_0_8x8_q8_0;
-
-    // instance for Q4_K
-    static const ggml::cpu::repack::tensor_traits<block_q4_K, 4, 8, GGML_TYPE_Q8_K> q4_K_8x4_q8_K;
-    static const ggml::cpu::repack::tensor_traits<block_q4_K, 8, 8, GGML_TYPE_Q8_K> q4_K_8x8_q8_K;
-
-    // instance for Q5_K
-    static const ggml::cpu::repack::tensor_traits<block_q5_K, 4, 8, GGML_TYPE_Q8_K> q5_K_8x4_q8_K;
-    static const ggml::cpu::repack::tensor_traits<block_q5_K, 8, 8, GGML_TYPE_Q8_K> q5_K_8x8_q8_K;
-
-    // instance for Q6_K
-    static const ggml::cpu::repack::tensor_traits<block_q6_K, 4, 8, GGML_TYPE_Q8_K> q6_K_8x4_q8_K;
-    static const ggml::cpu::repack::tensor_traits<block_q6_K, 8, 8, GGML_TYPE_Q8_K> q6_K_8x8_q8_K;
-
-    // instance for Q2
-    static const ggml::cpu::repack::tensor_traits<block_q2_K, 8, 8, GGML_TYPE_Q8_K> q2_K_8x8_q8_K;
-
-    // instance for IQ4
-    static const ggml::cpu::repack::tensor_traits<block_iq4_nl, 4, 4, GGML_TYPE_Q8_0> iq4_nl_4x4_q8_0;
-    static const ggml::cpu::repack::tensor_traits<block_iq4_nl, 8, 8, GGML_TYPE_Q8_0> iq4_nl_8x8_q8_0;
-
-    // instance for MXFP4
-    static const ggml::cpu::repack::tensor_traits<block_mxfp4, 4, 4, GGML_TYPE_Q8_0> mxfp4_4x4_q8_0;
-    static const ggml::cpu::repack::tensor_traits<block_mxfp4, 8, 8, GGML_TYPE_Q8_0> mxfp4_8x8_q8_0;
-
-    // instance for Q8_0
-    static const ggml::cpu::repack::tensor_traits<block_q8_0, 4, 4, GGML_TYPE_Q8_0> q8_0_4x4_q8_0;
-    static const ggml::cpu::repack::tensor_traits<block_q8_0, 8, 4, GGML_TYPE_Q8_0> q8_0_4x8_q8_0;
-
-    // instances for RISC-V
-    //
-    // These implement outer-product style matrix multiplication kernels with
-    // an interleave of 1.
-
-    if (cur->type == GGML_TYPE_Q4_0) {
-        if (ggml_cpu_has_avx2() || (ggml_cpu_has_sve() && ggml_cpu_has_matmul_int8() && ggml_cpu_get_sve_cnt() == QK8_0)) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q4_0_8x8_q8_0;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_matmul_int8()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &q4_0_4x8_q8_0;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &q4_0_4x4_q8_0;
-            }
-        }
-        if (ggml_cpu_has_riscv_v()) {
-        }
-    } else if (cur->type == GGML_TYPE_Q4_K) {
-        if (ggml_cpu_has_avx2()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q4_K_8x8_q8_K;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_matmul_int8()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q4_K_8x8_q8_K;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q4_K_8x4_q8_K;
-            }
-        }
-        if (ggml_cpu_has_riscv_v()) {
-        }
-    } else if (cur->type == GGML_TYPE_Q2_K) {
-        if (ggml_cpu_has_avx512()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q2_K_8x8_q8_K;
-            }
-        }
-        if (ggml_cpu_has_riscv_v()) {
-        }
-    } else if (cur->type == GGML_TYPE_Q5_K) {
-        if (ggml_cpu_has_neon() && ggml_cpu_has_matmul_int8()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q5_K_8x8_q8_K;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q5_K_8x4_q8_K;
-            }
-        }
-    } else if (cur->type == GGML_TYPE_Q6_K) {
-        if (ggml_cpu_has_neon() && ggml_cpu_has_matmul_int8()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q6_K_8x8_q8_K;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &q6_K_8x4_q8_K;
-            }
-        }
-    } else if (cur->type == GGML_TYPE_IQ4_NL) {
-        if (ggml_cpu_has_avx2()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &iq4_nl_8x8_q8_0;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &iq4_nl_4x4_q8_0;
-            }
-        }
-        if (ggml_cpu_has_riscv_v()) {
-        }
-    } else if (cur->type == GGML_TYPE_MXFP4) {
-        if (ggml_cpu_has_avx2()) {
-            if (cur->ne[1] % 8 == 0) {
-                return &mxfp4_8x8_q8_0;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &mxfp4_4x4_q8_0;
-            }
-        }
-    } else if (cur->type == GGML_TYPE_Q8_0) {
-        if (ggml_cpu_has_neon() && ggml_cpu_has_matmul_int8()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &q8_0_4x8_q8_0;
-            }
-        }
-        if (ggml_cpu_has_neon() && ggml_cpu_has_dotprod()) {
-            if (cur->ne[1] % 4 == 0) {
-                return &q8_0_4x4_q8_0;
-            }
-        }
-        if (ggml_cpu_has_riscv_v()) {
-        }
+    if (cur->ne[1] % 8 != 0) {
+        return nullptr;
     }
-
-    return nullptr;
+    if (cur->type == GGML_TYPE_Q2_K) {
+        static const ggml::cpu::repack::tensor_traits<block_q2_K, 8, 8, GGML_TYPE_Q8_K> repack;
+        return ggml_cpu_has_avx512() ? &repack : nullptr;
+    }
+    if (!ggml_cpu_has_avx2()) {
+        return nullptr;
+    }
+    switch (cur->type) {
+        case GGML_TYPE_Q4_0: {
+            static const ggml::cpu::repack::tensor_traits<block_q4_0, 8, 8, GGML_TYPE_Q8_0> repack;
+            return &repack;
+        }
+        case GGML_TYPE_Q4_K: {
+            static const ggml::cpu::repack::tensor_traits<block_q4_K, 8, 8, GGML_TYPE_Q8_K> repack;
+            return &repack;
+        }
+        case GGML_TYPE_IQ4_NL: {
+            static const ggml::cpu::repack::tensor_traits<block_iq4_nl, 8, 8, GGML_TYPE_Q8_0> repack;
+            return &repack;
+        }
+        case GGML_TYPE_MXFP4: {
+            static const ggml::cpu::repack::tensor_traits<block_mxfp4, 8, 8, GGML_TYPE_Q8_0> repack;
+            return &repack;
+        }
+        default:
+            return nullptr;
+    }
 }
 
 static enum ggml_status ggml_backend_cpu_repack_buffer_init_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor) {

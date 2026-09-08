@@ -12,18 +12,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#ifdef __ARM_FEATURE_SVE
-#include <arm_sve.h>
-#endif // __ARM_FEATURE_SVE
-
-#if defined(__ARM_NEON) && !defined(__CUDACC__) && !defined(__MUSACC__)
-// if YCM cannot find <arm_neon.h>, make a symbolic link to it, for example:
-//
-//   $ ln -sfn /Library/Developer/CommandLineTools/usr/lib/clang/13.1.6/include/arm_neon.h ./src/
-//
-#include <arm_neon.h>
-#endif
-
 #ifdef __cplusplus
 extern "C" {
 #endif

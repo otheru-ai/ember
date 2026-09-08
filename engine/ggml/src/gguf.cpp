@@ -18,13 +18,8 @@
 #define GGUF_MAX_STRING_LENGTH  (1024*1024*1024)
 #define GGUF_MAX_ARRAY_ELEMENTS (1024*1024*1024)
 
-#ifdef _WIN32
-#    define gguf_ftell _ftelli64
-#    define gguf_fseek _fseeki64
-#else
 #    define gguf_ftell ftello
 #    define gguf_fseek fseeko
-#endif
 
 template <typename T>
 struct type_to_gguf_type;

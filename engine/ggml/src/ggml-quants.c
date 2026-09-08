@@ -637,12 +637,7 @@ static float make_qx_quants(int n, int nmax, const float * GGML_RESTRICT x, int8
     }
     float sumlx = 0;
     float suml2 = 0;
-#ifdef HAVE_BUGGY_APPLE_LINKER
-    // use 'volatile' to prevent unroll and work around a bug in Apple ld64 1015.7
-    for (volatile int i = 0; i < n; ++i) {
-#else
     for (int i = 0; i < n; ++i) {
-#endif
         int l = nearest_int(iscale * x[i]);
         l = MAX(-nmax, MIN(nmax-1, l));
         L[i] = l + nmax;
@@ -786,12 +781,7 @@ static float make_qkx2_quants(int n, int nmax, const float * GGML_RESTRICT x, co
     float max = x[0];
     float sum_w = weights[0];
     float sum_x = sum_w * x[0];
-#ifdef HAVE_BUGGY_APPLE_LINKER
-    // use 'volatile' to prevent unroll and work around a bug in Apple ld64 1015.7
-    for (volatile int i = 1; i < n; ++i) {
-#else
     for (int i = 1; i < n; ++i) {
-#endif
         if (x[i] < min) min = x[i];
         if (x[i] > max) max = x[i];
         float w = weights[i];
@@ -980,12 +970,7 @@ static float make_qkx3_quants(int n, int nmax, const float * GGML_RESTRICT x, co
     float max = x[0];
     float sum_w = weights ? weights[0] : x[0]*x[0];
     float sum_x = sum_w * x[0];
-#ifdef HAVE_BUGGY_APPLE_LINKER
-    // use 'volatile' to prevent unroll and work around a bug in Apple ld64 1015.7
-    for (volatile int i = 1; i < n; ++i) {
-#else
     for (int i = 1; i < n; ++i) {
-#endif
         if (x[i] < min) min = x[i];
         if (x[i] > max) max = x[i];
         float w = weights ? weights[i] : x[i]*x[i];
@@ -5330,21 +5315,6 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                         GGML_UNREACHABLE();
                     }
                 }
-#elif defined(__ARM_NEON)
-                for (; i + 7 < nb; i += 8) {
-                    uint16x8_t v = vld1q_u16(f + i);
-                    uint16x8_t vexp = vandq_u16(v, vdupq_n_u16(0x7c00));
-                    uint16x8_t cmp = vceqq_u16(vexp, vdupq_n_u16(0x7c00));
-                    uint64_t mask = vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(cmp, 4)), 0);
-                    if (mask) {
-                        for (size_t j = 0; j < 8; ++j) {
-                            if (!validate_fp16(f[i + j], i + j)) {
-                                return false;
-                            }
-                        }
-                        GGML_UNREACHABLE();
-                    }
-                }
 #endif
                 for (; i < nb; ++i) {
                     if (!validate_fp16(f[i], i)) {
@@ -5364,21 +5334,6 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
                     int mask = _mm256_movemask_epi8(cmp);
                     if (mask) {
                         for (size_t j = 0; j < 8; ++j) {
-                            if (!validate_float(f[i + j], i + j)) {
-                                return false;
-                            }
-                        }
-                        GGML_UNREACHABLE();
-                    }
-                }
-#elif defined(__ARM_NEON)
-                for (; i + 3 < nb; i += 4) {
-                    uint32x4_t v = vld1q_u32((const uint32_t *)f + i);
-                    uint32x4_t vexp = vandq_u32(v, vdupq_n_u32(0x7f800000));
-                    uint32x4_t cmp = vceqq_u32(vexp, vdupq_n_u32(0x7f800000));
-                    uint64_t mask = vget_lane_u64(vreinterpret_u64_u16(vshrn_n_u32(cmp, 8)), 0);
-                    if (mask) {
-                        for (size_t j = 0; j < 4; ++j) {
                             if (!validate_float(f[i + j], i + j)) {
                                 return false;
                             }

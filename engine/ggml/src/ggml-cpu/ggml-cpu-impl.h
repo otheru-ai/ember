@@ -30,41 +30,14 @@ struct ggml_compute_params {
 };
 
 
-#if defined(_MSC_VER)
-
-#define m512bh(p) p
-#define m512i(p) p
-
-#else
-
 #define m512bh(p) (__m512bh)(p)
 #define m512i(p) (__m512i)(p)
 
-#endif
-
 // __FMA__ and __F16C__ are not defined in MSVC, however they are implied with AVX2/AVX512
-#if defined(_MSC_VER) && (defined(__AVX2__) || defined(__AVX512F__))
-#ifndef __FMA__
-#define __FMA__
-#endif
-#ifndef __F16C__
-#define __F16C__
-#endif
-#endif
 
 // __SSE3__ and __SSSE3__ are not defined in MSVC, but SSE3/SSSE3 are present when AVX/AVX2/AVX512 are available
-#if defined(_MSC_VER) && (defined(__AVX__) || defined(__AVX2__) || defined(__AVX512F__))
-#ifndef __SSE3__
-#define __SSE3__
-#endif
-#ifndef __SSSE3__
-#define __SSSE3__
-#endif
-#endif
 
-#if defined(_MSC_VER) || defined(__MINGW32__)
-#include <intrin.h>
-#elif defined(__SSE__) || defined(__SSE3__) || defined(__SSSE3__) || defined(__AVX__) || defined(__F16C__) || defined(__AVX2__) || defined(__AVX512F__) || defined(__AVX512BF16__)
+#if   defined(__SSE__) || defined(__SSE3__) || defined(__SSSE3__) || defined(__AVX__) || defined(__F16C__) || defined(__AVX2__) || defined(__AVX512F__) || defined(__AVX512BF16__)
 #include <immintrin.h>
 #endif
 

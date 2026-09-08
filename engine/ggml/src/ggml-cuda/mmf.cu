@@ -2,14 +2,6 @@
 #include "mmf.cuh"
 #include "mmid.cuh"
 
-static __forceinline__ int mmf_get_rows_per_block(const int cc) {
-    if (GGML_CUDA_CC_IS_CDNA(cc)) {
-        return MMF_ROWS_PER_BLOCK_CDNA;
-    } else {
-        return MMF_ROWS_PER_BLOCK;
-    }
-}
-
 void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(!ids ||  ids->type == GGML_TYPE_I32);
@@ -96,9 +88,7 @@ void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * sr
         ids_info_ptr = &ids_info;
     }
 
-    const int device    = ggml_cuda_get_device();
-    const int cc        = ggml_cuda_info().devices[device].cc;
-    const int rows_per_block = mmf_get_rows_per_block(cc);
+    const int rows_per_block = MMF_ROWS_PER_BLOCK;
 
     switch (src0->type) {
         case GGML_TYPE_F32: {
@@ -151,11 +141,7 @@ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const 
             return false;
         }
     }
-    if (src0_ne[1] % mmf_get_rows_per_block(cc) != 0) {
-        return false;
-    }
-
-    if (GGML_CUDA_CC_IS_CDNA3(cc) && type == GGML_TYPE_BF16) {
+    if (src0_ne[1] % MMF_ROWS_PER_BLOCK != 0) {
         return false;
     }
 
@@ -166,25 +152,19 @@ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const 
             return false;
         }
     } else {
-        if (GGML_CUDA_CC_IS_RDNA3_0(cc) && src1_ncols > 8) {
-            return false;
-        } else if (GGML_CUDA_CC_IS_CDNA2(cc) && (type == GGML_TYPE_F16 || type == GGML_TYPE_BF16)) {
-            //TODO: truse CDNA2 as CDNA1, tune the perf when CDNA2 is available.
-            return false;
-        } else if (GGML_CUDA_CC_IS_CDNA1(cc) && (type == GGML_TYPE_F16 || type == GGML_TYPE_BF16)) {
-            return false;
-        } else if (src1_ncols > 16) {
+        if (src1_ncols > 16) {
             return false;
         }
     }
 
     switch (type) {
+        // F32 mmf needs Ampere MMA or CDNA MFMA; gfx1151 has neither, so it
+        // falls through to the other paths exactly as it did before.
         case GGML_TYPE_F32:
-            return ampere_mma_available(cc) || amd_mfma_available(cc);
+            return false;
         case GGML_TYPE_F16:
-            return volta_mma_available(cc) || turing_mma_available(cc) || amd_wmma_available(cc) || amd_mfma_available(cc);
         case GGML_TYPE_BF16:
-            return ampere_mma_available(cc) || amd_wmma_available(cc) || amd_mfma_available(cc);
+            return amd_wmma_available(cc);
         default:
             return false;
     }

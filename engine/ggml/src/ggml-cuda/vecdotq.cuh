@@ -33,7 +33,6 @@ static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32
 // This function selects those bytes from table that are at those indices and returns them as int2.
 // The first int contains the bytes with even indices in q4, the second int contains the bytes with odd indices in q4.
 static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, const int8_t * table) {
-#if defined(GGML_USE_HIP)
     // Load the 16-byte table into four 32-bit unsigned integers.
     const uint32_t *values = (const uint32_t *)table;
 
@@ -55,44 +54,6 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
     uint32_t res_y = __builtin_amdgcn_perm(v_odd_high, v_odd_low, mask_odd);
 
     return make_int2(res_x, res_y);
-#elif !defined(GGML_USE_MUSA)
-    // CUDA does not have an instruction for selecting bytes with 4 bit indices.
-    // However, __byte_perm is an instruction that selects bytes with 3 bit indices that can be used instead.
-    const uint32_t * table32 = (const uint32_t *) table;
-
-    // __byte_perm selects bytes based on the lower 16 bits in its third argument.
-    // Therefore, do 2 iterations over the 32 bits in q4 with 0 and 16 shift.
-    // To handle the fourth bit, first call _byte_perm both for the low and the high 64 bit of table, using the low 3 bits.
-    // Then, call __byte_perm again to select from the low and high bytes based on the fourth bit.
-    uint32_t tmp[2];
-    const uint32_t low_high_selection_indices = (0x32103210 | ((q4 & 0x88888888) >> 1));
-#pragma unroll
-    for (uint32_t i = 0; i < 2; ++i) {
-        const uint32_t shift = 16 * i;
-
-        const uint32_t low  = __byte_perm(table32[0], table32[1], q4 >> shift);
-        const uint32_t high = __byte_perm(table32[2], table32[3], q4 >> shift);
-        tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
-    }
-
-    // tmp contains the bytes from tyble in the same order as the 4 bit indices in q4.
-    // However, for the result we need ints with all even/odd 4 bit indices in q4.
-    // Therefore, 2 more calls to __byte_perm to put the bytes in the correct order.
-    return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420), __byte_perm(tmp[0], tmp[1], 0x7531));
-#else
-    // Generic implementation.
-    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
-    const int8_t * q0_8   = (const int8_t *) &q0_32;
-    const char4    val0_8 = make_char4(
-        table[q0_8[0]], table[q0_8[1]], table[q0_8[2]], table[q0_8[3]]);
-
-    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
-    const int8_t * q1_8   = (const int8_t *) &q1_32;
-    const char4    val1_8 = make_char4(
-        table[q1_8[0]], table[q1_8[1]], table[q1_8[2]], table[q1_8[3]]);
-
-    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
-#endif
 }
 
 static __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
@@ -149,16 +110,9 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q4_1_q8_1_imp
         sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi);
     }
 
-#ifdef FAST_FP16_AVAILABLE
     const float2 tmp = __half22float2(__hmul2(dm4, ds8));
     const float d4d8 = tmp.x;
     const float m4s8 = tmp.y;
-#else
-    const float2 dm4f = __half22float2(dm4);
-    const float2 ds8f = __half22float2(ds8);
-    const float d4d8 = dm4f.x * ds8f.x;
-    const float m4s8 = dm4f.y * ds8f.y;
-#endif // FAST_FP16_AVAILABLE
 
     // scale second part of sum by QI8_1/(vdr * QR4_1) to compensate for multiple threads adding it
     return sumi * d4d8 + m4s8 / (QI8_1 / (vdr * QR4_1));
@@ -220,16 +174,9 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
         sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi); // SIMD dot product of quantized values
     }
 
-#ifdef FAST_FP16_AVAILABLE
     const float2 tmp = __half22float2(__hmul2(dm5, ds8));
     const float d5d8 = tmp.x;
     const float m5s8 = tmp.y;
-#else
-    const float2 dm5f = __half22float2(dm5);
-    const float2 ds8f = __half22float2(ds8);
-    const float d5d8 = dm5f.x * ds8f.x;
-    const float m5s8 = dm5f.y * ds8f.y;
-#endif // FAST_FP16_AVAILABLE
 
     // scale second part of sum by QI5_1 / vdr to compensate for multiple threads adding it
     return sumi*d5d8 + m5s8 / (QI5_1 / vdr);
@@ -263,16 +210,9 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q8_1_q8_1_imp
         sumi = ggml_cuda_dp4a(v[i], u[i], sumi);
     }
 
-#ifdef FAST_FP16_AVAILABLE
     const float2 tmp = __half22float2(__hmul2(dm8, ds8));
     const float d8d8 = tmp.x;
     const float m8s8 = tmp.y;
-#else
-    const float2 dm8f = __half22float2(dm8);
-    const float2 ds8f = __half22float2(ds8);
-    const float d8d8 = dm8f.x * ds8f.x;
-    const float m8s8 = dm8f.y * ds8f.y;
-#endif // FAST_FP16_AVAILABLE
 
     // scale second part of sum by QI8_1/ vdr to compensate for multiple threads adding it
     return sumi*d8d8 + m8s8 / (QI8_1 / vdr);
@@ -336,9 +276,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 #define GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR 2
 #endif
 
-#if GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 1 && \
-    GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 2 && \
-    GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 4
+#if GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 1 &&     GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 2 &&     GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR != 4
 #error "GGML_ROCMFP4_FAST_Q8_1_MMVQ_VDR must be 1, 2, or 4"
 #endif
 
@@ -407,7 +345,6 @@ static __device__ __forceinline__ int rocmfpx_pack4_fp6_bits24_vec_cuda(const ui
 }
 
 static __device__ __forceinline__ int rocmfpx_pack4_fp3_bits12_vec_cuda(const uint32_t bits12) {
-#if defined(GGML_USE_HIP)
     // Byte tables for codes {0, 1, 2, 4} and {0, -1, -2, -4}.
     // v_perm_b32 selects a byte with each 3-bit selector, replacing four
     // scalar code decodes without changing the packed int8 values.
@@ -419,14 +356,6 @@ static __device__ __forceinline__ int rocmfpx_pack4_fp3_bits12_vec_cuda(const ui
         (((bits12 >> 6) & 7u) << 16) |
         (((bits12 >> 9) & 7u) << 24);
     return (int) __builtin_amdgcn_perm(values_high, values_low, selectors);
-#else
-    const char4 v = make_char4(
-        (int8_t) rocmfpx_decode_fp3_code_vec_cuda(bits12 & 7u),
-        (int8_t) rocmfpx_decode_fp3_code_vec_cuda((bits12 >> 3) & 7u),
-        (int8_t) rocmfpx_decode_fp3_code_vec_cuda((bits12 >> 6) & 7u),
-        (int8_t) rocmfpx_decode_fp3_code_vec_cuda((bits12 >> 9) & 7u));
-    return *((const int *) &v);
-#endif
 }
 
 static __device__ __forceinline__ int rocmfpx_pack4_fp3_vec_cuda(const uint8_t * qs, const int base) {
@@ -454,19 +383,10 @@ static_assert(ROCMFP2_KVALUE_0_I8 == 0 && ROCMFP2_KVALUE_1_I8 == 1 &&
               "FP2 spread relies on the identity code table");
 
 static __device__ __forceinline__ int rocmfpx_pack4_fp2_bits8_vec_cuda(const uint32_t bits8) {
-#if defined(GGML_USE_HIP)
     return (int) (((bits8 >> 0) & 3u) |
                   (((bits8 >> 2) & 3u) << 8) |
                   (((bits8 >> 4) & 3u) << 16) |
                   (((bits8 >> 6) & 3u) << 24));
-#else
-    const char4 v = make_char4(
-        (int8_t) rocmfpx_decode_fp2_code_vec_cuda((bits8 >> 0) & 3u),
-        (int8_t) rocmfpx_decode_fp2_code_vec_cuda((bits8 >> 2) & 3u),
-        (int8_t) rocmfpx_decode_fp2_code_vec_cuda((bits8 >> 4) & 3u),
-        (int8_t) rocmfpx_decode_fp2_code_vec_cuda((bits8 >> 6) & 3u));
-    return *((const int *) &v);
-#endif
 }
 
 static __device__ __forceinline__ int rocmfpx_pack4_fp2_vec_cuda(const uint8_t * qs, const int base) {

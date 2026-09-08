@@ -387,14 +387,11 @@ static void launch_gated_delta_net(
     const uint3 neqk1_magic = init_fastdiv_values(neqk1);
     const uint3 rq3_magic   = init_fastdiv_values(rq3);
 
-    int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const bool ampere_nvidia = GGML_CUDA_CC_IS_NVIDIA(cc)
-                            && cc >= GGML_CUDA_CC_AMPERE
-                            && cc <  GGML_CUDA_CC_ADA_LOVELACE;
+    // The Ampere-NVIDIA exclusion cannot apply on gfx1151; grouped columns are
+    // enabled unless the operator opts out.
     const bool force_grouped_cols = getenv("DFLASH_GDN_FORCE_GROUPED_COLS") != nullptr;
     const bool disable_grouped_cols = getenv("DFLASH_GDN_NO_GROUPED_COLS") != nullptr;
-    const bool use_grouped_cols = force_grouped_cols ||
-        (!disable_grouped_cols && !ampere_nvidia);
+    const bool use_grouped_cols = force_grouped_cols || !disable_grouped_cols;
 
     switch (S_v) {
         case 16:
@@ -418,9 +415,8 @@ static void launch_gated_delta_net(
         }
         case 128: {
             if constexpr (!KDA) {
-                if (use_grouped_cols &&
-                    ((GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE) ||
-                     GGML_CUDA_CC_IS_AMD(cc))) {
+                // Every admitted device is AMD gfx1151, so the arch test holds.
+                if (use_grouped_cols) {
                     constexpr int cols = 4;
                     constexpr int width = 16;
                     constexpr int column_groups_per_block = 8;

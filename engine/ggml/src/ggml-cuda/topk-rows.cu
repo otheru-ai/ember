@@ -10,13 +10,11 @@
 #include "common.cuh"
 #include "ggml-cuda.h"
 
-#if defined(GGML_USE_HIP)
 #ifndef cudaPointerAttributes
 #define cudaPointerAttributes    hipPointerAttribute_t
 #define cudaPointerGetAttributes hipPointerGetAttributes
 #define cudaMemoryTypeDevice     hipMemoryTypeDevice
 #define cudaMemoryTypeManaged    hipMemoryTypeManaged
-#endif
 #endif
 
 #define TOPK_ROWS_K        8

@@ -90,21 +90,6 @@ extern "C" {
     GGML_BACKEND_API int ggml_cpu_has_avx512_vbmi(void);
     GGML_BACKEND_API int ggml_cpu_has_avx512_vnni(void);
     GGML_BACKEND_API int ggml_cpu_has_avx512_bf16(void);
-    // ARM
-    GGML_BACKEND_API int ggml_cpu_has_neon       (void);
-    GGML_BACKEND_API int ggml_cpu_has_arm_fma    (void);
-    GGML_BACKEND_API int ggml_cpu_has_fp16_va    (void);
-    GGML_BACKEND_API int ggml_cpu_has_dotprod    (void);
-    GGML_BACKEND_API int ggml_cpu_has_matmul_int8(void);
-    GGML_BACKEND_API int ggml_cpu_has_sve        (void);
-    GGML_BACKEND_API int ggml_cpu_get_sve_cnt    (void);  // sve vector length in bytes
-    GGML_BACKEND_API int ggml_cpu_has_sme        (void);
-    // other
-    GGML_BACKEND_API int ggml_cpu_has_riscv_v    (void);
-    GGML_BACKEND_API int ggml_cpu_get_rvv_vlen   (void);  // risc-v vector length in bytes
-    GGML_BACKEND_API int ggml_cpu_has_vsx        (void);
-    GGML_BACKEND_API int ggml_cpu_has_vxe        (void);
-    GGML_BACKEND_API int ggml_cpu_has_wasm_simd  (void);
     GGML_BACKEND_API int ggml_cpu_has_llamafile  (void);
 
     // Internal types and functions exposed for tests and benchmarks

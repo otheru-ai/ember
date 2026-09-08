@@ -62,17 +62,12 @@ static __global__ void flash_attn_ext_vec(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
-#ifdef GGML_USE_HIP
 #ifdef RDNA
     constexpr int nthreads_KQ_q = 2;
 #else
     constexpr int nthreads_KQ_q = 4;
 #endif // RDNA
     constexpr int nthreads_V_q  = (D/4 < 32 ? D/4 : 32);
-#else
-    constexpr int nthreads_KQ_q = (D/4 < 32 ? D/4 : 32);
-    constexpr int nthreads_V_q  = (D/4 < 32 ? D/4 : 32);
-#endif // GGML_USE_HIP
 
     constexpr int nthreads    = ggml_cuda_fattn_vec_get_nthreads_device();
     // TQ3_0 K reuses the f16/bf16 Q-loader (Q_q8_1=false below) so its vec_dot
@@ -310,10 +305,6 @@ static __global__ void flash_attn_ext_vec(
             }
 #endif // V_DOT2_F32_F16_AVAILABLE
         }
-
-#ifndef GGML_USE_HIP
-        __syncwarp();
-#endif // GGML_USE_HIP
 
 #pragma unroll
         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {

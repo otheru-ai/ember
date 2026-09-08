@@ -133,7 +133,6 @@ option(GGML_HIP_ROCMI4_W4A4                 "ggml: enable lossy gfx1151 W4A4 MMQ
 option(GGML_HIP_ROCMI4_W4A8_IU4             "ggml: compile exact gfx1151 W4A8 IU4 MMQ experiment" OFF)
 option(GGML_HIP_ROCMI4_W4A8_IU4_PREPACK     "ggml: prepack exact W4A8 activations during LDS publication" OFF)
 option(GGML_HIP_ROCWMMA_FATTN               "ggml: enable rocWMMA for FlashAttention"         OFF)
-option(GGML_HIP_MMQ_MFMA                    "ggml: enable MFMA MMA for CDNA in MMQ"           ON)
 option(GGML_HIP_EXPORT_METRICS              "ggml: enable kernel perf metrics output"         OFF)
 option(GGML_OPENMP                          "ggml: use OpenMP"                                ON)
 

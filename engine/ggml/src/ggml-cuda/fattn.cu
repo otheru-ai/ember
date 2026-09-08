@@ -1,13 +1,10 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
-#include "fattn-mma-f16.cuh"
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
 #include "fattn-wmma-f16.cuh"
 #include "fattn-chunked.cuh"
 #include "fattn.cuh"
-
-#if defined(GGML_USE_HIP)
 
 __device__ static float ds4_fa_block_sum(float v) {
     __shared__ float smem[256];
@@ -1502,14 +1499,11 @@ static bool ds4_launch_flash_attn_d512_grouped_compact(
 //   B: lane L holds column L%16
 //   D: c_frag[i] = D[2i + lane/16][lane%16]
 //   A/B replicate across lanes 0-15 / 16-31, which loading with lane%16 gives.
-#if defined(GGML_USE_HIP)
 // __gfx11__ is NOT a compiler predefine -- composable_kernel defines it itself
 // from the per-target macros. Guarding on it directly silently compiles the
 // WMMA intrinsics out of the device pass, leaving a kernel that runs fast and
-// returns nonsense. Derive it the same way CK does.
-#if defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
-    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) || \
-    defined(__gfx1152__) || defined(__gfx1153__) || defined(__gfx11_generic__)
+// returns nonsense. Use the actual gfx1151 compiler predefine.
+#if defined(__gfx1151__)
 #define DS4_HAVE_WMMA 1
 #endif
 
@@ -1695,7 +1689,6 @@ __global__ __launch_bounds__(256) void ds4_decode_attn_wmma_combine(
         dst[(size_t) h * DS4_DECW_D + d] = v * inv;
     }
 }
-#endif // GGML_USE_HIP
 
 static bool ggml_cuda_ds4_flash_attn_d512_f32_supported(const ggml_tensor * dst) {
     if (!ggml_flash_attn_ext_is_ds4(dst)) {
@@ -1873,7 +1866,6 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
                     sparse_block_size, n_comp_blocks);
         }
     }
-#if defined(GGML_USE_HIP)
     // q=1 decode: the dense kernels below reuse K/V across the query dimension,
     // which is empty here, so they re-read the span once per head-block. This
     // path keeps all heads resident and reads it once.
@@ -1893,7 +1885,7 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
     if (dec_wmma_enabled &&
         n_tokens == 1 && n_heads == 64 && !sparse && !indexed_mask && mask &&
         mask->type == GGML_TYPE_F16 && rope_flags == 0 && n_kv >= 16 &&
-        GGML_CUDA_CC_IS_RDNA3(dec_cc)) {
+        GGML_CUDA_CC_IS_GFX1151(dec_cc)) {
         constexpr int NH = 64;
         // DFLASH_DS4_DECODE_SPLIT pins the split count. Different split counts
         // change the order of the cross-split rescale in the combine pass, so a
@@ -1938,7 +1930,6 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
             return true;
         }
     }
-#endif
 
     dim3 grid((unsigned) n_tokens, (unsigned) n_heads, 1);
     const size_t shmem =
@@ -2107,211 +2098,6 @@ static bool ggml_cuda_ds4_flash_attn_d512_f32(
     return true;
 }
 
-#endif // defined(GGML_USE_HIP)
-
-template <int DKQ, int DV, int ncols2>
-static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const ggml_tensor * Q = dst->src[0];
-
-    if constexpr (ncols2 <= 8) {
-        if (turing_mma_available(cc) && Q->ne[1] <= 8/ncols2) {
-            ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 8/ncols2, ncols2>(ctx, dst);
-            return;
-        }
-    }
-
-    if constexpr (ncols2 <= 16) {
-        if ((turing_mma_available(cc) || amd_wmma_available(cc)) && Q->ne[1] <= 16/ncols2) {
-            ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 16/ncols2, ncols2>(ctx, dst);
-            return;
-        }
-    }
-
-    if (ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_TURING || amd_wmma_available(cc) || Q->ne[1] <= 32/ncols2) {
-        ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 32/ncols2, ncols2>(ctx, dst);
-        return;
-    }
-
-    ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 64/ncols2, ncols2>(ctx, dst);
-}
-
-template <int DKQ, int DV>
-static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const ggml_tensor * KQV  = dst;
-    const ggml_tensor * Q    = dst->src[0];
-    const ggml_tensor * K    = dst->src[1];
-    const ggml_tensor * V    = dst->src[2];
-    const ggml_tensor * mask = dst->src[3];
-
-    float max_bias = 0.0f;
-    memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
-
-    // Edge cases like no mask, ALiBi, unpadded K/V, or misaligned addresses for large data transfers
-    //     are put into the template specialization without GQA optimizations.
-    bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
-    for (const ggml_tensor * t : {Q, K, V, mask}) {
-        if (t == nullptr || ggml_is_quantized(t->type)) {
-            continue;
-        }
-        for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
-            if (t->nb[i] % 16 != 0) {
-                use_gqa_opt = false;
-                break;
-            }
-        }
-    }
-
-    GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
-    const int gqa_ratio = Q->ne[2] / K->ne[2];
-
-    // On Volta the GQA optimizations aren't as impactful vs. minimizing wasted compute:
-    if (cc == GGML_CUDA_CC_VOLTA) {
-        if (use_gqa_opt && gqa_ratio % 8 == 0) {
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst);
-            return;
-        }
-
-        if (use_gqa_opt && gqa_ratio % 4 == 0) {
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 4>(ctx, dst);
-            return;
-        }
-
-        if constexpr (DKQ <= 256) {
-            if (use_gqa_opt && gqa_ratio % 2 == 0) {
-                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 2>(ctx, dst);
-                return;
-            }
-
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 1>(ctx, dst);
-            return;
-        } else {
-            GGML_ABORT("fatal error");
-        }
-    }
-
-    if (use_gqa_opt && gqa_ratio > 4) {
-        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 8>(ctx, dst);
-        return;
-    }
-
-    if (use_gqa_opt && gqa_ratio > 2) {
-        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 4>(ctx, dst);
-        return;
-    }
-
-    if constexpr (DKQ <= 256) {
-        if (use_gqa_opt && gqa_ratio > 1) {
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 2>(ctx, dst);
-            return;
-        }
-
-        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 1>(ctx, dst);
-    } else {
-        GGML_ABORT("fatal error");
-    }
-}
-
-static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const ggml_tensor * KQV  = dst;
-    const ggml_tensor * Q    = dst->src[0];
-    const ggml_tensor * K    = dst->src[1];
-    const ggml_tensor * V    = dst->src[2];
-    const ggml_tensor * mask = dst->src[3];
-
-    switch (Q->ne[0]) {
-        case 64:
-            GGML_ASSERT(V->ne[0] == 64);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2< 64,  64>(ctx, dst);
-            break;
-        case 80:
-            GGML_ASSERT(V->ne[0] == 80);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2< 80,  80>(ctx, dst);
-            break;
-        case 96:
-            GGML_ASSERT(V->ne[0] == 96);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2< 96,  96>(ctx, dst);
-            break;
-        case 112:
-            GGML_ASSERT(V->ne[0] == 112);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2<112, 112>(ctx, dst);
-            break;
-        case 128:
-            GGML_ASSERT(V->ne[0] == 128);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2<128, 128>(ctx, dst);
-            break;
-        case 256:
-            GGML_ASSERT(V->ne[0] == 256);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2<256, 256>(ctx, dst);
-            break;
-        case 512:
-            GGML_ASSERT(V->ne[0] == 512);
-            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2<512, 512>(ctx, dst);
-            break;
-        case 576: {
-            // For Deepseek, go straight to the ncols1 switch to avoid compiling unnecessary kernels.
-            GGML_ASSERT(V->ne[0] == 512);
-            float max_bias = 0.0f;
-            memcpy(&max_bias, (const float *) KQV->op_params + 1, sizeof(float));
-
-            const bool use_gqa_opt = mask && max_bias == 0.0f;
-            GGML_ASSERT(use_gqa_opt);
-
-            GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
-            const int gqa_ratio = Q->ne[2] / K->ne[2];
-            if (gqa_ratio == 20) { // GLM 4.7 Flash
-                if (cc >= GGML_CUDA_CC_DGX_SPARK) {
-                    if (Q->ne[1] <= 8) {
-                        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
-                        break;
-                    }
-                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
-                    break;
-                }
-                if (cc >= GGML_CUDA_CC_BLACKWELL) {
-                    if (Q->ne[1] <= 4 && K->ne[1] >= 65536) {
-                        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
-                        break;
-                    }
-                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
-                    break;
-                }
-                if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
-                    if (Q->ne[1] <= 4) {
-                        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
-                        break;
-                    }
-                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
-                    break;
-                }
-                if (cc >= GGML_CUDA_CC_TURING) {
-                    if (Q->ne[1] <= 4) {
-                        if (K->ne[1] <= 16384) {
-                            ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
-                            break;
-                        }
-                        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 32>(ctx, dst);
-                        break;
-                    }
-                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
-                    break;
-                }
-                // Volta:
-                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
-            } else if (gqa_ratio % 16 == 0) {
-                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
-            } else {
-                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512,  4>(ctx, dst);
-            }
-        } break;
-        default:
-            GGML_ABORT("fatal error");
-            break;
-    }
-}
-
 #define FATTN_VEC_CASE(D, type_K, type_V)                                                                        \
     {                                                                                                            \
         const bool type_K_okay = K->type == (type_K) || (K->type == GGML_TYPE_F32 && (type_K) == GGML_TYPE_F16); \
@@ -2389,25 +2175,10 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_BF16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 
- #ifndef GGML_USE_HIP
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_TQ3_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_TQ3_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_TQ3_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_TQ3_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_TQ3_0)
-
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_F16)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_Q4_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_Q8_0)
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_BF16)
-#endif // GGML_USE_HIP
 #else
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
-#ifndef GGML_USE_HIP
-    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ3_0, GGML_TYPE_TQ3_0)
-#endif // GGML_USE_HIP
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
@@ -2420,7 +2191,6 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_TILE     = 200,
     BEST_FATTN_KERNEL_VEC      = 100,
     BEST_FATTN_KERNEL_WMMA_F16 = 300,
-    BEST_FATTN_KERNEL_MMA_F16  = 400,
     BEST_FATTN_KERNEL_CHUNKED  = 500,   // chunked long-context prefill (fattn-chunked.cu)
 };
 
@@ -2552,12 +2322,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         // VEC dispatch can handle TQ3 only at SWA-shaped decode and only when
         // the actual vector-kernel constraints hold. Everything else still
         // routes to CHUNKED.
-#ifndef GGML_USE_HIP
-        const bool tq3_can_vec = (Q->ne[1] == 1) && (Q->ne[0] <= 256) &&
-            (Q->ne[0] % 64 == 0) && (K->ne[1] % FATTN_KQ_STRIDE == 0);
-#else
         const bool tq3_can_vec = false;
-#endif // GGML_USE_HIP
         const bool tq3_needs_chunked = tq3_any && !tq3_can_vec;
         if ((chunked_threshold > 0 && K->ne[1] > chunked_threshold) || tq3_needs_chunked) {
             if (Q->type == GGML_TYPE_F32 && kv_supported && mask != nullptr) {
@@ -2568,45 +2333,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
-    // If Turing tensor cores are available, use them:
-    if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
-        if (can_use_vector_kernel) {
-            if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
-                if (cc >= GGML_CUDA_CC_ADA_LOVELACE && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && K->ne[1] >= 8192)) {
-                    return BEST_FATTN_KERNEL_VEC;
-                }
-            } else {
-                if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
-                    if (Q->ne[1] <= 2) {
-                        return BEST_FATTN_KERNEL_VEC;
-                    }
-                } else {
-                    if (Q->ne[1] == 1) {
-                        return BEST_FATTN_KERNEL_VEC;
-                    }
-                }
-            }
-            if (!gqa_opt_applies && Q->ne[1] == 1) {
-                return BEST_FATTN_KERNEL_VEC;
-            }
-        }
-        return BEST_FATTN_KERNEL_MMA_F16;
-    }
 
-    if (volta_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
-        int gqa_ratio_eff = 1;
-        const int ncols2_max = Q->ne[0] == 576 ? 16 : 8;
-        while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
-            gqa_ratio_eff *= 2;
-        }
-        if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
-            return BEST_FATTN_KERNEL_VEC;
-        }
-        if (Q->ne[1] * gqa_ratio_eff <= 16) {
-            return BEST_FATTN_KERNEL_TILE; // On Volta tensor cores are only faster for sufficiently large matrices.
-        }
-        return BEST_FATTN_KERNEL_MMA_F16;
-    }
 
     // Use the WMMA kernel if possible:
     if (ggml_cuda_should_use_wmma_fattn(cc) && K->ne[1] % FATTN_KQ_STRIDE == 0 && Q->ne[0] != 40 && Q->ne[0] != 72 && Q->ne[0] != 512 && Q->ne[0] != 576) {
@@ -2616,17 +2343,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_WMMA_F16;
     }
 
-    // Use MFMA flash attention for CDNA (MI100+):
-    if (amd_mfma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72 && Q->ne[0] != 256 && Q->ne[0] != 512 && Q->ne[0] != 576) {
-        const int64_t eff_nq = Q->ne[1] * (gqa_opt_applies ? gqa_ratio : 1);
-        // MMA vs tile crossover benchmarked on MI300X @ d32768:
-        //   hsk=64  (gqa=4): MMA wins at eff >= 128 (+11%)
-        //   hsk=128 (gqa=4): MMA wins at eff >= 128 (+4%)
-        if (eff_nq >= (GGML_CUDA_CC_IS_CDNA1(cc) && Q->ne[0] == 64 ? 64 : 128)) {
-            return BEST_FATTN_KERNEL_MMA_F16;
-        }
-        // Fall through to tile kernel for small effective batch sizes.
-    }
 
     // If there are no tensor cores available, use the generic tile kernel:
     if (can_use_vector_kernel) {
@@ -2648,14 +2364,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
     if (ggml_flash_attn_ext_is_ds4(dst)) {
-#if defined(GGML_USE_HIP)
         if (!ggml_cuda_ds4_flash_attn_d512_f32(ctx, dst)) {
             GGML_ABORT("unsupported DeepSeek4 D=512 flash-attention contract");
         }
         return;
-#else
-        GGML_ABORT("DeepSeek4 D=512 flash attention is only available on HIP");
-#endif // defined(GGML_USE_HIP)
     }
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
@@ -2669,9 +2381,6 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         case BEST_FATTN_KERNEL_WMMA_F16:
             ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
             break;
-        case BEST_FATTN_KERNEL_MMA_F16:
-            ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
-            break;
         case BEST_FATTN_KERNEL_CHUNKED:
             ggml_cuda_flash_attn_ext_chunked(ctx, dst);
             break;
@@ -2680,11 +2389,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
 
 bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
     if (ggml_flash_attn_ext_is_ds4(dst)) {
-#if defined(GGML_USE_HIP)
         return ggml_cuda_ds4_flash_attn_d512_f32_supported(dst);
-#else
-        return false;
-#endif // defined(GGML_USE_HIP)
     }
     return ggml_cuda_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_NONE;
 }

@@ -87,15 +87,11 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             break;
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
-#ifndef GGML_CUDA_BLACKWELL_CONSUMER
             if (args.type_x == GGML_TYPE_MXFP4) {
                 mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, args, stream);
             } else {
                 mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, args, stream);
             }
-#else
-            GGML_ABORT("FP4 quantization requires sm_120a, not supported on consumer Blackwell (SM 12.0)");
-#endif
             break;
         case GGML_TYPE_Q2_K:
             mul_mat_q_case<GGML_TYPE_Q2_K>(ctx, args, stream);
@@ -210,23 +206,7 @@ static void ggml_cuda_mul_mat_q_impl(
     const int64_t s03 = src0->nb[3] / ts_src0;
     const int64_t s3  =  dst->nb[3] / ts_dst;
 
-    bool use_stream_k =
-        (GGML_CUDA_CC_IS_NVIDIA(cc) &&
-         ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ||
-        GGML_CUDA_CC_IS_CDNA(cc);
-    // Keep the established small-batch tuning hook from #503. The default
-    // remains stream-k; positive values opt small verify widths into the
-    // lower-overhead data-parallel path.
-    static const int luce_mmq_dp_max_ne1 = []() {
-        const char * value = getenv("LUCE_MMQ_DP_MAX_NE1");
-        return value ? atoi(value) : 0;
-    }();
-    if (use_stream_k && ne11 <= luce_mmq_dp_max_ne1) {
-        use_stream_k = false;
-    }
-
-    // TODO: tighter pool buffer size vs q8 path
-    const bool use_native_mxfp4 = blackwell_mma_available(cc) && src0->type == GGML_TYPE_MXFP4;
+    const bool use_stream_k = false;
     const bool grouped_src = !ids && ggml_mul_mat_is_grouped_src(dst);
     const ggml_tensor * grouped_physical = grouped_src ? src1->view_src : nullptr;
     if (grouped_src) {
@@ -236,7 +216,6 @@ static void ggml_cuda_mul_mat_q_impl(
         GGML_ASSERT(grouped_physical->ne[0] * grouped_physical->ne[2] == ne10);
         GGML_ASSERT(grouped_physical->ne[1] == ne11);
         GGML_ASSERT(grouped_physical->ne[3] == 1);
-        GGML_ASSERT(!use_native_mxfp4);
     }
 
     if (!ids) {
@@ -255,11 +234,6 @@ static void ggml_cuda_mul_mat_q_impl(
                     grouped_physical->nb[1] / ts_src1,
                     grouped_physical->nb[2] / ts_src1,
                     ne10_padded, ne11, stream);
-            } else if (use_native_mxfp4) {
-                static_assert(sizeof(block_fp4_mmq) == 4 * sizeof(block_q8_1));
-                quantize_mmq_mxfp4_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded,
-                                        ne11, ne12, ne13, stream);
-
             } else {
                 quantize_mmq_q8_1_cuda(src1_d, nullptr, src1_q8_1.get(), src0->type, ne10, s11, s12, s13, ne10_padded,
                                        ne11, ne12, ne13, stream);
@@ -268,11 +242,7 @@ static void ggml_cuda_mul_mat_q_impl(
         }
 
         // Stride depends on quantization format
-        const int64_t s12 = use_native_mxfp4 ?
-                                ne11 * ne10_padded * sizeof(block_fp4_mmq) /
-                                    (8 * QK_MXFP4 * sizeof(int))  // block_fp4_mmq holds 256 values (8 blocks of 32)
-                                :
-                                ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
+        const int64_t s12 = ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
         const int64_t s13 = ne12*s12;
 
         const mmq_args args = {
@@ -331,18 +301,12 @@ static void ggml_cuda_mul_mat_q_impl(
         const int64_t s12 = src1->nb[2] / ts_src1;
         const int64_t s13 = src1->nb[3] / ts_src1;
 
-        if (use_native_mxfp4) {
-            quantize_mmq_mxfp4_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src0->type, ne10, s11, s12, s13,
-                                    ne10_padded, ne11_flat, ne12_flat, ne13_flat, stream);
-        } else {
-            quantize_mmq_q8_1_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src0->type, ne10, s11, s12, s13,
-                                   ne10_padded, ne11_flat, ne12_flat, ne13_flat, stream);
-        }
+        quantize_mmq_q8_1_cuda(src1_d, ids_src1.get(), src1_q8_1.get(), src0->type, ne10, s11, s12, s13,
+                               ne10_padded, ne11_flat, ne12_flat, ne13_flat, stream);
         CUDA_CHECK(cudaGetLastError());
     }
 
-    const int64_t s12 = use_native_mxfp4 ? ne11 * ne10_padded * sizeof(block_fp4_mmq) / (8 * QK_MXFP4 * sizeof(int)) :
-                                           ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
+    const int64_t s12 = ne11 * ne10_padded * sizeof(block_q8_1) / (QK8_1 * sizeof(int));
     const int64_t s13 = ne12*s12;
 
     // Note that ne02 is used instead of ne12 because the number of y channels determines the z dimension of the CUDA grid.
@@ -402,7 +366,6 @@ void ggml_cuda_op_mul_mat_q(
     const int64_t stride01 = ne00 / ggml_blck_size(src0->type);
 
     const int id = ggml_cuda_get_device();
-    const int cc = ggml_cuda_info().devices[id].cc;
 
     // the main device has a larger memory buffer to hold the results from all GPUs
     // nrows_dst == nrows of the matrix that the kernel writes into
@@ -411,9 +374,7 @@ void ggml_cuda_op_mul_mat_q(
     // The stream-k decomposition is only faster for recent NVIDIA GPUs.
     // Also its fixup needs to allocate a temporary buffer in the memory pool.
     // There are multiple parallel CUDA streams for src1_ncols != ne11 which would introduce a race condition for this buffer.
-    const bool use_stream_k = ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA)
-                            || GGML_CUDA_CC_IS_CDNA(cc))
-                            && src1_ncols == ne11;
+    const bool use_stream_k = false;
     const mmq_args args = {
         src0_dd_i, src0->name, src0->type, (const int *) src1_ddq_i, nullptr, nullptr, dst_dd_i,
         ne00, row_diff, src1_ncols, stride01, ne11, nrows_dst,
@@ -441,10 +402,6 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
-#ifdef GGML_CUDA_BLACKWELL_CONSUMER
-            mmq_supported = false;
-            break;
-#endif
         case GGML_TYPE_Q2_K:
         case GGML_TYPE_Q3_K:
         case GGML_TYPE_Q4_K:
@@ -464,8 +421,9 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         case GGML_TYPE_Q3_0_ROCMFPX:
         case GGML_TYPE_Q4_0_ROCMFP4_FAST:
         case GGML_TYPE_Q4_0_ROCMI4:
-            // ROCmFPX MMQ variants are implemented for gfx1151 only.
-            mmq_supported = GGML_CUDA_CC_IS_RDNA3_5(cc);
+            // ROCmFPX MMQ variants are implemented for gfx1151 only, which is
+            // the only admitted device.
+            mmq_supported = true;
             break;
         default:
             mmq_supported = false;
@@ -476,67 +434,33 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         return false;
     }
 
-    if (turing_mma_available(cc)) {
-        return true;
-    }
-
-    if (ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_DP4A) {
-        return false;
-    }
-
 #ifdef GGML_CUDA_FORCE_MMQ
     return true;
 #endif //GGML_CUDA_FORCE_MMQ
 
-    if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
-        return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
-    }
+    // gfx1151 always has WMMA and is always RDNA3, so both guards are constant
+    // and the CDNA fallback below them was unreachable.
 
-    if (amd_mfma_available(cc)) {
-        // As of ROCM 7.0 rocblas/tensile performs very poorly on CDNA3 and hipblaslt (via ROCBLAS_USE_HIPBLASLT)
-        // performs better but is currently suffering from a crash on this architecture.
-        // TODO: Revisit when hipblaslt is fixed on CDNA3
-        if (GGML_CUDA_CC_IS_CDNA3(cc)) {
-            return true;
-        }
-        if (n_experts > 64 || ne11 <= 128) {
-            return true;
-        }
-        if (type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1) {
-            return true;
-        }
-        if (ne11 <= 256 && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K)) {
-            return true;
-        }
-        return false;
-    }
-
-    if (amd_wmma_available(cc)) {
-        if (GGML_CUDA_CC_IS_RDNA3(cc)) {
-            // High expert counts are almost always better on MMQ due to
-            //     the synchronization overhead in the cuBLAS/hipBLAS path:
-            // https://github.com/ggml-org/llama.cpp/pull/18202
-            if (n_experts >= 64) {
-                return true;
-            }
-
-            // For some quantization types MMQ can have lower peak TOPS than hipBLAS
-            //     so it's only faster for sufficiently small batch sizes:
-            switch (type) {
-                case GGML_TYPE_Q2_K:
-                    return ne11 <= 128;
-                case GGML_TYPE_Q6_K:
-                    return ne11 <= (GGML_CUDA_CC_IS_RDNA3_0(cc) ? 128 : 256);
-                case GGML_TYPE_IQ2_XS:
-                case GGML_TYPE_IQ2_S:
-                    return GGML_CUDA_CC_IS_RDNA3_5(cc) || ne11 <= 128;
-                default:
-                    return true;
-            }
-        }
-
+    // High expert counts are almost always better on MMQ due to
+    //     the synchronization overhead in the cuBLAS/hipBLAS path:
+    // https://github.com/ggml-org/llama.cpp/pull/18202
+    if (n_experts >= 64) {
         return true;
     }
 
-    return (!GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
+    // For some quantization types MMQ can have lower peak TOPS than hipBLAS
+    //     so it's only faster for sufficiently small batch sizes:
+    switch (type) {
+        case GGML_TYPE_Q2_K:
+            return ne11 <= 128;
+        case GGML_TYPE_Q6_K:
+            // RDNA3_0 would use 128; gfx1151 is RDNA3_5.
+            return ne11 <= 256;
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+            // RDNA3_5, so the batch-size bound never applies.
+            return true;
+        default:
+            return true;
+    }
 }

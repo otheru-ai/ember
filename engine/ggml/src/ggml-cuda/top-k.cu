@@ -68,7 +68,6 @@ static inline __device__ void topk_swap(T & a, T & b) {
 // smaller than the wavefront width, both partners of a compare-exchange live in
 // the same wave, so the exchange can be done register-to-register via shuffle —
 // no shared-memory round-trip and no __syncthreads() barrier.
-#if defined(GGML_USE_HIP) || defined(__HIP_PLATFORM_AMD__)
 // On RDNA `__shfl_xor(v, j)` lowers to `ds_bpermute_b32`, which first computes a
 // per-lane address VGPR (`(lane ^ j) << 2`) and reads through the LDS return
 // path. For an xor mask that stays inside a 32-lane group (j < 32) the same
@@ -132,9 +131,6 @@ static __device__ __forceinline__ float topk_shfl_xor(float v, int mask) {
     return __int_as_float(topk_shfl_xor_i32(__float_as_int(v), mask));
 }
 #    define TOPK_SHFL_XOR(v, mask) topk_shfl_xor((v), (mask))
-#else
-#    define TOPK_SHFL_XOR(v, mask) __shfl_xor_sync(0xffffffffu, (v), (mask))
-#endif
 
 // Dedicated argmax for k == 1 (HIP / no-CUB builds).
 //

@@ -189,7 +189,6 @@ static __global__ void mul_mat_vec_f(
                 }
             }
         } else {
-#ifdef FP16_AVAILABLE
             half2 sumh2[ncols_dst] = {{0.0f, 0.0f}};
             half2 sumh2_gate[ncols_dst] = {{0.0f, 0.0f}};
 
@@ -227,13 +226,9 @@ static __global__ void mul_mat_vec_f(
                     }
                 }
             }
-#else
-            NO_DEVICE_CODE;
-#endif // FP16_AVAILABLE
         }
     } else if constexpr (std::is_same_v<T, nv_bfloat16>) {
 //TODO: add support for ggml_cuda_mad for hip_bfloat162
-#if defined(GGML_USE_HIP)
         const int * x2 = (const int *) x;
         const int * gate_x2 = nullptr;
         if constexpr (has_fusion) {
@@ -267,37 +262,6 @@ static __global__ void mul_mat_vec_f(
                 }
             }
         }
-#else
-        const nv_bfloat162 * x2 = (const nv_bfloat162 *) x;
-        const nv_bfloat162 * gate_x2 = nullptr;
-        if constexpr (has_fusion) {
-            if (use_gate) {
-                gate_x2 = (const nv_bfloat162 *) gate_x;
-            }
-        }
-        for (int col2 = tid; col2 < ncols2; col2 += block_size) {
-            const nv_bfloat162 tmpx = x2[col2];
-            nv_bfloat162 tmpx_gate;
-            if constexpr (has_fusion) {
-                if (use_gate) {
-                    tmpx_gate = gate_x2[col2];
-                }
-            }
-#pragma unroll
-            for (int j = 0; j < ncols_dst; ++j) {
-                const float2 tmpy = y2[j*stride_col_y2 + col2];
-                ggml_cuda_mad(sumf[j], tmpx.x, tmpy.x);
-                ggml_cuda_mad(sumf[j], tmpx.y, tmpy.y);
-
-                if constexpr (has_fusion) {
-                    if (use_gate) {
-                        ggml_cuda_mad(sumf_gate[j], tmpx_gate.x, tmpy.x);
-                        ggml_cuda_mad(sumf_gate[j], tmpx_gate.y, tmpy.y);
-                    }
-                }
-            }
-        }
-#endif
     } else {
         static_assert(std::is_same_v<T, void>, "unsupported type");
     }
@@ -433,10 +397,7 @@ void launch_mul_mat_vec_f_cuda(
 
     int64_t block_size_best = warp_size;
     int64_t niter_best      = (ncols + 2*warp_size - 1) / (2*warp_size);
-    int64_t max_block_size  = 256;
-    if(ggml_cuda_info().devices[device].cc > GGML_CUDA_CC_OFFSET_AMD && ggml_cuda_info().devices[device].cc < GGML_CUDA_CC_RDNA1) {
-        max_block_size = 128;
-    }
+    const int64_t max_block_size = 256;
     for (int64_t block_size = 2*warp_size; block_size <= max_block_size; block_size += warp_size) {
         const int64_t niter = (ncols + 2*block_size - 1) / (2*block_size);
         if (niter < niter_best) {
@@ -647,8 +608,7 @@ void ggml_cuda_mul_mat_vec_f(ggml_backend_cuda_context & ctx, const ggml_tensor 
     GGML_ASSERT(!ids || ids->nb[0] == ggml_type_size(ids->type));
     GGML_ASSERT(        nb0        == ts_dst);
 
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const enum ggml_prec prec = fast_fp16_available(cc) ? ggml_prec(dst->op_params[0]) : GGML_PREC_F32;
+    const enum ggml_prec prec = ggml_prec(dst->op_params[0]);
 
     const float   * src1_d =       (const float   *) src1->data;
     const int32_t *  ids_d = ids ? (const int32_t *)  ids->data : nullptr;
@@ -740,8 +700,7 @@ void ggml_cuda_op_mul_mat_vec_f(
     const int64_t row_diff = row_high - row_low;
 
     const int id = ggml_cuda_get_device();
-    const int cc = ggml_cuda_info().devices[id].cc;
-    const enum ggml_prec prec = fast_fp16_available(cc) ? ggml_prec(dst->op_params[0]) : GGML_PREC_F32;
+    const enum ggml_prec prec = ggml_prec(dst->op_params[0]);
 
     // ggml_cuda_op provides single, contiguous matrices
     const int64_t stride_row         = ne00;
@@ -803,66 +762,19 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0
         }
     }
 
+    // gfx1151: not NVIDIA, not CDNA, and RDNA3. So fp32 matrix hardware is
+    // absent while fp16/bf16 matrix hardware is present, which selects one
+    // branch per type and leaves the rest unreachable.
     switch (type) {
         case GGML_TYPE_F32:
-            if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
-                if (ampere_mma_available(cc)) {
-                    return ne11 <= 3;
-                }
-                if (cc >= GGML_CUDA_CC_TURING) {
-                    return ne11 <= 4;
-                }
-                return ne11 <= 3;
-            } else if (GGML_CUDA_CC_IS_AMD(cc)) {
-                if (fp32_mma_hardware_available(cc)) {
-                    return ne11 <= 3;
-                }
-                return ne11 <= 8;
-            }
+            // no fp32 matrix hardware (that is CDNA only)
             return ne11 <= 8;
         case GGML_TYPE_F16:
-            if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
-                const bool src0_small = (src0_ne[1] <= 512 || src0_ne[2]*src0_ne[3] == 1);
-                if (ampere_mma_available(cc)) {
-                    return src0_small && ne11 == 1;
-                }
-                if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
-                    return src0_small && ne11 <= 4;
-                }
-                if (fp16_mma_hardware_available(cc)) {
-                    return src0_small && ne11 <= 3;
-                }
-                return ne11 <= 8;
-            } else if (GGML_CUDA_CC_IS_AMD(cc)) {
-                if (fp16_mma_hardware_available(cc)) {
-                    if (GGML_CUDA_CC_IS_RDNA3(cc)) {
-                        return ne11 <= 3;
-                    }
-                    return ne11 <= 2;
-                }
-                return ne11 <= 8;
-            }
-            return ne11 <= 8;
+            // fp16 matrix hardware present, and RDNA3
+            return ne11 <= 3;
         case GGML_TYPE_BF16:
-            if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
-                const bool src0_small = (src0_ne[1] <= 512 || src0_ne[2]*src0_ne[3] == 1);
-                if (ampere_mma_available(cc)) {
-                    return src0_small && ne11 == 1;
-                }
-                if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
-                    return src0_small && ne11 <= 4;
-                }
-                if (bf16_mma_hardware_available(cc)) {
-                    return src0_small && ne11 <= 3;
-                }
-                return ne11 <= 8;
-            } else if (GGML_CUDA_CC_IS_AMD(cc)) {
-                if (bf16_mma_hardware_available(cc)) {
-                    return ne11 <= 3;
-                }
-                return ne11 <= 8;
-            }
-            return ne11 <= 8;
+            // bf16 matrix hardware present
+            return ne11 <= 3;
         default:
             return false;
     }

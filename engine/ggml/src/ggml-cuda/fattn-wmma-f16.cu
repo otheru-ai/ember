@@ -7,17 +7,8 @@
 #include "fattn-wmma-f16.cuh"
 
 #ifdef GGML_USE_WMMA_FATTN
-#if !defined(GGML_USE_HIP)
-#include <mma.h>
-#if defined(GGML_USE_MUSA)
-namespace wmma = mtmusa::wmma;
-#else // GGML_USE_MUSA
-namespace wmma = nvcuda::wmma;
-#endif // GGML_USE_MUSA
-#elif defined(GGML_USE_HIP)
 #include <rocwmma/rocwmma.hpp>
 namespace wmma = rocwmma;
-#endif // !defined(GGML_USE_HIP)
 #endif // GGML_USE_WMMA_FATTN
 
 // D == head size, VKQ_stride == num VKQ rows calculated in parallel:
@@ -560,9 +551,6 @@ void ggml_cuda_flash_attn_ext_wmma_f16(ggml_backend_cuda_context & ctx, ggml_ten
     const ggml_tensor * Q   = dst->src[0];
 
     const enum ggml_prec prec = ggml_flash_attn_ext_get_prec(KQV);
-#if !defined(GGML_USE_HIP)
-    const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
-#endif
 
     if (prec != GGML_PREC_DEFAULT) {
         if (Q->ne[1] <= 32 || Q->ne[0] > 128) {
@@ -618,30 +606,6 @@ void ggml_cuda_flash_attn_ext_wmma_f16(ggml_backend_cuda_context & ctx, ggml_ten
         }
         return;
     }
-
-#if !defined(GGML_USE_HIP)
-    if (Q->ne[1] <= 8 && Q->ne[0] % warp_size == 0) {
-        constexpr int cols_per_block = 8;
-        switch (Q->ne[0]) {
-            case 64:
-                ggml_cuda_flash_attn_ext_wmma_f16_case< 64, cols_per_block, half>(ctx, dst);
-                break;
-            case 96:
-                ggml_cuda_flash_attn_ext_wmma_f16_case< 96, cols_per_block, half>(ctx, dst);
-                break;
-            case 128:
-                ggml_cuda_flash_attn_ext_wmma_f16_case<128, cols_per_block, half>(ctx, dst);
-                break;
-            case 256:
-                ggml_cuda_flash_attn_ext_wmma_f16_case<256, cols_per_block, half>(ctx, dst);
-                break;
-            default:
-                GGML_ABORT("fatal error");
-                break;
-        }
-        return;
-    }
-#endif // !defined(GGML_USE_HIP)
 
     if (Q->ne[1] <= 32) {
         constexpr int cols_per_block = 16;

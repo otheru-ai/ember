@@ -646,9 +646,11 @@ if(EMBER_ENGINE)
   # Ember is an AMD Strix Halo appliance, not a portable ggml frontend. Pin
   # gfx1151 before enabling HIP so an image built without a visible GPU cannot
   # silently acquire a generic or host-dependent device-code target.
-  if(AMDGPU_TARGETS AND NOT AMDGPU_TARGETS STREQUAL "gfx1151")
-    message(FATAL_ERROR "Ember supports only AMD gfx1151, got AMDGPU_TARGETS=${AMDGPU_TARGETS}")
-  endif()
+  foreach(arch_var CMAKE_HIP_ARCHITECTURES GPU_TARGETS AMDGPU_TARGETS)
+    if(DEFINED ${arch_var} AND NOT "${${arch_var}}" STREQUAL "gfx1151")
+      message(FATAL_ERROR "Ember supports only AMD gfx1151, got ${arch_var}=${${arch_var}}")
+    endif()
+  endforeach()
   set(CMAKE_HIP_ARCHITECTURES "gfx1151" CACHE STRING "" FORCE)
   set(GPU_TARGETS             "gfx1151" CACHE STRING "" FORCE)
   set(AMDGPU_TARGETS          "gfx1151" CACHE STRING "" FORCE)

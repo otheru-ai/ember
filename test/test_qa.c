@@ -17,6 +17,7 @@
 #include "../src/server/chat_api.h"
 #include "../src/server/http.h"
 #include "../src/server/sse.h"
+#include "../engine/ggml/src/ggml-cuda/gfx1151.h"
 
 #define PIPE "\xef\xbd\x9c"
 static int g_pass = 0, g_fail = 0;
@@ -195,6 +196,12 @@ static void qa_validation_timing_contract(void) {
 }
 
 int main(void) {
+    CHECK(ggml_hip_is_gfx1151("gfx1151"), "gfx1151 accepted");
+    CHECK(ggml_hip_is_gfx1151("gfx1151:xnack-:sramecc+"), "HIP target features accepted");
+    const char *unsupported[] = {NULL, "", "gfx", "gfx1150", "gfx1100",
+                                 "gfx942", "gfx11510", "gfx1151-generic"};
+    for (size_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); ++i)
+        CHECK(!ggml_hip_is_gfx1151(unsupported[i]), "unsupported GPU rejected");
     printf("ember QA gauntlet (GPU-free half of QA_BEFORE_RELEASES)\n");
     qa_streaming();
     qa_tool_parser();

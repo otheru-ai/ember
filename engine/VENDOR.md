@@ -76,6 +76,18 @@ spacing. Preserve them across vendor refreshes.
 
 ## Pruned deployment scope
 
+The gfx1151-only pruning also removes platform branches inside the retained
+sources: non-x86 SIMD, Windows/macOS support, NVIDIA and other AMD architecture
+dispatch, and the unreachable NVIDIA/CDNA MMA flash-attention implementation
+and generated instances. The supported host remains Linux x86-64; its CPU
+backend, scalar/SIMD fallbacks and same-APU XDNA2 integration remain necessary.
+HIP device compilation rejects targets other than gfx1151, CMake rejects
+conflicting architecture overrides, and device discovery rejects a non-gfx1151
+architecture before exposing a backend. Runtime device-name matching tolerates
+HIP feature suffixes; the compiler target remains exactly `gfx1151`.
+Preserve these restrictions when refreshing upstream; do not restore portable
+dispatch without restoring and validating its removed implementation.
+
 Ember preserves the upstream provenance above, but intentionally does not carry
 the whole portable lucebox/ggml source matrix. This vendored snapshot is scoped
 to the only supported deployment: Linux x86-64 on AMD Strix Halo, with one

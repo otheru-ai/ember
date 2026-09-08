@@ -2,9 +2,6 @@
 #include "dequantize.cuh"
 #include "cpy-utils.cuh"
 #include "../../rocmfp4/rocmfp4_hip_scale.cuh"
-#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
-#include "ggml-musa/mudnn.cuh"
-#endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
 
 typedef void (*cpy_kernel_t)(const char * cx, char * cdst);
 
@@ -629,11 +626,6 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
 
     if (src0->type == src1->type && contiguous_srcs) {
         GGML_ASSERT(ggml_nbytes(src0) == ggml_nbytes(src1));
-#if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
-        if (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) {
-            CUDA_CHECK(mudnnMemcpyAsync(ctx, src1, src0));
-        } else
-#endif // GGML_USE_MUSA && GGML_MUSA_MUDNN_COPY
         {
             CUDA_CHECK(cudaMemcpyAsync(src1_ddc, src0_ddc, ggml_nbytes(src0), cudaMemcpyDeviceToDevice, main_stream));
         }

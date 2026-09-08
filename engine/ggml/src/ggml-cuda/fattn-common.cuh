@@ -383,7 +383,6 @@ static __device__ __forceinline__ void dequantize_V_q4_0(const void * __restrict
 
     const int8_t * q8 = (const int8_t *) &q;
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
         const half2 d = __half2half2(x[ib].d);
 
@@ -392,7 +391,6 @@ static __device__ __forceinline__ void dequantize_V_q4_0(const void * __restrict
             ((half2 *) dst)[l0/2] = d * make_half2(q8[l0 + 0], q8[l0 + 1]);
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same_v<T, float>) {
         const float d = x[ib].d;
 
@@ -421,7 +419,6 @@ static __device__ __forceinline__ void dequantize_V_q4_1(const void * __restrict
 
     const int8_t * q8 = (const int8_t *) &q;
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
         const half2 dm = x[ib].dm;
         const half2 d  = __half2half2( __low2half(dm));
@@ -432,7 +429,6 @@ static __device__ __forceinline__ void dequantize_V_q4_1(const void * __restrict
             ((half2 *) dst)[l0/2] = d * make_half2(q8[l0 + 0], q8[l0 + 1]) + m;
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same_v<T, float>) {
         const float2 dm = __half22float2(x[ib].dm);
 
@@ -473,7 +469,6 @@ static __device__ __forceinline__ void dequantize_V_q5_0(const void * __restrict
 
     const int8_t * q8 = (const int8_t *) &q;
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
         const half2 d = __half2half2(x[ib].d);
 
@@ -482,7 +477,6 @@ static __device__ __forceinline__ void dequantize_V_q5_0(const void * __restrict
             ((half2 *) dst)[l0/2] = d * make_half2(q8[l0 + 0], q8[l0 + 1]);
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same_v<T, float>) {
         const float d = x[ib].d;
 
@@ -521,7 +515,6 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
 
     const int8_t * q8 = (const int8_t *) &q;
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same_v<T, half>) {
         const half2 dm = x[ib].dm;
         const half2 d  = __half2half2( __low2half(dm));
@@ -532,7 +525,6 @@ static __device__ __forceinline__ void dequantize_V_q5_1(const void * __restrict
             ((half2 *) dst)[l0/2] = d * make_half2(q8[l0 + 0], q8[l0 + 1]) + m;
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same_v<T, float>) {
         const float2 dm = __half22float2(x[ib].dm);
 
@@ -556,7 +548,6 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     int8_t qs[ne];
     ggml_cuda_memcpy_1<ne, 2>(qs, x[ib].qs + iqs);
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
         const half2 d = __half2half2(x[ib].d);
 
@@ -565,7 +556,6 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
             ((half2 *) dst)[l0/2] = d * make_half2(qs[l0 + 0], qs[l0 + 1]);
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same<T, float>::value) {
         const float d = x[ib].d;
 
@@ -662,7 +652,6 @@ static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restric
 
     static_assert(ne == 2 || ne == 4, "bad ne");
 
-#ifdef FP16_AVAILABLE
     if constexpr (std::is_same<T, half>::value) {
 #pragma unroll
         for (int l = 0; l < ne; l++) {
@@ -673,7 +662,6 @@ static __device__ __forceinline__ void dequantize_V_tq3_0(const void * __restric
             ((half *) dst)[l] = __float2half(cv) * __float2half(norm);
         }
     } else
-#endif // FP16_AVAILABLE
     if constexpr (std::is_same<T, float>::value) {
 #pragma unroll
         for (int l = 0; l < ne; l++) {
@@ -1033,7 +1021,6 @@ void launch_fattn(
     ggml_cuda_pool & pool = ctx.pool();
     cudaStream_t main_stream = ctx.stream();
     const int id  = ggml_cuda_get_device();
-    const int cc  = ggml_cuda_info().devices[id].cc;
     const int nsm = ggml_cuda_info().devices[id].nsm;
 
     ggml_cuda_pool_alloc<half>   K_f16(pool);
@@ -1150,30 +1137,24 @@ void launch_fattn(
     if (stream_k) {
         // For short contexts it can be faster to have the SMs work on whole tiles because this lets us skip the fixup.
         const int max_blocks = max_blocks_per_sm*nsm;
-        const int tiles_nwaves = (ntiles_dst + max_blocks - 1) / max_blocks;
-        const int tiles_efficiency_percent = 100 * ntiles_dst / (max_blocks*tiles_nwaves);
-
-        const bool use_stream_k = cc >= GGML_CUDA_CC_ADA_LOVELACE || amd_wmma_available(cc) || tiles_efficiency_percent < 75;
 
         blocks_num.x = ntiles_dst;
         blocks_num.y = 1;
         blocks_num.z = 1;
 
-        if(use_stream_k) {
-            const int nblocks_stream_k_raw = std::min(max_blocks, ntiles_KV*ntiles_dst);
-            // Round down to a multiple of ntiles_dst so that each output tile gets the same number of blocks (avoids fixup).
-            // Only do this if the occupancy loss from rounding is acceptable.
-            const int nblocks_stream_k_rounded = (nblocks_stream_k_raw / ntiles_dst) * ntiles_dst;
-            const int max_efficiency_loss_percent = 5;
-            const int efficiency_loss_percent = nblocks_stream_k_rounded > 0
-                ? 100 * (nblocks_stream_k_raw - nblocks_stream_k_rounded) / nblocks_stream_k_raw
-                : 100;
-            const int nblocks_stream_k = efficiency_loss_percent <= max_efficiency_loss_percent
-                ? nblocks_stream_k_rounded
-                : nblocks_stream_k_raw;
+        const int nblocks_stream_k_raw = std::min(max_blocks, ntiles_KV*ntiles_dst);
+        // Round down to a multiple of ntiles_dst so that each output tile gets the same number of blocks (avoids fixup).
+        // Only do this if the occupancy loss from rounding is acceptable.
+        const int nblocks_stream_k_rounded = (nblocks_stream_k_raw / ntiles_dst) * ntiles_dst;
+        const int max_efficiency_loss_percent = 5;
+        const int efficiency_loss_percent = nblocks_stream_k_rounded > 0
+            ? 100 * (nblocks_stream_k_raw - nblocks_stream_k_rounded) / nblocks_stream_k_raw
+            : 100;
+        const int nblocks_stream_k = efficiency_loss_percent <= max_efficiency_loss_percent
+            ? nblocks_stream_k_rounded
+            : nblocks_stream_k_raw;
 
-            blocks_num.x = nblocks_stream_k;
-        }
+        blocks_num.x = nblocks_stream_k;
 
         if (ntiles_dst % blocks_num.x != 0) { // Fixup is only needed if the SMs work on fractional tiles.
             dst_tmp_meta.alloc((size_t(blocks_num.x) * ncols * (2 + DV/2)));

@@ -54,8 +54,6 @@ list(APPEND GGML_HEADERS_ROCM "../../include/ggml-cuda.h")
 file(GLOB   GGML_SOURCES_ROCM "../ggml-cuda/*.cu")
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
-file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
-list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/mmq*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/mmf*.cu")
@@ -159,7 +157,7 @@ if (GGML_HIP_ROCMI4_W4A4)
     add_compile_definitions(GGML_ROCMI4_W4A4=1)
     message(WARNING
         "GGML_HIP_ROCMI4_W4A4 is a lossy, experimental ROCmI4 prefill path "
-        "verified only on gfx1151. Exact MMQ is used on other architectures.")
+        "on gfx1151; exact int8 MMQ remains the default.")
 endif()
 
 if (GGML_HIP_ROCMI4_W4A8_IU4)
@@ -188,10 +186,6 @@ endif()
 
 if (GGML_HIP_ROCWMMA_FATTN)
     add_compile_definitions(GGML_HIP_ROCWMMA_FATTN)
-endif()
-
-if (NOT GGML_HIP_MMQ_MFMA)
-    add_compile_definitions(GGML_HIP_NO_MMQ_MFMA)
 endif()
 
 if (GGML_HIP_EXPORT_METRICS)

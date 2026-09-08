@@ -135,11 +135,7 @@ typedef half2 ggml_half2;
 
 #endif // GGML_COMMON_DECL_HIP
 
-#ifdef _MSC_VER
-#define GGML_EXTENSION
-#else // _MSC_VER
 #define GGML_EXTENSION __extension__
-#endif // _MSC_VER
 
 #define QK1_0 128
 typedef struct {

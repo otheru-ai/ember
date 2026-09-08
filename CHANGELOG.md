@@ -33,6 +33,9 @@ using an ambiguous same-day suffix.
   (#9)
 ### Changed
 
+- **engine:** remove unsupported GPU architectures, non-x86 CPU paths and
+  non-Linux integrations from the vendored engine. Builds and device discovery
+  now enforce gfx1151; the Linux x86-64 CPU companion and XDNA2 paths remain.
 - **server:** consolidate Chat, native streaming, and buffered generation into
   one lifecycle with shared snapshot/recovery handling and resource cleanup.
   Protocol-specific output, validation, and error behavior remain unchanged.

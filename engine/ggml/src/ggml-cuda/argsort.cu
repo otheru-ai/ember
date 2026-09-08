@@ -158,11 +158,7 @@ static inline __device__ void ggml_cuda_swap(T & a, T & b) {
 // smaller than the wavefront width, both partners of a compare-exchange live in
 // the same wave, so the exchange can be done register-to-register via shuffle —
 // no shared-memory round-trip and no __syncthreads() barrier.
-#if defined(GGML_USE_HIP) || defined(__HIP_PLATFORM_AMD__)
 #    define GGML_ARGSORT_SHFL_XOR(v, mask) __shfl_xor((v), (mask))
-#else
-#    define GGML_ARGSORT_SHFL_XOR(v, mask) __shfl_xor_sync(0xffffffffu, (v), (mask))
-#endif
 
 template<ggml_sort_order order>
 static __global__ void k_argsort_f32_i32(const float * x, int * dst, const int ncols, int ncols_pad) {

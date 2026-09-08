@@ -804,20 +804,10 @@ static void ggml_compute_forward_add1_f32(
         const int i2 = (ir - i3*ne2*ne1)/ne1;
         const int i1 = (ir - i3*ne2*ne1 - i2*ne1);
 
-#ifdef GGML_USE_ACCELERATE
-        GGML_UNUSED(ggml_vec_add1_f32);
-
-        vDSP_vadd(
-                (float *) ((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01), 1,
-                (float *) ((char *) src1->data), 0,
-                (float *) ((char *) dst->data  + i3*nb3  + i2*nb2  + i1*nb1 ), 1,
-                ne0);
-#else
         ggml_vec_add1_f32(ne0,
                 (float *) ((char *) dst->data  + i3*nb3  + i2*nb2  + i1*nb1 ),
                 (float *) ((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01),
                *(float *) src1->data);
-#endif
     }
 }
 
@@ -1217,17 +1207,10 @@ static void ggml_compute_forward_acc_f32(
         const int i2 = (ir - i3*ne12*ne11)/ne11;
         const int i1 = (ir - i3*ne12*ne11 - i2*ne11);
 
-#ifdef GGML_USE_ACCELERATE
-        vDSP_vadd(
-                (float *) ((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01 + offset), 1,
-                (float *) ((char *) src1->data + i3*nb13 + i2*nb12 + i1*nb11), 1,
-                (float *) ((char *) dst->data  + i3*nb3  + i2*nb2  + i1*nb1  + offset), 1, nc);
-#else
         ggml_vec_add_f32(nc,
                 (float *) ((char *)  dst->data + i3*nb3  + i2*nb2  + i1*nb1  + offset),
                 (float *) ((char *) src0->data + i3*nb03 + i2*nb02 + i1*nb01 + offset),
                 (float *) ((char *) src1->data + i3*nb13 + i2*nb12 + i1*nb11));
-#endif
     }
 }
 
@@ -3753,13 +3736,7 @@ static void ggml_compute_forward_norm_f32(
                 float * y = (float *) ((char *) dst->data + i01*nb1 + i02*nb2 + i03*nb3);
                 float variance = 0;
 
-#ifdef GGML_USE_ACCELERATE
-                mean = -mean;
-                vDSP_vsadd(x, 1, &mean, y, 1, ne00);
-                vDSP_measqv(y, 1, &variance, ne00);
-#else
                 variance = ggml_vec_cvar_f32(ne00, y, x, mean);
-#endif //GGML_USE_ACCELERATE
 
                 const float scale = 1.0f/sqrtf(variance + eps);
                 ggml_vec_scale_f32(ne00, y, scale);

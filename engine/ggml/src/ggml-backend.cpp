@@ -1,13 +1,5 @@
 // Note: porting this file to C++ is a work in progress
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#   define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "ggml-alloc.h"
@@ -21,11 +13,6 @@
 #include <string.h>
 #include <algorithm>
 #include <vector>
-
-#ifdef __APPLE__
-#include <sys/types.h>
-#include <sys/sysctl.h>
-#endif
 
 
 // backend buffer type

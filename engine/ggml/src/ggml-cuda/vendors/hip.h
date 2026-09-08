@@ -174,61 +174,14 @@
 
 #define __CUDA_ARCH__ 1300
 
-#if defined(__gfx900__) || defined(__gfx906__)
-#define GCN5
-#endif // defined(__gfx900__) || defined(__gfx906__)
-
-#if defined(__gfx803__)
-#define GCN4
-#endif // defined(__gfx803__)
-
-#if defined(GCN5) || defined(GCN4)
-#define GCN
-#endif // defined(GCN5) || defined(GCN4)
-
-#if defined(__gfx950__)
-#define CDNA4
-#endif // defined(__gfx950__)
-
-#if defined(__gfx942__)
-#define CDNA3
-#endif // defined(__gfx942__)
-
-#if defined(__gfx90a__)
-#define CDNA2
-#endif // defined(__gfx90a__)
-
-#if defined(__gfx908__)
-#define CDNA1
-#endif // defined(__gfx908__)
-
-#if defined(CDNA4) || defined(CDNA3) || defined(CDNA2) || defined(CDNA1)
-#define CDNA // For the entire family
-#endif // defined(CDNA4) || defined(CDNA3) || defined(CDNA2) || defined(CDNA1)
-
-#if defined(__GFX11__)
-#define RDNA3
-#endif // defined(__GFX11__)
-
-#if defined(__gfx1150__) || defined(__gfx1151__)
-#define RDNA3_5
-#endif // defined(__gfx1150__) || defined(__gfx1151__)
-
-#if defined(RDNA3) && !defined(RDNA3_5)
-#define RDNA3_0
-#endif // defined(RDNA3) && !defined(RDNA3_5)
-
-#if defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1033__) || \
-    defined(__gfx1034__) || defined(__gfx1035__) || defined(__gfx1036__) || defined(__gfx1037__)
-#define RDNA2
+#if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1151__)
+#error "Ember device code supports only AMD gfx1151"
 #endif
 
-#if defined(__gfx1010__) || defined(__gfx1012__)
-#define RDNA1
-#endif // defined(__gfx1010__) || defined(__gfx1012__)
-
-#if defined(RDNA3) || defined(RDNA2) || defined(RDNA1)
-#define RDNA // For the entire family
+#if defined(__gfx1151__)
+#define RDNA
+#define RDNA3
+#define RDNA3_5
 #endif
 
 #ifndef __has_builtin
