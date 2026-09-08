@@ -655,6 +655,20 @@ jobs:
           docker ps -aq --filter \
             "name=^ember-(cert|vision-gate)-.*$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT$" \
             | xargs -r docker rm -f >/dev/null 2>&1 || true
+          # `docker ps` sees containers only, so the validator's cache volume
+          # needs its own line. Lower severity than the containers -- it is
+          # trapped in-step and strands disk rather than the RAM that caused
+          # the outage -- but it costs one command to be complete.
+          #
+          # Removed by exact name, NOT by filter. `docker volume ls --filter
+          # name=` does not honour the anchored regex that `docker ps` does:
+          # tested on hermes, "name=^ember-cert-validator-999-1$" selected
+          # nothing while the volume existed. An unanchored filter is worse
+          # than useless here because it substring-matches, so attempt 1 would
+          # also select attempt 10's volume.
+          docker volume rm -f \
+            "ember-cert-validator-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            >/dev/null 2>&1 || true
 
       - name: Unblock production
         if: ${{ always() && steps.production.outputs.blocked == 'yes' }}
