@@ -43,10 +43,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from assemble_bundle import (  # noqa: E402
     jsonl, summarise_context, summarise_groups, summarise_workloads,
     validate_workload_rows)
+from benchmark import percentile  # noqa: E402
 
 # Bumped whenever the rules below get stricter, and recorded in the sidecar so a
 # published bundle says which contract it passed.
-VALIDATOR_VERSION = 3
+VALIDATOR_VERSION = 4
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 # The context sweep these releases are measured with. Depths are the sweep's
 # REQUESTED targets, not the measured prompt lengths, which drift at depth.
@@ -146,6 +147,50 @@ def _from_inspect(path, image, pinned):
     raise Invalid(f"--image-inspect carries no entry for {repo} with a "
                   f"RepoDigest; a locally built image has none, and an image "
                   f"with no registry identity cannot be published as evidence")
+
+
+def vision_from_requests(rows, declared):
+    """Recompute benchmark.py's vision aggregate from the requests themselves.
+
+    Three copies of an aggregate agreeing proves only that they were copied.
+    This is benchmark.py run_vision_group's exact formula (scripts/bench/
+    benchmark.py:754-778): cold is the first successful request, warm is the
+    rest, medians are percentile(.., 0.5) rounded to 2, and cold_wall_seconds
+    is rounded to 3.
+
+    The formula is restated here rather than extracted into a shared function
+    because benchmark.py is the live measurement harness and a run is in
+    flight. If it is ever refactored, this is the caller to update with it --
+    the line reference above is the anchor.
+
+    image_sha256, image_bytes and max_tokens are metadata about inputs this
+    function never sees, so they are carried, not recomputed.
+    """
+    ok = [r for r in rows if r.get("ok")]
+    if not ok:
+        raise Invalid("no successful vision request in raw-results.jsonl")
+    failed = [r for r in rows if not r.get("ok") or r.get("error")]
+    if failed:
+        raise Invalid(f"{len(failed)} vision request(s) failed; first error "
+                      f"{failed[0].get('error')!r}")
+    cold, warm = ok[0], ok[1:]
+
+    def med(values):
+        clean = [v for v in values if isinstance(v, (int, float))
+                 and not isinstance(v, bool)]
+        return round(percentile(clean, 0.5), 2) if clean else None
+
+    return {
+        "samples": len(ok),
+        "cold_prefill_ms": cold.get("prefill_ms"),
+        "cold_wall_seconds": round(cold["wall_seconds"], 3),
+        "warm_prefill_ms": med([r.get("prefill_ms") for r in warm]),
+        "warm_decode_tps": med([r.get("decode_tokens_per_second") for r in warm]),
+        "warm_wall_seconds": med([r["wall_seconds"] for r in warm]),
+        "prompt_tokens": cold.get("prompt_tokens"),
+        "spec_ran": [r.get("spec_ran") for r in ok],
+        "prefill_mode": cold.get("prefill_mode"),
+    }
 
 
 def _digest(model, part):
@@ -285,25 +330,28 @@ def validate(bundle: Path, release: str, inspect_path=None,
         raise Invalid("no vision requests in raw-results.jsonl; these releases "
                       "ship a vision tower and a bundle without it is not a "
                       "complete measurement of them")
-    if len(vision_rows) != declared_vision.get("samples"):
-        raise Invalid(
-            f"vision declares {declared_vision.get('samples')} samples but "
-            f"raw-results.jsonl holds {len(vision_rows)} vision requests")
     vision_summary = [r for r in rows if r.get("kind") == "vision_summary"]
     if not vision_summary:
         raise Invalid("raw-results.jsonl carries no vision_summary row")
-    # assemble_bundle copies the raw declaration into summary.json verbatim, so
-    # anything else there was edited afterwards. Counting samples alone left
-    # every other vision figure -- warm_decode_tps included -- free to be
-    # anything at all.
-    if summary.get("vision") != declared_vision:
-        raise Invalid("summary.json vision does not match the vision block in "
-                      "raw-results.jsonl; it was not derived from the "
-                      "measurement")
     from_row = {k: v for k, v in vision_summary[-1].items() if k != "kind"}
-    if declared_vision != from_row:
-        raise Invalid("the summary row's vision block does not match the "
-                      "vision_summary row it should have been built from")
+
+    # The three declarations must agree with EACH OTHER and with the requests.
+    # Agreement alone was not enough: they are copies of one another, so all
+    # three move together when the source is edited.
+    recomputed = vision_from_requests(vision_rows, declared_vision)
+    for name, claimed in (("the summary row", declared_vision),
+                          ("the vision_summary row", from_row),
+                          ("summary.json", summary.get("vision") or {})):
+        for field, value in recomputed.items():
+            if claimed.get(field) != value:
+                raise Invalid(
+                    f"{name} reports vision {field}={claimed.get(field)!r}, but "
+                    f"the vision requests give {value!r}; the aggregate was not "
+                    f"computed from these measurements")
+    for field in ("image_sha256", "image_bytes", "max_tokens"):
+        if not declared_vision.get(field):
+            raise Invalid(f"vision aggregate is missing {field}, which records "
+                          f"what was measured rather than what was computed")
 
     # ── the context sweep must be the whole sweep, in both arms ──
     for arm in ("spec-on", "spec-off"):
@@ -353,7 +401,14 @@ def validate(bundle: Path, release: str, inspect_path=None,
                       "context-sweep.jsonl")
     _finite(summary, "summary.json")
 
+    # A manual backfill is not a certification and must not be published as
+    # one. The memory gate on these runs is incomplete (server_host_pid and RSS
+    # null), which does not invalidate the throughput measurements but does
+    # mean the resource evidence is absent rather than passing.
     env["_publication"] = {
+        "certified": False,
+        "resource_evidence": "incomplete: memory gate did not capture "
+                             "server_host_pid or RSS",
         "image_digest": pinned,
         "image_revision": revision,
         "release": release,

@@ -90,8 +90,16 @@ a sweep that lost rows before assembly, which is exactly the case it exists to
 catch.
 
 The archive carries a generated `publication.json` recording the image digest,
-the bound revision, the release and the validator version. It is written into
-the archive only; the measured bundle directory is never modified.
+the bound revision, the release, the validator version, and `certified: false`.
+It is written into the archive only; the measured bundle directory is never
+modified.
+
+**A manual backfill is not a certification.** On these runs the memory gate is
+incomplete — `server_host_pid` and RSS are null — so the resource evidence is
+absent rather than passing. That does not invalidate the throughput
+measurements, which are raw facts either way, but it is why the sidecar records
+`certified: false` and why `--certified` must not be passed to
+`build_perf_site_data.py` for them.
 
 ## Re-running is safe; overwriting is not
 

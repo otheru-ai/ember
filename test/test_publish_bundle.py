@@ -210,7 +210,7 @@ class ValidateTest(unittest.TestCase):
         self.write_rows("raw-results.jsonl", kept)
         # The summary row still CLAIMS its original sample count, so a
         # truthiness check on summary["vision"] would pass this.
-        with self.assertRaisesRegex(Invalid, "declares"):
+        with self.assertRaisesRegex(Invalid, "vision samples=4, but .* give 3"):
             self.ok()
 
     def test_an_edited_vision_metric_is_refused(self):
@@ -218,7 +218,7 @@ class ValidateTest(unittest.TestCase):
         summary = self.summary()
         summary["vision"]["warm_decode_tps"] = 999999
         self.rewrite("summary.json", summary)
-        with self.assertRaisesRegex(Invalid, "not derived from the measurement"):
+        with self.assertRaisesRegex(Invalid, "summary.json reports vision"):
             self.ok()
 
     def test_a_summary_row_vision_block_that_drifted_is_refused(self):
@@ -236,8 +236,54 @@ class ValidateTest(unittest.TestCase):
         summary = self.summary()
         summary["vision"] = drifted
         self.rewrite("summary.json", summary)
-        with self.assertRaisesRegex(Invalid, "vision_summary row"):
+        with self.assertRaisesRegex(Invalid, "the summary row reports vision"):
             self.ok()
+
+    def test_all_three_aggregate_copies_edited_consistently_are_refused(self):
+        """The case that motivated recomputing rather than cross-checking.
+
+        Three copies of one aggregate agree by construction, so any amount of
+        comparing them to each other passes while all three are wrong. Only the
+        requests can settle it.
+        """
+        rows = rows_of("raw-results.jsonl")
+        for r in rows:
+            if r.get("kind") == "summary":
+                r["vision"] = dict(r["vision"], warm_decode_tps=999999)
+            elif r.get("kind") == "vision_summary":
+                r["warm_decode_tps"] = 999999
+        self.write_rows("raw-results.jsonl", rows)
+        summary = self.summary()
+        summary["vision"]["warm_decode_tps"] = 999999
+        self.rewrite("summary.json", summary)
+        with self.assertRaisesRegex(Invalid, "warm_decode_tps=999999"):
+            self.ok()
+
+    def test_a_failed_vision_request_is_refused(self):
+        rows = rows_of("raw-results.jsonl")
+        for r in rows:
+            if r.get("group") == "vision":
+                r["ok"] = False
+                r["error"] = "vision tower not resident"
+                break
+        self.write_rows("raw-results.jsonl", rows)
+        with self.assertRaisesRegex(Invalid, "vision request\\(s\\) failed"):
+            self.ok()
+
+    def test_vision_input_metadata_must_be_present(self):
+        for field in ("image_sha256", "image_bytes", "max_tokens"):
+            with self.subTest(field=field):
+                rows = rows_of("raw-results.jsonl")
+                for r in rows:
+                    if r.get("kind") == "summary":
+                        r["vision"].pop(field)
+                self.write_rows("raw-results.jsonl", rows)
+                summary = self.summary()
+                summary["vision"].pop(field)
+                self.rewrite("summary.json", summary)
+                with self.assertRaisesRegex(Invalid, f"missing {field}"):
+                    self.ok()
+                self.setUp()
 
     def test_an_undeclared_required_group_is_refused(self):
         rows = rows_of("raw-results.jsonl")
