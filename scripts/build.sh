@@ -28,6 +28,8 @@ REVISION="$(git -C "$REPO" rev-parse HEAD)"
 echo "[build] repo=$REPO revision=$REVISION image=$IMAGE jobs=$JOBS"
 
 docker run --rm \
+  -v ember-local-rocm-ccache:/root/.cache/ccache \
+  -e CCACHE_DIR=/root/.cache/ccache -e CCACHE_MAXSIZE=20G \
   -v "$REPO":/ember -w /ember \
   "$IMAGE" \
   bash -lc "
@@ -35,9 +37,13 @@ docker run --rm \
     cmake -S /ember -B /ember/build-rocm \
       -DCMAKE_BUILD_TYPE=Release \
       -DEMBER_ENGINE=ON \
+      -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+      -DCMAKE_HIP_COMPILER_LAUNCHER=ccache \
       -DEMBER_CONFIGURED_GIT_HEAD="${REVISION}"
     cmake --build /ember/build-rocm \
       --target ember-dflash ember-gguf-quantize -j ${JOBS}
+    ccache --show-stats
   "
 
 echo "[build] done -> $REPO/build-rocm/ember-dflash"

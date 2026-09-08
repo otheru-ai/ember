@@ -508,6 +508,20 @@ class ReleaseScriptTests(unittest.TestCase):
         self.assertIn("ccache", dockerfile)
         self.assertIn("id=ember-gfx1151-ccache", dockerfile)
         self.assertIn("CCACHE_MAXSIZE=20G", dockerfile)
+        # A cache mount alone is inert: every compiler must actually use it.
+        local_build = (ROOT / "scripts" / "build.sh").read_text()
+        for language in ("C", "CXX", "HIP"):
+            launcher = f"CMAKE_{language}_COMPILER_LAUNCHER=ccache"
+            self.assertIn(launcher, dockerfile)
+            self.assertIn(launcher, local_build)
+        self.assertIn("ember-local-rocm-ccache:/root/.cache/ccache", local_build)
+        # Version labels must not invalidate compilation when publishing the
+        # same SHA as dev and release. Revision still participates in the build.
+        dev = dockerfile.split("FROM toolchain AS dev", 1)[1].split(
+            "FROM ${RUNTIME_IMAGE} AS release", 1)[0]
+        self.assertGreater(dev.index("ARG EMBER_VERSION"),
+                           dev.index("ccache --show-stats"))
+        self.assertGreater(dev.index("ARG EMBER_VCS_REF"), dev.index("COPY . /ember"))
         self.assertIn("ember-ci-ccache", forgejo_ci)
         self.assertIn("CMAKE_C_COMPILER_LAUNCHER=ccache", forgejo_ci)
         self.assertIn("node:24-bookworm@sha256:", forgejo_ci)
