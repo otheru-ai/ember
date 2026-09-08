@@ -629,6 +629,24 @@ jobs:
           ' "$out/$kind/result.json" "$kind"
           done
 
+      # BEFORE production is restored, not after. Cancelling a step kills the
+      # docker CLI, not the container it started, and --rm only removes a
+      # container once it exits -- so a cancelled validator keeps running and
+      # holds the model in memory. Run 34221406217 left one behind holding
+      # 88 GiB, most of this host; production was restarted into a machine with
+      # no room for its model and sat in `activating` until the container was
+      # removed by hand. Sweeping after the restore would reproduce exactly
+      # that, so the order here is load-bearing. Names carry the run id so this
+      # touches only this run's containers, never production or a concurrent
+      # job.
+      - name: Remove leftover certification containers
+        if: ${{ always() }}
+        run: |
+          for c in gemm spec disk; do
+            docker rm -f "ember-cert-$c-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+              >/dev/null 2>&1 || true
+          done
+
       - name: Unblock production
         if: ${{ always() && steps.production.outputs.blocked == 'yes' }}
         run: sudo -n /usr/local/sbin/ember-cert-production unmask
@@ -652,20 +670,6 @@ jobs:
       - name: Release the GPU lock
         if: ${{ always() }}
         run: sudo -n /usr/local/sbin/ember-gpu-lock release
-
-      # Cancelling a step kills the docker CLI, not the container it started, and
-      # --rm only removes a container once it exits -- so a cancelled validator
-      # keeps running and holds the model in memory. Run 34221406217 left one
-      # behind holding 88 GiB, which is most of this host, and production could
-      # not load its own model until it was removed by hand. Names carry the run
-      # id so this sweeps only this run's containers.
-      - name: Remove leftover certification containers
-        if: ${{ always() }}
-        run: |
-          for c in gemm spec disk; do
-            docker rm -f "ember-cert-$c-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-              >/dev/null 2>&1 || true
-          done
 
       - name: Remove generated validation prompts
         if: ${{ always() }}
