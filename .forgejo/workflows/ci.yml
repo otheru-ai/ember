@@ -50,8 +50,21 @@ jobs:
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
-        - /home/mythos/.config/ember/forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
     steps:
+      # Docker creates a MISSING bind source as a directory rather than
+      # failing, so a stale host path does not break the mount -- it puts a
+      # directory where the CA should be, and every later TLS call fails with
+      # an error that names neither the mount nor the path. That is how this
+      # whole workflow stayed red while pointing at /home/mythos, a host that
+      # no longer exists. Fail here, naming the cause, instead.
+      - name: Verify the internal CA is mounted as a file
+        run: |
+          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+            echo "internal CA is not a regular file -- check the volume mount:" >&2
+            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            exit 1
+          }
       - uses: actions/checkout@v5
       - name: Check repo invariants
         run: python3 ci/check_invariants.py
@@ -65,12 +78,25 @@ jobs:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
         - ember-ci-ccache:/root/.cache/ccache
-        - /home/mythos/.config/ember/forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
     strategy:
       fail-fast: false
       matrix:
         build_type: [Release, Debug]
     steps:
+      # Docker creates a MISSING bind source as a directory rather than
+      # failing, so a stale host path does not break the mount -- it puts a
+      # directory where the CA should be, and every later TLS call fails with
+      # an error that names neither the mount nor the path. That is how this
+      # whole workflow stayed red while pointing at /home/mythos, a host that
+      # no longer exists. Fail here, naming the cause, instead.
+      - name: Verify the internal CA is mounted as a file
+        run: |
+          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+            echo "internal CA is not a regular file -- check the volume mount:" >&2
+            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            exit 1
+          }
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
@@ -99,8 +125,21 @@ jobs:
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
-        - /home/mythos/.config/ember/forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
     steps:
+      # Docker creates a MISSING bind source as a directory rather than
+      # failing, so a stale host path does not break the mount -- it puts a
+      # directory where the CA should be, and every later TLS call fails with
+      # an error that names neither the mount nor the path. That is how this
+      # whole workflow stayed red while pointing at /home/mythos, a host that
+      # no longer exists. Fail here, naming the cause, instead.
+      - name: Verify the internal CA is mounted as a file
+        run: |
+          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+            echo "internal CA is not a regular file -- check the volume mount:" >&2
+            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            exit 1
+          }
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
@@ -129,8 +168,21 @@ jobs:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
         - ember-ci-ccache:/root/.cache/ccache
-        - /home/mythos/.config/ember/forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
     steps:
+      # Docker creates a MISSING bind source as a directory rather than
+      # failing, so a stale host path does not break the mount -- it puts a
+      # directory where the CA should be, and every later TLS call fails with
+      # an error that names neither the mount nor the path. That is how this
+      # whole workflow stayed red while pointing at /home/mythos, a host that
+      # no longer exists. Fail here, naming the cause, instead.
+      - name: Verify the internal CA is mounted as a file
+        run: |
+          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+            echo "internal CA is not a regular file -- check the volume mount:" >&2
+            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            exit 1
+          }
       - uses: actions/checkout@v5
       - name: Install toolchain
         run: |
