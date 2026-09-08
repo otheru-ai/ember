@@ -824,6 +824,17 @@ jobs:
           out="$RUNNER_TEMP/bench-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -p "$out"
           # The promoted tag, so the bundle describes what people can pull.
+          # Use a config of our own rather than whatever the runner's
+          # home happens to hold. A leftover ghcr.io entry from an
+          # earlier job's docker login does not expire out of the file
+          # when its token expires: docker keeps sending it and the
+          # registry answers "denied", instead of falling back to the
+          # anonymous pull this public package would otherwise allow.
+          # That is what failed run 34222604917 after a certification
+          # that had already passed.
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
           image="ghcr.io/${GITHUB_REPOSITORY,,}:$RELEASE_VERSION"
           # Unlike certification this job owns nothing yet, so the script takes
           # the GPU lock and manages production itself, restoring it on exit.
