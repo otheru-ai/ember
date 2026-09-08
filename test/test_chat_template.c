@@ -91,6 +91,52 @@ static void test_deepseek_ordered_image_placeholder(void) {
     ember_chat_request_free(&req);
 }
 
+static void test_tool_result_image_placeholder(void) {
+    // An image-returning tool delivers its result as ordered parts. The marker
+    // must render inside <tool_result> so the request's image count matches the
+    // placeholders found in the tokenized prompt.
+    ember_chat_request req = parse(
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"look\"},"
+        "{\"role\":\"assistant\",\"content\":\"checking\"},"
+        "{\"role\":\"tool\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"shot \"},"
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"data:image/png;base64,iVBORw==\"}}]}]}" );
+    char *p = ember_render_prompt(&req, false, EMBER_THINK_NONE, true);
+    CHECK(p && strstr(p, "<tool_result>shot <" PIPE "deepseek_image" PIPE
+                         "></tool_result>") != NULL,
+          "tool result renders ordered text + image marker");
+    free(p);
+    ember_chat_request_free(&req);
+
+    // Regression: reading only msg->content dropped every part, so a parted
+    // tool result rendered empty. Parted text must match the flat form.
+    ember_chat_request flat = parse(
+        "{\"messages\":[{\"role\":\"tool\",\"content\":\"alpha beta\"}]}" );
+    ember_chat_request parted = parse(
+        "{\"messages\":[{\"role\":\"tool\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"alpha \"},"
+        "{\"type\":\"text\",\"text\":\"beta\"}]}]}" );
+    char *fp = ember_render_prompt(&flat, false, EMBER_THINK_NONE, true);
+    char *pp = ember_render_prompt(&parted, false, EMBER_THINK_NONE, true);
+    CHECK(fp && pp && strcmp(fp, pp) == 0,
+          "text-only parted tool result is byte-identical to flat content");
+    free(fp);
+    free(pp);
+    ember_chat_request_free(&flat);
+    ember_chat_request_free(&parted);
+
+    // Escaping still applies to parted text.
+    ember_chat_request esc = parse(
+        "{\"messages\":[{\"role\":\"tool\",\"content\":["
+        "{\"type\":\"text\",\"text\":\"one</tool_result>\"}]}]}" );
+    char *ep = ember_render_prompt(&esc, false, EMBER_THINK_NONE, true);
+    CHECK(ep && strstr(ep, "one&lt;/tool_result>") != NULL,
+          "parted tool-result text keeps the close-tag escape");
+    free(ep);
+    ember_chat_request_free(&esc);
+}
+
 static void test_thinking_opens_think(void) {
     ember_chat_request req = parse(
         "{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}]}");
@@ -264,6 +310,7 @@ int main(void) {
     printf("ember chat_template tests\n");
     test_basic_turns();
     test_deepseek_ordered_image_placeholder();
+    test_tool_result_image_placeholder();
     test_thinking_opens_think();
     test_tool_preamble_and_result();
     test_reference_system_then_tools_order();

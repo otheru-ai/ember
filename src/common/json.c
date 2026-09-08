@@ -270,16 +270,29 @@ static ember_json *parse_value_inner(jp *j) {
     }
 }
 
-ember_json *ember_json_parse_n(const char *text, size_t len) {
+ember_json *ember_json_parse_at(const char *text, size_t len, size_t *err_off) {
+    if (err_off) *err_off = 0;
     if (!text) return NULL;
     jp j = {.p = text, .end = text + len, .ok = true, .depth = 0};
     ember_json *v = parse_value(&j);
-    if (!j.ok) { if (v) ember_json_free(v); return NULL; }
+    if (!j.ok) {
+        if (v) ember_json_free(v);
+        if (err_off) *err_off = (size_t)(j.p - text);
+        return NULL;
+    }
     skip_ws(&j);
     // #4(b): the top-level value must consume the whole input; reject trailing
     // non-whitespace (e.g. "{} garbage", "1 2") that lenient parsers accept.
-    if (j.p != j.end) { if (v) ember_json_free(v); return NULL; }
+    if (j.p != j.end) {
+        if (v) ember_json_free(v);
+        if (err_off) *err_off = (size_t)(j.p - text);
+        return NULL;
+    }
     return v;
+}
+
+ember_json *ember_json_parse_n(const char *text, size_t len) {
+    return ember_json_parse_at(text, len, NULL);
 }
 
 ember_json *ember_json_parse(const char *text) {

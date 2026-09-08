@@ -129,6 +129,14 @@ typedef struct ember_server {
     // that returned nothing new. Keys on the RESULT, so it sees the stalls both
     // tool-loop signals miss -- they key on the call. Telemetry only.
     int               no_progress_report;
+    // > 0 arms the loop-breaker that survives DRY. The visible-cycle watchdog
+    // keys on exact token repetition, which the DRY sampler exists to perturb;
+    // the progress lease keys on tool-result identity, so it still fires. Off
+    // by default like auto_answer_after_loop: it changes behaviour rather than
+    // only reporting.
+    int               no_progress_stop;
+    long              no_progress_stop_count;
+    long              last_no_progress_stop_at;
     long              no_progress_count;
     long              last_no_progress_at;
     int               last_no_progress_rounds;
@@ -1294,8 +1302,19 @@ static bool parse_executable_tool_calls(const ember_chat_request *req,
     const char *detail = NULL;
     if (report.contaminated)
         detail = "nested DSML appeared inside a string tool argument";
-    else if (report.invalid_json)
-        detail = "a non-string tool argument was not valid JSON";
+    else if (report.invalid_json) {
+        // Give the position, not just the verdict: a retry that knows where the
+        // document broke can correct it instead of regenerating it blind.
+        if (report.invalid_json_len > 0) {
+            snprintf(tool_validation_detail, sizeof(tool_validation_detail),
+                     "a non-string tool argument was not valid JSON "
+                     "(parsing stopped at byte %zu of %zu)",
+                     report.invalid_json_offset, report.invalid_json_len);
+            detail = tool_validation_detail;
+        } else {
+            detail = "a non-string tool argument was not valid JSON";
+        }
+    }
     else if (report.mixed_syntax)
         detail = "mixed DSML syntax families were generated";
     else if (report.malformed)
@@ -2448,6 +2467,37 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         snprintf(srv->last_no_progress_tool,
                  sizeof(srv->last_no_progress_tool), "%s",
                  stalled_tool ? stalled_tool : "");
+        pthread_mutex_unlock(&srv->state_lock);
+    }
+
+    // The loop-breaker that survives DRY. Reporting alone left a stuck agent
+    // with nothing to stop it once EMBER_DRY_MULTIPLIER > 0 blinded the
+    // visible-cycle watchdog: measured 2026-09-05, 12 no-progress rounds and 0
+    // watchdog fires in 158 generations, one episode escalating 9 -> 20 rounds
+    // on a single tool and never stopping.
+    //
+    // Suppresses tools for this turn rather than terminating it: a hard stop
+    // produces exactly the silent empty turn that makes a healthy agent look
+    // dead, so the model is instead asked to answer from what it already has.
+    // Same intervention, threshold and statelessness as auto_answer_after_loop
+    // -- the evidence is the trailing rounds in the history the client just
+    // sent, never server-side memory, so the same request always decides the
+    // same way. Never overrides an explicit client demand for a tool call.
+    if (srv->no_progress_stop > 0 &&
+        observed_no_progress > srv->no_progress_stop &&
+        req->has_tools && !req->tool_choice_required) {
+        fprintf(stderr,
+                "[ember] no-progress stop: %d tool rounds returned nothing new "
+                "> %d; suppressing tools for this turn\n",
+                observed_no_progress, srv->no_progress_stop);
+        req->has_tools = false;      // before any render; grammar gates on this
+        if (!append_auto_answer_instruction(req))
+            fprintf(stderr, "[ember] no-progress stop: instruction not "
+                            "appended; the model may improvise tool markup as "
+                            "text\n");
+        pthread_mutex_lock(&srv->state_lock);
+        srv->no_progress_stop_count++;
+        srv->last_no_progress_stop_at = now_unix();
         pthread_mutex_unlock(&srv->state_lock);
     }
     bool enable_thinking = req->thinking_enabled;
@@ -4083,7 +4133,7 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         long np_count, np_at;
         int np_tokens;
         bool np_degenerate;
-        long lease_count, lease_at;
+        long lease_count, lease_at, lease_stopped;
         int lease_rounds;
         char lease_tool[sizeof(srv->last_no_progress_tool)];
         long dg_count, dg_at;
@@ -4105,6 +4155,7 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         np_tokens = srv->last_nonprogress_tokens;
         np_degenerate = srv->last_nonprogress_degenerate;
         lease_count = srv->no_progress_count;
+        lease_stopped = srv->no_progress_stop_count;
         lease_at = srv->last_no_progress_at;
         lease_rounds = srv->last_no_progress_rounds;
         snprintf(lease_tool, sizeof(lease_tool), "%s", srv->last_no_progress_tool);
@@ -4174,8 +4225,10 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         // report_after mirrors the flag so "never fired" reads differently
         // from "not enabled".
         ember_buf_printf(&b,
-            ",\"no_progress\":{\"report_after\":%d,\"count\":%ld,\"last\":",
-            srv->no_progress_report, lease_count);
+            ",\"no_progress\":{\"report_after\":%d,\"stop_after\":%d,"
+            "\"stopped\":%ld,\"count\":%ld,\"last\":",
+            srv->no_progress_report, srv->no_progress_stop,
+            lease_stopped, lease_count);
         if (lease_count > 0) {
             ember_buf_printf(&b, "{\"at\":%ld,\"rounds\":%d,\"tool\":",
                              lease_at, lease_rounds);
@@ -4252,6 +4305,9 @@ static void print_usage(FILE *out, const char *argv0) {
         "  --default-temperature T     override model-card temperature\n"
         "  --tool-loop-report N        report after N identical call+result repeats (default 8)\n"
         "  --no-progress-report N      report after N tool rounds return nothing new (default 8)\n"
+        "  --no-progress-stop N        suppress tools for one turn once more than N tool\n"
+        "                              rounds return nothing new (0 = off). Survives DRY,\n"
+        "                              which blinds the visible-cycle watchdog.\n"
         "  --auto-answer-after-loop N  suppress tools for one turn once a request's\n"
         "                              history shows >N identical trailing calls\n"
         "                              (0=off; BEHAVIOURAL, not diagnostic)\n"
@@ -4818,6 +4874,7 @@ int main(int argc, char **argv) {
     // other. Its default is also 8 so operators see the two advisory thresholds
     // at a consistent severity level.
     int no_progress_report = 8;
+    int no_progress_stop = 0;            // off: this one changes behaviour
     int auto_answer_after_loop = 0;      // off: this one changes behaviour
     // The model advertises deepseek4.context_length = 1048576; 65536 was a
     // server-side default, not a model limit. Compressed MLA keeps the cache
@@ -4928,6 +4985,10 @@ int main(int argc, char **argv) {
             v = need_option_value(&i, argc, argv);
             options_ok = v &&
                 parse_int_range(v, opt, 0, INT_MAX, &no_progress_report);
+        } else if (strcmp(opt, "--no-progress-stop") == 0) {
+            v = need_option_value(&i, argc, argv);
+            options_ok = v &&
+                parse_int_range(v, opt, 0, INT_MAX, &no_progress_stop);
         } else if (strcmp(opt, "--prefix-cache-slots") == 0) {
             v = need_option_value(&i, argc, argv);
             options_ok = v && parse_int_range(v, opt, 1,
@@ -5119,6 +5180,7 @@ int main(int argc, char **argv) {
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
     srv.no_progress_report = no_progress_report;
+    srv.no_progress_stop = no_progress_stop;
     srv.batch_sessions = batch_sessions;
     srv.auto_answer_after_loop = auto_answer_after_loop;
     if (pthread_mutex_init(&srv.gen_lock, NULL) != 0) {
@@ -5196,6 +5258,18 @@ int main(int argc, char **argv) {
             srv.card.presence_penalty, srv.tool_loop_report,
             srv.no_progress_report, batch_sessions,
             bg_idle_secs, bg_max_wait_secs);
+    // Make the DRY/watchdog trade explicit at startup. The visible-cycle
+    // watchdog fires only on an exact token cycle and DRY exists to perturb
+    // exactly that, so enabling DRY without an arming loop-breaker silently
+    // leaves a stuck agent with nothing to stop it.
+    if (dry_default_multiplier() > 0.0f &&
+        srv.no_progress_stop == 0 && srv.auto_answer_after_loop == 0)
+        fprintf(stderr,
+                "[ember] WARNING: DRY is enabled and no loop-breaker is armed. "
+                "DRY perturbs the exact token cycle the progress watchdog "
+                "detects, so semantic loops will not be stopped. Set "
+                "--no-progress-stop N (or --auto-answer-after-loop N) to "
+                "restore one.\n");
     // Start the persistent generation worker before accepting connections: all
     // backend forward passes run on it so the thread_local graph caches build
     // once and stay warm (see gen_worker above). If it can't start, abort —

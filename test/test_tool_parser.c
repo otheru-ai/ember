@@ -232,6 +232,20 @@ static void test_executable_report_rejects_invalid_raw_json(void) {
           report.invalid_json,
           "executable parser rejects invalid string=false JSON");
     ember_tool_calls_free(&tc);
+
+    // The rejection must say WHERE it broke, so a retry can correct rather
+    // than regenerate a long document blind.
+    const char *mid =
+        "<tool_calls><invoke name=\"run\">"
+        "<parameter name=\"x\" string=\"false\">[1,2,x]</parameter>"
+        "</invoke></tool_calls>";
+    ember_tool_calls tc2 = {0};
+    ember_tool_parse_report r2 = {0};
+    ember_parse_dsml_tool_calls_ex(mid, &tc2, &r2);
+    CHECK(r2.invalid_json, "mid-document break is still rejected");
+    CHECK(r2.invalid_json_len == 7, "payload length recorded");
+    CHECK(r2.invalid_json_offset == 5, "break position recorded exactly");
+    ember_tool_calls_free(&tc2);
 }
 
 static void test_wrapper_is_authoritative(void) {
