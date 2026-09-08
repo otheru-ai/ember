@@ -11,6 +11,12 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+### Changed
+
+- **server:** consolidate Chat, native streaming, and buffered generation into
+  one lifecycle with shared snapshot/recovery handling and resource cleanup.
+  Protocol-specific output, validation, and error behavior remain unchanged.
+
 ### Fixed
 
 - **server:** both opt-in tool loop breakers reset at a new user message,
