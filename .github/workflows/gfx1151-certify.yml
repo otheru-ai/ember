@@ -11,6 +11,11 @@ on:
         description: Optional YEAR.M.D override; defaults to the current UTC date
         required: false
         type: string
+      vision_gate:
+        description: "Vision behavioural gate: full, synthetic or off (default: repo variable, else off)"
+        required: false
+        default: ''
+        type: string
     secrets:
       FORGEJO_RELEASE_SSH_KEY:
         required: true
@@ -25,6 +30,11 @@ on:
       release_version:
         description: Optional YEAR.M.D override; defaults to the current UTC date
         required: false
+        type: string
+      vision_gate:
+        description: "Vision behavioural gate: full, synthetic or off"
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -442,9 +452,52 @@ jobs:
           assert response["usage"]["backend"]["spec_ran"] is True, response
           ' <<<"$response"
 
+      # The behavioural gate is 400 generations at max_tokens 512 -- 100
+      # synthetic and 100 natural items, each in two arms -- and it held
+      # production down for over 14 minutes without finishing on run
+      # 34187282066. That is the largest step in the job and it runs on every
+      # code push to main, so it is now opt-in per run rather than mandatory.
+      #
+      # Modes: full (both corpora), synthetic (the controlled set only, which
+      # is the half with exact ground truth), off. The corpora, the runner and
+      # policy-v4.json are untouched, so turning it back on is a variable
+      # change and not a rebuild.
+      - name: Resolve the vision gate mode
+        id: vision_mode
+        env:
+          REQUESTED: ${{ inputs.vision_gate }}
+          CONFIGURED: ${{ vars.EMBER_CERT_VISION_GATE }}
+        run: |
+          set -euo pipefail
+          mode="${REQUESTED:-}"
+          [[ -n "$mode" ]] || mode="${CONFIGURED:-}"
+          [[ -n "$mode" ]] || mode=off
+          case "$mode" in
+            full|synthetic|off) ;;
+            *) echo "unknown vision gate mode: $mode" >&2; exit 1 ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "vision behavioural gate mode: $mode"
+
+      # A gate whose result is never read is indistinguishable from one that
+      # was not run, so a skipped gate says so in the summary rather than
+      # leaving the job looking uniformly green.
+      - name: Record that the vision gate was skipped
+        if: ${{ steps.vision_mode.outputs.mode == 'off' }}
+        run: |
+          {
+            echo '## vision behavioural gate SKIPPED'
+            echo
+            echo 'This certification did not exercise the image path. Set the'
+            echo 'repository variable EMBER_CERT_VISION_GATE to `full` or'
+            echo '`synthetic`, or dispatch with the vision_gate input, to run it.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run the vision behavioural gate
+        if: ${{ steps.vision_mode.outputs.mode != 'off' }}
         env:
           GATE_CORPUS_ROOT: ${{ vars.EMBER_CERT_VISION_GATE_ROOT }}
+          GATE_MODE: ${{ steps.vision_mode.outputs.mode }}
         run: |
           set -euo pipefail
           # Everything above proves the vision artifacts are the right bytes and
@@ -534,7 +587,8 @@ jobs:
           PY
           identity_sha="$(sha256sum "$identity" | awk '{print $1}')"
 
-          for kind in synthetic natural; do
+          if [[ "$GATE_MODE" == synthetic ]]; then kinds="synthetic"; else kinds="synthetic natural"; fi
+          for kind in $kinds; do
             case "$kind" in
               synthetic) corpus="$GATE_CORPUS_ROOT/behavioural" ;;
               natural)   corpus="$GATE_CORPUS_ROOT/natural" ;;
@@ -562,7 +616,7 @@ jobs:
           # The runner exits nonzero on a red verdict, so reaching here is a
           # pass. Print the verdicts anyway: a gate whose result is never read
           # is indistinguishable from one that was not run.
-          for kind in synthetic natural; do
+          for kind in $kinds; do
             python3 -c '
           import json, sys
           result = json.load(open(sys.argv[1]))
