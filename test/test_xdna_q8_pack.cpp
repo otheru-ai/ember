@@ -1,4 +1,5 @@
 #include "q8_0_pack.h"
+#include "bf16_convert.h"
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +41,23 @@ static float bf16_to_float(uint16_t value) {
 }
 
 int main() {
+    // bf16 NaN/Inf guard. Without it the round-to-nearest addend carries out
+    // of the mantissa into the sign bit and a NaN becomes negative zero, which
+    // silently destroys the one signal saying a weight is broken.
+    {
+        using ember_xdna2::float_to_bf16;
+        auto from_bits = [](uint32_t b) { float f; std::memcpy(&f, &b, sizeof(f)); return f; };
+        const uint16_t nan_all = float_to_bf16(from_bits(0x7FFFFFFFu));
+        CHECK((nan_all & 0x7f80u) == 0x7f80u && (nan_all & 0x007fu) != 0,
+              "0x7FFFFFFF stays NaN and does not become negative zero");
+        const uint16_t qnan = float_to_bf16(from_bits(0x7FC00000u));
+        CHECK(qnan == 0x7FC0u, "quiet NaN is preserved");
+        CHECK(float_to_bf16(from_bits(0x7F800000u)) == 0x7F80u, "+Inf preserved");
+        CHECK(float_to_bf16(from_bits(0xFF800000u)) == 0xFF80u, "-Inf preserved");
+        // Finite values, including FLT_MAX rounding up to Inf, are unaffected.
+        CHECK(float_to_bf16(from_bits(0x7F7FFFFFu)) == 0x7F80u, "FLT_MAX rounds to Inf");
+        CHECK(float_to_bf16(1.0f) == 0x3F80u, "1.0f unchanged");
+    }
     using namespace ember::xdna2;
     std::printf("ember XDNA Q8 pack tests\n");
     CHECK(q8_projection_bytes(128, 2048) == 278528,

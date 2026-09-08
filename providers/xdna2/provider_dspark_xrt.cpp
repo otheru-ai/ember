@@ -37,8 +37,11 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "bf16_convert.h"
 
 namespace {
+using ember_xdna2::float_to_bf16;
+using ember_xdna2::bf16_to_float;
 
 using ProfileClock = std::chrono::steady_clock;
 
@@ -150,14 +153,6 @@ void set_error(char * error, size_t capacity, const std::string & message) {
     error[count] = '\0';
 }
 
-uint16_t float_to_bf16(float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    if ((bits & 0x7f800000u) != 0x7f800000u)
-        bits += 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(bits >> 16);
-}
-
 float fp16_to_float(uint16_t value) {
     const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
     const uint32_t exponent = (value >> 10) & 0x1fu;
@@ -181,13 +176,6 @@ float fp16_to_float(uint16_t value) {
     } else {
         bits = sign | (exponent + 112u) << 23 | fraction << 13;
     }
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-float bf16_to_float(uint16_t value) {
-    const uint32_t bits = static_cast<uint32_t>(value) << 16;
     float result = 0.0f;
     std::memcpy(&result, &bits, sizeof(result));
     return result;

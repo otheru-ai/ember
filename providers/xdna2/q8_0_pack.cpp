@@ -3,9 +3,12 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include "bf16_convert.h"
 
 namespace ember::xdna2 {
 namespace {
+using ember_xdna2::float_to_bf16;
+using ember_xdna2::bf16_to_float;
 
 bool checked_raw_size(int k, int n, size_t * size) {
     if (k <= 0 || n <= 0 || k % kQ8BlockWeights != 0) return false;
@@ -40,21 +43,6 @@ float fp16_to_float(uint16_t value) {
     } else {
         bits = sign | (exponent + 112u) << 23 | fraction << 13;
     }
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-uint16_t float_to_bf16(float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    if ((bits & 0x7f800000u) != 0x7f800000u)
-        bits += 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(bits >> 16);
-}
-
-float bf16_to_float(uint16_t value) {
-    const uint32_t bits = static_cast<uint32_t>(value) << 16;
     float result = 0.0f;
     std::memcpy(&result, &bits, sizeof(result));
     return result;

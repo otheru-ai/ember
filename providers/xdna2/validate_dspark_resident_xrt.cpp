@@ -21,8 +21,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "bf16_convert.h"
 
 namespace {
+using ember_xdna2::float_to_bf16;
+using ember_xdna2::bf16_to_float;
+using ember_xdna2::bf16_round;
 
 constexpr int kBatch = 5;
 constexpr int kEmbd = 4096;
@@ -31,24 +35,6 @@ constexpr int kHeader = kBatch * ember::xdna2::kQ8TileK;
 constexpr int kPacketBf16 = 256;
 constexpr int kProjectionN = 1536;
 using Clock = std::chrono::steady_clock;
-
-uint16_t float_to_bf16(float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    bits += 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(bits >> 16);
-}
-
-float bf16_to_float(uint16_t value) {
-    const uint32_t bits = static_cast<uint32_t>(value) << 16;
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-float bf16_round(float value) {
-    return bf16_to_float(float_to_bf16(value));
-}
 
 void store_raw_float(uint16_t * destination, float value) {
     std::memcpy(destination, &value, sizeof(value));

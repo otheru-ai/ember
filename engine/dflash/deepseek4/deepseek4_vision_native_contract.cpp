@@ -6,6 +6,7 @@
 #include <limits>
 
 #include <zlib.h>
+#include <climits>   // UINT_MAX
 
 namespace dflash {
 namespace {
@@ -325,8 +326,13 @@ bool solve_resize_ratio(int height, int width, int budget,
 uint16_t float_to_bf16(float value) {
     uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t rounding = 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>((bits + rounding) >> 16);
+    // Guard NaN/Inf: without it the addend carries into the sign bit and
+    // 0x7FFFFFFF (NaN) becomes 0x8000, negative zero. Mirrors
+    // providers/xdna2/bf16_convert.h, which this cannot include across the
+    // provider/engine include-path split without wider CMake plumbing.
+    if ((bits & 0x7f800000u) != 0x7f800000u)
+        bits += 0x7fffu + ((bits >> 16) & 1u);
+    return static_cast<uint16_t>(bits >> 16);
 }
 
 void add_spec(std::vector<Deepseek4VisionTensorSpec> & specs,

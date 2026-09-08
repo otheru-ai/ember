@@ -5,10 +5,13 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#include "bf16_convert.h"
 #endif
 
 namespace ember::xdna2 {
 namespace {
+using ember_xdna2::float_to_bf16;
+using ember_xdna2::bf16_to_float;
 
 bool checked_projection_size(int k, int n, size_t * size) {
     if (k <= 0 || n <= 0 || k % kRocmfp4BlockWeights != 0) return false;
@@ -34,20 +37,6 @@ float ue4m3_to_float(uint8_t value) {
         0x1p1f, 0x1p2f, 0x1p3f, 0x1p4f,
     };
     return static_cast<float>(8u + mantissa) * powers[exponent];
-}
-
-uint16_t float_to_bf16(float value) {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    bits += 0x7fffu + ((bits >> 16) & 1u);
-    return static_cast<uint16_t>(bits >> 16);
-}
-
-float bf16_to_float(uint16_t value) {
-    const uint32_t bits = static_cast<uint32_t>(value) << 16;
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
 }
 
 int8_t decode_code(uint8_t code) {
