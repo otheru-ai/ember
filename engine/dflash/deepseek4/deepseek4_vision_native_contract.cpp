@@ -6,6 +6,7 @@
 #include <limits>
 
 #include <zlib.h>
+#include <climits>   // UINT_MAX
 
 namespace dflash {
 namespace {
