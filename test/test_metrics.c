@@ -30,13 +30,12 @@ static void test_shape_and_counters(void) {
     CHECK(strstr(t, "# HELP ember_generations_total") != NULL, "HELP line present");
     CHECK(strstr(t, "# TYPE ember_generations_total counter") != NULL, "TYPE line present");
     CHECK(sample(t, "ember_generations_total") == 2, "generations counted");
-    CHECK(sample(t, "ember_prompt_tokens_total") == 5100, "prompt tokens summed");
+    CHECK(sample(t, "ember_prefill_tokens_total") == 5100, "prefill tokens summed");
     CHECK(sample(t, "ember_completion_tokens_total") == 420, "completion tokens summed");
 
     // The counters the soak actually needed.
     CHECK(sample(t, "ember_prefix_cache_prompt_tokens_total") == 1000, "cache prompt tokens");
     CHECK(sample(t, "ember_prefix_cache_restored_tokens_total") == 250, "cache restored tokens");
-    CHECK(sample(t, "ember_spec_decode_eligible_total") == 2, "spec eligible counts every generation");
     CHECK(sample(t, "ember_spec_decode_engaged_total") == 1, "spec engaged counted separately");
 
     // Vision: a served image request must be distinguishable from none.
@@ -52,8 +51,18 @@ static void test_shape_and_counters(void) {
     CHECK(strstr(t, "ember_queue_seconds_bucket{le=\"+Inf\"} 1") != NULL,
           "queue histogram +Inf equals count");
     CHECK(strstr(t, "ember_queue_seconds_count 1") != NULL, "queue histogram count");
-    CHECK(strstr(t, "ember_request_prompt_tokens_bucket{le=\"+Inf\"} 2") != NULL,
-          "prompt token histogram +Inf equals count");
+    CHECK(strstr(t, "ember_request_prefill_tokens_bucket{le=\"+Inf\"} 2") != NULL,
+          "prefill token histogram +Inf equals count");
+    // Prompt size and prefill work are DIFFERENT numbers whenever a prefix is
+    // restored. Only the prefix-cache site sees the prompt as presented, so
+    // exactly one observation (1000) reached the prompt histogram while two
+    // generations reached the prefill histogram.
+    CHECK(strstr(t, "ember_request_prompt_tokens_bucket{le=\"+Inf\"} 1") != NULL,
+          "prompt histogram counts the presented prompt, not the prefill");
+    CHECK(strstr(t, "ember_request_prompt_tokens_sum 1000.000000") != NULL,
+          "prompt histogram sums the presented prompt size");
+    CHECK(strstr(t, "ember_spec_decode_eligible_total") == NULL,
+          "no eligible series: it claimed an eligibility the API cannot determine");
     ember_buf_free(&b);
 }
 

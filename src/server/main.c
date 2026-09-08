@@ -2376,7 +2376,11 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // nothing to attribute them to.
     const double queue_start = monotonic_now();
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
-    ember_metrics_record_queue_wait(monotonic_now() - queue_start);
+    // Only when generation actually serialises. With batching there is no lock
+    // to wait on, so recording it anyway would bury the real distribution
+    // under zeros and quietly misreport the batching path as having no queue.
+    if (serialize)
+        ember_metrics_record_queue_wait(monotonic_now() - queue_start);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);

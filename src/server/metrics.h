@@ -18,7 +18,7 @@
 // One completed generation. `finish_reason` is mapped onto a fixed label set,
 // so a novel reason cannot grow the series cardinality without a code change.
 void ember_metrics_record_generation(const char *finish_reason,
-                                     int prompt_tokens, int completion_tokens,
+                                     int prefill_tokens, int completion_tokens,
                                      double prefill_s, double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images);

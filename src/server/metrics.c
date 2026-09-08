@@ -42,14 +42,13 @@ static struct {
     pthread_mutex_t lock;
     unsigned long long generations;
     unsigned long long finish_reason[N_FINISH_REASONS];
-    unsigned long long prompt_tokens;
+    unsigned long long prefill_tokens;
     unsigned long long completion_tokens;
     // Prefix cache
     unsigned long long cache_prompt_tokens;
     unsigned long long cache_restored_tokens;
     unsigned long long cache_requests;
     // Speculative decode
-    unsigned long long spec_eligible;
     unsigned long long spec_engaged;
     double spec_accept_sum;
     // Vision: a served image request and no image traffic are otherwise
@@ -60,6 +59,7 @@ static struct {
     histogram prefill_seconds;
     histogram decode_seconds;
     histogram queue_seconds;
+    histogram prefill_token_shape;
     histogram prompt_token_shape;
     histogram completion_token_shape;
 } g = {
@@ -67,6 +67,7 @@ static struct {
     .prefill_seconds       = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .decode_seconds        = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .queue_seconds         = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .prefill_token_shape   = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .prompt_token_shape    = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .completion_token_shape= {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
 };
@@ -88,16 +89,16 @@ static size_t finish_reason_index(const char *reason) {
 }
 
 void ember_metrics_record_generation(const char *finish_reason,
-                                     int prompt_tokens, int completion_tokens,
+                                     int prefill_tokens, int completion_tokens,
                                      double prefill_s, double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images) {
     pthread_mutex_lock(&g.lock);
     g.generations++;
     g.finish_reason[finish_reason_index(finish_reason)]++;
-    if (prompt_tokens > 0) {
-        g.prompt_tokens += (unsigned long long)prompt_tokens;
-        observe(&g.prompt_token_shape, prompt_tokens);
+    if (prefill_tokens > 0) {
+        g.prefill_tokens += (unsigned long long)prefill_tokens;
+        observe(&g.prefill_token_shape, prefill_tokens);
     }
     if (completion_tokens > 0) {
         g.completion_tokens += (unsigned long long)completion_tokens;
@@ -105,9 +106,6 @@ void ember_metrics_record_generation(const char *finish_reason,
     }
     observe(&g.prefill_seconds, prefill_s);
     observe(&g.decode_seconds, decode_s);
-    // Eligible counts every generation so the ratio answers "how often does
-    // speculation actually engage", which is the question 833/833 raised.
-    g.spec_eligible++;
     if (spec_engaged) {
         g.spec_engaged++;
         if (accept_rate > 0.0) g.spec_accept_sum += accept_rate;
@@ -124,6 +122,8 @@ void ember_metrics_record_prefix_cache(int prompt_tokens, int restored_tokens) {
     pthread_mutex_lock(&g.lock);
     g.cache_requests++;
     g.cache_prompt_tokens += (unsigned long long)prompt_tokens;
+    // The only site that sees the prompt as presented, before restore.
+    if (prompt_tokens > 0) observe(&g.prompt_token_shape, prompt_tokens);
     g.cache_restored_tokens += (unsigned long long)restored_tokens;
     pthread_mutex_unlock(&g.lock);
 }
@@ -170,8 +170,12 @@ void ember_metrics_render(ember_buf *out) {
             "ember_generations_by_finish_reason_total{reason=\"%s\"} %llu\n",
             kFinishReasons[i], g.finish_reason[i]);
 
-    render_counter(out, "ember_prompt_tokens_total",
-                   "Prompt tokens accepted.", g.prompt_tokens);
+    // Named for what the backend actually reports: tokens evaluated AFTER
+    // prefix restore, not the size of the prompt the client sent. A restored
+    // prefix makes those differ by design, which is the whole point of the
+    // prefix-cache counters below.
+    render_counter(out, "ember_prefill_tokens_total",
+                   "Tokens evaluated after prefix restore.", g.prefill_tokens);
     render_counter(out, "ember_completion_tokens_total",
                    "Tokens generated.", g.completion_tokens);
 
@@ -186,11 +190,12 @@ void ember_metrics_render(ember_buf *out) {
                    "ember_prefix_cache_prompt_tokens_total for hit rate.",
                    g.cache_restored_tokens);
 
-    render_counter(out, "ember_spec_decode_eligible_total",
-                   "Generations where speculative decode could have run.",
-                   g.spec_eligible);
+    // No separate "eligible" series: it was incremented on every generation,
+    // so it claimed an eligibility this API cannot determine and duplicated a
+    // denominator ember_generations_total already provides.
     render_counter(out, "ember_spec_decode_engaged_total",
-                   "Generations where speculative decode actually ran.",
+                   "Generations where speculative decode actually ran. Divide "
+                   "by ember_generations_total for the engagement rate.",
                    g.spec_engaged);
     ember_buf_printf(out,
         "# HELP ember_spec_decode_accept_rate_sum Sum of accept rates over "
@@ -211,8 +216,13 @@ void ember_metrics_render(ember_buf *out) {
     render_histogram(out, "ember_queue_seconds",
                              "Time a request waited before generation began.",
                              &g.queue_seconds);
+    render_histogram(out, "ember_request_prefill_tokens",
+                           "Distribution of tokens evaluated after prefix "
+                           "restore.", &g.prefill_token_shape);
     render_histogram(out, "ember_request_prompt_tokens",
-                           "Prompt size distribution.", &g.prompt_token_shape);
+                           "Distribution of prompt size as presented by the "
+                           "client, before prefix restore.",
+                           &g.prompt_token_shape);
     render_histogram(out, "ember_request_completion_tokens",
                            "Completion size distribution.",
                            &g.completion_token_shape);
