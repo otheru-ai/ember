@@ -638,6 +638,64 @@ def run_progress_lease_off_case(server: str) -> None:
     assert "[ember] no progress:" not in log, log
 
 
+def run_loop_breaker_user_reset_case(server: str) -> None:
+    """An old loop must not suppress tools for a new user request (#12)."""
+    for flags, status_key, counter, history in (
+        (["--auto-answer-after-loop", "3"], "auto_answer", "count", _loop_messages),
+        (["--no-progress-stop", "3"], "no_progress", "stopped", _wall_messages),
+        (["--auto-answer-after-loop", "3", "--no-progress-stop", "3"],
+         "auto_answer", "count", _loop_messages),
+    ):
+        flag = " ".join(flags)
+        port = free_port()
+        base = f"http://127.0.0.1:{port}"
+        env = os.environ.copy()
+        env["EMBER_STUB_REPLY"] = dsml_write(path="/tmp/safe.py", content="x")
+        proc = subprocess.Popen(
+            [server, "-m", "stub", "--port", str(port), *flags],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        try:
+            wait_ready(base, proc)
+            payload = tool_request(stream=False)
+            payload["messages"] = history(6)
+            request(base + "/v1/chat/completions", payload)
+            _, status = request(base + "/status")
+            assert status[status_key][counter] == 1, (flag, status)
+
+            payload["messages"].append({"role": "user", "content": "Start a new task"})
+            code, body = request(base + "/v1/chat/completions", payload)
+            assert code == 200, (flag, body)
+            assert body["choices"][0]["message"].get("tool_calls"), (flag, body)
+            _, status = request(base + "/status")
+            assert status[status_key][counter] == 1, (flag, status)
+
+            # One new round is not a continuation of the old stall, even if
+            # it returns a result already present before the user boundary.
+            payload["messages"].extend(history(1)[1:])
+            code, body = request(base + "/v1/chat/completions", payload)
+            assert code == 200, (flag, body)
+            assert body["choices"][0]["message"].get("tool_calls"), (flag, body)
+            _, status = request(base + "/status")
+            assert status[status_key][counter] == 1, (flag, status)
+
+            # A fresh loop after that boundary must still be detected.
+            payload["messages"] = history(6) + [
+                {"role": "user", "content": "Start a new task"}
+            ] + history(6)[1:]
+            request(base + "/v1/chat/completions", payload)
+            _, status = request(base + "/status")
+            assert status[status_key][counter] == 2, (flag, status)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            proc.stderr.close()
+
+
 def run_auto_answer_case(server: str) -> None:
     """--auto-answer-after-loop suppresses tools once the run exceeds N."""
     port = free_port()
@@ -915,6 +973,7 @@ def main() -> int:
     run_progress_lease_case(server)
     run_progress_lease_off_case(server)
     run_auto_answer_case(server)
+    run_loop_breaker_user_reset_case(server)
     run_auto_answer_instruction_case(server)
     run_clean_output_not_flagged_case(server)
     run_auto_answer_off_by_default_case(server)
