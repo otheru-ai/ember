@@ -29,9 +29,6 @@ on:
 
 env:
   DEBIAN_FRONTEND: noninteractive
-  # Runner defaults name the host path; jobs mount the CA under certs/.
-  GIT_SSL_CAINFO: /etc/ssl/certs/otheru-forgejo-root.crt
-  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/otheru-forgejo-root.crt
   CCACHE_COMPRESS: 'true'
   CCACHE_MAXSIZE: 2G
 
@@ -50,10 +47,11 @@ jobs:
     # can build that), and a test that compiles but was never registered with
     # ctest, which reads as coverage that does not exist.
     runs-on: docker
+    # Keep the CA at the runner's GIT_SSL_CAINFO/NODE_EXTRA_CA_CERTS path.
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
-        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/otheru-forgejo-root.crt:ro
     steps:
       # Docker creates a MISSING bind source as a directory rather than
       # failing, so a stale host path does not break the mount -- it puts a
@@ -63,9 +61,9 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+          test -f /etc/ssl/otheru-forgejo-root.crt || {
             echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
             exit 1
           }
       - uses: actions/checkout@v5
@@ -77,11 +75,12 @@ jobs:
     # Debug matters independently of Release — the assertions and the different
     # inlining reach code paths -O3 folds away.
     runs-on: docker
+    # Keep the CA at the runner's GIT_SSL_CAINFO/NODE_EXTRA_CA_CERTS path.
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
         - ember-ci-ccache:/root/.cache/ccache
-        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/otheru-forgejo-root.crt:ro
     strategy:
       fail-fast: false
       matrix:
@@ -95,9 +94,9 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+          test -f /etc/ssl/otheru-forgejo-root.crt || {
             echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
             exit 1
           }
       - uses: actions/checkout@v5
@@ -125,10 +124,11 @@ jobs:
     # narrow source suppressions with ownership rationale; every new warning
     # therefore fails the job instead of silently growing a baseline.
     runs-on: docker
+    # Keep the CA at the runner's GIT_SSL_CAINFO/NODE_EXTRA_CA_CERTS path.
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
-        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/otheru-forgejo-root.crt:ro
     steps:
       # Docker creates a MISSING bind source as a directory rather than
       # failing, so a stale host path does not break the mount -- it puts a
@@ -138,9 +138,9 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+          test -f /etc/ssl/otheru-forgejo-root.crt || {
             echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
             exit 1
           }
       - uses: actions/checkout@v5
@@ -167,11 +167,12 @@ jobs:
     # untested 500-line module land unnoticed; ci/coverage_floors.json pins each
     # file individually and the ratchet only moves up.
     runs-on: docker
+    # Keep the CA at the runner's GIT_SSL_CAINFO/NODE_EXTRA_CA_CERTS path.
     container:
       image: node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584
       volumes:
         - ember-ci-ccache:/root/.cache/ccache
-        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/certs/otheru-forgejo-root.crt:ro
+        - /etc/ssl/otheru-forgejo-root.crt:/etc/ssl/otheru-forgejo-root.crt:ro
     steps:
       # Docker creates a MISSING bind source as a directory rather than
       # failing, so a stale host path does not break the mount -- it puts a
@@ -181,9 +182,9 @@ jobs:
       # no longer exists. Fail here, naming the cause, instead.
       - name: Verify the internal CA is mounted as a file
         run: |
-          test -f /etc/ssl/certs/otheru-forgejo-root.crt || {
+          test -f /etc/ssl/otheru-forgejo-root.crt || {
             echo "internal CA is not a regular file -- check the volume mount:" >&2
-            ls -ld /etc/ssl/certs/otheru-forgejo-root.crt >&2
+            ls -ld /etc/ssl/otheru-forgejo-root.crt >&2
             exit 1
           }
       - uses: actions/checkout@v5
