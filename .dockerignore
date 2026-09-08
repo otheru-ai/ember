@@ -8,3 +8,7 @@ reports
 *.gguf
 *.dat
 __pycache__
+# Buildx writes these between the release and dev image builds. They are
+# outputs, not source; copying them invalidates the otherwise identical layer.
+image-metadata.json
+dev-image-metadata.json
