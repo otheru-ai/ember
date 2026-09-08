@@ -29,21 +29,37 @@ release.
 ## What it refuses, and why
 
 A bundle is a provenance claim. An incomplete one is worse than none, because it
-looks authoritative and cannot be checked afterwards. Validation is fail-closed:
+looks authoritative and cannot be checked afterwards. Validation reuses
+`assemble_bundle.py`'s own validators and summarisers rather than restating
+them — a second opinion about what makes a bundle sound drifts from the one that
+produced it, and then disagrees silently.
 
 - **Identity.** `environment.json` must name the release it measured, and that
-  must match the tag being published — a bundle is never published under a
-  version it did not measure. It must also carry the container image and a
-  SHA-256 for the target and drafter, each marked `computed` or `asserted`, with
-  an evidence reference when asserted.
-- **Completeness.** Every required file must be present, including the three
-  harness sources: a measurement whose harness cannot be re-read is not
-  reproducible. Aggregates are checked against the rows behind them by SAMPLE
-  COUNT, not by presence — `summary.decode.samples` must equal the usable
-  `decode-256` rows in `raw-results.jsonl`, and the same for every
-  `prefill-*` group.
-- **Finiteness.** A `NaN` or infinity anywhere in `summary.json` is a broken
-  measurement, not a small one.
+  must match the tag being published. Target, drafter and (when present) mmproj
+  digests must be full lowercase SHA-256, each marked `computed` or `asserted`
+  with an evidence reference when asserted. The container image must be a
+  well-formed reference **pinned by digest**: a tag is mutable and does not
+  identify what ran. If the bundle recorded only a tag, pass the digest you
+  captured at measurement time as `--image-digest sha256:…`; it is recorded, and
+  a value that contradicts the bundle is refused. Nothing is ever synthesised.
+- **Completeness.** All eleven required files, including `context-sweep.jsonl`
+  and the three harness sources — a measurement whose harness cannot be re-read
+  is not reproducible. The workload sweep goes through
+  `validate_workload_rows`: unique labels, no error rows, usable speculative
+  evidence, identical workload identities in both arms, and a `spec_cycles`
+  counter that is not inert. The context sweep must carry both arms and at
+  least two depths, since one point is not a curve. Decode **and** prefill
+  results are both required, and so is a vision result.
+- **Aggregates must be the ones these rows produce.** Sample counts cannot
+  catch a fabricated median, so `summary.json`'s `decode`, `prefill`,
+  `by_workload` and `by_context_depth` are recomputed from the raw files with
+  the assembler's own summarisers and compared.
+- **Finiteness.** A `NaN` or infinity in `summary.json` *or in any raw row* is
+  refused. A NaN the median averages away still means the run was broken.
+
+`--expected-workloads N` makes the sweep's row count a real check. Without it
+the count is taken from the file itself, which cannot detect a sweep that lost
+rows before assembly.
 
 ## Re-running is safe; overwriting is not
 
@@ -52,7 +68,10 @@ gid and mode are normalised and the gzip header timestamp is zeroed. So the tool
 can compare what it built against what is already published.
 
 - Same content already on the release → reports it and exits 0.
-- **Different** content under the same asset name → **refuses**. A published
+- Archive present but checksum missing (an upload interrupted between the two)
+  → uploads only what is outstanding. Checking the archive alone reported this
+  as complete and stranded the release without its checksum, permanently.
+- **Different** content under either asset name → **refuses**. A published
   measurement someone may have cited is never silently replaced. Remove it
   deliberately if that is genuinely intended.
 
