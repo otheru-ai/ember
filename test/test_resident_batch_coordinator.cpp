@@ -38,6 +38,11 @@ struct FakeResidentBackend : ResidentBatchBackend {
     // rollback path from a test.
     bool throw_on_create = false;
     bool throw_on_status = false;
+    // Admission calls status once directly and again inside reconcile(). The
+    // second call is the one that unwinds AFTER the session is registered, so
+    // it has to be reachable on its own.
+    mutable int status_calls = 0;
+    int throw_on_status_call = -1;
 
     bool resident_session_create(
             ContinuousBatchSessionId id,
@@ -91,7 +96,11 @@ struct FakeResidentBackend : ResidentBatchBackend {
 
     SessionStatus resident_session_status(
             ContinuousBatchSessionId id) const override {
+        ++status_calls;
         if (throw_on_status) throw std::runtime_error("injected status failure");
+        if (throw_on_status_call >= 0 && status_calls == throw_on_status_call) {
+            throw std::runtime_error("injected late status failure");
+        }
         SessionStatus status;
         auto it = sessions.find(id);
         if (it == sessions.end()) {
@@ -308,6 +317,32 @@ int main() {
         CHECK(coordinator.sessions().empty());
         CHECK(backend.sessions.empty());
         CHECK(backend.destroyed == 2);
+    }
+
+    {
+        // Throwing from the SECOND status call unwinds inside reconcile(),
+        // after the session is already registered in sessions_. Disarming the
+        // guard before reconcile left resident=1 tracked=1 backend=1 with the
+        // id never returned to any caller, so nothing could ever release it.
+        FakeResidentBackend backend;
+        ResidentBatchCoordinator coordinator(
+            backend, ContinuousBatchConfig{2, 4, 2, 0});
+        backend.throw_on_status_call = 2;
+        bool threw = false;
+        try {
+            (void)coordinator.admit(request(0, 1), {}, -1, 0, nullptr);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        CHECK(threw);
+        CHECK(coordinator.scheduler().resident() == 0);
+        CHECK(coordinator.sessions().empty());
+        CHECK(backend.sessions.empty());
+
+        backend.throw_on_status_call = -1;
+        std::string error;
+        auto recovered = coordinator.admit(request(0, 1), {}, -1, 0, &error);
+        CHECK(recovered.has_value());
     }
 
     std::printf("resident batch coordinator tests: %d passed, %d failed\n",

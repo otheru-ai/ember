@@ -52,12 +52,19 @@ ResidentBatchCoordinator::admit(
     struct AdmissionRollback {
         ResidentBatchBackend *backend;
         ContinuousBatchScheduler *scheduler;
+        std::vector<ContinuousBatchSessionId> *sessions;
         ContinuousBatchSessionId id;
         bool backend_created;
+        bool registered;
         bool armed;
         ~AdmissionRollback() {
             if (!armed) return;
             // Runs while an exception may be in flight, so it must not throw.
+            if (registered) {
+                sessions->erase(
+                    std::remove(sessions->begin(), sessions->end(), id),
+                    sessions->end());
+            }
             if (backend_created) {
                 try {
                     (void)backend->resident_session_destroy(id);
@@ -70,7 +77,7 @@ ResidentBatchCoordinator::admit(
             } catch (...) {
             }
         }
-    } rollback{&backend_, &scheduler_, *id, false, true};
+    } rollback{&backend_, &scheduler_, &sessions_, *id, false, false, true};
 
     std::string backend_error;
     if (!backend_.resident_session_create(*id, request, io, restore_slot,
@@ -89,8 +96,15 @@ ResidentBatchCoordinator::admit(
         return std::nullopt;
     }
     sessions_.push_back(*id);
-    rollback.armed = false;
+    // Registered but NOT yet committed. reconcile() calls back into
+    // resident_session_status, so it can throw too, and disarming before it
+    // left a lease nobody owns: the caller never receives this id, so nothing
+    // will ever release it, while sessions_ still lists it. Found by
+    // codex-rejoin-01, whose throw-on-second-status probe reproduced
+    // resident=1 tracked=1 backend=1 against my first version of this guard.
+    rollback.registered = true;
     reconcile(/*now_us=*/0);
+    rollback.armed = false;
     return id;
 }
 

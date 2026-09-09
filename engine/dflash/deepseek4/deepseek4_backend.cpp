@@ -3052,10 +3052,29 @@ bool DeepSeek4Backend::resident_session_create(
     }
     session->cache.prefill_mode = cfg_.prefill_mode;
 
+    // The cache is backend-owned from acquisition until the session is
+    // registered, and it is pooled precisely so it is not reallocated. Every
+    // failure RETURN below recycled it; the throwing work that follows -- two
+    // snapshot vector copies, sampling, and the map emplace -- did not, so an
+    // exception lost a cache from the pool permanently. The coordinator's
+    // scheduler rollback cannot reach it: it was never registered, so nothing
+    // outside this function knows it exists. Raised by codex-rejoin-01.
+    struct CacheRecycler {
+        DeepSeek4Backend *self;
+        ResidentSession *session;
+        bool armed;
+        ~CacheRecycler() {
+            if (!armed) return;
+            try {
+                self->recycle_resident_cache(session->cache);
+            } catch (...) {
+            }
+        }
+    } recycler{this, session.get(), true};
+
     if (restore_slot >= 0 && snapshot_used(restore_slot)) {
         if (!deepseek4_snapshot_restore(snapshots_[restore_slot],
                                         session->cache)) {
-            recycle_resident_cache(session->cache);
             if (error) *error = "failed to restore resident KV snapshot";
             return false;
         }
@@ -3066,7 +3085,6 @@ bool DeepSeek4Backend::resident_session_create(
         if (session->prefilled < 0 ||
             session->prefilled > (int)request.prompt.size() ||
             session->last_logits.empty()) {
-            recycle_resident_cache(session->cache);
             if (error) *error = "resident snapshot does not match request";
             return false;
         }
@@ -3076,7 +3094,6 @@ bool DeepSeek4Backend::resident_session_create(
         request.n_gen > 0 &&
         !resident_sample_next(*session)) {
         if (error) *error = session->error;
-        recycle_resident_cache(session->cache);
         return false;
     }
     if (session->pending_ready && session->spec_eligible) {
@@ -3091,7 +3108,16 @@ bool DeepSeek4Backend::resident_session_create(
             session->spec_decline_reason = "resident_submit_failed";
         }
     }
-    resident_sessions_.emplace(id, std::move(session));
+    // Disarmed only once the map owns the session. If emplace throws while the
+    // unique_ptr still holds it, recycle here; if the move already happened the
+    // pointer is null and there is nothing left to recycle.
+    recycler.armed = false;
+    try {
+        resident_sessions_.emplace(id, std::move(session));
+    } catch (...) {
+        if (session) recycle_resident_cache(session->cache);
+        throw;
+    }
     return true;
 }
 

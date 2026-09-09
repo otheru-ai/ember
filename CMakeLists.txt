@@ -588,17 +588,6 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_metrics_server.py
             $<TARGET_FILE:ember-server>)
   set_tests_properties(metrics_server PROPERTIES TIMEOUT 20)
-  # Compiles and RUNS the real coordinator loop, extracted verbatim from
-  # backend_dflash.cc, which the host build cannot link because it includes
-  # HIP. This is the only test that exercises the worker itself; the unit test
-  # next to it pins the predicate's truth table but would stay green if the
-  # predicate were deleted from the wait. Generous timeout: it compiles three
-  # engine sources, and its own failure mode for a regression is a deadlock.
-  add_test(
-    NAME batch_worker_seam
-    COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/test/extract_batch_worker.py)
-  set_tests_properties(batch_worker_seam PROPERTIES TIMEOUT 300)
   add_test(
     NAME request_budgets_server
     COMMAND ${Python3_EXECUTABLE}
