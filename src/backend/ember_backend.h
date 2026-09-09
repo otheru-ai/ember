@@ -243,6 +243,13 @@ typedef struct {
     char   termination_reason[32]; // repetition/reasoning-cycle/prompt-echo, or ""
     bool   empty_visible_output;   // decode produced only suppressed tokens
     bool   spec_decode_ran;        // DSpark actually ran this generation
+    // Why speculation did not run: "disabled", "no_drafter", "context",
+    // "force_ar", "token_mask", "sampling", "empty_budget", "short_budget" or
+    // "profitability_gate". Empty when it ran. The engine already computed this
+    // to print behind DFLASH_DS4_SPEC_DEBUG; #13 showed 833 of 833 generations
+    // declining for one reason with nothing counting it, so it is reported
+    // rather than logged. Points at a static string owned by the backend.
+    const char *spec_decline_reason;
     char   prefill_mode[16];       // none | exact | dense | sparse | hybrid
     char   prefill_reason[32];     // configured | forced_exact | dspark_capture | ...
     // True iff THIS generation persisted a reusable KV snapshot into

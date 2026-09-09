@@ -115,6 +115,12 @@ typedef struct ember_server {
     // Latest request-derived tool-loop alert, guarded by state_lock. This is
     // telemetry only: detection never reads it and has no cross-request state.
     int               tool_loop_report;
+    // Whether an operator supplied a vision tower. Architecture support alone
+    // is not the same question: a build whose architecture understands image
+    // placeholders still refuses image input without an mmproj, so reporting
+    // capability from the architecture would advertise vision on a deployment
+    // that cannot serve it.
+    const char       *vision_mmproj_path;
     // > 0 arms automatic loop recovery: see auto_answer_suppresses_tools().
     int               auto_answer_after_loop;
     long              auto_answer_count;
@@ -2150,8 +2156,19 @@ static void respond_generation_stalled(
     ember_buf_free(&e);
 }
 
+// Does the loaded architecture understand image placeholders at all? Returns
+// a positive length when it does, -1 when it does not, and allocates, so this
+// frees what it asks for. /status is not a hot path.
+static bool vision_placeholders_supported(ember_backend *be) {
+    int32_t *ids = NULL;
+    const int n = ember_backend_vision_placeholder_ids(be, &ids);
+    free(ids);
+    return n > 0;
+}
+
 static void log_generation_performance(const ember_gen_result *res,
-                                       const ember_gen_request *greq) {
+                                       const ember_gen_request *greq,
+                                       double queue_s) {
     if (!res) return;
     const double prefill_tps = res->prefill_s > 0.0
         ? res->prefill_tokens / res->prefill_s : 0.0;
@@ -2170,8 +2187,11 @@ static void log_generation_performance(const ember_gen_result *res,
     // trend question; 833 consecutive spec=no went unnoticed for a day.
     ember_metrics_record_generation(
         res->finish_reason, res->prefill_tokens, res->n_generated,
-        res->prefill_s, res->decode_s, res->spec_decode_ran,
+        queue_s, res->prefill_s, res->decode_s, res->spec_decode_ran,
         res->accept_rate, greq ? greq->n_vision : 0);
+    // Only meaningful when speculation did NOT run; the recorder ignores an
+    // empty reason rather than making every caller test it.
+    ember_metrics_record_spec_decline(res->spec_decline_reason);
 }
 
 static void free_vision_runs(ember_vision_run *runs, int count) {
@@ -2366,12 +2386,15 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
     // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
     const double queue_start = monotonic_now();
+    double queue_wait_s = 0.0;
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
     // Only when generation actually serialises. With batching there is no lock
     // to wait on, so recording it anyway would bury the real distribution
     // under zeros and quietly misreport the batching path as having no queue.
-    if (serialize)
-        ember_metrics_record_queue_wait(monotonic_now() - queue_start);
+    // Measured on both paths, because TTFT needs it either way and the
+    // batching path's near-zero wait is a true value, not a missing one.
+    queue_wait_s = monotonic_now() - queue_start;
+    if (serialize) ember_metrics_record_queue_wait(queue_wait_s);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);
@@ -3047,7 +3070,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // Atomic replacement attempts are fresh decodes; recheck their close.
         unclosed_think_tool = tool_started_in_unclosed_think(&g, started_thinking);
     }
-    log_generation_performance(&res, &greq);
+    log_generation_performance(&res, &greq, queue_wait_s);
     const int completion_tokens = hidden_recovery_tokens + res.n_generated;
     g.scratch.len = 0;
     if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
@@ -4017,12 +4040,17 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         ember_buf_puts(&b, "{\"model\":");
         ember_json_escape(&b, ember_backend_model_name(be));
         ember_buf_printf(&b,
-            ",\"ctx\":%d,\"busy\":%d,\"served\":%ld,"
+            ",\"ctx\":%d,\"modalities\":{\"text\":true,\"vision\":%s},"
+            "\"busy\":%d,\"served\":%ld,"
             "\"sampling_defaults\":{\"temperature\":%.9g,"
             "\"top_p\":%.9g,\"top_k\":%d,\"min_p\":%.9g,"
             "\"repetition_penalty\":%.9g,\"presence_penalty\":%.9g},"
             "\"tool_loop\":{\"report_after_repeats\":%d,\"last\":",
             ember_backend_n_ctx(be),
+            // Both conditions, because either alone would lie: the tokenizer
+            // knows the placeholder, the operator supplies the tower.
+            (srv->vision_mmproj_path && srv->vision_mmproj_path[0] &&
+             vision_placeholders_supported(be)) ? "true" : "false",
             atomic_load(&srv->busy), atomic_load(&srv->served),
             srv->default_temp, srv->card.top_p, srv->card.top_k,
             srv->card.min_p, srv->card.repetition_penalty,
@@ -5026,6 +5054,7 @@ int main(int argc, char **argv) {
     srv.prompt_profile = prompt_profile;
     srv.auto_compact = auto_compact;
     srv.tool_loop_report = tool_loop_report;
+    srv.vision_mmproj_path = vision_mmproj_path;
     srv.no_progress_report = no_progress_report;
     srv.no_progress_stop = no_progress_stop;
     srv.batch_sessions = batch_sessions;

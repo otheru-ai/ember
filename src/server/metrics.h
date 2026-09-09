@@ -17,11 +17,27 @@
 
 // One completed generation. `finish_reason` is mapped onto a fixed label set,
 // so a novel reason cannot grow the series cardinality without a code change.
+// `queue_s` is the wait before generation began. It is taken here rather than
+// left to the separate queue observation because time-to-first-token is
+// queue + prefill, and a scraper cannot add two independent histograms. Quoting
+// prefill duration as TTFT would understate exactly the delay a caller feels.
 void ember_metrics_record_generation(const char *finish_reason,
                                      int prefill_tokens, int completion_tokens,
-                                     double prefill_s, double decode_s,
+                                     double queue_s, double prefill_s,
+                                     double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images);
+
+// Why speculation did not run. #13 recorded 833 of 833 generations declining
+// for a single reason with nothing counting it, and the engine already computes
+// this string -- it was simply never leaving the backend. NULL or "" means
+// speculation ran, which is not counted here.
+void ember_metrics_record_spec_decline(const char *reason);
+
+// One image encode. `seconds` is the vision tower only, separated from LM
+// prefill, because a projector that silently falls back to CPU shows up here
+// and nowhere else -- that is how ggml-org/llama.cpp#22582 was diagnosed.
+void ember_metrics_record_vision_encode(double seconds, int image_tokens);
 
 // Prompt-cache reuse for one request: tokens presented and tokens restored.
 void ember_metrics_record_prefix_cache(int prompt_tokens, int restored_tokens);

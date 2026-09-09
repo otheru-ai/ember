@@ -29,6 +29,17 @@ typedef struct {
 // A closed label set. An unrecognised reason maps to "other" rather than
 // minting a new series: an unbounded label is how a scrape target degrades a
 // monitoring system, and ember's reasons are enumerable.
+// The engine's own decline taxonomy (deepseek4_backend.cpp). Closed for the
+// same reason as finish reasons: an unbounded label is how a scrape target
+// degrades a monitoring system. A new engine reason must be added here
+// deliberately, and lands in "other" until it is.
+static const char *const kSpecDeclineReasons[] = {
+    "disabled", "no_drafter", "context", "force_ar", "token_mask",
+    "sampling", "empty_budget", "short_budget", "profitability_gate", "other",
+};
+#define N_SPEC_DECLINE_REASONS \
+    (sizeof(kSpecDeclineReasons) / sizeof(kSpecDeclineReasons[0]))
+
 static const char *const kFinishReasons[] = {
     "stop", "length", "tool_calls", "repetition_detected",
     "reasoning_cycle_detected", "prompt_echo_detected", "other"
@@ -51,14 +62,20 @@ static struct {
     // Speculative decode
     unsigned long long spec_engaged;
     double spec_accept_sum;
+    unsigned long long spec_declined[N_SPEC_DECLINE_REASONS];
     // Vision: a served image request and no image traffic are otherwise
     // byte-identical in the logs.
     unsigned long long vision_requests;
     unsigned long long vision_images;
+    unsigned long long image_tokens;
     // Distributions
     histogram prefill_seconds;
     histogram decode_seconds;
     histogram queue_seconds;
+    histogram ttft_seconds;
+    histogram inter_token_seconds;
+    histogram vision_encode_seconds;
+    histogram image_count;
     histogram prefill_token_shape;
     histogram prompt_token_shape;
     histogram completion_token_shape;
@@ -67,6 +84,10 @@ static struct {
     .prefill_seconds       = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .decode_seconds        = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .queue_seconds         = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .ttft_seconds          = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .inter_token_seconds   = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .vision_encode_seconds = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .image_count           = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .prefill_token_shape   = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .prompt_token_shape    = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .completion_token_shape= {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
@@ -88,9 +109,33 @@ static size_t finish_reason_index(const char *reason) {
     return N_FINISH_REASONS - 1;  // "other"
 }
 
+static size_t spec_decline_index(const char *reason) {
+    if (reason) {
+        for (size_t i = 0; i < N_SPEC_DECLINE_REASONS; ++i) {
+            if (strcmp(reason, kSpecDeclineReasons[i]) == 0) return i;
+        }
+    }
+    return N_SPEC_DECLINE_REASONS - 1;  // "other"
+}
+
+void ember_metrics_record_spec_decline(const char *reason) {
+    if (!reason || !reason[0]) return;   // speculation ran; nothing declined
+    pthread_mutex_lock(&g.lock);
+    g.spec_declined[spec_decline_index(reason)]++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_vision_encode(double seconds, int image_tokens) {
+    pthread_mutex_lock(&g.lock);
+    observe(&g.vision_encode_seconds, seconds);
+    if (image_tokens > 0) g.image_tokens += (unsigned long long)image_tokens;
+    pthread_mutex_unlock(&g.lock);
+}
+
 void ember_metrics_record_generation(const char *finish_reason,
                                      int prefill_tokens, int completion_tokens,
-                                     double prefill_s, double decode_s,
+                                     double queue_s, double prefill_s,
+                                     double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images) {
     pthread_mutex_lock(&g.lock);
@@ -106,6 +151,15 @@ void ember_metrics_record_generation(const char *finish_reason,
     }
     observe(&g.prefill_seconds, prefill_s);
     observe(&g.decode_seconds, decode_s);
+    // TTFT is queue + prefill. Ember serialises generation, so omitting the
+    // queue term would report a number no caller experiences.
+    observe(&g.ttft_seconds, queue_s + prefill_s);
+    // Inter-token latency needs a gap to measure: with one token there is no
+    // interval, so recording decode_s/1 would report a first-token cost as a
+    // steady-state one and drag the distribution.
+    if (completion_tokens > 1 && decode_s > 0.0) {
+        observe(&g.inter_token_seconds, decode_s / (double)(completion_tokens - 1));
+    }
     if (spec_engaged) {
         g.spec_engaged++;
         if (accept_rate > 0.0) g.spec_accept_sum += accept_rate;
@@ -113,6 +167,7 @@ void ember_metrics_record_generation(const char *finish_reason,
     if (n_images > 0) {
         g.vision_requests++;
         g.vision_images += (unsigned long long)n_images;
+        observe(&g.image_count, n_images);
     }
     pthread_mutex_unlock(&g.lock);
 }
@@ -193,6 +248,17 @@ void ember_metrics_render(ember_buf *out) {
     // No separate "eligible" series: it was incremented on every generation,
     // so it claimed an eligibility this API cannot determine and duplicated a
     // denominator ember_generations_total already provides.
+    // #13: 833 of 833 generations declined for ONE reason and no signal said
+    // so. The engine computed this string already and only printed it behind a
+    // debug env; this is that value, counted.
+    ember_buf_puts(out,
+        "# HELP ember_spec_decode_declined_total Generations where speculation did not run, by reason.\n"
+        "# TYPE ember_spec_decode_declined_total counter\n");
+    for (size_t i = 0; i < N_SPEC_DECLINE_REASONS; ++i)
+        ember_buf_printf(out,
+            "ember_spec_decode_declined_total{reason=\"%s\"} %llu\n",
+            kSpecDeclineReasons[i], g.spec_declined[i]);
+
     render_counter(out, "ember_spec_decode_engaged_total",
                    "Generations where speculative decode actually ran. Divide "
                    "by ember_generations_total for the engagement rate.",
@@ -206,6 +272,9 @@ void ember_metrics_render(ember_buf *out) {
     render_counter(out, "ember_vision_requests_total",
                    "Generations that carried at least one image.",
                    g.vision_requests);
+    render_counter(out, "ember_image_tokens_total",
+                   "Prompt tokens contributed by encoded images.",
+                   g.image_tokens);
     render_counter(out, "ember_vision_images_total",
                    "Images accepted across all generations.", g.vision_images);
 
@@ -216,6 +285,22 @@ void ember_metrics_render(ember_buf *out) {
     render_histogram(out, "ember_queue_seconds",
                              "Time a request waited before generation began.",
                              &g.queue_seconds);
+    // Deliberately distinct from ember_prefill_seconds: TTFT includes the
+    // queue wait, and on a serialising server that term dominates.
+    render_histogram(out, "ember_time_to_first_token_seconds",
+                             "Queue wait plus prefill, i.e. the delay before "
+                             "the first token reaches the caller.",
+                             &g.ttft_seconds);
+    render_histogram(out, "ember_inter_token_seconds",
+                             "Steady-state gap between generated tokens. "
+                             "Single-token generations are excluded, having no "
+                             "interval to measure.",
+                             &g.inter_token_seconds);
+    render_histogram(out, "ember_vision_encoder_seconds",
+                             "Vision tower encode duration, separated from LM "
+                             "prefill.", &g.vision_encode_seconds);
+    render_histogram(out, "ember_request_image_count",
+                             "Images per request.", &g.image_count);
     render_histogram(out, "ember_request_prefill_tokens",
                            "Distribution of tokens evaluated after prefix "
                            "restore.", &g.prefill_token_shape);
