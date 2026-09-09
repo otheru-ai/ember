@@ -76,6 +76,7 @@ static void test_spec_decline_reasons(void) {
     const long long ctx0   = sample(b0, "ember_spec_decode_declined_total{reason=\"context\"}");
     const long long ar0    = sample(b0, "ember_spec_decode_declined_total{reason=\"force_ar\"}");
     const long long other0 = sample(b0, "ember_spec_decode_declined_total{reason=\"other\"}");
+    const long long vis0   = sample(b0, "ember_spec_decode_declined_total{reason=\"vision\"}");
 
     ember_metrics_record_spec_decline("context");
     ember_metrics_record_spec_decline("context");
@@ -85,6 +86,9 @@ static void test_spec_decline_reasons(void) {
     ember_metrics_record_spec_decline(NULL);
     ember_metrics_record_spec_decline("");
     // An engine reason this build does not know must not mint a series.
+    // Image turns short-circuit the gate and are attributed separately; #9
+    // asks specifically why they forgo speculation.
+    ember_metrics_record_spec_decline("vision");
     ember_metrics_record_spec_decline("some_future_gate");
 
     ember_buf b = {0};
@@ -94,6 +98,8 @@ static void test_spec_decline_reasons(void) {
           "declines counted per reason");
     CHECK(sample(t, "ember_spec_decode_declined_total{reason=\"force_ar\"}") - ar0 == 1,
           "second reason counted separately");
+    CHECK(sample(t, "ember_spec_decode_declined_total{reason=\"vision\"}") - vis0 == 1,
+          "image turns attributed to vision, not folded into force_ar");
     CHECK(strstr(t, "reason=\"some_future_gate\"") == NULL,
           "an unknown decline reason does not mint a series");
     CHECK(sample(t, "ember_spec_decode_declined_total{reason=\"other\"}") - other0 == 1,

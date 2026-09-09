@@ -2281,6 +2281,7 @@ bool ds4_spec_should_run(const GenerateRequest & req, bool spec_enabled,
                      committed, ceiling, req.force_ar_decode ? 1 : 0,
                      sampling_requires_ar ? 1 : 0, req.n_gen, spec_budget);
     }
+    if (out_reason) *out_reason = run ? nullptr : reason;
     return run;
 }
 
@@ -2433,10 +2434,15 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
         req.tool_region_open_ids, req.tool_region_close_ids);
     SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
                                     req.token_mask, req.force_greedy_next);
+    // Vision short-circuits before the gate, so the gate would never attribute
+    // an image turn. Recorded as its own reason rather than folded into
+    // force_ar: #9 specifically asks why image turns forgo speculation, and
+    // "force_ar" would answer a different question.
+    const char * spec_reason = req.vision.empty() ? nullptr : "vision";
     if (req.vision.empty() &&
         ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
-                            profitability_allowed)) {
+                            profitability_allowed, &spec_reason)) {
         if (last_logits_.empty()) {
             result.fail(GenerateErrorCode::DecodeFailed, "spec: no prefill logits");
             return result;
@@ -2520,6 +2526,9 @@ GenerateResult DeepSeek4Backend::generate_impl(const GenerateRequest & req,
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    // Beside spec_decode_ran deliberately: the two must never disagree,
+    // and a branch added later without touching this line still reports.
+    result.spec_decline_reason = spec_ran ? nullptr : spec_reason;
     result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);
@@ -2850,9 +2859,10 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
         req.tool_region_open_ids, req.tool_region_close_ids);
     SpeculativeSampler spec_sampler(sampler_, req.prompt, sampler_rng_,
                                     req.token_mask, req.force_greedy_next);
+    const char * spec_reason = nullptr;
     if (ds4_spec_should_run(req, spec_enabled_, spec_drafter_ != nullptr,
                             sampling_requires_ar, spec_budget, committed,
-                            profitability_allowed)) {
+                            profitability_allowed, &spec_reason)) {
         int seed = 0;
         if (sampled_spec) {
             auto seed_logits = last_logits_;
@@ -2937,6 +2947,9 @@ GenerateResult DeepSeek4Backend::restore_and_generate_impl(
     result.termination_reason = termination_reason;
     result.accept_rate = accept_rate;
     result.spec_decode_ran = spec_ran;
+    // Beside spec_decode_ran deliberately: the two must never disagree,
+    // and a branch added later without touching this line still reports.
+    result.spec_decline_reason = spec_ran ? nullptr : spec_reason;
     result.spec_cycles = spec_cycles;
     if (spec_ran) {
         dspark_worker_scheduler().note_request_result(accept_rate);

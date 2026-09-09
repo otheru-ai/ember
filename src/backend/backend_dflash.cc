@@ -932,6 +932,7 @@ static ember_gen_result map_generate_result(
              res.termination_reason.c_str());
     r.empty_visible_output    = res.empty_visible_output;
     r.spec_decode_ran         = res.spec_decode_ran;
+    r.spec_decline_reason     = res.spec_decline_reason;
     r.spec_cycles             = res.spec_cycles;
     r.spec_provider_age_s     = res.spec_provider_age_s;
     r.spec_provider_block_s   = res.spec_provider_block_s;

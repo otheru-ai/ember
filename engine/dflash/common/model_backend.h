@@ -280,6 +280,9 @@ struct GenerateResult {
     float                      accept_rate     = 0.0f;
     // True when spec decode actually ran (accept_rate==0 still needs a bandit update).
     bool                       spec_decode_ran = false;
+    // Why speculation did not run, or nullptr when it did. Points at a string
+    // literal owned by the engine, so it outlives the result without copying.
+    const char *               spec_decline_reason = nullptr;
     // Resident XDNA proposal-pipeline attribution. These are zero for ordinary
     // AR and monolithic DSpark. Provider age includes hidden overlap; provider
     // block is the portion paid on this request's critical path.

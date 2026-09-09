@@ -35,7 +35,11 @@ typedef struct {
 // deliberately, and lands in "other" until it is.
 static const char *const kSpecDeclineReasons[] = {
     "disabled", "no_drafter", "context", "force_ar", "token_mask",
-    "sampling", "empty_budget", "short_budget", "profitability_gate", "other",
+    "sampling", "empty_budget", "short_budget", "profitability_gate",
+    // Image turns short-circuit the gate entirely, so they never reach the
+    // reasons above. #9 asks specifically why they forgo speculation, and
+    // folding them into force_ar would answer a different question.
+    "vision", "other",
 };
 #define N_SPEC_DECLINE_REASONS \
     (sizeof(kSpecDeclineReasons) / sizeof(kSpecDeclineReasons[0]))
