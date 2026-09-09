@@ -1,5 +1,6 @@
 {
   "src/backend/backend_stub.c": 78.0,
+  "src/backend/batch_wake.h": 99.5,
   "src/common/buf.h": 90.7,
   "src/common/bytes.h": 99.5,
   "src/common/json.c": 94.7,
