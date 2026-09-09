@@ -676,22 +676,58 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
     // validated by the normal parse below: an invoke without a name yields no
     // call, so a repair that recovers nothing emits nothing.
     char *repaired = NULL;
-    if (!strstr(first, sx->calls_close) && strstr(first, sx->invoke_open)) {
+    // Repair is the ONLY consumer that can invent bytes, so a raw scan is least
+    // acceptable here. The counting walked the whole text with strncmp,
+    // markers inside parameter VALUES included, and then appended one closer
+    // per apparent deficit -- synthesising framing out of payload content.
+    // Completeness is judged with the shared frame scan for the same reason.
+    if (!frame_close(first + strlen(sx->calls_open), sx->calls_open,
+                     sx->calls_close, sx) &&
+        strstr(first, sx->invoke_open)) {
         if (report) report->complete = false;
         const size_t co_l = strlen(sx->calls_open),  cc_l = strlen(sx->calls_close);
         const size_t io_l = strlen(sx->invoke_open), ic_l = strlen(sx->invoke_close);
         const size_t po_l = strlen(sx->param_open),  pc_l = strlen(sx->param_close);
         size_t tos = 0, toe = 0, ios = 0, ioe = 0, pos = 0, poe = 0;
+        bool unterminated_value = false;
         for (const char *p = first; *p;) {
+            if (!strncmp(p, sx->param_open, po_l)) {
+                const char *ptag = strchr(p, '>');
+                pos++;
+                if (!ptag) break;          // opener truncated mid-tag
+                const bool json_v =
+                    ember_dsml_param_is_json(p, po_l, ptag + 1);
+                const char *pc = ember_dsml_value_close(
+                    ptag, sx->param_open, sx->param_close, json_v);
+                if (pc) {
+                    poe++;
+                    p = pc + pc_l;
+                    continue;
+                }
+                if (json_v) {
+                    // A JSON value that ends inside a string or on a dangling
+                    // escape has no honest closer to synthesise: appending one
+                    // would turn a truncated payload into a complete-looking
+                    // call, which is what repair must never do.
+                    unterminated_value = true;
+                    break;
+                }
+                // A RAW value with no closer is the historical truncated-tail
+                // case, which repair is meant to recover and which the
+                // executable gate then rejects via report.repaired. Keep the
+                // old deficit accounting and keep scanning past the tag so
+                // later markers are still counted.
+                p = ptag + 1;
+                continue;
+            }
             if      (!strncmp(p, sx->calls_close,  cc_l)) { toe++; p += cc_l; }
             else if (!strncmp(p, sx->calls_open,   co_l)) { tos++; p += co_l; }
             else if (!strncmp(p, sx->invoke_close, ic_l)) { ioe++; p += ic_l; }
             else if (!strncmp(p, sx->invoke_open,  io_l)) { ios++; p += io_l; }
             else if (!strncmp(p, sx->param_close,  pc_l)) { poe++; p += pc_l; }
-            else if (!strncmp(p, sx->param_open,   po_l)) { pos++; p += po_l; }
             else p++;
         }
-        if (toe <= tos && ioe <= ios && poe <= pos) {
+        if (!unterminated_value && toe <= tos && ioe <= ios && poe <= pos) {
             ember_buf r = {0};
             ember_buf_puts(&r, text);
             for (size_t i = 0; i < pos - poe; i++) ember_buf_puts(&r, sx->param_close);

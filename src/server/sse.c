@@ -84,13 +84,28 @@ static const char *const TOOL_STARTS[] = {
 static const size_t N_TOOL_STARTS =
     sizeof(TOOL_STARTS) / sizeof(TOOL_STARTS[0]);
 
-const char *ember_find_tool_start(const char *s) {
+const char *ember_find_tool_start_ex(const char *s, size_t *family) {
     const char *best = NULL;
+    size_t best_family = 0;
+    if (!s) return NULL;
     for (size_t i = 0; i < N_TOOL_STARTS; i++) {
         const char *hit = strstr(s, TOOL_STARTS[i]);
-        if (hit && (!best || hit < best)) best = hit;
+        if (hit && (!best || hit < best)) { best = hit; best_family = i; }
     }
+    if (best && family) *family = best_family;
     return best;
+}
+
+const char *ember_find_tool_start(const char *s) {
+    return ember_find_tool_start_ex(s, NULL);
+}
+
+// Only the emitter needs this, so it stays internal rather than dragging the
+// parser's anonymous syntax typedef into sse.h.
+static const ember_dsml_syntax *ember_sse_family_syntax(size_t family) {
+    int n = 0;
+    const ember_dsml_syntax *table = ember_dsml_syntaxes(&n);
+    return (n > 0 && family < (size_t)n) ? &table[family] : NULL;
 }
 
 // Tool-calls END markers (closers of the openers above). Returns a pointer to
@@ -400,7 +415,11 @@ static void tool_args_delta(ember_sse_stream *st, int idx, const char *frag,
 static void emit_tool_stream(ember_sse_stream *st, const char *raw,
                              size_t raw_len, bool final, ember_buf *out) {
     const char *region = raw + st->tool_start;
-    const ember_dsml_syntax *sx = ember_dsml_detect(region);
+    // Bound to the family selected when tool_start was found. Re-detecting from
+    // the region picks up a payload's opener -- a native outer block whose JSON
+    // value contains a plain DSML opener would extract with the wrong syntax,
+    // the same defect as the stop path. Flagged by codex-rejoin-01.
+    const ember_dsml_syntax *sx = ember_sse_family_syntax(st->tool_family);
     if (!sx) {
         if (final && st->tool_open) { tool_args_delta(st, st->tool_idx, "}", 1, out); st->tool_open = false; }
         return;
@@ -613,6 +632,8 @@ void ember_sse_update(ember_sse_stream *st, const char *raw, size_t raw_len,
             st->mode = EMBER_SSE_SUPPRESS;
         } else if (tool) {
             st->tool_start = (size_t)(tool - raw);
+            (void)ember_find_tool_start_ex(raw + st->emit_pos,
+                                           &st->tool_family);
             st->emit_pos = st->tool_start;
             st->mode = EMBER_SSE_TOOL;
         } else if (final) {

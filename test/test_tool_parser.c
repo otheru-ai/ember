@@ -547,6 +547,48 @@ static void test_native_payload_opener_is_not_mixed_syntax(void) {
     ember_tool_calls_free(&tc);
 }
 
+// Repair is the only consumer that can invent bytes. It counted markers with a
+// raw scan across the whole text, values included, so a JSON value containing
+// an opener inflated the deficit and repair appended closers that the payload
+// implied rather than the framing.
+static void test_repair_does_not_count_markers_inside_json_values(void) {
+    // Complete parameter, truncated block: repair should close the invoke and
+    // the tool_calls, and must NOT be misled by the opener inside the value.
+    const char *t =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\" string=\"false\">"
+        "[\"<" PIPE "DSML" PIPE "invoke name=\\\"fake\\\">\"]"
+        "</" PIPE "DSML" PIPE "parameter>";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(t, &tc, &report);
+    CHECK(n == 1, "repair: truncated block still recovered");
+    CHECK(report.repaired, "repair: reported as repaired");
+    CHECK(n == 1 && strcmp(tc.calls[0].arguments,
+                           "{\"items\":[\"<" PIPE "DSML" PIPE
+                           "invoke name=\\\"fake\\\">\"]}") == 0,
+          "repair: value with an embedded opener preserved exactly");
+    CHECK(report.invocations == 1,
+          "repair: the opener inside the value is not a second invocation");
+    ember_tool_calls_free(&tc);
+}
+
+// An unterminated JSON string has no honest closer to synthesise.
+static void test_repair_refuses_unterminated_json(void) {
+    const char *t =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\" string=\"false\">"
+        "[{\"text\":\"still open";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(t, &tc, &report);
+    CHECK(n == 0, "repair: unterminated JSON is not recovered");
+    CHECK(!report.complete, "repair: reported incomplete");
+    ember_tool_calls_free(&tc);
+}
+
 int main(void) {
     test_real_degraded_output_is_not_a_tool_call();
     test_real_degraded_output_never_matches_a_replay();
@@ -571,6 +613,8 @@ int main(void) {
     test_absent_string_attribute_stays_raw();
     test_ds_engine_property_value_may_contain_terminators();
     test_native_payload_opener_is_not_mixed_syntax();
+    test_repair_does_not_count_markers_inside_json_values();
+    test_repair_refuses_unterminated_json();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

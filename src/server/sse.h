@@ -92,6 +92,10 @@ typedef struct {
                                         // what was generated; see
                                         // ember_sse_delivered_tool_markup()
     size_t       tool_start;      // offset in raw where a tool marker began
+    // The family chosen WHEN tool_start was found. Re-deriving it later by
+    // scanning the region finds the payload's opener instead of the outer
+    // one, which is how the stop path came to use the wrong scanner.
+    size_t       tool_family;
     // validation-gated tool-call emission state
     int          tool_idx;        // highest tool_call index started (-1 = none)
     int          tool_nparams;    // args fragments emitted for the current call
@@ -229,6 +233,10 @@ size_t ember_text_safe_limit(const char *raw, size_t start, size_t raw_len,
 // Earliest tool-call marker start in `s`, or NULL. Recognizes DeepSeek DSML in
 // its full, short (leading '<|' eaten), and ascii-degraded spellings.
 const char *ember_find_tool_start(const char *s);
+// As above, and reports WHICH family matched, so callers can bind the scanner
+// to it rather than re-detecting from the text.
+const char *ember_find_tool_start_ex(const char *s, size_t *family);
+
 // Byte after the complete end marker matching the earliest opener in `s`, or
 // NULL. A closer from another degradation family is not accepted.
 const char *ember_find_tool_end(const char *s);
