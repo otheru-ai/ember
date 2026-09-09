@@ -393,6 +393,7 @@ static void test_boundary_matrix_json_values(void);
 static void test_boundary_matrix_raw_entities(void);
 static void test_boundary_matrix_rejections(void);
 static void test_boundary_matrix_replay(void);
+static void test_boundary_matrix_all_byte_truncation(void);
 
 // ─── DSML boundary acceptance matrix ────────────────────────────────────────
 // Every family, every payload shape, every byte split, asserting that the
@@ -492,7 +493,10 @@ static char *bfam_block(const bfam *f, const char *pname, const char *is_str,
 static bool executable(const ember_tool_parse_report *r, int n) {
     return n > 0 && r->found && r->complete && !r->repaired &&
            !r->malformed && !r->contaminated && !r->invalid_json &&
-           !r->trailing && !r->mixed_syntax;
+           !r->trailing && !r->mixed_syntax &&
+           // The counts must agree: a block whose invocations and emitted
+           // calls disagree has been recovered rather than parsed.
+           n == r->invocations;
 }
 
 static void matrix_case(const bfam *f, const char *pname, const char *is_str,
@@ -663,35 +667,108 @@ static void test_boundary_matrix_raw_entities(void) {
 // matches the expected call. It shares the parser but NOT the executable
 // report gate, so it is its own boundary consumer -- my first inventory said
 // there was no replay scanner and codex-rejoin-01 corrected that.
+//
+// EVERY prefix, not a midpoint. codex-rejoin-01's sweep found 155 incomplete
+// prefixes across five families that compared equal to the finished call,
+// because the NULL-report reparse repaired the truncated tail. A midpoint-only
+// check cannot see that: the interesting cuts are after a complete value and
+// between the closers.
+// Every prefix of a complete block, on the two paths that can act on one: no
+// prefix may be executable, and no prefix may stop early. The matrix's
+// malformed values inside complete wrappers do not cover cuts after a complete
+// value or between the closers, which is where truncation actually lands.
+static void test_boundary_matrix_all_byte_truncation(void) {
+    for (size_t i = 0; i < N_BFAMS; i++) {
+        const bfam *f = &BFAMS[i];
+        char v[512];
+        snprintf(v, sizeof v, "[{\"text\":\"%s\"},{\"text\":\"</div>\"}]",
+                 f->calls_c);
+        char *text = bfam_block(f, "items", "false", v);
+        const size_t len = strlen(text);
+
+        size_t executable_prefixes = 0, early_stops = 0;
+        size_t first_exec = 0, first_stop = 0;
+        char *buf = (char *)malloc(len + 1);
+        for (size_t cut = 1; cut < len; cut++) {
+            memcpy(buf, text, cut);
+            buf[cut] = '\0';
+
+            ember_tool_calls tc = {0};
+            ember_tool_parse_report report = {0};
+            int n = ember_parse_dsml_tool_calls_ex(buf, &tc, &report);
+            if (executable(&report, n)) {
+                if (!executable_prefixes) first_exec = cut;
+                executable_prefixes++;
+            }
+            ember_tool_calls_free(&tc);
+
+            // A stop inside an incomplete block would truncate the value the
+            // parser has not finished reading.
+            const char *end = ember_find_tool_end(buf);
+            if (end) {
+                if (!early_stops) first_stop = cut;
+                early_stops++;
+            }
+        }
+        free(buf);
+        free(text);
+
+        if (executable_prefixes) {
+            printf("  FAIL %s/truncation: %zu executable prefixes, first at %zu\n",
+                   f->name, executable_prefixes, first_exec);
+            g_fail++;
+        } else {
+            g_pass++;
+        }
+        if (early_stops) {
+            printf("  FAIL %s/truncation: %zu early stops, first at %zu\n",
+                   f->name, early_stops, first_stop);
+            g_fail++;
+        } else {
+            g_pass++;
+        }
+    }
+}
+
 static void test_boundary_matrix_replay(void) {
     for (size_t i = 0; i < N_BFAMS; i++) {
         const bfam *f = &BFAMS[i];
-        char v[512], label[128];
+        char v[512], label[160];
 
-        // A value carrying this family's own terminator must still match its
-        // own reparse: if the boundary moved, replay would silently refuse.
         snprintf(v, sizeof v, "[\"%s\"]", f->calls_c);
         char *text = bfam_block(f, "items", "false", v);
+        const size_t len = strlen(text);
+
         ember_tool_calls expected = {0};
         int n = ember_parse_dsml_tool_calls(text, &expected);
-        snprintf(label, sizeof label, "%s/replay matches own reparse", f->name);
+        snprintf(label, sizeof label, "%s/replay matches its own reparse", f->name);
         CHECK(n == 1 && ember_tool_calls_match_raw(text, &expected), label);
 
-        // A DIFFERENT value must not match, or replay would attach tokens from
-        // one call to another.
         char *other = bfam_block(f, "items", "false", "[\"different\"]");
         snprintf(label, sizeof label, "%s/replay rejects a different value",
                  f->name);
         CHECK(!ember_tool_calls_match_raw(other, &expected), label);
 
-        // Truncated raw must not match a complete expected call.
-        ember_buf trunc = {0};
-        ember_buf_append(&trunc, text, strlen(text) / 2);
-        snprintf(label, sizeof label, "%s/replay rejects truncated raw", f->name);
-        CHECK(!ember_tool_calls_match_raw(trunc.ptr ? trunc.ptr : "", &expected),
-              label);
-
-        ember_buf_free(&trunc);
+        // No PREFIX of the stream may match the finished call.
+        size_t matched_prefixes = 0, first_match = 0;
+        char *buf = (char *)malloc(len + 1);
+        for (size_t cut = 1; cut < len; cut++) {
+            memcpy(buf, text, cut);
+            buf[cut] = '\0';
+            if (ember_tool_calls_match_raw(buf, &expected)) {
+                if (!matched_prefixes) first_match = cut;
+                matched_prefixes++;
+            }
+        }
+        if (matched_prefixes) {
+            printf("  FAIL %s/replay: %zu incomplete prefixes matched, "
+                   "first at %zu/%zu bytes\n",
+                   f->name, matched_prefixes, first_match, len);
+            g_fail++;
+        } else {
+            g_pass++;
+        }
+        free(buf);
         free(other);
         ember_tool_calls_free(&expected);
         free(text);
@@ -737,6 +814,7 @@ int main(void) {
     test_boundary_matrix_raw_entities();
     test_boundary_matrix_rejections();
     test_boundary_matrix_replay();
+    test_boundary_matrix_all_byte_truncation();
     test_native_tool_id_is_registered();
     test_stop_precedes_tool();
     test_more_than_sixteen_tool_ids();

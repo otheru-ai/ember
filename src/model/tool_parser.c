@@ -891,8 +891,21 @@ static bool json_args_equal(const char *a, const char *b) {
 bool ember_tool_calls_match_raw(const char *raw, const ember_tool_calls *expected) {
     if (!raw || !expected) return false;
     ember_tool_calls parsed = {0};
-    ember_parse_dsml_tool_calls(raw, &parsed);
-    bool equal = parsed.len == expected->len;
+    // Reparse WITH the report. The NULL-report wrapper repairs a truncated tail
+    // and returns a complete-looking call, so an INCOMPLETE prefix of a stream
+    // compared equal to the finished call and replay attached its exact tokens.
+    // codex-rejoin-01's all-byte sweep found 155 such prefixes across five
+    // families; the repair conversion widened the set from 96, so this became
+    // worse before it got better. Replay shares the parser but not the
+    // executable gate, so it has to apply the equivalent checks itself.
+    ember_tool_parse_report report = {0};
+    ember_parse_dsml_tool_calls_ex(raw, &parsed, &report);
+    bool equal = report.found && report.complete && !report.repaired &&
+                 !report.malformed && !report.contaminated &&
+                 !report.invalid_json && !report.trailing &&
+                 !report.mixed_syntax &&
+                 parsed.len == report.invocations &&
+                 parsed.len == expected->len;
     for (int i = 0; equal && i < parsed.len; i++) {
         const char *pn = parsed.calls[i].name;
         const char *en = expected->calls[i].name;
