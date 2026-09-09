@@ -589,6 +589,12 @@ if(Python3_Interpreter_FOUND)
             $<TARGET_FILE:ember-server>)
   set_tests_properties(metrics_server PROPERTIES TIMEOUT 20)
   add_test(
+    NAME batch_worker
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_batch_worker.py
+            --compiler ${CMAKE_CXX_COMPILER} "--flags=${CMAKE_CXX_FLAGS}")
+  set_tests_properties(batch_worker PROPERTIES TIMEOUT 90)
+  add_test(
     NAME request_budgets_server
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_request_budgets_server.py
