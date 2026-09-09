@@ -80,7 +80,7 @@ void stop(ember_backend& b){
 int main(int argc,char**argv){
  if(argc!=2)return 2;
  std::string mode=argv[1];FakeResidentBackend f;ember_backend b;b.resident=&f;
- hold_first=(mode=="control" || mode=="generation");
+ hold_first=(mode=="control" || mode=="generation" || mode=="failure");
  b.batch_thread=std::thread(ember_batch_thread_main,&b);
  if(hold_first){std::unique_lock<std::mutex> l(hook_mu);hook_cv.wait(l,[]{return reached;});}
  else {std::unique_lock<std::mutex> l(b.batch_mu);b.batch_cv.wait(l,[&]{return b.batch_start_done;});}
@@ -103,12 +103,16 @@ int main(int argc,char**argv){
  }
  if(mode=="failure"){
   {std::unique_lock<std::mutex> l(b.batch_mu);throw_pump=true;
-   b.batch_pending.push_back(&call);b.batch_cv.notify_one();call.cv.wait(l,[&]{return call.done;});}
+   b.batch_pending.push_back(&call);b.batch_cv.notify_one();}
+  // The first idle pump already ran and is held at the hook. Release it only
+  // after enqueue, so the injected failure hits the next pump AFTER admission.
+  {std::lock_guard<std::mutex> l(hook_mu);resume_pump=true;hook_cv.notify_all();}
+  {std::unique_lock<std::mutex> l(b.batch_mu);call.cv.wait(l,[&]{return call.done;});}
   b.batch_thread.join();
   bool ran=false;bool serviced=ember_batch_control_run(&b,[&]{ran=true;});
   std::printf("failed request done=%d session=%llu running=%d control serviced=%d ran=%d\n",
    call.done,(unsigned long long)call.session_id,b.batch_running,serviced,ran);
-  return !call.done || call.result.ok() || b.batch_running || serviced || ran;
+  return !call.done || !call.session_id || call.result.ok() || b.batch_running || serviced || ran;
  }
  {std::lock_guard<std::mutex> l(b.batch_mu);
   if(mode=="control")b.batch_controls.push_back(&control);else b.batch_pending.push_back(&call);
