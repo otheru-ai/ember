@@ -377,6 +377,90 @@ static void test_real_degraded_output_never_matches_a_replay(void) {
     ember_tool_calls_free(&expected);
 }
 
+
+// The <script> problem, in our frame. A JSON parameter value may legally
+// contain text identical to a protocol terminator, and that must be data
+// rather than a frame boundary. Before the boundary fix the scanner cut the
+// value at the embedded marker and the call was lost or corrupted -- which is
+// what the tool grammar was banning every "</" to avoid, at the cost of
+// silently corrupting ordinary closing tags like </div>.
+static void test_json_value_may_contain_a_protocol_terminator(void) {
+    const char *text =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
+        "[{\"text\":\"</" PIPE "DSML" PIPE "tool_calls>\"}]"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+    ember_tool_calls tc = {0};
+    int n = ember_parse_dsml_tool_calls(text, &tc);
+    CHECK(n == 1, "embedded terminator: one call parsed");
+    CHECK(n == 1 && strcmp(tc.calls[0].name, "record") == 0,
+          "embedded terminator: name survives");
+    CHECK(n == 1 && strstr(tc.calls[0].arguments, "tool_calls") != NULL,
+          "embedded terminator: value keeps the marker text");
+    ember_tool_calls_free(&tc);
+}
+
+// Ordinary closing tags were never a framing hazard, and are the values the
+// grammar ban was actually costing us.
+static void test_ordinary_closing_tag_round_trips(void) {
+    const char *text =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
+        "[{\"text\":\"</div>\"},{\"text\":\"i < n\"}]"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+    ember_tool_calls tc = {0};
+    int n = ember_parse_dsml_tool_calls(text, &tc);
+    CHECK(n == 1, "</div>: one call parsed");
+    CHECK(n == 1 && strstr(tc.calls[0].arguments, "</div>") != NULL,
+          "</div>: closing tag survives verbatim");
+    ember_tool_calls_free(&tc);
+}
+
+// An escaped quote must not end the string, and an odd backslash run must not
+// be mistaken for one that does.
+static void test_escaped_quotes_do_not_end_the_value(void) {
+    const char *text =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
+        "[{\"text\":\"quote \\\" then </" PIPE "DSML" PIPE "tool_calls> still inside\"}]"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+    ember_tool_calls tc = {0};
+    int n = ember_parse_dsml_tool_calls(text, &tc);
+    CHECK(n == 1, "escaped quote: one call parsed");
+    CHECK(n == 1 && strstr(tc.calls[0].arguments, "still inside") != NULL,
+          "escaped quote: value continues past the embedded marker");
+    ember_tool_calls_free(&tc);
+}
+
+// An unterminated JSON string must NOT become an executable call. Repair may
+// restore framing only after a complete value; inventing a terminator here
+// would turn truncated output into a successful call.
+static void test_unterminated_json_string_is_not_executable(void) {
+    const char *text =
+        "<" PIPE "DSML" PIPE "tool_calls>"
+        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
+        "[{\"text\":\"unterminated"
+        "</" PIPE "DSML" PIPE "parameter>"
+        "</" PIPE "DSML" PIPE "invoke>"
+        "</" PIPE "DSML" PIPE "tool_calls>";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    (void)ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+    CHECK(report.malformed || report.contaminated || report.invalid_json,
+          "unterminated string: reported, not silently executable");
+    ember_tool_calls_free(&tc);
+}
+
 int main(void) {
     test_real_degraded_output_is_not_a_tool_call();
     test_real_degraded_output_never_matches_a_replay();
@@ -394,6 +478,10 @@ int main(void) {
     test_executable_report_rejects_invalid_raw_json();
     test_wrapper_is_authoritative();
     test_malformed_nested_tags_are_not_executable();
+    test_json_value_may_contain_a_protocol_terminator();
+    test_ordinary_closing_tag_round_trips();
+    test_escaped_quotes_do_not_end_the_value();
+    test_unterminated_json_string_is_not_executable();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

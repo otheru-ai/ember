@@ -120,8 +120,14 @@ const char *ember_find_tool_end(const char *s) {
     // wrapper. gen_token truncates g->acc at this offset and stops generating, so
     // a first-match close here cuts the value off before the parser ever sees it
     // -- parser-side recovery cannot reach past this boundary (.coord 1067).
-    const char *end = ember_dsml_matching_close(
-        start + strlen(TOOL_STARTS[family]), TOOL_STARTS[family], TOOL_ENDS[family]);
+    // Parameter-aware: a parameter VALUE may legally contain text identical to
+    // this terminator, and cutting there truncates the value before the parser
+    // ever sees it -- parser-side recovery cannot reach past this boundary.
+    // ember_dsml_detect returns NULL for the ds_engine and bare <tool_call>
+    // families, which then fall back to the previous behaviour.
+    const char *end = ember_dsml_frame_close(
+        start + strlen(TOOL_STARTS[family]), TOOL_STARTS[family],
+        TOOL_ENDS[family], ember_dsml_detect(start));
     return end ? end + strlen(TOOL_ENDS[family]) : NULL;
 }
 

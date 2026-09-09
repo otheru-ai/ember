@@ -100,6 +100,15 @@ char *ember_dsml_attr(const char *tag, const char *tag_limit, const char *key);
 // must use this -- the generation stop (main.c), the SSE emitter (sse.c) and
 // the parser each had their own first-match walker, and fixing only the parser
 // left validated arguments differing from emitted ones (.coord 1067).
+// Frame terminator scan that treats each parameter block as opaque, so a
+// parameter VALUE containing text identical to a terminator cannot end the
+// frame. `sx` NULL falls back to ember_dsml_matching_close. EVERY site that
+// looks for a frame boundary must use this, including the streaming stop in
+// sse.c -- a parser-only fix is defeated by an earlier truncation.
+const char *ember_dsml_frame_close(const char *from, const char *open_tag,
+                                   const char *close_tag,
+                                   const ember_dsml_syntax *sx);
+
 const char *ember_dsml_matching_close(const char *from, const char *open_tag,
                                       const char *close_tag);
 

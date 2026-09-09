@@ -85,6 +85,52 @@ static bool nested_values_enabled(void) {
 //
 // open_tag is matched as a prefix (the real openers carry attributes and end at
 // a later '>'), which is what makes a nested opener count toward depth.
+// A protocol terminator inside a JSON string literal is DATA, not a frame
+// boundary. This is the <script> problem: the answer is to parse the frame
+// rather than scan it, so the payload never has to be restricted.
+//
+// Deliberately NOT gated on EMBER_DSML_NESTED_VALUES. Depth tracking is a
+// nesting policy; string awareness is correctness, and a marker inside a
+// quoted value is never a terminator under any policy.
+//
+// Returns NULL when the value ends inside a string or on a dangling escape.
+// That makes an incomplete value NON-RECOVERABLE rather than executable, which
+// is the property codex-rejoin-01 asked for: repair must never turn a truncated
+// payload into a successful call.
+static const char *json_value_close(const char *from, const char *open_tag,
+                                    const char *close_tag) {
+    if (!from || !open_tag || !close_tag) return NULL;
+    const size_t o_l = strlen(open_tag), c_l = strlen(close_tag);
+    if (!o_l || !c_l) return NULL;
+    const bool nested = nested_values_enabled();
+    int depth = 0;
+    bool in_string = false, escaped = false;
+    for (const char *p = from; *p;) {
+        if (in_string) {
+            if (escaped)         escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"')  in_string = false;
+            ++p;
+            continue;
+        }
+        if (*p == '"') { in_string = true; ++p; continue; }
+        if (!strncmp(p, close_tag, c_l)) {
+            if (depth == 0) return p;
+            --depth;
+            p += c_l;
+            continue;
+        }
+        if (nested && !strncmp(p, open_tag, o_l)) {
+            if (depth == INT_MAX) return NULL;
+            ++depth;
+            p += o_l;
+            continue;
+        }
+        ++p;
+    }
+    return NULL;
+}
+
 static const char *matching_close(const char *from, const char *open_tag,
                                   const char *close_tag) {
     if (!from || !open_tag || !close_tag) return NULL;
@@ -104,6 +150,58 @@ static const char *matching_close(const char *from, const char *open_tag,
         } else {
             ++p;
         }
+    }
+    return NULL;
+}
+
+// Scan for a FRAME terminator -- a tool_calls or invoke close -- treating every
+// parameter block as opaque. A parameter VALUE may legally contain text
+// identical to a terminator, so the frame scan must step over the value rather
+// than through it. Without this the outer scan cuts at an embedded marker and
+// the parameter-level fix never gets a chance to run, which is why a
+// parser-only change is not sufficient: sse.c truncates on the same boundary
+// before the parser ever sees the text.
+//
+// A parameter whose value cannot be closed makes the whole frame unresolvable
+// and returns NULL, so a truncated payload stays non-executable.
+static const char *frame_close(const char *from, const char *open_tag,
+                               const char *close_tag,
+                               const ember_dsml_syntax *sx) {
+    if (!from || !open_tag || !close_tag) return NULL;
+    if (!sx) return matching_close(from, open_tag, close_tag);
+    const size_t o_l = strlen(open_tag), c_l = strlen(close_tag);
+    const size_t po_l = strlen(sx->param_open), pc_l = strlen(sx->param_close);
+    if (!o_l || !c_l || !po_l || !pc_l) return NULL;
+    const bool nested = nested_values_enabled();
+    int depth = 0;
+    for (const char *p = from; *p;) {
+        if (!strncmp(p, sx->param_open, po_l)) {
+            const char *ptag_end = strchr(p, '>');
+            if (!ptag_end) return NULL;
+            char *is_str = ember_dsml_attr(p + po_l, ptag_end + 1, "string");
+            const bool raw_value = is_str && !strcmp(is_str, "true");
+            free(is_str);
+            const char *pc =
+                raw_value
+                    ? matching_close(ptag_end, sx->param_open, sx->param_close)
+                    : json_value_close(ptag_end, sx->param_open, sx->param_close);
+            if (!pc) return NULL;
+            p = pc + pc_l;
+            continue;
+        }
+        if (!strncmp(p, close_tag, c_l)) {
+            if (depth == 0) return p;
+            --depth;
+            p += c_l;
+            continue;
+        }
+        if (nested && !strncmp(p, open_tag, o_l)) {
+            if (depth == INT_MAX) return NULL;
+            ++depth;
+            p += o_l;
+            continue;
+        }
+        ++p;
     }
     return NULL;
 }
@@ -180,6 +278,12 @@ static char *dsml_unescape_n(const char *s, size_t n) {
 const char *ember_dsml_matching_close(const char *from, const char *open_tag,
                                       const char *close_tag) {
     return matching_close(from, open_tag, close_tag);
+}
+
+const char *ember_dsml_frame_close(const char *from, const char *open_tag,
+                                   const char *close_tag,
+                                   const ember_dsml_syntax *sx) {
+    return frame_close(from, open_tag, close_tag, sx);
 }
 
 char *ember_dsml_attr(const char *tag, const char *tag_limit, const char *key) {
@@ -499,8 +603,8 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
     const size_t param_open_len = strlen(sx->param_open);
     const size_t param_close_len = strlen(sx->param_close);
 
-    const char *block_close = matching_close(first + strlen(sx->calls_open),
-                                             sx->calls_open, sx->calls_close);
+    const char *block_close = frame_close(first + strlen(sx->calls_open),
+                                          sx->calls_open, sx->calls_close, sx);
     const char *cur = first;
     while ((cur = strstr(cur, sx->invoke_open)) != NULL &&
            (!block_close || cur < block_close)) {
@@ -510,7 +614,7 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
             break;
         }
         const char *inv_close =
-            matching_close(tag_end, sx->invoke_open, sx->invoke_close);
+            frame_close(tag_end, sx->invoke_open, sx->invoke_close, sx);
         if (!inv_close || (block_close && inv_close >= block_close)) {
             if (report) report->malformed = true;
             break;
@@ -535,8 +639,18 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                 if (report) report->malformed = true;
                 break;
             }
+            // Read string= FIRST: it decides how the value must be scanned.
+            // A JSON value needs quote and escape awareness so a protocol
+            // terminator inside a string literal is treated as data; raw
+            // string=true text keeps plain scanning, because there quotes are
+            // ordinary characters that may be unmatched and a literal
+            // terminator is encoded with the existing &lt; entity convention.
+            char *is_str_early = attr(p + param_open_len, ptag_end + 1, "string");
+            const bool raw_value = is_str_early && !strcmp(is_str_early, "true");
             const char *pclose =
-                matching_close(ptag_end, sx->param_open, sx->param_close);
+                raw_value
+                    ? matching_close(ptag_end, sx->param_open, sx->param_close)
+                    : json_value_close(ptag_end, sx->param_open, sx->param_close);
             if (!pclose || pclose > inv_close) {
                 // Nesting never balanced, so there is no faithful value to
                 // emit. Report contamination specifically when the unbalanced
@@ -552,11 +666,12 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                     else
                         report->malformed = true;
                 }
+                free(is_str_early);
                 break;
             }
 
             char *key = attr(p + param_open_len, ptag_end + 1, "name");
-            char *is_str = attr(p + param_open_len, ptag_end + 1, "string");
+            char *is_str = is_str_early;
             const char *val = ptag_end + 1;
             size_t val_len = (size_t)(pclose - val);
 

@@ -331,26 +331,47 @@ char *ember_tool_grammar_build(const char *tools_json, bool allow_parallel) {
     // cause itself: "The patch keeps truncating at `<`".
     //
     // chat_template.c's preamble only requires escaping a literal
-    // </|DSML|parameter> (as &lt;/...), so bare '<' is legal. Forbidding '<'
-    // followed by '/' keeps the closing tag unambiguously findable while
-    // allowing everything real code contains. A trailing '<' is allowed
-    // explicitly, since a value may legitimately end with one.
+    // </|DSML|parameter> (as &lt;/...), so bare '<' is legal.
+    // The blanket "/" after "<" ban is GONE, together with the framing fix in
+    // tool_parser.c. It forbade every ordinary closing tag -- </div>, </tag>,
+    // </script> -- to keep one protocol terminator findable, and a model that
+    // wanted one emitted the next legal token instead, silently producing a
+    // DIFFERENT value. Valid, schema-clean and wrong is worse than rejected.
+    //
+    // For raw string=true text the existing entity convention carries the
+    // weight: a LITERAL terminator is written &lt;/... and decoded once, while
+    // an unescaped exact terminator remains structural by design. Ordinary
+    // closing tags are now representable, which is the whole point.
+    // UNCHANGED, DELIBERATELY, and this is the one gap in the fix.
+    //
+    // Raw string=true text still cannot contain "</", so ordinary closing tags
+    // are still not representable HERE. Narrowing it to the actual delimiter --
+    // "strval ::= ([^<] | \"<\" [^/] | \"</\" [^<PIPE>])* (\"<\")?" -- generates
+    // the semantically correct rule (verified by dumping it: "</" followed by
+    // any codepoint except U+FF5C) but breaks conditional-schema
+    // discrimination: test_tool_grammar_match's allOf/if-then case stops
+    // rejecting a patch action that omits its required old_string/new_string.
+    // I could not explain that interaction, so I am not shipping it.
+    //
+    // Gate 5 does not need this: its probe sends a JSON array parameter, so it
+    // goes through jsonval/jstring, which IS fixed. Raw-text closing tags are a
+    // second, narrower instance of the same class, handed to codex-rejoin-01
+    // with the reproduction rather than forced.
     ember_buf_puts(&out, "strval ::= ([^<] | \"<\" [^/])* (\"<\")?\n");
     // #11/#10: raw text admitted malformed JSON even while the mask was
     // active. Match JSON syntax here; tool_schema.c still checks schema
     // semantics. Surrogate escapes match json.c: lone halves are rejected.
-    // Keep raw DSML closing tags out of strings; escape their slash or less-
-    // than sign. Ordinary code comparisons and trailing less-than stay legal.
+    // No closing-tag restriction here any more: a terminator inside a JSON
+    // string is data, and tool_parser.c now parses the frame instead of
+    // scanning it, so the payload does not have to be restricted to keep the
+    // boundary findable.
     ember_buf_puts(&out,
         "jsonval ::= ws jvalue ws\n"
         "jvalue ::= jobject | jarray | jstring | jnumber | \"true\" | \"false\" | \"null\"\n"
         "jobject ::= \"{\" ws (jstring ws \":\" ws jvalue (ws \",\" ws jstring ws \":\" ws jvalue)*)? ws \"}\"\n"
         "jarray ::= \"[\" ws (jvalue (ws \",\" ws jvalue)*)? ws \"]\"\n"
         "jnumber ::= \"-\"? (\"0\" | [1-9] [0-9]*) (\".\" [0-9]+)? ([eE] [+-]? [0-9]+)?\n"
-        "jstring ::= \"\\\"\" (jchar | \"<\"+ jafterlt)* \"<\"* \"\\\"\"\n"
-        "jchar ::= [^\"\\\\<\\x00-\\x1f] | jescape\n"
-        "jafterlt ::= [^\"\\\\</\\x00-\\x1f] | jescape\n"
-        "jescape ::= \"\\\\\" ([\"\\\\/bfnrt] | \"u\" junicode)\n"
+        "jstring ::= \"\\\"\" ([^\"\\\\\\x00-\\x1f] | \"\\\\\" ([\"\\\\/bfnrt] | \"u\" junicode))* \"\\\"\"\n"
         "jhex ::= [0-9a-fA-F]\n"
         "junicode ::= [0-9a-cA-Ce-fE-F] jhex jhex jhex | [dD] [0-7] jhex jhex | [dD] [89abAB] jhex jhex \"\\\\u\" [dD] [cdefCDEF] jhex jhex\n"
     );
