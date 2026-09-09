@@ -11,6 +11,82 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.9.9
+
+### Added
+
+- **vision:** report per-image encode duration and token count (`93e145c2`)
+- **engine:** report why speculation declined, including image turns (`fb6d0846`)
+- **metrics:** TTFT, inter-token latency, spec decline reasons, vision timing (`f0a76e79`)
+- **bench:** publish complete benchmark bundles to existing releases (`aa0d920f`)
+
+### Fixed
+
+- **dsml:** gate replay on the parse report, and sweep every prefix (`21bba4a5`)
+- **dsml:** bind the emitter family and stop repair counting payload markers (`cab07134`)
+- **dsml:** bind the stop scanner to the outer family and scan native structure (`174eb4c1`)
+- **dsml:** close the native stop, contamination and delimiter-overlap holes (`84e4adaa`)
+- **dsml:** one boundary contract across validation, streaming and ds_engine (`385137ed`)
+- **dsml:** parse the frame instead of restricting the payload (`5d755693`)
+- **batch:** reserve the session node before moving the cache into it (`4438cd78`)
+- **metrics:** preserve request timing across queues and recovery (`c456a884`)
+- **batch:** keep the admission guard armed through reconcile (`1995164b`)
+- **batch:** make admission transactional and controls survivable (`844b10c3`)
+- **batch:** require admission capacity before waking on pending work (`9a32f091`)
+- **batch:** predicate the coordinator wait so queued work cannot be lost (`5836b1bc`)
+- **metrics:** measure TTFT and token gaps, attribute resident declines (`5d25feeb`)
+- **bench:** carry the run's memory gate, and check vision inputs agree (`605f3f3a`)
+- **bench:** recompute the vision aggregate from the requests (`24216cbc`)
+- **bench:** resolve the release commit always, and compare vision fully (`9d674da3`)
+- **bench:** bind published bundles to a captured image and a whole suite (`6b87a36e`)
+- **build:** exclude Buildx output metadata from image contexts (`0381abdc`)
+- **bench:** validate bundles against their own rows, not just their shape (`cf613464`)
+- **grammar:** preserve DSML closing-tag boundaries in JSON strings (`9d1ac82c`)
+- **grammar:** constrain JSON tool arguments to valid JSON syntax (`8ebdb17c`)
+- **build:** enable ROCm compiler caches and preserve reusable layers (`06513fc4`)
+- **ci:** align CA mount with runner-injected TLS settings (`71d6f420`)
+- **ci:** point container TLS clients at the mounted Forgejo CA (`33c4dcfa`)
+- **server:** restore the metrics wiring the lifecycle refactor dropped (`6492def7`)
+- **server:** reset tool loop recovery for new user turns (`aab8623a`)
+
+### Changed
+
+- **engine:** prune non-gfx1151 platform code (`1ed8d557`)
+- **ggml-cpu:** drop non-x86 architecture code (`617f6902`)
+- **server:** share generation lifecycle and cleanup (`db65c290`)
+
+### Build and CI
+
+- drop the textual wait guards now the real worker test covers them (`3b8ef5b6`)
+- register the batch_wake test with the gates it has to satisfy (`5cb0a18c`)
+- **forgejo:** guard the CA paths the TLS clients are pointed at (`3858f1ba`)
+- **certify:** record why artifact verification stays after the quiesce (`2a6b64fb`)
+- **certify:** obtain the image before stopping production, in both jobs (`2d7012f0`)
+- certify on release, not on every push to main (`80086ff6`)
+- **certify:** remove the validator cache volume too (`b8b02497`)
+- **certify:** sweep every container this run made, and trap the cancel signal (`ab0861a7`)
+- **certify:** sweep leftover containers before restoring production (`f376a3a6`)
+- **forgejo:** allow the internal CA mount, and fail loudly when it is missing (`a8473a07`)
+- **certify:** give the benchmark its own docker config (`d51ee957`)
+
+### Documentation
+
+- **perf:** add the 2026.9.5 measurements to the chart (`5a69babf`)
+- **perf:** add the 2026.9.8 measurements to the chart (`0f391089`)
+
+### Testing
+
+- **dsml:** entity round-trips and the all-family all-byte boundary matrix (`f4651b56`)
+- **batch:** inject worker failure after confirmed admission (`ddd39f69`)
+- **batch:** widen the per-scenario timeout that flaked under load (`79760f1e`)
+- **batch:** exercise production worker waits and failure cleanup (`3940402b`)
+- **release:** guard that certification is manual, not that it is automatic (`7d9adb9f`)
+
+### Other
+
+- Merge commit '605f3f3' (`c04a269d`)
+- Merge remote-tracking branch 'origin/main' into fix/tool-json-grammar-20260908 (`a30a1f62`)
+- Merge main CA preflight guard with verified runner mount fix (`7081c907`)
 ## 2026.9.8
 
 ### Curated notes
