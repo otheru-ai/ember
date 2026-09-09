@@ -501,15 +501,28 @@ static void ember_batch_thread_main(ember_backend *b) {
             run.status == dflash::common::ContinuousBatchRunStatus::Completed) {
             continue;
         }
+        // Predicated, and that is the whole point: batch_mu is released at the
+        // pump() above, so a submitter can enqueue and notify_one() in that
+        // window with nobody yet waiting. A condition variable does not latch,
+        // so the wakeup is dropped, and neither of the checks above re-reads
+        // the queues -- the unpredicated wait then slept forever on work that
+        // was already queued. At startup pump() returns Idle/wake_at_us=-1, so
+        // the first submit took exactly that path; it deadlocked gate 2 of the
+        // gfx1151 certification twice with the GPU at 0% and both threads
+        // parked on futexes.
+        const auto have_work = [b] {
+            return !b->batch_controls.empty() || !b->batch_pending.empty() ||
+                   b->batch_stop;
+        };
         if (run.status ==
                 dflash::common::ContinuousBatchRunStatus::Waiting &&
             run.wake_at_us >= 0) {
             const auto deadline =
                 std::chrono::steady_clock::time_point(
                     std::chrono::microseconds(run.wake_at_us));
-            b->batch_cv.wait_until(lock, deadline);
+            b->batch_cv.wait_until(lock, deadline, have_work);
         } else {
-            b->batch_cv.wait(lock);
+            b->batch_cv.wait(lock, have_work);
         }
     }
 
