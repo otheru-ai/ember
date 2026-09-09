@@ -389,6 +389,331 @@ static void test_emitted_equals_validated_nested(void) {
 }
 
 static void test_native_stop_ignores_payload_openers(void);
+static void test_boundary_matrix_json_values(void);
+static void test_boundary_matrix_raw_entities(void);
+static void test_boundary_matrix_rejections(void);
+static void test_boundary_matrix_replay(void);
+
+// ─── DSML boundary acceptance matrix ────────────────────────────────────────
+// Every family, every payload shape, every byte split, asserting that the
+// FINAL parsed arguments and the STREAMED arguments agree and that execution
+// eligibility is decided by the report rather than by a non-zero call count.
+//
+// Requested by codex-rejoin-01 after four review rounds each found a consumer
+// converted while a sibling was missed. The point of the matrix is that a
+// divergence between what is validated and what is emitted is caught here
+// rather than on hardware.
+
+// ember_sse_update alone never emits tool arguments: the stream goes quiet in
+// EMBER_SSE_TOOL and the CALLER validates the block before asking for the
+// flush (main.c). Driving only the update loop measures nothing, so this
+// completes the real sequence.
+static char *stream_tools_in_chunks(const char *full, size_t chunk_sz) {
+    ember_sse_stream st;
+    ember_sse_init(&st, "cc", "m", 1700000000, true, false, false);
+    ember_buf out = {0}, acc = {0};
+    const size_t total = strlen(full);
+    for (size_t i = 0; i < total; i += chunk_sz) {
+        const size_t n = chunk_sz < total - i ? chunk_sz : total - i;
+        ember_buf_append(&acc, full + i, n);
+        ember_sse_update(&st, acc.ptr, acc.len, false, &out);
+    }
+    ember_sse_update(&st, acc.ptr, acc.len, true, &out);
+    (void)ember_sse_emit_tools(&st, acc.ptr, acc.len, &out);
+    ember_sse_free(&st);
+    ember_buf_free(&acc);
+    return ember_buf_take(&out);
+}
+
+typedef struct {
+    const char *name;
+    const char *calls_o, *calls_c;
+    const char *inv_o, *inv_c;      // invoke opener WITHOUT the name attribute
+    const char *par_o, *par_c;      // parameter opener WITHOUT attributes
+    bool native;
+} bfam;
+
+static const bfam BFAMS[] = {
+    { "canonical",
+      "<" PIPE "DSML" PIPE "tool_calls>",  "</" PIPE "DSML" PIPE "tool_calls>",
+      "<" PIPE "DSML" PIPE "invoke",       "</" PIPE "DSML" PIPE "invoke>",
+      "<" PIPE "DSML" PIPE "parameter",    "</" PIPE "DSML" PIPE "parameter>", false },
+    { "short",
+      "<DSML" PIPE "tool_calls>",  "</DSML" PIPE "tool_calls>",
+      "<DSML" PIPE "invoke",       "</DSML" PIPE "invoke>",
+      "<DSML" PIPE "parameter",    "</DSML" PIPE "parameter>", false },
+    { "ascii",
+      "<?DSML?tool_calls>",  "</?DSML?tool_calls>",
+      "<?DSML?invoke",       "</?DSML?invoke>",
+      "<?DSML?parameter",    "</?DSML?parameter>", false },
+    { "plain",
+      "<tool_calls>",  "</tool_calls>",
+      "<invoke",       "</invoke>",
+      "<parameter",    "</parameter>", false },
+    { "native",
+      "<ds_engine_tool_use>", "</ds_engine_tool_use>",
+      "", "",
+      "<ds_engine_tool_use_parameters_property",
+      "</ds_engine_tool_use_parameters_property>", true },
+};
+static const size_t N_BFAMS = sizeof(BFAMS) / sizeof(BFAMS[0]);
+
+// Build one complete tool block for `f` carrying a single parameter.
+static char *bfam_block(const bfam *f, const char *pname, const char *is_str,
+                        const char *value) {
+    ember_buf b = {0};
+    ember_buf_puts(&b, f->calls_o);
+    if (f->native) {
+        ember_buf_puts(&b, "<ds_engine_tool_use_name>record"
+                           "</ds_engine_tool_use_name>");
+    } else {
+        ember_buf_puts(&b, f->inv_o);
+        ember_buf_puts(&b, " name=\"record\">");
+    }
+    ember_buf_puts(&b, f->par_o);
+    ember_buf_puts(&b, " name=\"");
+    ember_buf_puts(&b, pname);
+    ember_buf_puts(&b, "\"");
+    if (is_str) {
+        ember_buf_puts(&b, " string=\"");
+        ember_buf_puts(&b, is_str);
+        ember_buf_puts(&b, "\"");
+    }
+    ember_buf_puts(&b, ">");
+    ember_buf_puts(&b, value);
+    ember_buf_puts(&b, f->par_c);
+    if (!f->native) ember_buf_puts(&b, f->inv_c);
+    ember_buf_puts(&b, f->calls_c);
+    return ember_buf_take(&b);
+}
+
+// The eligibility rule main.c's parse_executable_tool_calls applies BEFORE
+// schema validation. A non-zero call count is not the test.
+static bool executable(const ember_tool_parse_report *r, int n) {
+    return n > 0 && r->found && r->complete && !r->repaired &&
+           !r->malformed && !r->contaminated && !r->invalid_json &&
+           !r->trailing && !r->mixed_syntax;
+}
+
+static void matrix_case(const bfam *f, const char *pname, const char *is_str,
+                        const char *value, const char *want_args,
+                        bool want_exec, const char *what) {
+    char *text = bfam_block(f, pname, is_str, value);
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+
+    char label[256];
+    snprintf(label, sizeof label, "%s/%s", f->name, what);
+
+    const bool exec = executable(&report, n);
+    if (exec != want_exec) {
+        printf("  FAIL %s: executable=%d want=%d\n", label, exec, want_exec);
+        g_fail++;
+        goto done;
+    }
+    if (!want_exec) { g_pass++; goto done; }
+
+    if (strcmp(tc.calls[0].arguments, want_args) != 0) {
+        printf("  FAIL %s: final args\n    got  %s\n    want %s\n",
+               label, tc.calls[0].arguments, want_args);
+        g_fail++;
+        goto done;
+    }
+
+    // Every byte split. Primes straddle multi-byte and marker boundaries so no
+    // split is systematically avoided; 64 and the whole text cover the bulk
+    // path where a marker never spans a slice.
+    const size_t sizes[] = {1, 2, 3, 5, 7, 11, 64, 4096};
+    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+        char *sse = stream_tools_in_chunks(text, sizes[k]);
+        ember_buf got = {0};
+        collect_field(sse, "arguments", &got);
+        const char *streamed = got.ptr ? got.ptr : "";
+        if (strcmp(streamed, want_args) != 0) {
+            printf("  FAIL %s: SSE args at chunk %zu\n    got  %s\n    want %s\n",
+                   label, sizes[k], streamed, want_args);
+            g_fail++;
+            ember_buf_free(&got);
+            free(sse);
+            goto done;
+        }
+        ember_buf_free(&got);
+        free(sse);
+    }
+    g_pass++;
+
+done:
+    ember_tool_calls_free(&tc);
+    free(text);
+}
+
+static void test_boundary_matrix_json_values(void) {
+    for (size_t i = 0; i < N_BFAMS; i++) {
+        const bfam *f = &BFAMS[i];
+        char v[512], w[512];
+
+        // Each family's own terminators, inside a JSON string.
+        snprintf(v, sizeof v, "[\"%s\"]", f->calls_c);
+        snprintf(w, sizeof w, "{\"items\":[\"%s\"]}", f->calls_c);
+        matrix_case(f, "items", "false", v, w, true, "calls close in string");
+
+        snprintf(v, sizeof v, "[\"%s\"]", f->par_c);
+        snprintf(w, sizeof w, "{\"items\":[\"%s\"]}", f->par_c);
+        matrix_case(f, "items", "false", v, w, true, "param close in string");
+
+        if (!f->native) {
+            snprintf(v, sizeof v, "[\"%s\"]", f->inv_c);
+            snprintf(w, sizeof w, "{\"items\":[\"%s\"]}", f->inv_c);
+            matrix_case(f, "items", "false", v, w, true, "invoke close in string");
+        }
+
+        // A foreign family's opener is data too.
+        snprintf(v, sizeof v, "[\"%s\"]", BFAMS[0].calls_o);
+        snprintf(w, sizeof w, "{\"items\":[\"%s\"]}", BFAMS[0].calls_o);
+        matrix_case(f, "items", "false", v, w, true, "foreign opener in string");
+
+        // A foreign INVOKE opener, which is what actually exposes a mis-bound
+        // emitter: a bare foreign tool_calls opener makes the wrong scanner
+        // find no invocations and emit nothing, so the fallback still returns
+        // the right answer and the bug hides. With a complete foreign
+        // invocation in the value, an emitter that re-detects its family walks
+        // the PAYLOAD and streams a call that was never validated.
+        // Needs the foreign tool_calls opener AND a foreign invocation:
+        // ember_dsml_detect keys on tool_calls, so without it the mis-bound
+        // emitter finds no family and the bug stays invisible.
+        snprintf(v, sizeof v,
+                 "[\"%s%s name=\\\"fake\\\">%s x%s%s\"]",
+                 BFAMS[0].calls_o, BFAMS[0].inv_o, BFAMS[0].par_o,
+                 BFAMS[0].par_c, BFAMS[0].inv_c);
+        snprintf(w, sizeof w,
+                 "{\"items\":[\"%s%s name=\\\"fake\\\">%s x%s%s\"]}",
+                 BFAMS[0].calls_o, BFAMS[0].inv_o, BFAMS[0].par_o,
+                 BFAMS[0].par_c, BFAMS[0].inv_c);
+        matrix_case(f, "items", "false", v, w, true, "foreign invocation in string");
+
+        // The gate 5 request, verbatim.
+        matrix_case(f, "items", "false",
+                    "[{\"text\":\"i < n\"},{\"text\":\"</div>\"},"
+                    "{\"text\":\"ends with <\"}]",
+                    "{\"items\":[{\"text\":\"i < n\"},{\"text\":\"</div>\"},"
+                    "{\"text\":\"ends with <\"}]}",
+                    true, "gate 5 value set");
+
+        // Escapes: an odd run keeps the string open, an even run closes it.
+        // ONE backslash then a quote: an escaped quote, so the string stays
+        // open and the terminator after it is data. Writing two backslashes
+        // here would be an even run that CLOSES the string, which is the
+        // opposite case and is covered separately below.
+        snprintf(v, sizeof v, "[\"esc \\\" %s in\"]", f->calls_c);
+        snprintf(w, sizeof w, "{\"items\":[\"esc \\\" %s in\"]}", f->calls_c);
+        matrix_case(f, "items", "false", v, w, true, "escaped quote then close");
+
+        matrix_case(f, "items", "false", "[\"ends \\\\\\\\\"]",
+                    "{\"items\":[\"ends \\\\\\\\\"]}", true, "even backslash run");
+
+        // Nested structure carrying a terminator deep inside.
+        snprintf(v, sizeof v, "{\"a\":[{\"b\":{\"c\":\"%s\"}}]}", f->calls_c);
+        snprintf(w, sizeof w, "{\"items\":{\"a\":[{\"b\":{\"c\":\"%s\"}}]}}",
+                 f->calls_c);
+        matrix_case(f, "items", "false", v, w, true, "nested object/array");
+
+        // A terminator as a KEY, not only a value.
+        snprintf(v, sizeof v, "{\"%s\":1}", f->calls_c);
+        snprintf(w, sizeof w, "{\"items\":{\"%s\":1}}", f->calls_c);
+        matrix_case(f, "items", "false", v, w, true, "terminator as a key");
+    }
+}
+
+static void test_boundary_matrix_raw_entities(void) {
+    for (size_t i = 0; i < N_BFAMS; i++) {
+        const bfam *f = &BFAMS[i];
+        // Raw text keeps quotes as ordinary characters.
+        matrix_case(f, "note", "true", "hello \" quote",
+                    "{\"note\":\"hello \\\" quote\"}", true, "raw unmatched quote");
+        // Absent attribute is raw too, and must behave identically.
+        matrix_case(f, "note", NULL, "hello \" quote",
+                    "{\"note\":\"hello \\\" quote\"}", true, "absent attr is raw");
+        // Ordinary closing tags in raw text.
+        matrix_case(f, "note", "true", "</div>", "{\"note\":\"</div>\"}",
+                    true, "raw ordinary closing tag");
+        // Ampersand, and a literal &lt; written as &amp;lt;.
+        matrix_case(f, "note", "true", "a &amp; b",
+                    "{\"note\":\"a & b\"}", true, "raw ampersand");
+        matrix_case(f, "note", "true", "&amp;lt;",
+                    "{\"note\":\"&lt;\"}", true, "literal &lt; via &amp;lt;");
+        // A literal terminator, encoded. This is the round trip that lets raw
+        // text carry a structural sequence at all.
+        {
+            char v[256], w[256];
+            snprintf(v, sizeof v, "&lt;%s", f->calls_c + 1);   // &lt; + "/..."
+            snprintf(w, sizeof w, "{\"note\":\"%s\"}", f->calls_c);
+            matrix_case(f, "note", "true", v, w, true, "encoded literal terminator");
+        }
+        // Trailing "</" and "</<", which the grammar withholds as bare
+        // spellings and which must survive when encoded.
+        matrix_case(f, "note", "true", "tail &lt;/",
+                    "{\"note\":\"tail </\"}", true, "encoded trailing </");
+        matrix_case(f, "note", "true", "tail &lt;/<",
+                    "{\"note\":\"tail </<\"}", true, "encoded trailing </<");
+    }
+}
+
+// Replay authorizes attaching exact tokens when a reparse of the RAW text
+// matches the expected call. It shares the parser but NOT the executable
+// report gate, so it is its own boundary consumer -- my first inventory said
+// there was no replay scanner and codex-rejoin-01 corrected that.
+static void test_boundary_matrix_replay(void) {
+    for (size_t i = 0; i < N_BFAMS; i++) {
+        const bfam *f = &BFAMS[i];
+        char v[512], label[128];
+
+        // A value carrying this family's own terminator must still match its
+        // own reparse: if the boundary moved, replay would silently refuse.
+        snprintf(v, sizeof v, "[\"%s\"]", f->calls_c);
+        char *text = bfam_block(f, "items", "false", v);
+        ember_tool_calls expected = {0};
+        int n = ember_parse_dsml_tool_calls(text, &expected);
+        snprintf(label, sizeof label, "%s/replay matches own reparse", f->name);
+        CHECK(n == 1 && ember_tool_calls_match_raw(text, &expected), label);
+
+        // A DIFFERENT value must not match, or replay would attach tokens from
+        // one call to another.
+        char *other = bfam_block(f, "items", "false", "[\"different\"]");
+        snprintf(label, sizeof label, "%s/replay rejects a different value",
+                 f->name);
+        CHECK(!ember_tool_calls_match_raw(other, &expected), label);
+
+        // Truncated raw must not match a complete expected call.
+        ember_buf trunc = {0};
+        ember_buf_append(&trunc, text, strlen(text) / 2);
+        snprintf(label, sizeof label, "%s/replay rejects truncated raw", f->name);
+        CHECK(!ember_tool_calls_match_raw(trunc.ptr ? trunc.ptr : "", &expected),
+              label);
+
+        ember_buf_free(&trunc);
+        free(other);
+        ember_tool_calls_free(&expected);
+        free(text);
+    }
+}
+
+static void test_boundary_matrix_rejections(void) {
+    for (size_t i = 0; i < N_BFAMS; i++) {
+        const bfam *f = &BFAMS[i];
+        // Truncation must never be executable, at any depth.
+        matrix_case(f, "items", "false", "[{\"text\":\"unterminated",
+                    NULL, false, "unterminated string not executable");
+        matrix_case(f, "items", "false", "[{\"text\":\"dangling \\\\",
+                    NULL, false, "dangling escape not executable");
+        matrix_case(f, "items", "false", "[{\"text\":",
+                    NULL, false, "truncated after key not executable");
+        // A raw structural terminator is still structural: unescaped, it ends
+        // the value, and what follows is not a complete call.
+        matrix_case(f, "items", "false", "[\"a\"] trailing junk {",
+                    NULL, false, "invalid JSON not executable");
+    }
+}
 
 int main(void) {
     test_emitted_equals_validated_nested();
@@ -408,6 +733,10 @@ int main(void) {
     test_tool_attempt_reset();
     test_matching_tool_closer_required();
     test_native_stop_ignores_payload_openers();
+    test_boundary_matrix_json_values();
+    test_boundary_matrix_raw_entities();
+    test_boundary_matrix_rejections();
+    test_boundary_matrix_replay();
     test_native_tool_id_is_registered();
     test_stop_precedes_tool();
     test_more_than_sixteen_tool_ids();
