@@ -229,6 +229,10 @@ add_executable(test_metrics test/test_metrics.c)
 target_link_libraries(test_metrics ember_core m)
 add_test(NAME metrics COMMAND test_metrics)
 
+add_executable(test_batch_wake test/test_batch_wake.c)
+target_include_directories(test_batch_wake PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME batch_wake COMMAND test_batch_wake)
+
 add_executable(test_background_gate test/test_background_gate.c)
 target_link_libraries(test_background_gate ember_core m)
 add_test(NAME background_gate COMMAND test_background_gate)

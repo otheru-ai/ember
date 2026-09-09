@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "common/backend_factory.h"
+#include "backend/batch_wake.h"
 #include "common/errors.h"
 #include "common/model_backend.h"
 #include "common/prefill_validation.h"
@@ -511,8 +512,11 @@ static void ember_batch_thread_main(ember_backend *b) {
         // gfx1151 certification twice with the GPU at 0% and both threads
         // parked on futexes.
         const auto have_work = [b] {
-            return !b->batch_controls.empty() || !b->batch_pending.empty() ||
-                   b->batch_stop;
+            return ember_batch_should_wake(
+                !b->batch_controls.empty(), !b->batch_pending.empty(),
+                b->batch_stop,
+                (int)b->coordinator->scheduler().resident(),
+                (int)b->coordinator->scheduler().capacity());
         };
         if (run.status ==
                 dflash::common::ContinuousBatchRunStatus::Waiting &&
