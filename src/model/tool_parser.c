@@ -575,9 +575,31 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
             report->trailing = true;
     }
     if (report) {
-        const ember_dsml_syntax *foreign = ember_dsml_detect(text);
-        if (foreign && strstr(text, foreign->calls_open))
-            report->mixed_syntax = true;
+        // Scan the STRUCTURE, not the payload: a foreign opener inside a JSON
+        // property value is data, and flagging it made ["<tool_calls>"] report
+        // mixed_syntax in the native format. Property values are stepped over
+        // the same way every other native scan now does.
+        const size_t po_l = strlen(DSE_PROP_O), pc_l = strlen(DSE_PROP_C);
+        for (const char *p = text; *p && !report->mixed_syntax;) {
+            if (!strncmp(p, DSE_PROP_O, po_l)) {
+                const char *ptag = strchr(p, '>');
+                if (!ptag) break;
+                const char *pc = ember_dsml_value_close(
+                    ptag, DSE_PROP_O, DSE_PROP_C,
+                    ember_dsml_param_is_json(p, po_l, ptag + 1));
+                if (!pc) break;
+                p = pc + pc_l;
+                continue;
+            }
+            for (int i = 0; i < N_SYNTAX; ++i) {
+                if (!strncmp(p, SYNTAX[i].calls_open,
+                             strlen(SYNTAX[i].calls_open))) {
+                    report->mixed_syntax = true;
+                    break;
+                }
+            }
+            ++p;
+        }
     }
     if (report && (report->contaminated || report->invalid_json ||
                    report->trailing || report->mixed_syntax ||

@@ -388,6 +388,8 @@ static void test_emitted_equals_validated_nested(void) {
     ember_buf_free(&out);
 }
 
+static void test_native_stop_ignores_payload_openers(void);
+
 int main(void) {
     test_emitted_equals_validated_nested();
     test_real_degraded_output_survives_every_chunk_size();
@@ -405,6 +407,7 @@ int main(void) {
     test_tool_calls_emitted();
     test_tool_attempt_reset();
     test_matching_tool_closer_required();
+    test_native_stop_ignores_payload_openers();
     test_native_tool_id_is_registered();
     test_stop_precedes_tool();
     test_more_than_sixteen_tool_ids();
@@ -634,6 +637,25 @@ static void test_matching_tool_closer_required(void) {
           "mismatched closer family is rejected");
     CHECK(ember_find_tool_end("<tool_calls></tool_calls>") != NULL,
           "matching closer family is accepted");
+}
+
+// The stop must be bound to the OUTER family, not re-detected from the text.
+// A native block whose JSON value contains a plain DSML opener used to make
+// ember_dsml_detect return non-NULL, bypassing the native scanner, and the
+// wrong scanner then stopped at the embedded native close -- cutting the value
+// short while the parser read it correctly. Found by codex-rejoin-01.
+static void test_native_stop_ignores_payload_openers(void) {
+    const char *raw =
+        "<ds_engine_tool_use>"
+        "<ds_engine_tool_use_name>record</ds_engine_tool_use_name>"
+        "<ds_engine_tool_use_parameters_property name=\"items\" string=\"false\">"
+        "[\"<tool_calls> </ds_engine_tool_use>\"]"
+        "</ds_engine_tool_use_parameters_property>"
+        "</ds_engine_tool_use>";
+    const char *end = ember_find_tool_end(raw);
+    CHECK(end != NULL, "native stop found");
+    CHECK(end != NULL && (size_t)(end - raw) == strlen(raw),
+          "native stop is the real end, not the one inside the JSON value");
 }
 
 static void test_native_tool_id_is_registered(void) {

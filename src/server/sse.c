@@ -123,11 +123,21 @@ const char *ember_find_tool_end(const char *s) {
     // Parameter-aware: a parameter VALUE may legally contain text identical to
     // this terminator, and cutting there truncates the value before the parser
     // ever sees it -- parser-side recovery cannot reach past this boundary.
-    // ember_dsml_detect returns NULL for the ds_engine and bare <tool_call>
-    // families, which then fall back to the previous behaviour.
+    //
+    // The scanner is bound to the family selected ABOVE. Re-detecting from the
+    // text found the PAYLOAD's opener instead: a native block whose JSON value
+    // contained a plain DSML opener made ember_dsml_detect return non-NULL, the
+    // native dispatch was bypassed, and the DSML scanner then stopped at the
+    // embedded native close. TOOL_ENDS[0..] are ordered to match the parser's
+    // syntax table, and the trailing families (native, bare <tool_call>) have
+    // no entry, which is what NULL means here.
+    int n_syntax = 0;
+    const ember_dsml_syntax *table = ember_dsml_syntaxes(&n_syntax);
+    const ember_dsml_syntax *bound =
+        (n_syntax > 0 && family < (size_t)n_syntax) ? &table[family] : NULL;
     const char *end = ember_dsml_frame_close(
         start + strlen(TOOL_STARTS[family]), TOOL_STARTS[family],
-        TOOL_ENDS[family], ember_dsml_detect(start));
+        TOOL_ENDS[family], bound);
     return end ? end + strlen(TOOL_ENDS[family]) : NULL;
 }
 

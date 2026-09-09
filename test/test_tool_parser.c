@@ -525,6 +525,28 @@ static void test_ds_engine_property_value_may_contain_terminators(void) {
     ember_tool_calls_free(&tc);
 }
 
+// A foreign opener inside a native JSON property value is data, not a mixed
+// syntax. The final foreign-format check used to scan raw bytes.
+static void test_native_payload_opener_is_not_mixed_syntax(void) {
+    const char *text =
+        "<ds_engine_tool_use>"
+        "<ds_engine_tool_use_name>record</ds_engine_tool_use_name>"
+        "<ds_engine_tool_use_parameters_property name=\"items\" string=\"false\">"
+        "[\"<tool_calls>\"]"
+        "</ds_engine_tool_use_parameters_property>"
+        "</ds_engine_tool_use>";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+    CHECK(n == 1, "native payload opener: one call parsed");
+    CHECK(!report.mixed_syntax, "native payload opener is not mixed syntax");
+    CHECK(!report.contaminated, "native payload opener is not contamination");
+    CHECK(n == 1 && strcmp(tc.calls[0].arguments,
+                           "{\"items\":[\"<tool_calls>\"]}") == 0,
+          "native payload opener: exact value preserved");
+    ember_tool_calls_free(&tc);
+}
+
 int main(void) {
     test_real_degraded_output_is_not_a_tool_call();
     test_real_degraded_output_never_matches_a_replay();
@@ -548,6 +570,7 @@ int main(void) {
     test_unterminated_json_string_is_not_executable();
     test_absent_string_attribute_stays_raw();
     test_ds_engine_property_value_may_contain_terminators();
+    test_native_payload_opener_is_not_mixed_syntax();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
