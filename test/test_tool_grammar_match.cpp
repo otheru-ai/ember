@@ -304,6 +304,21 @@ int main() {
                             P("</|DSML|invoke>")));
         CHECK(accepts(cg2, open + pr("action","patch") + pr("name","x") +
                            pr("old_string","a") + pr("new_string","b")));
+        // Delimiter-prefix overlap: a raw value must not be able to swallow a
+        // '<' that begins a real terminator. Both of these were accepted as
+        // content before the run-based rule, hiding a delimiter the parser
+        // still saw.
+        CHECK(!accepts(cg2, open + pr("action","delete") +
+                            pr("name", P("<</|DSML|parameter>").c_str()) +
+                            P("</|DSML|invoke>")));
+        CHECK(!accepts(cg2, open + pr("action","delete") +
+                            pr("name", P("</</|DSML|parameter>").c_str()) +
+                            P("</|DSML|invoke>")));
+        // Ordinary closing tags and trailing '<' remain representable.
+        CHECK(accepts(cg2, open + pr("action","delete") + pr("name","</div>") +
+                           P("</|DSML|invoke>")));
+        CHECK(accepts(cg2, open + pr("action","delete") + pr("name","a < b <") +
+                           P("</|DSML|invoke>")));
         free(e);
     }
 

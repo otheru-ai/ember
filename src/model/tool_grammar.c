@@ -356,9 +356,21 @@ char *ember_tool_grammar_build(const char *tools_json, bool allow_parallel) {
     // strval swallowed the parameter close, and conditional-schema
     // discrimination collapsed. Diagnosed by codex-rejoin-01; a grammar-local
     // positive range is preferred here over changing vendor semantics.
+    // Run-based, because a single-'<' alternative lets a SECOND '<' be
+    // consumed as the ordinary character after the first, which hides a
+    // delimiter the parser still sees: <</PIPE|DSML|parameter> and
+    // </</PIPE|DSML|parameter> were both accepted as content. Found by
+    // codex-rejoin-01. A maximal run of '<' is taken first, and only then is
+    // the following character constrained.
+    //
+    // After "</" the next character excludes BOTH the pipe and '<'. Excluding
+    // '<' costs the odd value ending "</<", which must be written &lt;/< --
+    // the alternative is to let "</<" consume the '<' that starts a real
+    // delimiter, which is the hole being closed.
     ember_buf_puts(&out,
-        "strval ::= ([^<] | \"<\" [^/] "
-        "| \"</\" [\\u0000-\\uFF5B\\uFF5D-\\U0010FFFF])* (\"<\")?\n");
+        "strval ::= ([^<] | \"<\"+ strafterlt)* \"<\"*\n"
+        "strafterlt ::= [^</] "
+        "| \"/\" [\\u0000-\\u003B\\u003D-\\uFF5B\\uFF5D-\\U0010FFFF]\n");
     // #11/#10: raw text admitted malformed JSON even while the mask was
     // active. Match JSON syntax here; tool_schema.c still checks schema
     // semantics. Surrogate escapes match json.c: lone halves are rejected.

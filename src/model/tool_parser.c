@@ -31,13 +31,13 @@ static const ember_dsml_syntax SYNTAX[] = {
 };
 static const int N_SYNTAX = sizeof(SYNTAX) / sizeof(SYNTAX[0]);
 
-static bool contains_n(const char *s, size_t n, const char *needle) {
-    size_t m = needle ? strlen(needle) : 0;
-    if (!s || m == 0 || n < m) return false;
-    for (size_t i = 0; i <= n - m; ++i)
-        if (memcmp(s + i, needle, m) == 0) return true;
-    return false;
-}
+#define DSE_OPEN   "<ds_engine_tool_use>"
+#define DSE_CLOSE  "</ds_engine_tool_use>"
+#define DSE_NAME_O "<ds_engine_tool_use_name>"
+#define DSE_NAME_C "</ds_engine_tool_use_name>"
+#define DSE_PROP_O "<ds_engine_tool_use_parameters_property"
+#define DSE_PROP_C "</ds_engine_tool_use_parameters_property>"
+
 
 // DSML string values are raw, unquoted payload. A nested protocol opener inside
 // one is not data unless its leading '<' was escaped; otherwise the first nested
@@ -233,14 +233,47 @@ static bool has_structural_tag(const char *from, const char *limit,
     return false;
 }
 
-static bool contains_nested_tool_markup(const char *s, size_t n) {
-    for (int i = 0; i < N_SYNTAX; ++i) {
-        if (contains_n(s, n, SYNTAX[i].calls_open) ||
-            contains_n(s, n, SYNTAX[i].invoke_open) ||
-            contains_n(s, n, SYNTAX[i].param_open))
+static bool starts_with_n(const char *s, size_t n, size_t i,
+                          const char *needle) {
+    const size_t l = strlen(needle);
+    return i + l <= n && !memcmp(s + i, needle, l);
+}
+
+static bool markup_at(const char *s, size_t n, size_t i) {
+    for (int k = 0; k < N_SYNTAX; ++k) {
+        if (starts_with_n(s, n, i, SYNTAX[k].calls_open) ||
+            starts_with_n(s, n, i, SYNTAX[k].invoke_open) ||
+            starts_with_n(s, n, i, SYNTAX[k].param_open))
             return true;
     }
-    return contains_n(s, n, "<ds_engine_tool_use>");
+    return starts_with_n(s, n, i, DSE_OPEN);
+}
+
+// Protocol markup inside a JSON STRING is data, exactly as it is for the
+// boundary scan. Flagging it as contamination rejected valid calls in every
+// dialect -- the native opener included -- which is the same defect one layer
+// up. `json_value` false keeps the old whole-region policy for raw text.
+static bool contains_nested_tool_markup_ctx(const char *s, size_t n,
+                                            bool json_value) {
+    if (!s) return false;
+    bool in_string = false, escaped = false;
+    for (size_t i = 0; i < n; ++i) {
+        if (json_value) {
+            if (in_string) {
+                if (escaped)          escaped = false;
+                else if (s[i] == '\\') escaped = true;
+                else if (s[i] == '"') in_string = false;
+                continue;
+            }
+            if (s[i] == '"') { in_string = true; continue; }
+        }
+        if (markup_at(s, n, i)) return true;
+    }
+    return false;
+}
+
+static bool contains_nested_tool_markup(const char *s, size_t n) {
+    return contains_nested_tool_markup_ctx(s, n, false);
 }
 
 static char *xstrndup(const char *s, size_t n) {
@@ -292,9 +325,17 @@ const char *ember_dsml_value_close(const char *from, const char *open_tag,
                       : matching_close(from, open_tag, close_tag);
 }
 
+static const char *dse_frame_close(const char *from, const char *close_tag);
+
 const char *ember_dsml_frame_close(const char *from, const char *open_tag,
                                    const char *close_tag,
                                    const ember_dsml_syntax *sx) {
+    // ember_dsml_detect returns NULL for the native ds_engine format, so
+    // without this the upstream stop path fell back to the raw matcher and
+    // stopped INSIDE a JSON value -- the native parse was correct while the
+    // stream was cut short. Found by codex-rejoin-01.
+    if (!sx && open_tag && !strcmp(open_tag, DSE_OPEN))
+        return dse_frame_close(from, close_tag);
     return frame_close(from, open_tag, close_tag, sx);
 }
 
@@ -430,12 +471,6 @@ bool ember_dsml_append_arg(ember_buf *b, const char *key, const char *val,
 // doesn't fully steer it (seen leaking to clients). Structurally distinct from
 // DSML: one <ds_engine_tool_use> block per call, name as a child element, params
 // under a wrapper as <..._property name= string=> elements.
-#define DSE_OPEN   "<ds_engine_tool_use>"
-#define DSE_CLOSE  "</ds_engine_tool_use>"
-#define DSE_NAME_O "<ds_engine_tool_use_name>"
-#define DSE_NAME_C "</ds_engine_tool_use_name>"
-#define DSE_PROP_O "<ds_engine_tool_use_parameters_property"
-#define DSE_PROP_C "</ds_engine_tool_use_parameters_property>"
 
 static char *trim_dup(const char *s, size_t n) {
     while (n && (*s==' '||*s=='\n'||*s=='\t'||*s=='\r')) { s++; n--; }
@@ -515,8 +550,9 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
                 (is_str && strcmp(is_str, "true") && strcmp(is_str, "false"))) {
                 if (report) report->malformed = true;
             } else {
-                if (contains_nested_tool_markup(
-                        ptag + 1, (size_t)(pclose - (ptag + 1))) &&
+                if (contains_nested_tool_markup_ctx(
+                        ptag + 1, (size_t)(pclose - (ptag + 1)),
+                        is_str && !strcmp(is_str, "false")) &&
                     report)
                     report->contaminated = true;
                 if (nparam++) ember_buf_putc(&args, ',');
@@ -735,7 +771,9 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
                 // block was captured whole rather than truncated at the first
                 // inner closer -- not an error.
                 if (!nested_values_enabled() &&
-                    contains_nested_tool_markup(val, val_len) && report)
+                    contains_nested_tool_markup_ctx(
+                        val, val_len, is_str && !strcmp(is_str, "false")) &&
+                    report)
                     report->contaminated = true;
                 if (nparam++) ember_buf_putc(&args, ',');
                 if (!ember_dsml_append_arg(
