@@ -47,7 +47,7 @@ from benchmark import percentile  # noqa: E402
 
 # Bumped whenever the rules below get stricter, and recorded in the sidecar so a
 # published bundle says which contract it passed.
-VALIDATOR_VERSION = 4
+VALIDATOR_VERSION = 5
 SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 # The context sweep these releases are measured with. Depths are the sweep's
 # REQUESTED targets, not the measured prompt lengths, which drift at depth.
@@ -149,7 +149,7 @@ def _from_inspect(path, image, pinned):
                   f"with no registry identity cannot be published as evidence")
 
 
-def vision_from_requests(rows, declared):
+def vision_from_requests(rows):
     """Recompute benchmark.py's vision aggregate from the requests themselves.
 
     Three copies of an aggregate agreeing proves only that they were copied.
@@ -338,7 +338,7 @@ def validate(bundle: Path, release: str, inspect_path=None,
     # The three declarations must agree with EACH OTHER and with the requests.
     # Agreement alone was not enough: they are copies of one another, so all
     # three move together when the source is edited.
-    recomputed = vision_from_requests(vision_rows, declared_vision)
+    recomputed = vision_from_requests(vision_rows)
     for name, claimed in (("the summary row", declared_vision),
                           ("the vision_summary row", from_row),
                           ("summary.json", summary.get("vision") or {})):
@@ -348,10 +348,22 @@ def validate(bundle: Path, release: str, inspect_path=None,
                     f"{name} reports vision {field}={claimed.get(field)!r}, but "
                     f"the vision requests give {value!r}; the aggregate was not "
                     f"computed from these measurements")
+    # These describe inputs the publisher never sees, so they are checked for
+    # AGREEMENT rather than recomputed. Inventing a derivation for them would
+    # be the same error in a new place.
     for field in ("image_sha256", "image_bytes", "max_tokens"):
-        if not declared_vision.get(field):
-            raise Invalid(f"vision aggregate is missing {field}, which records "
-                          f"what was measured rather than what was computed")
+        values = [(name, claimed.get(field)) for name, claimed in (
+            ("the summary row", declared_vision),
+            ("the vision_summary row", from_row),
+            ("summary.json", summary.get("vision") or {}))]
+        if any(v is None for _, v in values):
+            missing = [n for n, v in values if v is None]
+            raise Invalid(f"vision {field} is missing from {', '.join(missing)}; "
+                          f"it records what was measured rather than what was "
+                          f"computed")
+        if len({v for _, v in values}) != 1:
+            raise Invalid(f"vision {field} disagrees across the declarations: "
+                          + ", ".join(f"{n}={v!r}" for n, v in values))
 
     # ── the context sweep must be the whole sweep, in both arms ──
     for arm in ("spec-on", "spec-off"):
@@ -402,13 +414,13 @@ def validate(bundle: Path, release: str, inspect_path=None,
     _finite(summary, "summary.json")
 
     # A manual backfill is not a certification and must not be published as
-    # one. The memory gate on these runs is incomplete (server_host_pid and RSS
-    # null), which does not invalidate the throughput measurements but does
-    # mean the resource evidence is absent rather than passing.
+    # one. The memory gate travels VERBATIM from the run rather than as a
+    # verdict written here: today's runs leave server_host_pid and RSS null,
+    # but hardcoding "incomplete" would keep saying so about a future bundle
+    # whose gate captured everything.
     env["_publication"] = {
         "certified": False,
-        "resource_evidence": "incomplete: memory gate did not capture "
-                             "server_host_pid or RSS",
+        "memory_gate": summary_rows[-1].get("memory_gate"),
         "image_digest": pinned,
         "image_revision": revision,
         "release": release,

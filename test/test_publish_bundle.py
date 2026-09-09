@@ -270,18 +270,33 @@ class ValidateTest(unittest.TestCase):
         with self.assertRaisesRegex(Invalid, "vision request\\(s\\) failed"):
             self.ok()
 
-    def test_vision_input_metadata_must_be_present(self):
+    def test_vision_input_metadata_must_be_present_everywhere(self):
         for field in ("image_sha256", "image_bytes", "max_tokens"):
             with self.subTest(field=field):
                 rows = rows_of("raw-results.jsonl")
                 for r in rows:
                     if r.get("kind") == "summary":
                         r["vision"].pop(field)
+                    elif r.get("kind") == "vision_summary":
+                        r.pop(field)
                 self.write_rows("raw-results.jsonl", rows)
                 summary = self.summary()
                 summary["vision"].pop(field)
                 self.rewrite("summary.json", summary)
-                with self.assertRaisesRegex(Invalid, f"missing {field}"):
+                with self.assertRaisesRegex(Invalid, f"vision {field} is missing"):
+                    self.ok()
+                self.setUp()
+
+    def test_vision_input_metadata_must_agree_across_declarations(self):
+        # Not recomputed -- the publisher never sees the image -- so agreement
+        # is the only check available, and it has to cover all three copies.
+        for field, value in (("image_sha256", "0" * 64), ("image_bytes", 1),
+                             ("max_tokens", 7)):
+            with self.subTest(field=field):
+                summary = self.summary()
+                summary["vision"][field] = value
+                self.rewrite("summary.json", summary)
+                with self.assertRaisesRegex(Invalid, f"vision {field} disagrees"):
                     self.ok()
                 self.setUp()
 
