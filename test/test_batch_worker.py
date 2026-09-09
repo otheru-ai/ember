@@ -157,7 +157,14 @@ def main():
                            "continuous_batch_executor")), "-o", str(binary)],
                        check=True, timeout=60)
         for mode in ("control", "generation", "capacity", "failure"):
-            subprocess.run([str(binary), mode], check=True, timeout=5)
+            # 5s was too tight: this failed once for me immediately after a
+            # parallel build had saturated the machine, and passed on rerun and
+            # in 20 further runs. The scenarios use 500 ms waits, so a loaded
+            # runner can exceed 5s without anything being wrong. A real
+            # regression here deadlocks and blows any bound, so the extra
+            # headroom costs nothing and removes a spurious CI failure that
+            # would look exactly like the deadlock this test exists to catch.
+            subprocess.run([str(binary), mode], check=True, timeout=30)
 
 
 if __name__ == "__main__":
