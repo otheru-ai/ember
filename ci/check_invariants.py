@@ -190,6 +190,46 @@ def check_strict_targets(text: str, fail) -> None:
              f"or no longer links ember_core; remove it")
 
 
+
+def check_batch_wait_guards(fail) -> None:
+    """Guard the coordinator wait against silent regression.
+
+    test_batch_wake.c pins the predicate's truth table, but nothing in it makes
+    the worker USE the predicate: deleting it from the actual wait leaves that
+    unit test green, as codex-rejoin-01 pointed out. These are textual checks
+    over the real loop, which is weaker than an integration test -- the loop
+    lives in a HIP translation unit that the host build excludes -- but they do
+    fail if the call site is removed, which is the specific gap.
+    """
+    path = ROOT / "src" / "backend" / "backend_dflash.cc"
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        fail(f"cannot read {path}: {exc}")
+        return
+
+    # Both waits must be predicated, and on the shared helper.
+    for call in ("batch_cv.wait(lock, have_work)",
+                 "batch_cv.wait_until(lock, deadline, have_work)"):
+        if call not in text:
+            fail(f"backend_dflash.cc no longer contains '{call}' — the "
+                 f"coordinator wait must stay predicated or a dropped "
+                 f"notify_one() deadlocks it (gfx1151 gate 2, twice)")
+    if "ember_batch_should_wake(" not in text:
+        fail("backend_dflash.cc no longer calls ember_batch_should_wake — "
+             "test_batch_wake.c would still pass while the real wait is "
+             "unpredicated")
+
+    # Controls must be refused under batch_mu once the worker is going away.
+    if "if (!b->batch_running || b->batch_stop) return false;" not in text:
+        fail("ember_batch_control_run no longer refuses controls when the "
+             "coordinator is stopping — a queued control would wait forever "
+             "on a worker that has exited")
+    if "ember_batch_discard_controls_locked(b);" not in text:
+        fail("the batch worker no longer discards queued controls on exit — "
+             "callers blocked on control.cv would never be woken")
+
+
 def main() -> int:
     text = read_cmake()
     failures: list[str] = []
@@ -201,6 +241,7 @@ def main() -> int:
     check_tests_registered(text, fail)
     check_test_timeouts(text, fail)
     check_strict_targets(text, fail)
+    check_batch_wait_guards(fail)
 
     if failures:
         print(f"{len(failures)} invariant violation(s):\n", file=sys.stderr)

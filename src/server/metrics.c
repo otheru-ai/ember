@@ -42,7 +42,7 @@ static const char *const kSpecDeclineReasons[] = {
     "vision",
     // Resident batching decides eligibility in session state rather than
     // through the serial gate, so its declines carry their own reasons.
-    "resident_provider", "resident_submit_failed",
+    "resident_provider", "resident_submit_failed", "resident_shadow_capture",
     "other",
 };
 #define N_SPEC_DECLINE_REASONS \

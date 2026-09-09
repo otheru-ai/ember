@@ -183,3 +183,35 @@ is target-exact with 100% acceptance. Including the shadow replay, the complete
 10-round gate measured 1.1765x throughput (1.1762x 95% lower bound) over the
 two-session control. A representative quality corpus is still the promotion
 gate for making the optional overlay the normal release path.
+
+## Known limitation in 2026.9.9: a slow reader stalls every resident session
+
+Streaming output is written inline on the coordinator thread. Ordinary decode
+iterates rows in `deepseek4_backend.cpp` and calls `session.io.emit(token)` for
+each one; the server's `on_token` reaches `ember_send_all` in
+`src/server/main.c`, which waits for socket writability against a 20 second
+absolute deadline in `src/server/http.c`. Prefill keepalives take the same
+inline path.
+
+So a client that stops reading does not only delay itself. The single
+coordinator blocks on that socket before it can advance another row, admit a
+queued request, or service a control, and every other resident session waits
+behind it for up to the send deadline. The bounded timeout prevents one write
+from hanging forever; it does not isolate peers from each other, and adding
+dispatch threads does not help, because they submit to one coordinator that
+owns engine execution.
+
+This is documented rather than fixed in 2026.9.9. The fix is bounded per-request
+output queues with a separate writer thread and an explicit overflow and
+cancellation policy, which has to preserve token order, validated tool
+buffering, callback ownership and lease lifetime. That is an architectural
+change and is deliberately out of scope for this release.
+
+Operationally, until it is fixed: treat `--batch-sessions > 1` as suitable for
+clients that read their streams promptly. When testing batching, include a
+deliberately non-reading streaming client alongside a healthy one, because a
+test suite where every client reads eagerly will not show this coupling at all.
+
+Identified by codex-rejoin-01 by source inspection during the 2026.9.9 batching
+review; not reproduced on hardware, and the stall duration above is the code's
+bound rather than a measurement.

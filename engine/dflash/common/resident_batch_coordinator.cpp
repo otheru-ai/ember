@@ -35,27 +35,61 @@ ResidentBatchCoordinator::admit(
         if (error) *error = "resident session capacity exhausted";
         return std::nullopt;
     }
+    // Admission is transactional from here. Each failure return below used to
+    // release the slot by hand, which was correct for a returned false and
+    // wrong for a throw -- and nothing on this path is noexcept. Backend
+    // creation allocates and constructs a random_device, session status is
+    // backend code, and the sessions_ push_back can throw on its own. An
+    // exception therefore left the scheduler slot allocated with no tracked
+    // lease able to release it: sessions() could not enumerate it, shutdown
+    // could not reclaim it, and the capacity was gone for the life of the
+    // coordinator. With the wake predicate now correctly requiring admission
+    // capacity, the worker then sleeps on a capacity that can never free,
+    // which turns a leak into a stall.
+    //
+    // The guard owns every failure path, including the returns, so the two
+    // cannot drift apart again.
+    struct AdmissionRollback {
+        ResidentBatchBackend *backend;
+        ContinuousBatchScheduler *scheduler;
+        ContinuousBatchSessionId id;
+        bool backend_created;
+        bool armed;
+        ~AdmissionRollback() {
+            if (!armed) return;
+            // Runs while an exception may be in flight, so it must not throw.
+            if (backend_created) {
+                try {
+                    (void)backend->resident_session_destroy(id);
+                } catch (...) {
+                }
+            }
+            try {
+                (void)scheduler->cancel(id);
+                (void)scheduler->release(id);
+            } catch (...) {
+            }
+        }
+    } rollback{&backend_, &scheduler_, *id, false, true};
+
     std::string backend_error;
     if (!backend_.resident_session_create(*id, request, io, restore_slot,
                                           &backend_error)) {
-        (void)scheduler_.cancel(*id);
-        (void)scheduler_.release(*id);
         if (error) {
             *error = backend_error.empty()
                 ? "resident backend rejected session" : backend_error;
         }
         return std::nullopt;
     }
+    rollback.backend_created = true;
     const ResidentBatchBackend::SessionStatus status =
         backend_.resident_session_status(*id);
     if (status.failed || status.prefilled_tokens != restored_prompt_tokens) {
-        (void)backend_.resident_session_destroy(*id);
-        (void)scheduler_.cancel(*id);
-        (void)scheduler_.release(*id);
         if (error) *error = "resident backend restored an unexpected frontier";
         return std::nullopt;
     }
     sessions_.push_back(*id);
+    rollback.armed = false;
     reconcile(/*now_us=*/0);
     return id;
 }

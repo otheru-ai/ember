@@ -3268,6 +3268,11 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
                          "using target AR\n",
                          shadow_error.c_str());
             session.spec_eligible = false;
+            // Admission succeeded and eligibility held, so nothing earlier in
+            // the ladder attributed this. Without a reason here the session
+            // records a generation with neither an engagement nor a decline,
+            // which is the invisible disengagement #9 asks about.
+            session.spec_decline_reason = "resident_shadow_capture";
             session.spec_feat_window.clear();
         }
         session.prefill_s += elapsed_s(shadow_t0);
@@ -3290,6 +3295,7 @@ ContinuousBatchPrefillCompletion DeepSeek4Backend::prefill(
                          "using target AR\n",
                          spec_error.c_str());
             session.spec_eligible = false;
+            session.spec_decline_reason = "resident_submit_failed";
         }
     }
     return {consumed > 0, consumed};
@@ -3343,6 +3349,10 @@ DeepSeek4Backend::decode_batch(
                          ": %s; using target AR\n",
                          (uint64_t)id, spec_error.c_str());
             session.spec_eligible = false;
+            // Same label as the prefill submit failure deliberately: both are
+            // the drafter refusing a submission before first engagement, and
+            // splitting them would add a series without adding an answer.
+            session.spec_decline_reason = "resident_submit_failed";
         }
     }
 

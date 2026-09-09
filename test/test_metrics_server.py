@@ -110,7 +110,9 @@ def main() -> None:
         # The closed label set must be exported in full, so a reason that has
         # not occurred yet still graphs as zero rather than appearing later and
         # looking like a spike.
-        for reason in ("context", "force_ar", "vision", "other"):
+        for reason in ("context", "force_ar", "vision", "other",
+                       "resident_provider", "resident_submit_failed",
+                       "resident_shadow_capture"):
             assert f'ember_spec_decode_declined_total{{reason="{reason}"}}' in body, \
                 f"decline reason {reason} not exported"
 

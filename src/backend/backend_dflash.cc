@@ -77,6 +77,11 @@ struct ember_batch_call {
 struct ember_batch_control {
     std::function<void()> fn;
     bool done = false;
+    // Distinct from done: a control is "done" when nobody will service it
+    // again, which includes being discarded at coordinator shutdown. ran says
+    // whether fn actually executed, so a caller can tell a real result from a
+    // control that was thrown away.
+    bool ran = false;
     std::condition_variable cv;
 };
 
@@ -348,6 +353,20 @@ static void batch_refresh_stats_locked(ember_backend *b) {
     stats.max_decode_batch = (int)scheduler.max_decode_batch;
 }
 
+// Resolve every queued control without running it. Called on the worker's way
+// out, while batch_mu is held: past this point the coordinator is destroyed and
+// nothing will ever service these, so a caller blocked on control.cv would wait
+// for a thread that no longer exists.
+static void ember_batch_discard_controls_locked(ember_backend *b) {
+    while (!b->batch_controls.empty()) {
+        ember_batch_control *control = b->batch_controls.front();
+        b->batch_controls.pop_front();
+        control->ran = false;
+        control->done = true;
+        control->cv.notify_one();
+    }
+}
+
 static void ember_batch_thread_main(ember_backend *b) {
     try {
         auto coordinator = std::make_unique<ResidentBatchCoordinator>(
@@ -391,6 +410,7 @@ static void ember_batch_thread_main(ember_backend *b) {
                 // as failure. Always wake the caller.
             }
             lock.lock();
+            control->ran = true;
             control->done = true;
             batch_refresh_stats_locked(b);
             control->cv.notify_one();
@@ -530,12 +550,20 @@ static void ember_batch_thread_main(ember_backend *b) {
         }
     }
 
+    // Order matters. Close submission and resolve queued controls BEFORE the
+    // coordinator is destroyed: a control queued after a pump failure used to
+    // sit in the deque while this thread exited, leaving its caller waiting on
+    // control.cv forever with no worker left to wake it. The release path taken
+    // by every completed generation goes through a control, so a single pump
+    // exception could strand callers indefinitely.
+    b->batch_running = false;
+    b->batch_stop = true;
+    ember_batch_discard_controls_locked(b);
     lock.unlock();
     b->coordinator.reset();
     b->disk.reset();
     if (b->be) b->be->shutdown();
     lock.lock();
-    b->batch_running = false;
     b->batch_cv.notify_all();
 }
 
@@ -586,14 +614,23 @@ static void ember_batch_stop(ember_backend *b) {
     b->batch_thread.join();
 }
 
+// Returns whether fn actually ran on the coordinator thread. Callers that only
+// need best effort may ignore it; callers holding a lease must not treat a
+// refusal as success.
 template <typename Fn>
-static void ember_batch_control_run(ember_backend *b, Fn &&fn) {
+static bool ember_batch_control_run(ember_backend *b, Fn &&fn) {
     ember_batch_control control;
     control.fn = std::forward<Fn>(fn);
     std::unique_lock<std::mutex> lock(b->batch_mu);
+    // Checked under batch_mu, with the enqueue, so it cannot race the worker's
+    // shutdown: outside the lock this would be a stale read and the control
+    // could still land in a deque nobody will drain. Generation submission
+    // already tested these flags; control submission did not.
+    if (!b->batch_running || b->batch_stop) return false;
     b->batch_controls.push_back(&control);
     b->batch_cv.notify_one();
     control.cv.wait(lock, [&control] { return control.done; });
+    return control.ran;
 }
 
 extern "C" ember_backend *ember_backend_load(const ember_backend_config *cfg,
@@ -1320,14 +1357,25 @@ extern "C" void ember_backend_generation_release(ember_backend *b) {
     if (it == tls_batch_sessions.end()) return;
     const dflash::common::ContinuousBatchSessionId id = it->second;
     bool released = false;
-    ember_batch_control_run(b, [b, id, &released] {
+    const bool serviced = ember_batch_control_run(b, [b, id, &released] {
         released = b->coordinator->release(id);
     });
-    if (!released) {
+    if (!serviced) {
+        // The coordinator is gone, so the lease it tracked is gone with it.
+        // Distinguished from a refused release because they need different
+        // reading: this one is shutdown, not a leak.
+        std::fprintf(stderr,
+                     "[ember] resident batch session %llu abandoned: "
+                     "coordinator stopped before release\n",
+                     (unsigned long long)id);
+    } else if (!released) {
         std::fprintf(stderr,
                      "[ember] failed to release resident batch session %llu\n",
                      (unsigned long long)id);
     }
+    // Dropped either way. Keeping a lease the coordinator can no longer honour
+    // would block this thread's next generation on a session that cannot be
+    // released.
     tls_batch_sessions.erase(it);
     {
         std::lock_guard<std::mutex> lock(b->batch_mu);

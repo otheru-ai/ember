@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <stdexcept>
 #include <unordered_map>
 
 using namespace dflash::common;
@@ -31,6 +32,12 @@ struct FakeResidentBackend : ResidentBatchBackend {
     int destroyed = 0;
     int restore_position = 2;
     bool fail_decode = false;
+    // Admission runs backend code that is not noexcept: creation
+    // allocates and constructs a random_device, and status is backend
+    // code. These inject that, which is the only way to reach the
+    // rollback path from a test.
+    bool throw_on_create = false;
+    bool throw_on_status = false;
 
     bool resident_session_create(
             ContinuousBatchSessionId id,
@@ -38,6 +45,7 @@ struct FakeResidentBackend : ResidentBatchBackend {
             const DaemonIO &,
             int restore_slot,
             std::string *error) override {
+        if (throw_on_create) throw std::runtime_error("injected create failure");
         if (sessions.count(id)) {
             if (error) *error = "duplicate";
             return false;
@@ -83,6 +91,7 @@ struct FakeResidentBackend : ResidentBatchBackend {
 
     SessionStatus resident_session_status(
             ContinuousBatchSessionId id) const override {
+        if (throw_on_status) throw std::runtime_error("injected status failure");
         SessionStatus status;
         auto it = sessions.find(id);
         if (it == sessions.end()) {
@@ -245,6 +254,60 @@ int main() {
         CHECK(failed_result.has_value() && !failed_result->ok());
         CHECK(failed_result &&
               failed_result->error_code() == "backend_specific");
+    }
+
+    {
+        // An exception during admission must not consume the scheduler slot.
+        // Every failure RETURN released it by hand; a throw did not, so the
+        // capacity was gone for the life of the coordinator, with no tracked
+        // lease able to release it and no way for sessions() to enumerate it.
+        // With the wake predicate requiring admission capacity, the worker then
+        // sleeps on a capacity that can never free.
+        FakeResidentBackend backend;
+        ResidentBatchCoordinator coordinator(
+            backend, ContinuousBatchConfig{2, 4, 2, 0});
+        backend.throw_on_create = true;
+        for (int i = 0; i < 2; ++i) {
+            bool threw = false;
+            try {
+                (void)coordinator.admit(request(0, 1), {}, -1, 0, nullptr);
+            } catch (const std::runtime_error &) {
+                threw = true;
+            }
+            CHECK(threw);
+        }
+        CHECK(coordinator.scheduler().resident() == 0);
+        CHECK(coordinator.sessions().empty());
+        CHECK(backend.sessions.empty());
+
+        // The point of the rollback: the capacity is genuinely reusable, not
+        // merely reported as free.
+        backend.throw_on_create = false;
+        std::string error;
+        auto recovered = coordinator.admit(request(0, 1), {}, -1, 0, &error);
+        CHECK(recovered.has_value());
+    }
+
+    {
+        // Throwing AFTER creation must also destroy the backend session, or the
+        // slot is recovered while an orphaned session lives on in the backend.
+        FakeResidentBackend backend;
+        ResidentBatchCoordinator coordinator(
+            backend, ContinuousBatchConfig{2, 4, 2, 0});
+        backend.throw_on_status = true;
+        for (int i = 0; i < 2; ++i) {
+            bool threw = false;
+            try {
+                (void)coordinator.admit(request(0, 1), {}, -1, 0, nullptr);
+            } catch (const std::runtime_error &) {
+                threw = true;
+            }
+            CHECK(threw);
+        }
+        CHECK(coordinator.scheduler().resident() == 0);
+        CHECK(coordinator.sessions().empty());
+        CHECK(backend.sessions.empty());
+        CHECK(backend.destroyed == 2);
     }
 
     std::printf("resident batch coordinator tests: %d passed, %d failed\n",
