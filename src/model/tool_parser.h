@@ -105,6 +105,19 @@ char *ember_dsml_attr(const char *tag, const char *tag_limit, const char *key);
 // frame. `sx` NULL falls back to ember_dsml_matching_close. EVERY site that
 // looks for a frame boundary must use this, including the streaming stop in
 // sse.c -- a parser-only fix is defeated by an earlier truncation.
+// True when a parameter tag declares an explicit string="false", i.e. its value
+// is verbatim JSON. An ABSENT attribute is raw text, matching append_arg.
+// `tag` points at the parameter opener, `tag_limit` just past its '>'.
+bool ember_dsml_param_is_json(const char *tag, size_t open_len,
+                              const char *tag_limit);
+
+// Close for a parameter VALUE. json_value selects quote/escape-aware scanning
+// so a protocol terminator inside a JSON string is data; raw values keep plain
+// scanning. Returns NULL for an unterminated JSON string or dangling escape,
+// which keeps a truncated payload non-executable.
+const char *ember_dsml_value_close(const char *from, const char *open_tag,
+                                   const char *close_tag, bool json_value);
+
 const char *ember_dsml_frame_close(const char *from, const char *open_tag,
                                    const char *close_tag,
                                    const ember_dsml_syntax *sx);

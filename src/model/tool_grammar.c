@@ -342,22 +342,23 @@ char *ember_tool_grammar_build(const char *tools_json, bool allow_parallel) {
     // weight: a LITERAL terminator is written &lt;/... and decoded once, while
     // an unescaped exact terminator remains structural by design. Ordinary
     // closing tags are now representable, which is the whole point.
-    // UNCHANGED, DELIBERATELY, and this is the one gap in the fix.
+    // Scoped to the ACTUAL delimiter so ordinary closing tags stay
+    // representable: only "</" immediately followed by the DSML pipe is
+    // withheld.
     //
-    // Raw string=true text still cannot contain "</", so ordinary closing tags
-    // are still not representable HERE. Narrowing it to the actual delimiter --
-    // "strval ::= ([^<] | \"<\" [^/] | \"</\" [^<PIPE>])* (\"<\")?" -- generates
-    // the semantically correct rule (verified by dumping it: "</" followed by
-    // any codepoint except U+FF5C) but breaks conditional-schema
-    // discrimination: test_tool_grammar_match's allOf/if-then case stops
-    // rejecting a patch action that omits its required old_string/new_string.
-    // I could not explain that interaction, so I am not shipping it.
-    //
-    // Gate 5 does not need this: its probe sends a JSON array parameter, so it
-    // goes through jsonval/jstring, which IS fixed. Raw-text closing tags are a
-    // second, narrower instance of the same class, handed to codex-rejoin-01
-    // with the reproduction rather than forced.
-    ember_buf_puts(&out, "strval ::= ([^<] | \"<\" [^/])* (\"<\")?\n");
+    // The exclusion is written as a POSITIVE complement rather than [^PIPE],
+    // because the vendored xgrammar cannot express a negative class over a
+    // multibyte character: BuildNegativeCharacterClass
+    // (vendor/xgrammar/cpp/grammar_functor.cc:1339) casts Unicode endpoints to
+    // uint8_t and then admits every multibyte character unconditionally, so
+    // U+FF5C silently became 0x5C and the real fullwidth pipe stayed allowed.
+    // [^PIPE] therefore accepted the very delimiter it was meant to withhold,
+    // strval swallowed the parameter close, and conditional-schema
+    // discrimination collapsed. Diagnosed by codex-rejoin-01; a grammar-local
+    // positive range is preferred here over changing vendor semantics.
+    ember_buf_puts(&out,
+        "strval ::= ([^<] | \"<\" [^/] "
+        "| \"</\" [\\u0000-\\uFF5B\\uFF5D-\\U0010FFFF])* (\"<\")?\n");
     // #11/#10: raw text admitted malformed JSON even while the mask was
     // active. Match JSON syntax here; tool_schema.c still checks schema
     // semantics. Surrogate escapes match json.c: lone halves are rejected.

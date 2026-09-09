@@ -425,15 +425,16 @@ static void emit_tool_stream(ember_sse_stream *st, const char *raw,
         // the ones tool_schema approved -- the thing executed would not be the
         // thing checked (.coord 1067 P1 #2).
         const char *inv_close =
-            ember_dsml_matching_close(tag_end, sx->invoke_open, sx->invoke_close);
+            ember_dsml_frame_close(tag_end, sx->invoke_open, sx->invoke_close, sx);
         const char *inv_limit = inv_close ? inv_close : raw + raw_len;
         const char *p = tag_end + 1;
         int pcount = 0;
         while ((p = strstr(p, sx->param_open)) != NULL && p < inv_limit) {
             const char *ptag = strchr(p, '>');
             if (!ptag || ptag >= inv_limit) break;
-            const char *pclose =
-                ember_dsml_matching_close(ptag, sx->param_open, sx->param_close);
+            const char *pclose = ember_dsml_value_close(
+                ptag, sx->param_open, sx->param_close,
+                ember_dsml_param_is_json(p, pol, ptag + 1));
             if (!pclose || pclose > inv_limit) break;  // parameter not complete yet
             if (idx == st->tool_idx && pcount >= st->tool_nparams) {
                 char *key = ember_dsml_attr(p + pol, ptag + 1, "name");

@@ -178,13 +178,9 @@ static const char *frame_close(const char *from, const char *open_tag,
         if (!strncmp(p, sx->param_open, po_l)) {
             const char *ptag_end = strchr(p, '>');
             if (!ptag_end) return NULL;
-            char *is_str = ember_dsml_attr(p + po_l, ptag_end + 1, "string");
-            const bool raw_value = is_str && !strcmp(is_str, "true");
-            free(is_str);
-            const char *pc =
-                raw_value
-                    ? matching_close(ptag_end, sx->param_open, sx->param_close)
-                    : json_value_close(ptag_end, sx->param_open, sx->param_close);
+            const char *pc = ember_dsml_value_close(
+                ptag_end, sx->param_open, sx->param_close,
+                ember_dsml_param_is_json(p, po_l, ptag_end + 1));
             if (!pc) return NULL;
             p = pc + pc_l;
             continue;
@@ -213,18 +209,20 @@ static const char *frame_close(const char *from, const char *open_tag,
 static bool has_structural_tag(const char *from, const char *limit,
                                const ember_dsml_syntax *sx, const char *tag) {
     if (!from || !limit || !tag || from >= limit) return false;
-    if (!nested_values_enabled()) {
-        const char *hit = strstr(from, tag);
-        return hit && hit < limit;
-    }
+    // The value-skipping walk below is now used regardless of
+    // EMBER_DSML_NESTED_VALUES. The old shortcut scanned raw bytes, so a
+    // calls_open inside a JSON string read as structural contamination and the
+    // call was rejected -- the same class of defect as the boundary scan, and
+    // it did not depend on the nesting policy.
     const size_t t_l = strlen(tag);
     const size_t po_l = strlen(sx->param_open);
     for (const char *p = from; p < limit;) {
         if (!strncmp(p, sx->param_open, po_l)) {
             const char *ptag = strchr(p, '>');
             if (!ptag || ptag >= limit) return false;
-            const char *pc =
-                matching_close(ptag, sx->param_open, sx->param_close);
+            const char *pc = ember_dsml_value_close(
+                ptag, sx->param_open, sx->param_close,
+                ember_dsml_param_is_json(p, po_l, ptag + 1));
             if (!pc || pc >= limit) return false;
             p = pc;                      // skip the value wholesale
             continue;
@@ -278,6 +276,20 @@ static char *dsml_unescape_n(const char *s, size_t n) {
 const char *ember_dsml_matching_close(const char *from, const char *open_tag,
                                       const char *close_tag) {
     return matching_close(from, open_tag, close_tag);
+}
+
+bool ember_dsml_param_is_json(const char *tag, size_t open_len,
+                              const char *tag_limit) {
+    char *is_str = ember_dsml_attr(tag + open_len, tag_limit, "string");
+    const bool json_value = is_str && !strcmp(is_str, "false");
+    free(is_str);
+    return json_value;
+}
+
+const char *ember_dsml_value_close(const char *from, const char *open_tag,
+                                   const char *close_tag, bool json_value) {
+    return json_value ? json_value_close(from, open_tag, close_tag)
+                      : matching_close(from, open_tag, close_tag);
 }
 
 const char *ember_dsml_frame_close(const char *from, const char *open_tag,
@@ -431,16 +443,43 @@ static char *trim_dup(const char *s, size_t n) {
     return xstrndup(s, n);
 }
 
+// ds_engine's native format has the same framing hazard and used plain strstr
+// for tool_use and property termination. A property VALUE may legally contain
+// text identical to either terminator, so the frame scan steps over each
+// property the way frame_close does for DSML.
+static const char *dse_frame_close(const char *from, const char *close_tag) {
+    if (!from || !close_tag) return NULL;
+    const size_t c_l = strlen(close_tag);
+    const size_t po_l = strlen(DSE_PROP_O), pc_l = strlen(DSE_PROP_C);
+    for (const char *p = from; *p;) {
+        if (!strncmp(p, DSE_PROP_O, po_l)) {
+            const char *ptag = strchr(p, '>');
+            if (!ptag) return NULL;
+            const char *pc = ember_dsml_value_close(
+                ptag, DSE_PROP_O, DSE_PROP_C,
+                ember_dsml_param_is_json(p, po_l, ptag + 1));
+            if (!pc) return NULL;
+            p = pc + pc_l;
+            continue;
+        }
+        if (!strncmp(p, close_tag, c_l)) return p;
+        ++p;
+    }
+    return NULL;
+}
+
 static int parse_ds_engine(const char *text, ember_tool_calls *out,
                            ember_tool_parse_report *report) {
     const char *cur = text;
     while ((cur = strstr(cur, DSE_OPEN)) != NULL) {
         if (report) report->found = true;
         if (report) report->invocations++;
-        const char *tu_close = strstr(cur, DSE_CLOSE);
+        const char *tu_close = dse_frame_close(cur + strlen(DSE_OPEN), DSE_CLOSE);
         if (!tu_close && report) report->complete = false;
         const char *tu_limit = tu_close ? tu_close : text + strlen(text);
-        const char *nested = strstr(cur + strlen(DSE_OPEN), DSE_OPEN);
+        // Nested detection steps over property values too: an opener inside a
+        // property value is data, not a nested invocation.
+        const char *nested = dse_frame_close(cur + strlen(DSE_OPEN), DSE_OPEN);
         if (nested && nested < tu_limit && report) report->malformed = true;
         // name (child element)
         char *name = NULL;
@@ -462,13 +501,16 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
                 if (report) report->malformed = true;
                 break;
             }
-            const char *pclose = strstr(ptag, DSE_PROP_C);
-            if (!pclose || pclose > tu_limit) {
-                if (report) report->malformed = true;
-                break;
-            }
             char *key = ember_dsml_attr(p + strlen(DSE_PROP_O), ptag + 1, "name");
             char *is_str = ember_dsml_attr(p + strlen(DSE_PROP_O), ptag + 1, "string");
+            const char *pclose = ember_dsml_value_close(
+                ptag, DSE_PROP_O, DSE_PROP_C,
+                is_str && !strcmp(is_str, "false"));
+            if (!pclose || pclose > tu_limit) {
+                if (report) report->malformed = true;
+                free(key); free(is_str);
+                break;
+            }
             if (!key || !key[0] ||
                 (is_str && strcmp(is_str, "true") && strcmp(is_str, "false"))) {
                 if (report) report->malformed = true;
@@ -527,8 +569,13 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
         return parse_ds_engine(text, out, report);
     if (!sx) return 0;
     const char *first = dsml_at;
-    const char *original_close = matching_close(
-        first + strlen(sx->calls_open), sx->calls_open, sx->calls_close);
+    // Same context-aware contract as the stop finder and the extractor. With
+    // the old scanner an exact calls_close inside a valid JSON string set
+    // report.trailing and rejected the call, even though ember_find_tool_end
+    // correctly reached the real end -- the checked and the executed boundary
+    // disagreed.
+    const char *original_close = frame_close(
+        first + strlen(sx->calls_open), sx->calls_open, sx->calls_close, sx);
     if (report) {
         report->found = true;
         report->complete = original_close != NULL;
@@ -646,11 +693,15 @@ int ember_parse_dsml_tool_calls_ex(const char *text, ember_tool_calls *out,
             // ordinary characters that may be unmatched and a literal
             // terminator is encoded with the existing &lt; entity convention.
             char *is_str_early = attr(p + param_open_len, ptag_end + 1, "string");
-            const bool raw_value = is_str_early && !strcmp(is_str_early, "true");
-            const char *pclose =
-                raw_value
-                    ? matching_close(ptag_end, sx->param_open, sx->param_close)
-                    : json_value_close(ptag_end, sx->param_open, sx->param_close);
+            // JSON scanning ONLY for an explicit string="false". An ABSENT
+            // attribute is raw text, which is what append_arg and the
+            // documented contract already assume -- treating it as JSON
+            // rejected a formerly valid value like: hello " quote, because the
+            // lone quote read as the start of a JSON string.
+            const bool json_value =
+                is_str_early && !strcmp(is_str_early, "false");
+            const char *pclose = ember_dsml_value_close(
+                ptag_end, sx->param_open, sx->param_close, json_value);
             if (!pclose || pclose > inv_close) {
                 // Nesting never balanced, so there is no faithful value to
                 // emit. Report contamination specifically when the unbalanced

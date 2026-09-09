@@ -380,84 +380,148 @@ static void test_real_degraded_output_never_matches_a_replay(void) {
 
 // The <script> problem, in our frame. A JSON parameter value may legally
 // contain text identical to a protocol terminator, and that must be data
-// rather than a frame boundary. Before the boundary fix the scanner cut the
-// value at the embedded marker and the call was lost or corrupted -- which is
-// what the tool grammar was banning every "</" to avoid, at the cost of
-// silently corrupting ordinary closing tags like </div>.
+// rather than a frame boundary.
+//
+// These use string="false" and parse_ex DELIBERATELY. An earlier version of
+// these tests omitted the attribute and used the NULL-report wrapper, so they
+// exercised the RAW path and bypassed the executable-report guards entirely --
+// they passed while the JSON contract was still broken. codex-rejoin-01 caught
+// that; exact values and reports are asserted here, not substring presence.
+#define JSON_CALL(value)                                                      \
+    "<" PIPE "DSML" PIPE "tool_calls>"                                        \
+    "<" PIPE "DSML" PIPE "invoke name=\"record\">"                            \
+    "<" PIPE "DSML" PIPE "parameter name=\"items\" string=\"false\">"         \
+    value                                                                     \
+    "</" PIPE "DSML" PIPE "parameter>"                                        \
+    "</" PIPE "DSML" PIPE "invoke>"                                           \
+    "</" PIPE "DSML" PIPE "tool_calls>"
+
+static void check_json_arg(const char *text, const char *want_args,
+                           const char *what) {
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+    CHECK(n == 1, what);
+    CHECK(n == 1 && strcmp(tc.calls[0].name, "record") == 0, what);
+    CHECK(n == 1 && strcmp(tc.calls[0].arguments, want_args) == 0, what);
+    // The executable gate must agree with the parse, or the thing checked is
+    // not the thing run.
+    CHECK(!report.malformed, what);
+    CHECK(!report.contaminated, what);
+    CHECK(!report.invalid_json, what);
+    CHECK(!report.trailing, what);
+    ember_tool_calls_free(&tc);
+}
+
 static void test_json_value_may_contain_a_protocol_terminator(void) {
-    const char *text =
-        "<" PIPE "DSML" PIPE "tool_calls>"
-        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
-        "[{\"text\":\"</" PIPE "DSML" PIPE "tool_calls>\"}]"
-        "</" PIPE "DSML" PIPE "parameter>"
-        "</" PIPE "DSML" PIPE "invoke>"
-        "</" PIPE "DSML" PIPE "tool_calls>";
-    ember_tool_calls tc = {0};
-    int n = ember_parse_dsml_tool_calls(text, &tc);
-    CHECK(n == 1, "embedded terminator: one call parsed");
-    CHECK(n == 1 && strcmp(tc.calls[0].name, "record") == 0,
-          "embedded terminator: name survives");
-    CHECK(n == 1 && strstr(tc.calls[0].arguments, "tool_calls") != NULL,
-          "embedded terminator: value keeps the marker text");
-    ember_tool_calls_free(&tc);
+    check_json_arg(JSON_CALL("[{\"text\":\"</" PIPE "DSML" PIPE "tool_calls>\"}]"),
+                   "{\"items\":[{\"text\":\"</" PIPE "DSML" PIPE "tool_calls>\"}]}",
+                   "calls terminator inside a JSON string is data");
+    check_json_arg(JSON_CALL("[{\"text\":\"</" PIPE "DSML" PIPE "invoke>\"}]"),
+                   "{\"items\":[{\"text\":\"</" PIPE "DSML" PIPE "invoke>\"}]}",
+                   "invoke terminator inside a JSON string is data");
+    check_json_arg(JSON_CALL("[{\"text\":\"</" PIPE "DSML" PIPE "parameter>\"}]"),
+                   "{\"items\":[{\"text\":\"</" PIPE "DSML" PIPE "parameter>\"}]}",
+                   "parameter terminator inside a JSON string is data");
 }
 
-// Ordinary closing tags were never a framing hazard, and are the values the
-// grammar ban was actually costing us.
+// The values the grammar ban was actually costing us: gate 5's exact request.
 static void test_ordinary_closing_tag_round_trips(void) {
-    const char *text =
-        "<" PIPE "DSML" PIPE "tool_calls>"
-        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
-        "[{\"text\":\"</div>\"},{\"text\":\"i < n\"}]"
-        "</" PIPE "DSML" PIPE "parameter>"
-        "</" PIPE "DSML" PIPE "invoke>"
-        "</" PIPE "DSML" PIPE "tool_calls>";
-    ember_tool_calls tc = {0};
-    int n = ember_parse_dsml_tool_calls(text, &tc);
-    CHECK(n == 1, "</div>: one call parsed");
-    CHECK(n == 1 && strstr(tc.calls[0].arguments, "</div>") != NULL,
-          "</div>: closing tag survives verbatim");
-    ember_tool_calls_free(&tc);
+    check_json_arg(
+        JSON_CALL("[{\"text\":\"i < n\"},{\"text\":\"</div>\"},"
+                  "{\"text\":\"ends with <\"}]"),
+        "{\"items\":[{\"text\":\"i < n\"},{\"text\":\"</div>\"},"
+        "{\"text\":\"ends with <\"}]}",
+        "gate 5 value set round-trips verbatim");
 }
 
-// An escaped quote must not end the string, and an odd backslash run must not
-// be mistaken for one that does.
 static void test_escaped_quotes_do_not_end_the_value(void) {
-    const char *text =
-        "<" PIPE "DSML" PIPE "tool_calls>"
-        "<" PIPE "DSML" PIPE "invoke name=\"record\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
-        "[{\"text\":\"quote \\\" then </" PIPE "DSML" PIPE "tool_calls> still inside\"}]"
-        "</" PIPE "DSML" PIPE "parameter>"
-        "</" PIPE "DSML" PIPE "invoke>"
-        "</" PIPE "DSML" PIPE "tool_calls>";
-    ember_tool_calls tc = {0};
-    int n = ember_parse_dsml_tool_calls(text, &tc);
-    CHECK(n == 1, "escaped quote: one call parsed");
-    CHECK(n == 1 && strstr(tc.calls[0].arguments, "still inside") != NULL,
-          "escaped quote: value continues past the embedded marker");
-    ember_tool_calls_free(&tc);
+    // The escaped quote does NOT close the JSON string, so the terminator
+    // after it is still data.
+    check_json_arg(
+        JSON_CALL("[{\"text\":\"q \\\" </" PIPE "DSML" PIPE "tool_calls> in\"}]"),
+        "{\"items\":[{\"text\":\"q \\\" </" PIPE "DSML" PIPE "tool_calls> in\"}]}",
+        "escaped quote does not end the value");
+    // An EVEN backslash run does close it: the backslash is itself escaped, so
+    // the following quote is a real delimiter. The opposite case, and the one
+    // an off-by-one in the escape tracking would get wrong.
+    check_json_arg(
+        JSON_CALL("[{\"text\":\"ends \\\\\"}]"),
+        "{\"items\":[{\"text\":\"ends \\\\\"}]}",
+        "even backslash run closes the string");
 }
 
-// An unterminated JSON string must NOT become an executable call. Repair may
-// restore framing only after a complete value; inventing a terminator here
-// would turn truncated output into a successful call.
+// Truncation must never become an executable call.
 static void test_unterminated_json_string_is_not_executable(void) {
+    struct { const char *v; const char *what; } cases[] = {
+        { "[{\"text\":\"unterminated", "unterminated string" },
+        { "[{\"text\":\"dangling escape \\\\", "dangling escape" },
+        { "[{\"text\":", "truncated after a key" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s",
+                 "<" PIPE "DSML" PIPE "tool_calls>"
+                 "<" PIPE "DSML" PIPE "invoke name=\"record\">"
+                 "<" PIPE "DSML" PIPE "parameter name=\"items\" string=\"false\">");
+        strncat(buf, cases[i].v, sizeof buf - strlen(buf) - 1);
+        strncat(buf,
+                "</" PIPE "DSML" PIPE "parameter>"
+                "</" PIPE "DSML" PIPE "invoke>"
+                "</" PIPE "DSML" PIPE "tool_calls>",
+                sizeof buf - strlen(buf) - 1);
+        ember_tool_calls tc = {0};
+        ember_tool_parse_report report = {0};
+        (void)ember_parse_dsml_tool_calls_ex(buf, &tc, &report);
+        CHECK(report.malformed || report.contaminated || report.invalid_json,
+              cases[i].what);
+        ember_tool_calls_free(&tc);
+    }
+}
+
+// An ABSENT string attribute is raw text, and a lone quote in it is ordinary.
+static void test_absent_string_attribute_stays_raw(void) {
     const char *text =
         "<" PIPE "DSML" PIPE "tool_calls>"
         "<" PIPE "DSML" PIPE "invoke name=\"record\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"items\">"
-        "[{\"text\":\"unterminated"
+        "<" PIPE "DSML" PIPE "parameter name=\"note\">hello \" quote"
         "</" PIPE "DSML" PIPE "parameter>"
         "</" PIPE "DSML" PIPE "invoke>"
         "</" PIPE "DSML" PIPE "tool_calls>";
     ember_tool_calls tc = {0};
     ember_tool_parse_report report = {0};
-    (void)ember_parse_dsml_tool_calls_ex(text, &tc, &report);
-    CHECK(report.malformed || report.contaminated || report.invalid_json,
-          "unterminated string: reported, not silently executable");
+    int n = ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+    CHECK(n == 1, "absent string attribute: parsed");
+    CHECK(!report.malformed, "absent string attribute: unmatched quote is raw");
+    ember_tool_calls_free(&tc);
+}
+
+// The native ds_engine fallback has the same hazard and is executable, so it
+// gets the same contract: a property VALUE containing either terminator is
+// data. codex-rejoin-01 required this before release rather than as follow-up.
+static void test_ds_engine_property_value_may_contain_terminators(void) {
+    const char *text =
+        "<ds_engine_tool_use>"
+        "<ds_engine_tool_use_name>record</ds_engine_tool_use_name>"
+        "<ds_engine_tool_use_parameters_property name=\"items\" string=\"false\">"
+        "[{\"text\":\"</ds_engine_tool_use_parameters_property>\"},"
+        "{\"text\":\"</ds_engine_tool_use>\"},{\"text\":\"</div>\"}]"
+        "</ds_engine_tool_use_parameters_property>"
+        "</ds_engine_tool_use>";
+    ember_tool_calls tc = {0};
+    ember_tool_parse_report report = {0};
+    int n = ember_parse_dsml_tool_calls_ex(text, &tc, &report);
+    CHECK(n == 1, "ds_engine: one call parsed");
+    CHECK(n == 1 && strcmp(tc.calls[0].name, "record") == 0,
+          "ds_engine: name survives");
+    CHECK(n == 1 &&
+          strcmp(tc.calls[0].arguments,
+                 "{\"items\":[{\"text\":\"</ds_engine_tool_use_parameters_property>\"},"
+                 "{\"text\":\"</ds_engine_tool_use>\"},{\"text\":\"</div>\"}]}") == 0,
+          "ds_engine: embedded terminators kept as data");
+    CHECK(!report.malformed, "ds_engine: not malformed");
+    CHECK(!report.contaminated, "ds_engine: not contaminated");
+    CHECK(!report.invalid_json, "ds_engine: valid JSON");
     ember_tool_calls_free(&tc);
 }
 
@@ -482,6 +546,8 @@ int main(void) {
     test_ordinary_closing_tag_round_trips();
     test_escaped_quotes_do_not_end_the_value();
     test_unterminated_json_string_is_not_executable();
+    test_absent_string_attribute_stays_raw();
+    test_ds_engine_property_value_may_contain_terminators();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
