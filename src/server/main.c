@@ -2268,10 +2268,31 @@ static bool prepare_vision_prompt(
             }
             if (ok) {
                 planned_offsets[image_index] += expansion_delta;
+                // Timed and reported per image. A successful image request and
+                // no image traffic at all previously produced byte-identical
+                // logs, and the encode duration is the signal that catches a
+                // projector silently falling back to CPU -- the ~82s-per-slice
+                // regression in ggml-org/llama.cpp#22582 was diagnosed from
+                // exactly this line and from nothing else available here.
+                const double encode_t0 = monotonic_now();
                 ok = ember_backend_vision_encode(
                     be, part->image.data, part->image.size,
                     planned_offsets[image_index], &encoded[image_index],
                     error, error_cap);
+                const double encode_s = monotonic_now() - encode_t0;
+                if (ok) {
+                    fprintf(stderr,
+                            "[ember-vision] image %d encoded in %.0f ms, "
+                            "n_image_tokens=%d grid=%dx%dx%d bytes=%zu\n",
+                            image_index, encode_s * 1000.0,
+                            encoded[image_index].n_tokens,
+                            encoded[image_index].grid_t,
+                            encoded[image_index].grid_h,
+                            encoded[image_index].grid_w,
+                            part->image.size);
+                    ember_metrics_record_vision_encode(
+                        encode_s, encoded[image_index].n_tokens);
+                }
             }
             if (ok && (encoded[image_index].grid_t != 1 ||
                        encoded[image_index].n_tokens <= 0 ||

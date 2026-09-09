@@ -95,6 +95,34 @@ def main() -> None:
         assert after == before + 1, f"{before} -> {after}\n{body}"
         assert series(body, "ember_prefix_cache_requests_total") >= 1.0, body
 
+        # #9's latency gap: TTFT is queue + prefill and must be its own series.
+        # Asserting it advanced with the generation is what distinguishes a
+        # wired-up histogram from a declared-but-never-observed one.
+        assert series(body, "ember_time_to_first_token_seconds_count") >= 1.0, body
+        # Present even at zero. A missing series and a zero one look identical
+        # to a human reading a dashboard, but not to a scraper building a graph.
+        for name in ("ember_spec_decode_declined_total",
+                     "ember_inter_token_seconds_count",
+                     "ember_vision_encoder_seconds_count",
+                     "ember_image_tokens_total",
+                     "ember_request_image_count_count"):
+            assert name in body, f"{name} absent from the exposition:\n{body}"
+        # The closed label set must be exported in full, so a reason that has
+        # not occurred yet still graphs as zero rather than appearing later and
+        # looking like a spike.
+        for reason in ("context", "force_ar", "vision", "other"):
+            assert f'ember_spec_decode_declined_total{{reason="{reason}"}}' in body, \
+                f"decline reason {reason} not exported"
+
+        # /status advertises modalities, llama.cpp /props parity. The stub has
+        # no tower, so vision MUST be false here -- a true value would mean the
+        # capability is being read from the architecture rather than from what
+        # the operator actually supplied.
+        status_code, _, status_body = get(base + "/status")
+        assert status_code == 200, status_code
+        modalities = json.loads(status_body).get("modalities")
+        assert modalities == {"text": True, "vision": False}, modalities
+
         print("metrics server ok")
     finally:
         proc.terminate()
