@@ -157,14 +157,34 @@ def main():
                            "continuous_batch_executor")), "-o", str(binary)],
                        check=True, timeout=60)
         for mode in ("control", "generation", "capacity", "failure"):
-            # 5s was too tight: this failed once for me immediately after a
-            # parallel build had saturated the machine, and passed on rerun and
-            # in 20 further runs. The scenarios use 500 ms waits, so a loaded
-            # runner can exceed 5s without anything being wrong. A real
-            # regression here deadlocks and blows any bound, so the extra
-            # headroom costs nothing and removes a spurious CI failure that
-            # would look exactly like the deadlock this test exists to catch.
-            subprocess.run([str(binary), mode], check=True, timeout=30)
+            # This failed once in a full ctest run straight after a parallel
+            # build and passed on rerun and in 20 further runs. The CAUSE IS
+            # NOT ESTABLISHED: ctest had already overwritten the log, so
+            # whether it was this timeout or a scenario returning 1 is unknown,
+            # and a passing rerun does not settle it. 30s is headroom for a
+            # loaded runner, not a diagnosis -- raising it cannot hide a
+            # scenario failure, which still exits non-zero.
+            #
+            # So report which happened. A recurrence has to be identifiable:
+            # a timeout here looks exactly like the deadlock this test exists
+            # to catch, and guessing between them is how a real regression gets
+            # dismissed as flake.
+            try:
+                subprocess.run([str(binary), mode], check=True, timeout=30,
+                               capture_output=True, text=True)
+            except subprocess.TimeoutExpired as exc:
+                raise SystemExit(
+                    f"batch worker scenario {mode!r} TIMED OUT after 30s. "
+                    f"Either the worker deadlocked -- which is the regression "
+                    f"this test detects -- or the runner is badly overloaded. "
+                    f"Do not dismiss this as flake without the distinction.\n"
+                    f"stdout: {exc.stdout!r}") from exc
+            except subprocess.CalledProcessError as exc:
+                raise SystemExit(
+                    f"batch worker scenario {mode!r} FAILED (exit "
+                    f"{exc.returncode}); this is a scenario assertion, not a "
+                    f"timeout.\nstdout: {exc.stdout}\nstderr: {exc.stderr}"
+                ) from exc
 
 
 if __name__ == "__main__":

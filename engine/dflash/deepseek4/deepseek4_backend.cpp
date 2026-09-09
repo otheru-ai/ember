@@ -3040,37 +3040,44 @@ bool DeepSeek4Backend::resident_session_create(
           : (request.n_gen <= 0)       ? "empty_budget"
                                        : "short_budget";
     }
+    // Armed BEFORE acquisition, because create_deepseek4_cache allocates
+    // out.ctx before the backend allocator and can throw or fail partway: a
+    // half-built cache must be FREED, never returned to the pool, and the old
+    // code simply dropped it. After a successful acquisition the same guard
+    // recycles instead, since the pool exists to avoid reallocating it.
+    //
+    // Declared after `session` so it destructs first and its pointer is still
+    // valid. Nothing outside this function knows the cache exists until the map
+    // owns it, so the coordinator's scheduler rollback cannot clean this up --
+    // it has to be handled here. Raised by codex-rejoin-01.
+    struct CacheGuard {
+        DeepSeek4Backend *self;
+        ResidentSession *session;
+        bool acquired;
+        bool armed;
+        ~CacheGuard() {
+            if (!armed) return;
+            try {
+                if (acquired) self->recycle_resident_cache(session->cache);
+                else free_deepseek4_cache(session->cache);
+            } catch (...) {
+            }
+        }
+    } cache_guard{this, session.get(), false, true};
+
     if (!resident_cache_pool_.empty()) {
         session->cache = std::move(resident_cache_pool_.back());
         resident_cache_pool_.pop_back();
+        cache_guard.acquired = true;
     } else {
         const int max_ctx = cfg_.max_ctx > 0 ? cfg_.max_ctx : 8192;
         if (!create_deepseek4_cache(backend_, w_, max_ctx, session->cache)) {
             if (error) *error = "failed to allocate resident KV cache";
-            return false;
+            return false;   // guard frees the partial cache
         }
+        cache_guard.acquired = true;
     }
     session->cache.prefill_mode = cfg_.prefill_mode;
-
-    // The cache is backend-owned from acquisition until the session is
-    // registered, and it is pooled precisely so it is not reallocated. Every
-    // failure RETURN below recycled it; the throwing work that follows -- two
-    // snapshot vector copies, sampling, and the map emplace -- did not, so an
-    // exception lost a cache from the pool permanently. The coordinator's
-    // scheduler rollback cannot reach it: it was never registered, so nothing
-    // outside this function knows it exists. Raised by codex-rejoin-01.
-    struct CacheRecycler {
-        DeepSeek4Backend *self;
-        ResidentSession *session;
-        bool armed;
-        ~CacheRecycler() {
-            if (!armed) return;
-            try {
-                self->recycle_resident_cache(session->cache);
-            } catch (...) {
-            }
-        }
-    } recycler{this, session.get(), true};
 
     if (restore_slot >= 0 && snapshot_used(restore_slot)) {
         if (!deepseek4_snapshot_restore(snapshots_[restore_slot],
@@ -3108,16 +3115,22 @@ bool DeepSeek4Backend::resident_session_create(
             session->spec_decline_reason = "resident_submit_failed";
         }
     }
-    // Disarmed only once the map owns the session. If emplace throws while the
-    // unique_ptr still holds it, recycle here; if the move already happened the
-    // pointer is null and there is nothing left to recycle.
-    recycler.armed = false;
-    try {
-        resident_sessions_.emplace(id, std::move(session));
-    } catch (...) {
-        if (session) recycle_resident_cache(session->cache);
-        throw;
+    // Reserve the node BEFORE the move. My first version moved the unique_ptr
+    // into emplace and cleaned up only "if (session)", which codex-rejoin-01
+    // disproved with an allocator-failure probe: when the move happens and a
+    // rehash then throws, the node is destroyed and the local pointer is
+    // already null, so the cleanup was skipped and the raw cache leaked --
+    // ResidentSession's destructor does not free it. try_emplace allocates the
+    // node while the local unique_ptr still owns the session and the guard is
+    // still armed; the move that follows is noexcept, so nothing between here
+    // and the disarm can throw.
+    auto inserted = resident_sessions_.try_emplace(id);
+    if (!inserted.second) {
+        if (error) *error = "invalid or duplicate resident session";
+        return false;   // guard recycles; the pre-existing node is left alone
     }
+    inserted.first->second = std::move(session);   // noexcept
+    cache_guard.armed = false;
     return true;
 }
 
