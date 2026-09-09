@@ -269,6 +269,14 @@ static void respond_api_error(int fd, ember_api_kind api, int status,
 }
 
 // ── generation context threaded through the backend callbacks ──
+// Owned by run_chat, shared by all hidden recovery attempts. Replacing a
+// gen_ctx must not discard earlier token observations or failed-attempt work.
+typedef struct {
+    double first_token_at;
+    double last_token_at;
+    long tokens_seen;
+} request_token_timing;
+
 typedef struct {
     ember_backend    *be;
     ember_sse_stream *st;        // NULL when collect_only
@@ -283,9 +291,7 @@ typedef struct {
     // so it includes the FIFO wait behind other generations, image encoding and
     // prompt preparation -- all of which happen outside the backend's prefill_s
     // and none of which a caller experiences as free.
-    double            first_token_at;   // 0 until the first token arrives
-    double            last_token_at;
-    long              tokens_seen;
+    request_token_timing *timing;
     bool              has_tools;     // stop decode at the tool-calls end marker
     bool              started_thinking;  // B#1: prompt ended inside an open <think>
     time_t            last_ka;       // last prefill keepalive (throttle to ~4s)
@@ -361,9 +367,9 @@ static bool on_token(int32_t tok, void *ud) {
     if (g->disconnected) return false;
     {
         const double now = monotonic_now();
-        if (g->tokens_seen == 0) g->first_token_at = now;
-        g->last_token_at = now;
-        g->tokens_seen++;
+        if (g->timing->tokens_seen == 0) g->timing->first_token_at = now;
+        g->timing->last_token_at = now;
+        g->timing->tokens_seen++;
     }
     // Don't wait for a write to fail to learn the client left: tokens whose
     // deltas the encoder withholds produce no write at all, so a generation
@@ -1442,6 +1448,7 @@ static bool continue_tool_started_in_think(
     }
 
     gen_ctx next = {0};
+    next.timing = g->timing;
     next.be = be;
     next.st = g->st;
     next.fd = g->fd;
@@ -1878,6 +1885,7 @@ static bool retry_malformed_tool_call(
     }
 
     gen_ctx next = {0};
+    next.timing = g->timing;
     next.be = be;
     next.fd = g->fd;
     next.collect_only = true;
@@ -2203,13 +2211,14 @@ static void log_generation_performance(const ember_gen_result *res,
     // Negative means "not measurable for this request" and is skipped by the
     // recorder rather than recorded as zero.
     double ttft_s = -1.0, mean_gap_s = -1.0;
-    if (g && g->tokens_seen > 0 && enqueued_at > 0.0) {
-        ttft_s = g->first_token_at - enqueued_at;
+    const request_token_timing *timing = g ? g->timing : NULL;
+    if (timing && timing->tokens_seen > 0 && enqueued_at > 0.0) {
+        ttft_s = timing->first_token_at - enqueued_at;
         if (ttft_s < 0.0) ttft_s = 0.0;   // clock skew guard, not a default
     }
-    if (g && g->tokens_seen > 1) {
-        mean_gap_s = (g->last_token_at - g->first_token_at) /
-                     (double)(g->tokens_seen - 1);
+    if (timing && timing->tokens_seen > 1) {
+        mean_gap_s = (timing->last_token_at - timing->first_token_at) /
+                     (double)(timing->tokens_seen - 1);
     }
     ember_metrics_record_generation(
         res->finish_reason, res->prefill_tokens, res->n_generated,
@@ -2433,16 +2442,12 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
     // getters return interior pointers that eviction can free, so callers must
     // continue holding state_lock for the entire lifetime of those pointers.
     const bool serialize = !ember_backend_batch_enabled(be);
-    const double queue_start = monotonic_now();
-    double queue_wait_s = 0.0;
     if (serialize) pthread_mutex_lock(&srv->gen_lock);
-    // Only when generation actually serialises. With batching there is no lock
-    // to wait on, so recording it anyway would bury the real distribution
-    // under zeros and quietly misreport the batching path as having no queue.
-    // Measured on both paths, because TTFT needs it either way and the
-    // batching path's near-zero wait is a true value, not a missing one.
-    queue_wait_s = monotonic_now() - queue_start;
-    if (serialize) ember_metrics_record_queue_wait(queue_wait_s);
+    // HTTP enqueue through dispatcher admission, including foreground or
+    // background FIFO wait and any serial lock wait. Resident engine admission
+    // happens later and is deliberately outside this queue measurement.
+    const double queue_wait_s = monotonic_now() - enqueued_at;
+    ember_metrics_record_queue_wait(queue_wait_s > 0.0 ? queue_wait_s : 0.0);
     atomic_fetch_add(&srv->busy, 1);
     const int observed_tool_loop_rounds =
         ember_chat_request_tool_loop_rounds(req);
@@ -3035,7 +3040,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
     ember_tool_calls tc = {0};
     char *reasoning = NULL, *content_stop = NULL, *content_trimmed = NULL;
     const bool native_stream = req->stream && req->api != EMBER_API_CHAT;
+    request_token_timing timing = {0};
     gen_ctx g = {
+        .timing = &timing,
         .be = be, .fd = fd, .has_tools = req->has_tools,
         .prompt_ids = ids, .n_prompt_ids = n_prompt,
         .stops = req->stop, .n_stops = req->n_stop,

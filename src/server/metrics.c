@@ -287,7 +287,9 @@ void ember_metrics_render(ember_buf *out) {
     render_histogram(out, "ember_decode_seconds",
                              "Decode duration.", &g.decode_seconds);
     render_histogram(out, "ember_queue_seconds",
-                             "Time a request waited before generation began.",
+                             "HTTP enqueue to dispatcher admission, including "
+                             "serial lock wait; excludes later resident "
+                             "engine admission and prompt preparation.",
                              &g.queue_seconds);
     // Deliberately distinct from ember_prefill_seconds: TTFT includes the
     // queue wait, and on a serialising server that term dominates.
@@ -295,6 +297,8 @@ void ember_metrics_render(ember_buf *out) {
                              "Measured first-token arrival minus request "
                              "enqueue: includes FIFO wait, image encoding and "
                              "prompt preparation, not only backend prefill. "
+                             "Includes hidden recovery token callbacks; not "
+                             "time to first visible content. "
                              "Requests producing no token are excluded.",
                              &g.ttft_seconds);
     // Named a mean, because it is one. Dividing a span by a count is not a
@@ -304,6 +308,8 @@ void ember_metrics_render(ember_buf *out) {
                              "Per-request mean gap between generated tokens, "
                              "(last - first) / (tokens - 1). A distribution of "
                              "per-request means, NOT of individual gaps. "
+                             "Includes hidden recovery attempts and the gaps "
+                             "between them. "
                              "Requests with fewer than two tokens are excluded.",
                              &g.mean_token_gap_seconds);
     render_histogram(out, "ember_vision_encoder_seconds",

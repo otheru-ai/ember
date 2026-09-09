@@ -16,6 +16,9 @@ import subprocess
 import sys
 import time
 import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 
 def free_port() -> int:
@@ -46,6 +49,97 @@ def series(text: str, name: str) -> float:
         if key == name:
             return float(value)
     raise AssertionError(f"series {name} absent from exposition:\n{text}")
+
+
+@contextmanager
+def timing_server(server, overrides, batch_sessions=1):
+    port = free_port()
+    env = os.environ.copy()
+    env.update(overrides)
+    proc = subprocess.Popen(
+        [server, "-m", "stub", "--port", str(port), "--max-ctx", "4096",
+         "--batch-sessions", str(batch_sessions)], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            assert proc.poll() is None, "timing server exited"
+            try:
+                get(base + "/status")
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.01)
+        yield base
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def timing_regressions(server):
+    payload = {"model": "stub", "messages": [{"role": "user", "content": "hi"}],
+               "max_tokens": 12, "reasoning_effort": "none"}
+    # Occupy all dispatch workers before enqueueing one more request. This
+    # distinguishes FIFO time from the old post-dequeue mutex measurement,
+    # and checks that batched requests are also observed.
+    for workers in (1, 2):
+        with timing_server(server, {"EMBER_STUB_REPLY": "abcdefghijkl",
+                                   "EMBER_STUB_TOKEN_DELAY_US": "50000"}, workers) as base:
+            with ThreadPoolExecutor(max_workers=workers + 1) as pool:
+                active = [pool.submit(post_json, base + "/v1/chat/completions", payload)
+                          for _ in range(workers)]
+                deadline = time.monotonic() + 3
+                while json.loads(get(base + "/status")[2])["busy"] < workers:
+                    assert time.monotonic() < deadline, "workers never became busy"
+                    time.sleep(0.005)
+                post_json(base + "/v1/chat/completions", payload)
+                for future in active:
+                    future.result()
+            body = get(base + "/metrics")[2]
+            assert series(body, "ember_queue_seconds_count") == workers + 1, body
+            assert series(body, "ember_queue_seconds_sum") > 0.25, body
+
+    # A long, hidden malformed attempt followed by a short valid replacement.
+    # Recovery must not move TTFT to the replacement's first token. An empty
+    # replacement must also retain the original callback observations.
+    from test_tool_safety_server import dsml_write, tool_request
+    initial = dsml_write(path=None, content="x" * 120)
+    valid = dsml_write(path="/tmp/metrics", content="ok")
+    for initial_reply, replacement, thinking in ((initial, valid, False),
+                                                (initial, "", False),
+                                                ("reasoning " * 20 + valid, valid, True)):
+        with timing_server(server, {"EMBER_STUB_REPLY": initial_reply,
+                                   "EMBER_STUB_RECOVERY_REPLY": replacement,
+                                   "EMBER_STUB_THINK_TOOL_REPLY": replacement,
+                                   "EMBER_STUB_TOKEN_DELAY_US": "3000"}) as base:
+            payload = tool_request()
+            if thinking:
+                payload["reasoning_effort"] = "high"
+            request = urllib.request.Request(
+                base + "/v1/chat/completions", data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    completion = json.load(response)
+                    calls = completion["choices"][0]["message"].get("tool_calls", [])
+                    if replacement:
+                        assert calls, completion
+                        assert json.loads(calls[0]["function"]["arguments"])["path"] == "/tmp/metrics", completion
+                    else:
+                        assert not calls, completion
+            except urllib.error.HTTPError as error:
+                assert replacement == "" and error.code == 422, error
+                error.read()
+            body = get(base + "/metrics")[2]
+            assert series(body, "ember_time_to_first_token_seconds_count") == 1, body
+            assert series(body, "ember_time_to_first_token_seconds_sum") < 0.4, body
+            assert series(body, "ember_request_mean_token_gap_seconds_count") == 1, body
 
 
 def main() -> None:
@@ -137,3 +231,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    timing_regressions(sys.argv[1])
