@@ -1,0 +1,19 @@
+[
+  {
+    "Config": {
+      "Labels": {
+        "org.opencontainers.image.description": "DeepSeek-V4-Flash inference server for AMD Strix Halo",
+        "org.opencontainers.image.licenses": "MIT",
+        "org.opencontainers.image.revision": "d46ecc956c545f7bc70a0a7f450330aa1e6efa93",
+        "org.opencontainers.image.source": "https://github.com/otheru-ai/ember",
+        "org.opencontainers.image.title": "Ember",
+        "org.opencontainers.image.vendor": "OtherU",
+        "org.opencontainers.image.version": "2026.9.8"
+      }
+    },
+    "Id": "sha256:d0a558b3836db77cdddbe00d9b19500487543f413e9c6f4c3155d0063bac6b6a",
+    "RepoDigests": [
+      "ghcr.io/otheru-ai/ember@sha256:d0a558b3836db77cdddbe00d9b19500487543f413e9c6f4c3155d0063bac6b6a"
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+{"label": "count", "prompt_tokens": 40, "completion_tokens": 256, "decode_tps": 23.48, "prefill_tps": 71.1, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "repeat", "prompt_tokens": 31, "completion_tokens": 256, "decode_tps": 23.79, "prefill_tps": 103.4, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "alphabet", "prompt_tokens": 33, "completion_tokens": 256, "decode_tps": 23.8, "prefill_tps": 91.3, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "multiples", "prompt_tokens": 32, "completion_tokens": 256, "decode_tps": 23.8, "prefill_tps": 108.8, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "json", "prompt_tokens": 45, "completion_tokens": 256, "decode_tps": 23.76, "prefill_tps": 113.8, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "code", "prompt_tokens": 40, "completion_tokens": 139, "decode_tps": 23.98, "prefill_tps": 116.3, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "factual", "prompt_tokens": 31, "completion_tokens": 114, "decode_tps": 24.0, "prefill_tps": 105.5, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "prose", "prompt_tokens": 20, "completion_tokens": 256, "decode_tps": 23.83, "prefill_tps": 74.2, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "essay", "prompt_tokens": 26, "completion_tokens": 256, "decode_tps": 23.8, "prefill_tps": 88.3, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
+{"label": "creative", "prompt_tokens": 24, "completion_tokens": 256, "decode_tps": 23.82, "prefill_tps": 86.1, "accept_rate": 0.0, "spec_ran": false, "spec_cycles": 0}
