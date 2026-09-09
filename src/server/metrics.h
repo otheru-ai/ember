@@ -17,14 +17,21 @@
 
 // One completed generation. `finish_reason` is mapped onto a fixed label set,
 // so a novel reason cannot grow the series cardinality without a code change.
-// `queue_s` is the wait before generation began. It is taken here rather than
-// left to the separate queue observation because time-to-first-token is
-// queue + prefill, and a scraper cannot add two independent histograms. Quoting
-// prefill duration as TTFT would understate exactly the delay a caller feels.
+// `ttft_s` is MEASURED: the first token's own arrival minus the moment the
+// request was enqueued. It is not queue + prefill. Those are backend durations
+// and exclude the FIFO wait behind other generations, image encoding and prompt
+// preparation, none of which a caller experiences as free. Pass a negative
+// value when no token was produced, and no TTFT is recorded -- a request that
+// emitted nothing has no time-to-first-token, and recording zero would pull the
+// distribution toward a latency that never happened.
+//
+// `mean_token_gap_s` is likewise measured, as (last - first) / (tokens - 1),
+// and is a PER-REQUEST MEAN rather than a distribution of individual gaps.
+// Pass a negative value when fewer than two tokens were produced.
 void ember_metrics_record_generation(const char *finish_reason,
                                      int prefill_tokens, int completion_tokens,
-                                     double queue_s, double prefill_s,
-                                     double decode_s,
+                                     double ttft_s, double mean_token_gap_s,
+                                     double prefill_s, double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images);
 
@@ -34,9 +41,12 @@ void ember_metrics_record_generation(const char *finish_reason,
 // speculation ran, which is not counted here.
 void ember_metrics_record_spec_decline(const char *reason);
 
-// One image encode. `seconds` is the vision tower only, separated from LM
-// prefill, because a projector that silently falls back to CPU shows up here
-// and nowhere else -- that is how ggml-org/llama.cpp#22582 was diagnosed.
+// One image encode. `seconds` spans the whole encode call as the server sees
+// it -- preprocessing, a lazy first-use tower load, execution and the result
+// copy -- NOT the tower alone. That is deliberately the end-to-end cost a
+// caller pays, and it is what would expose a projector silently falling back to
+// CPU, the way ggml-org/llama.cpp#22582 was diagnosed. Do not read a change
+// here as tower execution alone; a first-use load lands in the same series.
 void ember_metrics_record_vision_encode(double seconds, int image_tokens);
 
 // Prompt-cache reuse for one request: tokens presented and tokens restored.

@@ -531,6 +531,10 @@ struct DeepSeek4Backend::ResidentSession {
     bool failed = false;
     bool spec_eligible = false;
     bool spec_ran = false;
+    // Why speculation did not run on this resident session. Recorded
+    // where the decision is made, so telemetry never re-runs a stateful
+    // gate to find out. nullptr once speculation actually runs.
+    const char * spec_decline_reason = nullptr;
     bool budget_forced_close = false;
     bool degenerate_decode_close = false;
     std::string termination_reason;
@@ -2234,10 +2238,15 @@ int ds4_spec_context_budget(int committed) {
 }
 
 // committed = KV tokens already in cache (the context this request decodes on).
+// out_reason receives the decline reason, or nullptr when speculation runs.
+// The engine computed this already and printed it only behind
+// DFLASH_DS4_SPEC_DEBUG; #13 recorded 833 of 833 generations declining for one
+// reason with nothing counting it, so the caller reports it instead.
 bool ds4_spec_should_run(const GenerateRequest & req, bool spec_enabled,
                          bool have_drafter, bool sampling_requires_ar,
                          int spec_budget, int committed,
-                         bool profitability_allowed) {
+                         bool profitability_allowed,
+                         const char ** out_reason) {
     const char * debug_env = std::getenv("DFLASH_DS4_SPEC_DEBUG");
     const bool debug = debug_env && (*debug_env == '1' ||
                                     *debug_env == 'y' ||
@@ -3009,11 +3018,28 @@ bool DeepSeek4Backend::resident_session_create(
     const int capture_spec_budget = std::min(
         ds4_spec_emit_budget(request),
         ds4_spec_context_budget((int)request.prompt.size()));
+    const bool resident_provider_ok =
+        spec_xdna_draft_compute_ && spec_xdna_draft_compute_->healthy();
     session->spec_eligible =
-        spec_xdna_draft_compute_ && spec_xdna_draft_compute_->healthy() &&
+        resident_provider_ok &&
         dspark_request_can_prepare(
             spec_enabled_, spec_drafter_ != nullptr, request.force_ar_decode,
             sampling_requires_ar, request.n_gen, capture_spec_budget);
+    // Attributed from the SAME inputs the eligibility test used, in the same
+    // order, rather than by calling the serial gate again: resident declines
+    // were previously invisible, so a session could add a generation while
+    // adding neither an engagement nor a decline -- exactly the unexplained
+    // disengagement #13 is about.
+    if (!session->spec_eligible) {
+        session->spec_decline_reason =
+            !resident_provider_ok      ? "resident_provider"
+          : !spec_enabled_             ? "disabled"
+          : (spec_drafter_ == nullptr) ? "no_drafter"
+          : request.force_ar_decode    ? "force_ar"
+          : sampling_requires_ar       ? "sampling"
+          : (request.n_gen <= 0)       ? "empty_budget"
+                                       : "short_budget";
+    }
     if (!resident_cache_pool_.empty()) {
         session->cache = std::move(resident_cache_pool_.back());
         resident_cache_pool_.pop_back();
@@ -3062,6 +3088,7 @@ bool DeepSeek4Backend::resident_session_create(
                          "using target AR\n",
                          spec_error.c_str());
             session->spec_eligible = false;
+            session->spec_decline_reason = "resident_submit_failed";
         }
     }
     resident_sessions_.emplace(id, std::move(session));
@@ -3149,6 +3176,8 @@ GenerateResult DeepSeek4Backend::resident_session_result(
     result.termination_reason = session.termination_reason;
     result.snapshot_saved = session.inline_snapshot_saved;
     result.spec_decode_ran = session.spec_ran;
+    result.spec_decline_reason =
+        session.spec_ran ? nullptr : session.spec_decline_reason;
     result.accept_rate = session.spec_offered > 0
         ? (float)session.spec_accepted / (float)session.spec_offered
         : 0.0f;

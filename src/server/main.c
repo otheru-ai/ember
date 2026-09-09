@@ -278,6 +278,14 @@ typedef struct {
     bool              collect_only;  // accumulate without streaming (non-stream path)
     bool              keepalive_while_collecting; // hidden/buffered streaming attempt
     bool              disconnected;
+    // Measured token arrival, not derived from backend durations. TTFT is the
+    // first token's own timestamp minus the moment the request was ENQUEUED,
+    // so it includes the FIFO wait behind other generations, image encoding and
+    // prompt preparation -- all of which happen outside the backend's prefill_s
+    // and none of which a caller experiences as free.
+    double            first_token_at;   // 0 until the first token arrives
+    double            last_token_at;
+    long              tokens_seen;
     bool              has_tools;     // stop decode at the tool-calls end marker
     bool              started_thinking;  // B#1: prompt ended inside an open <think>
     time_t            last_ka;       // last prefill keepalive (throttle to ~4s)
@@ -351,6 +359,12 @@ static bool generated_suffix_matches_prompt(const gen_ctx *g) {
 static bool on_token(int32_t tok, void *ud) {
     gen_ctx *g = (gen_ctx *)ud;
     if (g->disconnected) return false;
+    {
+        const double now = monotonic_now();
+        if (g->tokens_seen == 0) g->first_token_at = now;
+        g->last_token_at = now;
+        g->tokens_seen++;
+    }
     // Don't wait for a write to fail to learn the client left: tokens whose
     // deltas the encoder withholds produce no write at all, so a generation
     // could run to completion into a dead socket, holding the only slot.
@@ -2168,7 +2182,7 @@ static bool vision_placeholders_supported(ember_backend *be) {
 
 static void log_generation_performance(const ember_gen_result *res,
                                        const ember_gen_request *greq,
-                                       double queue_s) {
+                                       const gen_ctx *g, double enqueued_at) {
     if (!res) return;
     const double prefill_tps = res->prefill_s > 0.0
         ? res->prefill_tokens / res->prefill_s : 0.0;
@@ -2185,10 +2199,22 @@ static void log_generation_performance(const ember_gen_result *res,
             res->spec_decode_ran ? "yes" : "no", res->accept_rate);
     // Same values, aggregated. Printing them was never enough to answer a
     // trend question; 833 consecutive spec=no went unnoticed for a day.
+    // Measured from token arrivals, not inferred from backend durations.
+    // Negative means "not measurable for this request" and is skipped by the
+    // recorder rather than recorded as zero.
+    double ttft_s = -1.0, mean_gap_s = -1.0;
+    if (g && g->tokens_seen > 0 && enqueued_at > 0.0) {
+        ttft_s = g->first_token_at - enqueued_at;
+        if (ttft_s < 0.0) ttft_s = 0.0;   // clock skew guard, not a default
+    }
+    if (g && g->tokens_seen > 1) {
+        mean_gap_s = (g->last_token_at - g->first_token_at) /
+                     (double)(g->tokens_seen - 1);
+    }
     ember_metrics_record_generation(
         res->finish_reason, res->prefill_tokens, res->n_generated,
-        queue_s, res->prefill_s, res->decode_s, res->spec_decode_ran,
-        res->accept_rate, greq ? greq->n_vision : 0);
+        ttft_s, mean_gap_s, res->prefill_s, res->decode_s,
+        res->spec_decode_ran, res->accept_rate, greq ? greq->n_vision : 0);
     // Only meaningful when speculation did NOT run; the recorder ignores an
     // empty reason rather than making every caller test it.
     ember_metrics_record_spec_decline(res->spec_decline_reason);
@@ -2380,7 +2406,8 @@ cleanup:
     return ok;
 }
 
-static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
+static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
+                     double enqueued_at) {
     ember_backend *be = srv->be;
     req->prompt_profile = srv->prompt_profile;
     // NO ENGINE-SIDE TOOL-LOOP CEILING (deliberate ds4 parity). ds4 caps tool
@@ -3091,7 +3118,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd) {
         // Atomic replacement attempts are fresh decodes; recheck their close.
         unclosed_think_tool = tool_started_in_unclosed_think(&g, started_thinking);
     }
-    log_generation_performance(&res, &greq, queue_wait_s);
+    log_generation_performance(&res, &greq, &g, enqueued_at);
     const int completion_tokens = hidden_recovery_tokens + res.n_generated;
     g.scratch.len = 0;
     if (g.scratch.ptr) g.scratch.ptr[0] = '\0';
@@ -3775,7 +3802,7 @@ static void *gen_worker_main(void *arg) {
         w->active_jobs++;
         pthread_mutex_unlock(&w->lock);
 
-        run_chat(job->srv, job->req, job->fd);
+        run_chat(job->srv, job->req, job->fd, job->enqueued_at);
 
         // Graphs are now populated for this request's shape; arm the reclaim.
         pthread_mutex_lock(&w->lock);
@@ -4061,16 +4088,25 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         ember_buf_puts(&b, "{\"model\":");
         ember_json_escape(&b, ember_backend_model_name(be));
         ember_buf_printf(&b,
-            ",\"ctx\":%d,\"modalities\":{\"text\":true,\"vision\":%s},"
+            ",\"ctx\":%d,\"modalities\":{\"text\":true,\"vision\":%s,"
+            "\"vision_scope\":\"configured\"},"
             "\"busy\":%d,\"served\":%ld,"
             "\"sampling_defaults\":{\"temperature\":%.9g,"
             "\"top_p\":%.9g,\"top_k\":%d,\"min_p\":%.9g,"
             "\"repetition_penalty\":%.9g,\"presence_penalty\":%.9g},"
             "\"tool_loop\":{\"report_after_repeats\":%d,\"last\":",
             ember_backend_n_ctx(be),
-            // Both conditions, because either alone would lie: the tokenizer
-            // knows the placeholder, the operator supplies the tower.
+            // Every condition that would actually reject an image, not just
+            // the two configuration facts. Resident batching and forced-exact
+            // prefill both refuse image requests outright (see the 400s in the
+            // vision path), so a deployment with a tower configured under
+            // either of them advertises a capability it will not serve.
+            // This reports CONFIGURED capability: the projector loads lazily,
+            // so "configured" and "proven loadable" remain different, and
+            // /status deliberately does not force a tower load to answer.
             (srv->vision_mmproj_path && srv->vision_mmproj_path[0] &&
+             srv->batch_sessions <= 1 &&
+             !force_exact_prefill_enabled() &&
              vision_placeholders_supported(be)) ? "true" : "false",
             atomic_load(&srv->busy), atomic_load(&srv->served),
             srv->default_temp, srv->card.top_p, srv->card.top_k,

@@ -18,8 +18,8 @@ static long long sample(const char *text, const char *name) {
 }
 
 static void test_shape_and_counters(void) {
-    ember_metrics_record_generation("stop", 100, 20, 0.05, 0.30, 1.20, false, 0.0, 0);
-    ember_metrics_record_generation("length", 5000, 400, 0.25, 3.00, 20.0, true, 0.9, 2);
+    ember_metrics_record_generation("stop", 100, 20, 0.35, 0.06, 0.30, 1.20, false, 0.0, 0);
+    ember_metrics_record_generation("length", 5000, 400, 3.25, 0.05, 3.00, 20.0, true, 0.9, 2);
     ember_metrics_record_prefix_cache(1000, 250);
     ember_metrics_record_queue_wait(0.75);
 
@@ -113,26 +113,27 @@ static void test_latency_and_vision_series(void) {
     ember_metrics_render(&before);
     const char *b0 = before.ptr ? before.ptr : "";
     const long long ttft0 = sample(b0, "ember_time_to_first_token_seconds_count");
-    const long long itl0  = sample(b0, "ember_inter_token_seconds_count");
+    const long long gap0  = sample(b0, "ember_request_mean_token_gap_seconds_count");
     const long long ven0  = sample(b0, "ember_vision_encoder_seconds_count");
     const long long imt0  = sample(b0, "ember_image_tokens_total");
     const long long imc0  = sample(b0, "ember_request_image_count_count");
 
-    // 21 tokens over 2.0s decode, 0.5s queue, 1.0s prefill:
-    // ttft = queue + prefill = 1.5; inter-token = 2.0 / (21-1) = 0.1
-    ember_metrics_record_generation("stop", 10, 21, 0.5, 1.0, 2.0, false, 0.0, 1);
-    // A single token has no interval, so it must not enter inter-token latency:
-    // recording decode_s/1 would report a first-token cost as a steady-state one.
-    ember_metrics_record_generation("stop", 10, 1, 0.0, 0.5, 0.4, false, 0.0, 0);
+    // Measured values, as the server now computes them from token arrivals.
+    ember_metrics_record_generation("stop", 10, 21, 1.50, 0.10, 1.0, 2.0, false, 0.0, 1);
+    // One token: a TTFT exists, but there is no gap to measure.
+    ember_metrics_record_generation("stop", 10, 1, 0.80, -1.0, 0.5, 0.4, false, 0.0, 0);
+    // No token at all: neither is measurable. Recording zero would invent a
+    // latency that never happened and drag both distributions down.
+    ember_metrics_record_generation("stop", 10, 0, -1.0, -1.0, 0.5, 0.0, false, 0.0, 0);
     ember_metrics_record_vision_encode(0.25, 131);
 
     ember_buf b = {0};
     ember_metrics_render(&b);
     const char *t = b.ptr ? b.ptr : "";
     CHECK(sample(t, "ember_time_to_first_token_seconds_count") - ttft0 == 2,
-          "ttft observed for every generation");
-    CHECK(sample(t, "ember_inter_token_seconds_count") - itl0 == 1,
-          "single-token generation excluded from inter-token latency");
+          "ttft recorded for token-producing requests only, not the empty one");
+    CHECK(sample(t, "ember_request_mean_token_gap_seconds_count") - gap0 == 1,
+          "token-gap mean needs two tokens; one-token and empty excluded");
     CHECK(sample(t, "ember_vision_encoder_seconds_count") - ven0 == 1,
           "vision encode duration recorded separately from prefill");
     CHECK(sample(t, "ember_image_tokens_total") - imt0 == 131,
@@ -144,7 +145,7 @@ static void test_latency_and_vision_series(void) {
 }
 
 static void test_unknown_reason_does_not_grow_cardinality(void) {
-    ember_metrics_record_generation("a_brand_new_reason", 1, 1, 0.0, 0.0, 0.0, false, 0.0, 0);
+    ember_metrics_record_generation("a_brand_new_reason", 1, 1, -1.0, -1.0, 0.0, 0.0, false, 0.0, 0);
     ember_buf b = {0};
     ember_metrics_render(&b);
     const char *t = b.ptr ? b.ptr : "";

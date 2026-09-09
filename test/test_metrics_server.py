@@ -102,7 +102,7 @@ def main() -> None:
         # Present even at zero. A missing series and a zero one look identical
         # to a human reading a dashboard, but not to a scraper building a graph.
         for name in ("ember_spec_decode_declined_total",
-                     "ember_inter_token_seconds_count",
+                     "ember_request_mean_token_gap_seconds_count",
                      "ember_vision_encoder_seconds_count",
                      "ember_image_tokens_total",
                      "ember_request_image_count_count"):
@@ -121,7 +121,8 @@ def main() -> None:
         status_code, _, status_body = get(base + "/status")
         assert status_code == 200, status_code
         modalities = json.loads(status_body).get("modalities")
-        assert modalities == {"text": True, "vision": False}, modalities
+        assert modalities == {"text": True, "vision": False,
+                              "vision_scope": "configured"}, modalities
 
         print("metrics server ok")
     finally:

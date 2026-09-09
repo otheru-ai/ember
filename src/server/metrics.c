@@ -39,7 +39,11 @@ static const char *const kSpecDeclineReasons[] = {
     // Image turns short-circuit the gate entirely, so they never reach the
     // reasons above. #9 asks specifically why they forgo speculation, and
     // folding them into force_ar would answer a different question.
-    "vision", "other",
+    "vision",
+    // Resident batching decides eligibility in session state rather than
+    // through the serial gate, so its declines carry their own reasons.
+    "resident_provider", "resident_submit_failed",
+    "other",
 };
 #define N_SPEC_DECLINE_REASONS \
     (sizeof(kSpecDeclineReasons) / sizeof(kSpecDeclineReasons[0]))
@@ -77,7 +81,7 @@ static struct {
     histogram decode_seconds;
     histogram queue_seconds;
     histogram ttft_seconds;
-    histogram inter_token_seconds;
+    histogram mean_token_gap_seconds;
     histogram vision_encode_seconds;
     histogram image_count;
     histogram prefill_token_shape;
@@ -89,7 +93,7 @@ static struct {
     .decode_seconds        = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .queue_seconds         = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .ttft_seconds          = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
-    .inter_token_seconds   = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .mean_token_gap_seconds= {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .vision_encode_seconds = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
     .image_count           = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .prefill_token_shape   = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
@@ -138,8 +142,8 @@ void ember_metrics_record_vision_encode(double seconds, int image_tokens) {
 
 void ember_metrics_record_generation(const char *finish_reason,
                                      int prefill_tokens, int completion_tokens,
-                                     double queue_s, double prefill_s,
-                                     double decode_s,
+                                     double ttft_s, double mean_token_gap_s,
+                                     double prefill_s, double decode_s,
                                      bool spec_engaged, double accept_rate,
                                      int n_images) {
     pthread_mutex_lock(&g.lock);
@@ -155,15 +159,11 @@ void ember_metrics_record_generation(const char *finish_reason,
     }
     observe(&g.prefill_seconds, prefill_s);
     observe(&g.decode_seconds, decode_s);
-    // TTFT is queue + prefill. Ember serialises generation, so omitting the
-    // queue term would report a number no caller experiences.
-    observe(&g.ttft_seconds, queue_s + prefill_s);
-    // Inter-token latency needs a gap to measure: with one token there is no
-    // interval, so recording decode_s/1 would report a first-token cost as a
-    // steady-state one and drag the distribution.
-    if (completion_tokens > 1 && decode_s > 0.0) {
-        observe(&g.inter_token_seconds, decode_s / (double)(completion_tokens - 1));
-    }
+    // Both are measured by the caller from token arrivals. A negative value
+    // means the request had no such measurement -- no token at all, or only
+    // one -- and is skipped rather than recorded as zero.
+    if (ttft_s >= 0.0) observe(&g.ttft_seconds, ttft_s);
+    if (mean_token_gap_s >= 0.0) observe(&g.mean_token_gap_seconds, mean_token_gap_s);
     if (spec_engaged) {
         g.spec_engaged++;
         if (accept_rate > 0.0) g.spec_accept_sum += accept_rate;
@@ -292,19 +292,31 @@ void ember_metrics_render(ember_buf *out) {
     // Deliberately distinct from ember_prefill_seconds: TTFT includes the
     // queue wait, and on a serialising server that term dominates.
     render_histogram(out, "ember_time_to_first_token_seconds",
-                             "Queue wait plus prefill, i.e. the delay before "
-                             "the first token reaches the caller.",
+                             "Measured first-token arrival minus request "
+                             "enqueue: includes FIFO wait, image encoding and "
+                             "prompt preparation, not only backend prefill. "
+                             "Requests producing no token are excluded.",
                              &g.ttft_seconds);
-    render_histogram(out, "ember_inter_token_seconds",
-                             "Steady-state gap between generated tokens. "
-                             "Single-token generations are excluded, having no "
-                             "interval to measure.",
-                             &g.inter_token_seconds);
+    // Named a mean, because it is one. Dividing a span by a count is not a
+    // distribution of individual gaps, and calling it inter-token latency would
+    // invite a p99 read off a series that cannot express one.
+    render_histogram(out, "ember_request_mean_token_gap_seconds",
+                             "Per-request mean gap between generated tokens, "
+                             "(last - first) / (tokens - 1). A distribution of "
+                             "per-request means, NOT of individual gaps. "
+                             "Requests with fewer than two tokens are excluded.",
+                             &g.mean_token_gap_seconds);
     render_histogram(out, "ember_vision_encoder_seconds",
-                             "Vision tower encode duration, separated from LM "
-                             "prefill.", &g.vision_encode_seconds);
+                             "End-to-end image encode as the server sees it: "
+                             "preprocessing, lazy first-use tower load, "
+                             "execution and result copy. Separated from LM "
+                             "prefill, but NOT tower execution alone.",
+                             &g.vision_encode_seconds);
     render_histogram(out, "ember_request_image_count",
-                             "Images per request.", &g.image_count);
+                             "Images per IMAGE-BEARING generation. Text-only "
+                             "requests are not observed here at all, so this is "
+                             "not a per-request distribution over all traffic.",
+                             &g.image_count);
     render_histogram(out, "ember_request_prefill_tokens",
                            "Distribution of tokens evaluated after prefix "
                            "restore.", &g.prefill_token_shape);
