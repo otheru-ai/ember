@@ -516,9 +516,20 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
         // property value is data, not a nested invocation.
         const char *nested = dse_frame_close(cur + strlen(DSE_OPEN), DSE_OPEN);
         if (nested && nested < tu_limit && report) report->malformed = true;
-        // name (child element)
+        // name (child element). Found STRUCTURALLY: a bare strstr here took
+        // the tool name from a property VALUE when the name element was
+        // absent, producing a clean call -- malformed=0 -- whose name came
+        // from payload content. The name selects which tool runs, so that is
+        // the most consequential place in this parser to trust payload bytes.
+        // Reachability demonstrated with a native block carrying no name
+        // element and a property value containing one.
+        //
+        // dse_frame_close already steps over property values; the previous
+        // comment below claimed every native scan did so, which was one scan
+        // too strong. Found by dsh-1538188 (E3) and dsh-1537943 (E2) reaching
+        // the same line from opposite directions.
         char *name = NULL;
-        const char *no = strstr(cur, DSE_NAME_O);
+        const char *no = dse_frame_close(cur + strlen(DSE_OPEN), DSE_NAME_O);
         if (no && no < tu_limit) {
             no += strlen(DSE_NAME_O);
             const char *nc = strstr(no, DSE_NAME_C);
@@ -577,8 +588,14 @@ static int parse_ds_engine(const char *text, ember_tool_calls *out,
     if (report) {
         // Scan the STRUCTURE, not the payload: a foreign opener inside a JSON
         // property value is data, and flagging it made ["<tool_calls>"] report
-        // mixed_syntax in the native format. Property values are stepped over
-        // the same way every other native scan now does.
+        // mixed_syntax in the native format. Property values are stepped over,
+        // as they now are in the tool_use, nested, property and NAME scans.
+        //
+        // The earlier wording claimed every native scan already did this while
+        // the name scan did not, and dsh-1538188 used exactly that gap as the
+        // lead that found it: a comment asserting a property the code lacks is
+        // the same defect one level up. Enumerating the scans is deliberate --
+        // "every other scan" cannot be checked by a reader, a list can.
         const size_t po_l = strlen(DSE_PROP_O), pc_l = strlen(DSE_PROP_C);
         for (const char *p = text; *p && !report->mixed_syntax;) {
             if (!strncmp(p, DSE_PROP_O, po_l)) {
