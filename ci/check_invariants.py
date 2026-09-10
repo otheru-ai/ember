@@ -102,7 +102,17 @@ def check_tests_registered(text: str, fail) -> None:
     commands = " ".join(re.findall(r"add_test\((.*?)\)", text, re.S))
 
     for src in sorted(ROOT.glob("test/test_*")):
-        if src.suffix not in {".c", ".cpp", ".py"}:
+        if src.is_dir() or src.suffix in {".h", ".data", ".fixtures"}:
+            continue
+        if src.suffix not in {".c", ".cpp", ".hip", ".py"}:
+            # Previously `continue`, which made a test invisible to every check
+            # below purely because of its extension: test_rocmi4_operator_oracle
+            # .hip was registered but unverified, so deleting its add_test()
+            # would have left this file green. An unknown suffix is now a
+            # failure, so the next new extension cannot hide the same way.
+            fail(f"{src.relative_to(ROOT)}: unrecognised test suffix "
+                 f"'{src.suffix}'; add it to the enumerated suffixes or this "
+                 f"test is invisible to every invariant below")
             continue
         rel = str(src.relative_to(ROOT))
         if src.suffix == ".py":
@@ -191,6 +201,47 @@ def check_strict_targets(text: str, fail) -> None:
 
 
 
+
+def check_distinct_registrations(text: str, fail) -> None:
+    """Two tests sharing a COMMAND must differ in their effective ENVIRONMENT.
+
+    tool_parser_nested and sse_nested run the SAME binaries as their defaults
+    and are distinguished only by set_tests_properties(... ENVIRONMENT ...).
+    No invariant read ENVIRONMENT, so deleting that property left every check
+    green while the _nested test silently re-ran the default path -- a mode
+    that looks covered and is not. That matters here because
+    EMBER_DSML_NESTED_VALUES=1 is what production runs, and the boundary
+    matrix only exercises the validation path under it.
+
+    Found by dsh-1539658 answering E6; the failure it describes is the same
+    one that produced two of my own green-but-meaningless tests.
+    """
+    commands = {}
+    for name, cmd in re.findall(r"add_test\(\s*NAME\s+(\w+)\s+COMMAND\s+([^)]*)\)",
+                                text):
+        commands.setdefault(" ".join(cmd.split()), []).append(name)
+
+    env = {}
+    for name, props in re.findall(
+            r"set_tests_properties\(\s*(\w+)\s+PROPERTIES\s+(.*?)\)", text, re.S):
+        m = re.search(r'ENVIRONMENT\s+"([^"]*)"', props)
+        if m:
+            env[name] = m.group(1)
+
+    for cmd, names in sorted(commands.items()):
+        if len(names) < 2:
+            continue
+        seen = {}
+        for name in names:
+            key = env.get(name, "")
+            if key in seen:
+                fail(f"tests '{seen[key]}' and '{name}' run the same COMMAND "
+                     f"({cmd}) with the same ENVIRONMENT "
+                     f"({key or 'none'}); one of them is a silent duplicate "
+                     f"and pins nothing the other does not")
+            seen[key] = name
+
+
 def main() -> int:
     text = read_cmake()
     failures: list[str] = []
@@ -202,6 +253,7 @@ def main() -> int:
     check_tests_registered(text, fail)
     check_test_timeouts(text, fail)
     check_strict_targets(text, fail)
+    check_distinct_registrations(text, fail)
 
     if failures:
         print(f"{len(failures)} invariant violation(s):\n", file=sys.stderr)
