@@ -246,15 +246,20 @@ static bool markup_at(const char *s, size_t n, size_t i) {
             starts_with_n(s, n, i, SYNTAX[k].param_open))
             return true;
     }
-    // The native format's CHILD markers too. Only DSE_OPEN was listed, so a
-    // property value carrying a name or property opener raised no contamination
-    // at all -- which is how an injected name element sat in a value with
-    // contaminated=0. For the DSML families all three openers are covered; the
-    // native family was covered by one. Raised by dsh-1537943 as the second
-    // half of the E2 mechanism.
-    return starts_with_n(s, n, i, DSE_OPEN) ||
-           starts_with_n(s, n, i, DSE_NAME_O) ||
-           starts_with_n(s, n, i, DSE_PROP_O);
+    // DSE_OPEN only, deliberately. Adding the native CHILD markers here was
+    // measured by claude-1827598 to buy nothing this defence does not already
+    // provide -- the structural name read closes every injection case on its
+    // own -- while turning legitimate calls into hard rejections: any tool
+    // argument whose string contains native protocol text, such as writing
+    // documentation about the protocol or editing this file.
+    //
+    // My justification for adding them was also wrong. I argued symmetry with
+    // the DSML families, but their contamination check at the parameter loop is
+    // guarded by !nested_values_enabled() and production runs
+    // EMBER_DSML_NESTED_VALUES=1, so it does not run there at all. The native
+    // check has no such guard. Native was already the STRICTEST family, not the
+    // laxest, so the change widened the gap it claimed to close.
+    return starts_with_n(s, n, i, DSE_OPEN);
 }
 
 // Protocol markup inside a JSON STRING is data, exactly as it is for the
