@@ -47,6 +47,27 @@ int main(void) {
     CHECK(state_after(scaffold) == EMBER_DSML_STRUCTURAL);
     CHECK(greedy_after(scaffold));
 
+    // An ABSENT string attribute is RAW, not JSON -- the contract in
+    // tool_parser.h and what append_arg implements. Reading it as JSON meant a
+    // raw value carrying one unmatched quote entered a JSON string the tracker
+    // never left: the following </parameter> was swallowed, the structural loop
+    // was never re-entered, and every remaining token sampled at temperature
+    // instead of greedily. Found by dsh-1538543 (E1).
+    const char *absent_attr =
+        "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"run\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"cmd\">ls -la /var";
+    CHECK(state_after(absent_attr) == EMBER_DSML_STRING_BODY);
+    CHECK(!greedy_after(absent_attr));
+
+    // The quote that used to capture the tracker: raw text, one unmatched
+    // quote, then the real close. It must still be raw body and the close must
+    // still be seen.
+    const char *raw_lone_quote =
+        "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"run\">"
+        "<" PIPE "DSML" PIPE "parameter name=\"cmd\">echo \" unmatched";
+    CHECK(state_after(raw_lone_quote) == EMBER_DSML_STRING_BODY);
+    CHECK(!greedy_after(raw_lone_quote));
+
     // A string="true" parameter body → payload → sample (NOT greedy).
     const char *string_param =
         "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"run\">"
@@ -54,23 +75,29 @@ int main(void) {
     CHECK(state_after(string_param) == EMBER_DSML_STRING_BODY);
     CHECK(!greedy_after(string_param));
 
-    // A JSON (non-string) parameter: structure greedy, string value sampled.
+    // A JSON parameter: structure greedy, string value sampled.
+    //
+    // string="false" is declared EXPLICITLY. These fixtures used to omit the
+    // attribute and still expect the JSON path, which encoded the old
+    // divergence: dsml_decode read an absent attribute as JSON while
+    // tool_parser.h and append_arg read it as RAW. The tracker now follows the
+    // documented contract, so a fixture that means JSON has to say so.
     const char *json_struct =
         "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"f\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"arguments\">{\"path\": ";
+        "<" PIPE "DSML" PIPE "parameter name=\"arguments\" string=\"false\">{\"path\": ";
     CHECK(state_after(json_struct) == EMBER_DSML_JSON_STRUCTURAL);
     CHECK(greedy_after(json_struct));
 
     const char *json_string =
         "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"f\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"arguments\">{\"path\": \"/etc/host";
+        "<" PIPE "DSML" PIPE "parameter name=\"arguments\" string=\"false\">{\"path\": \"/etc/host";
     CHECK(state_after(json_string) == EMBER_DSML_JSON_STRING);
     CHECK(!greedy_after(json_string));
 
     // Closing the value returns to JSON structure → greedy again.
     const char *json_after_string =
         "<" PIPE "DSML" PIPE "tool_calls>\n<" PIPE "DSML" PIPE "invoke name=\"f\">"
-        "<" PIPE "DSML" PIPE "parameter name=\"arguments\">{\"path\": \"/etc/hosts\", ";
+        "<" PIPE "DSML" PIPE "parameter name=\"arguments\" string=\"false\">{\"path\": \"/etc/hosts\", ";
     CHECK(state_after(json_after_string) == EMBER_DSML_JSON_STRUCTURAL);
 
     // After the whole tool_calls block closes → outside again.

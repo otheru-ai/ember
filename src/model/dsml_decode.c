@@ -66,19 +66,31 @@ static bool find_tool_start_from(const char *raw, size_t raw_len, size_t start,
     return true;
 }
 
-// Does the parameter tag at raw[tag_start:tag_end] carry string="true"?
-static bool attr_is_string_true(const char *raw, size_t raw_len,
-                                size_t tag_start, size_t tag_end) {
+
+// The parameter's value is verbatim JSON only when the tag says so EXPLICITLY.
+//
+// The previous helper answered a different question -- it was true only for
+// string="true" -- and its caller read false as JSON, so an ABSENT attribute
+// selected the JSON path. tool_parser.h states the opposite contract and
+// append_arg implements it: absent means RAW. The divergence is not cosmetic.
+// A raw value carrying one unmatched quote put this tracker into a JSON string
+// it never leaves, so the following </parameter> was swallowed, the structural
+// loop was never re-entered, TRK_DONE became unreachable, and every remaining
+// token of the generation sampled at temperature instead of greedily.
+//
+// Found by dsh-1538543 (E1), reproduced as a state-machine trace rather than a
+// runtime generation; the consequence chain above is theirs.
+static bool attr_is_string_false(const char *raw, size_t raw_len,
+                                 size_t tag_start, size_t tag_end) {
     if (tag_end <= tag_start || tag_end > raw_len) return false;
     const char *tag = raw + tag_start;
     size_t taglen = tag_end - tag_start;
-    // find `string="` within the tag, then compare the quoted value to `true`.
     static const char pat[] = "string=\"";
     for (size_t i = 0; i + sizeof(pat) - 1 <= taglen; i++) {
         if (!memcmp(tag + i, pat, sizeof(pat) - 1)) {
             const char *v = tag + i + sizeof(pat) - 1;
             size_t rem = taglen - (i + sizeof(pat) - 1);
-            return rem >= 5 && !memcmp(v, "true\"", 5);
+            return rem >= 6 && !memcmp(v, "false\"", 6);
         }
     }
     return false;
@@ -196,9 +208,12 @@ structural:
                 const char *tag_end = memchr(raw + dt->pos, '>', raw_len - dt->pos);
                 if (!tag_end) { dt->decode = EMBER_DSML_STRUCTURAL; return; }
                 size_t tag_after = (size_t)(tag_end - raw) + 1;
-                bool string_value = attr_is_string_true(raw, raw_len, tag_start, tag_after);
+                // JSON only on an explicit string="false"; absent is RAW,
+                // matching tool_parser.h and append_arg.
+                bool json_value = attr_is_string_false(raw, raw_len,
+                                                       tag_start, tag_after);
                 dt->pos = tag_after;
-                if (string_value) {
+                if (!json_value) {
                     dt->mode = EMBER_DSML_TRK_STRING_BODY;
                     dt->decode = EMBER_DSML_STRING_BODY;
                 } else {
