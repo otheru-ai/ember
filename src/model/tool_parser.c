@@ -246,7 +246,15 @@ static bool markup_at(const char *s, size_t n, size_t i) {
             starts_with_n(s, n, i, SYNTAX[k].param_open))
             return true;
     }
-    return starts_with_n(s, n, i, DSE_OPEN);
+    // The native format's CHILD markers too. Only DSE_OPEN was listed, so a
+    // property value carrying a name or property opener raised no contamination
+    // at all -- which is how an injected name element sat in a value with
+    // contaminated=0. For the DSML families all three openers are covered; the
+    // native family was covered by one. Raised by dsh-1537943 as the second
+    // half of the E2 mechanism.
+    return starts_with_n(s, n, i, DSE_OPEN) ||
+           starts_with_n(s, n, i, DSE_NAME_O) ||
+           starts_with_n(s, n, i, DSE_PROP_O);
 }
 
 // Protocol markup inside a JSON STRING is data, exactly as it is for the
