@@ -1482,6 +1482,23 @@ def main() -> int:
     assert body["error"]["type"] == "invalid_request_error", body
     assert body["error"]["code"] == "stop_limit_exceeded", body
 
+    # Issue #22 part 2: the per-token stop scan is incremental; a stop string
+    # straddling the scan-window boundary must still truncate. The stub
+    # backend emits one byte per token, so every 'a' advances the scan resume
+    # point and "END" then completes across three more tokens, starting 2
+    # bytes behind the resume point.
+    straddle = {
+        "model": "stub",
+        "max_tokens": 100,
+        "reasoning_effort": "none",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stop": ["END"],
+    }
+    code, body = run_case(server, "a" * 40 + "ENDtail", "unused", payload=straddle)
+    assert code == 200, body
+    assert body["choices"][0]["message"]["content"] == "a" * 40, body
+    assert body["choices"][0]["finish_reason"] == "stop", body
+
     print("tool-safety server integration: PASS")
     return 0
 

@@ -314,6 +314,12 @@ typedef struct {
     int               n_stops;
     bool              hit_stop;      // a stop sequence was reached
     const char       *hit_stop_sequence; // borrowed exact matching request stop
+    // Issue #22: incremental stop-scan resume point. stop_scan_off is the
+    // offset in acc.ptr known stop-free; stop_vis_off is the visible-region
+    // start it belongs to. A visible-region change (a </think> appeared, or a
+    // fresh continuation acc) resets both to the new region start.
+    size_t            stop_scan_off;
+    size_t            stop_vis_off;
     int32_t          *gen_ids;       // B3 L2: committed generated token ids
     int               n_gen_ids, gen_cap;
     const int32_t    *prompt_ids;    // borrowed during this backend call
@@ -457,22 +463,51 @@ static bool on_token(int32_t tok, void *ud) {
     if (g->n_stops > 0 && g->acc.ptr &&
         !inside_unclosed_think(g->acc.ptr, g->started_thinking)) {
         const char *vis = visible_after_think(g->acc.ptr);
-        char *earliest = NULL;
-        const char *matched = NULL;
+        size_t vis_off = (size_t)(vis - g->acc.ptr);
+        // Issue #22: scan only the newly appended bytes plus max_stop_len-1
+        // of overlap. A stop can only complete inside that window: any match
+        // starting earlier would have ended at or before stop_scan_off and so
+        // would have been found by a previous token's scan (which covered
+        // those bytes). This is the same overlap the SSE holdback accounts
+        // for (sse.c stop-sequence holdback). A visible-region change (a
+        // </think> appeared, or a fresh continuation acc) resets the resume
+        // point to the new region start.
+        if (g->stop_vis_off != vis_off) {
+            g->stop_vis_off = vis_off;
+            g->stop_scan_off = vis_off;
+        }
+        size_t max_stop = 0;
         for (int si = 0; si < g->n_stops; si++) {
             if (!g->stops[si] || !g->stops[si][0]) continue;
-            char *h = strstr((char *)vis, g->stops[si]);
-            if (h && (!earliest || h < earliest)) {
-                earliest = h;
-                matched = g->stops[si];
-            }
+            size_t l = strlen(g->stops[si]);
+            if (l > max_stop) max_stop = l;
         }
-        if (earliest) {
-            g->acc.len = (size_t)(earliest - g->acc.ptr);
-            g->acc.ptr[g->acc.len] = '\0';
-            g->hit_stop = true;
-            g->hit_stop_sequence = matched;
-            return false;
+        if (max_stop > 0) {
+            size_t scan_from = vis_off;
+            if (g->stop_scan_off - vis_off >= max_stop)
+                scan_from = g->stop_scan_off - (max_stop - 1);
+            // Non-const like the original scan: glibc's strstr is const-
+            // preserving under the analyzer's flags and would refuse the
+            // assignment below (the same cast the whole-output scan used).
+            char *scan = g->acc.ptr + scan_from;
+            char *earliest = NULL;
+            const char *matched = NULL;
+            for (int si = 0; si < g->n_stops; si++) {
+                if (!g->stops[si] || !g->stops[si][0]) continue;
+                char *h = strstr(scan, g->stops[si]);
+                if (h && (!earliest || h < earliest)) {
+                    earliest = h;
+                    matched = g->stops[si];
+                }
+            }
+            if (earliest) {
+                g->acc.len = (size_t)(earliest - g->acc.ptr);
+                g->acc.ptr[g->acc.len] = '\0';
+                g->hit_stop = true;
+                g->hit_stop_sequence = matched;
+                return false;
+            }
+            g->stop_scan_off = vis_off + strlen(vis);
         }
     }
     // B#1/B#7: stateful, thinking-aware tool-call stop (ds4 observe_tool_markers
