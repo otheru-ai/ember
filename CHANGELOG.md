@@ -11,6 +11,40 @@ using an ambiguous same-day suffix.
 
 ## Unreleased
 
+## 2026.9.11
+
+### Added
+
+- **metrics:** lifecycle gauges, outcomes, per-token gaps, identity and process series (`ce322c92`)
+
+### Fixed
+
+- **server:** bound the client stop list at parse (`01241a1a`)
+- **sse:** flush text holdback before terminal errors (`1d67c3b7`)
+- **sse:** preserve prose marker tails without advertised tools (`42355e43`)
+- **anthropic:** escape the image source into the normalized request (`8bec82d2`)
+- **json:** accept subnormals, and check duplicate keys in O(n log n) (`d3dd30d4`)
+- **metrics:** count adapter 200s, classify every attempted generation, scrape outside the lock (`b0437573`)
+- **dsml:** an absent string attribute is raw text in the decode tracker too (`68e69cb5`)
+- **dsml:** drop the contamination widening, keep the structural name read (`1c6394d6`)
+- **dsml:** flag native child markers as contamination too (`439dc35c`)
+- **dsml:** take the native tool name from structure, not from payload (`fef34520`)
+
+### Performance
+
+- **server:** scan stop sequences incrementally per token (`468eb6bc`)
+
+### Build and CI
+
+- require registrations to be distinguishable, and stop hiding tests by suffix (`395739fd`)
+
+### Documentation
+
+- drop the dead compile-evidence gate, say certification is manual, fix five drifts (`5f069087`)
+
+### Testing
+
+- **bench:** read the certify workflow with the stdlib, not PyYAML (`21d744c4`)
 ## 2026.9.9
 
 ### Added
