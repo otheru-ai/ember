@@ -24,23 +24,69 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import yaml
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CERTIFY = ROOT / ".github" / "workflows" / "gfx1151-certify.yml"
 BUNDLE = ROOT / "scripts" / "benchmark_bundle.sh"
 DIGEST = "a" * 64
 
 
+def _block(lines: list[str], start: int) -> list[str]:
+    """Lines of the block nested under lines[start], up to its dedent."""
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    body = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line.startswith("#"):
+            depth = len(line) - len(line.lstrip())
+            if depth <= indent:
+                break
+        body.append(line)
+    return body
+
+
+def _env_map(lines: list[str]) -> dict[str, str]:
+    """`KEY: value` pairs from an `env:` block; quotes stripped, comments dropped."""
+    env = {}
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or ":" not in text:
+            continue
+        key, _, value = text.partition(":")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        env[key.strip()] = value
+    return env
+
+
 def benchmark_step() -> tuple[str, dict[str, str]]:
-    """The workflow's benchmark step body and the env visible to it."""
-    workflow = yaml.safe_load(CERTIFY.read_text())
-    job = workflow["jobs"]["benchmark"]
-    env = dict(job.get("env") or {})
-    for step in job["steps"]:
-        if step.get("name") == "Run the performance bundle":
-            env.update(step.get("env") or {})
-            return step["run"], env
+    """The workflow's benchmark step body and the env visible to it.
+
+    A stdlib-only reader for the two shapes this file uses -- `env:` maps of
+    scalars and a `run: |` literal block -- because AGENTS.md promises a
+    stdlib-only test suite and this was the one PyYAML import (#21). It
+    deliberately understands nothing else: a workflow edit that needs more
+    YAML than this should fail here loudly, not be parsed wrong quietly.
+    """
+    lines = CERTIFY.read_text().splitlines()
+    job_start = next(i for i, l in enumerate(lines) if l == "  benchmark:")
+    job = _block(lines, job_start)
+    env: dict[str, str] = {}
+    for i, line in enumerate(job):
+        if line == "    env:":
+            env.update(_env_map(_block(job, i)))
+        if line.strip() == "- name: Run the performance bundle":
+            step = _block(job, i)
+            run = None
+            for k, sline in enumerate(step):
+                if sline.strip() == "env:":
+                    env.update(_env_map(_block(step, k)))
+                if sline.strip() == "run: |":
+                    body = _block(step, k)
+                    dedent = min(len(b) - len(b.lstrip()) for b in body if b.strip())
+                    run = "\n".join(b[dedent:] for b in body).rstrip("\n") + "\n"
+            if run is None:
+                raise AssertionError("benchmark step has no `run: |` block")
+            return run, env
     raise AssertionError("benchmark step not found")
 
 
