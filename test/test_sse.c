@@ -221,6 +221,44 @@ static void test_tool_marker_false_positive_on_dsml_profile(void) {
     ember_sse_free(&st);
 }
 
+static void test_no_tools_marker_tail(void) {
+    // #8: detection must enter the same validation-gated state even when
+    // tools were withdrawn. A caller-approved prose marker then reaches the
+    // existing text fallback; real calls must remain silent until validation.
+    const char *markers[] = {
+        "<" PIPE "DSML" PIPE "tool_calls>", "<DSML" PIPE "tool_calls>",
+        "<?DSML?tool_calls>", "<tool_calls>",
+        "<ds_engine_tool_use>", "<tool_call>",
+    };
+    for (size_t m = 0; m < sizeof(markers) / sizeof(markers[0]); ++m) {
+        char full[256];
+        snprintf(full, sizeof(full), "before:%s after DONE", markers[m]);
+        const size_t len = strlen(full);
+        for (size_t chunk = 1; chunk <= len; ++chunk) {
+            ember_sse_stream st;
+            ember_sse_init(&st, "cc", "m", 0, false, false, false);
+            ember_buf acc = {0}, out = {0}, content = {0};
+            for (size_t i = 0; i < len; i += chunk) {
+                size_t n = chunk < len - i ? chunk : len - i;
+                ember_buf_append(&acc, full + i, n);
+                ember_sse_update(&st, acc.ptr, acc.len, false, &out);
+            }
+            ember_sse_update(&st, acc.ptr, acc.len, true, &out);
+            CHECK(!strstr(out.ptr ? out.ptr : "", "after DONE"),
+                  "no-tools marker remains held until caller validation");
+            CHECK(!ember_sse_emit_tools(&st, acc.ptr, acc.len, &out),
+                  "prose marker does not invent a tool call");
+            collect_field(out.ptr ? out.ptr : "", "content", &content);
+            CHECK(strcmp(content.ptr ? content.ptr : "", full) == 0,
+                  "no-tools prose marker preserves the full tail at every split");
+            ember_buf_free(&content);
+            ember_buf_free(&out);
+            ember_buf_free(&acc);
+            ember_sse_free(&st);
+        }
+    }
+}
+
 static void test_short_dsml_spelling(void) {
     // Short spelling (leading "<｜" eaten) must also be recognized/suppressed.
     const char *full = "ok<DSML" PIPE "tool_calls>x";
@@ -804,6 +842,7 @@ int main(void) {
     test_force_close_hint_filtered_from_reasoning();
     test_tool_marker_suppressed();
     test_tool_marker_false_positive_on_dsml_profile();
+    test_no_tools_marker_tail();
     test_short_dsml_spelling();
     test_utf8_safe_limit_direct();
     test_tool_calls_emitted();

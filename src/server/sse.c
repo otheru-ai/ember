@@ -588,8 +588,9 @@ void ember_sse_update(ember_sse_stream *st, const char *raw, size_t raw_len,
     }
 
     if (st->mode == EMBER_SSE_TEXT) {
-        const char *tool =
-            st->has_tools ? ember_find_tool_start(raw + st->emit_pos) : NULL;
+        // #8: match the unconditional holdback below. Caller validation still
+        // decides whether this region is a tool, ordinary prose, or rejected.
+        const char *tool = ember_find_tool_start(raw + st->emit_pos);
         size_t limit =
             ember_text_safe_limit(raw, st->emit_pos, raw_len, st->has_tools, final);
         // Stop-sequence holdback (ds4 stop_list_stream_safe_len): cut visible
