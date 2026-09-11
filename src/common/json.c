@@ -1,6 +1,5 @@
 #include "json.h"
 
-#include <errno.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -259,9 +258,12 @@ static ember_json *parse_value_inner(jp *j) {
         ember_json *v = jnew(EMBER_JSON_NUMBER);
         v->num_raw = strndup(ns, (size_t)(p - ns));  // preserve exact token
         if (!v->num_raw) ember_buf_fatal("out of memory parsing JSON number");
-        errno = 0;
+        // strtod sets ERANGE for underflow too, and an underflow yields a
+        // perfectly representable subnormal (1e-320) -- rejecting it turned
+        // valid JSON into a 400 (#24). Only a non-finite result is a number
+        // this DOM cannot hold, so that is the whole test.
         v->u.num = strtod(v->num_raw, NULL);
-        if (!isfinite(v->u.num) || errno == ERANGE) {
+        if (!isfinite(v->u.num)) {
             ember_json_free(v);
             j->ok = false;
             return NULL;
@@ -349,15 +351,34 @@ const char *ember_json_key(const ember_json *obj, int i) {
     return obj->u.arr.keys[i];
 }
 
+static int cmp_key_ptr(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+// Sort a copy of the key pointers and compare neighbours: O(n log n) per
+// object. The pairwise scan this replaces was O(n^2) on every request body,
+// and a 64 MiB body admits enough members for hours of CPU on one
+// unauthenticated connection (#7). Objects with one key have nothing to sort.
+static bool object_has_duplicate_keys(const ember_json *v) {
+    const int n = v->u.arr.count;
+    if (n < 2) return false;
+    const char **keys = malloc((size_t)n * sizeof(*keys));
+    if (!keys) ember_buf_fatal("out of memory checking JSON keys");
+    memcpy(keys, v->u.arr.keys, (size_t)n * sizeof(*keys));
+    qsort(keys, (size_t)n, sizeof(*keys), cmp_key_ptr);
+    bool dup = false;
+    for (int i = 1; i < n && !dup; ++i)
+        dup = strcmp(keys[i - 1], keys[i]) == 0;
+    free(keys);
+    return dup;
+}
+
 bool ember_json_has_duplicate_keys(const ember_json *v) {
     if (!v) return false;
     if (v->type == EMBER_JSON_OBJECT) {
-        for (int i = 0; i < v->u.arr.count; ++i) {
-            for (int j = i + 1; j < v->u.arr.count; ++j)
-                if (strcmp(v->u.arr.keys[i], v->u.arr.keys[j]) == 0)
-                    return true;
+        if (object_has_duplicate_keys(v)) return true;
+        for (int i = 0; i < v->u.arr.count; ++i)
             if (ember_json_has_duplicate_keys(v->u.arr.items[i])) return true;
-        }
     } else if (v->type == EMBER_JSON_ARRAY) {
         for (int i = 0; i < v->u.arr.count; ++i)
             if (ember_json_has_duplicate_keys(v->u.arr.items[i])) return true;

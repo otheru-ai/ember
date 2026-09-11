@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "../src/common/json.h"
 #include "../src/common/json_util.h"
@@ -64,6 +65,22 @@ static void test_edge_cases(void) {
           "length-delimited parser rejects hidden suffix after NUL");
     CHECK(ember_json_parse("1e400") == NULL,
           "non-finite number rejected");
+    // #24: strtod reports ERANGE for underflow as well, but a subnormal is a
+    // finite, representable double and must parse. Only overflow is rejected.
+    {
+        ember_json *n = ember_json_parse("1e-320");
+        CHECK(n && n->type == EMBER_JSON_NUMBER && ember_json_num(n, -1) > 0.0 &&
+              ember_json_num(n, -1) < 1e-300, "subnormal 1e-320 accepted");
+        ember_json_free(n);
+        n = ember_json_parse("1e-310");
+        CHECK(n && ember_json_num(n, -1) > 0.0, "subnormal 1e-310 accepted");
+        ember_json_free(n);
+        n = ember_json_parse("1e-324");   // below the smallest subnormal: 0.0
+        CHECK(n && ember_json_num(n, -1) == 0.0, "underflow to zero accepted as 0");
+        ember_json_free(n);
+        CHECK(ember_json_parse("1e309") == NULL, "true overflow still rejected");
+        CHECK(ember_json_parse("-1e309") == NULL, "negative overflow still rejected");
+    }
 
     ember_json *hi = ember_json_parse("\"\\ud800x\"");
     CHECK(hi && strcmp(ember_json_str(hi, ""), "\xef\xbf\xbdx") == 0,
@@ -165,8 +182,47 @@ static void test_parse_at_reports_position(void) {
     CHECK(n == NULL, "parse_n behaviour unchanged");
 }
 
+
+// #7: the duplicate-key check was a pairwise scan, O(n^2) per object on every
+// request body. The sort-based version must still find a duplicate anywhere
+// (first/last, nested, inside an array), pass unique keys of every size, and
+// check a 40k-member object in a fraction of the seconds the quadratic scan
+// took.
+static void test_duplicate_keys(void) {
+    ember_json *j = ember_json_parse("{\"a\":1,\"b\":2,\"a\":3}");
+    CHECK(j && ember_json_has_duplicate_keys(j), "duplicate at ends found");
+    ember_json_free(j);
+    j = ember_json_parse("{\"a\":1,\"b\":{\"x\":1,\"y\":2,\"x\":3}}");
+    CHECK(j && ember_json_has_duplicate_keys(j), "nested duplicate found");
+    ember_json_free(j);
+    j = ember_json_parse("[{\"k\":1},{\"k\":1,\"k\":2}]");
+    CHECK(j && ember_json_has_duplicate_keys(j), "duplicate inside array found");
+    ember_json_free(j);
+    j = ember_json_parse("{\"a\":1,\"b\":2,\"c\":[{\"d\":1}],\"e\":{}}");
+    CHECK(j && !ember_json_has_duplicate_keys(j), "unique keys pass");
+    ember_json_free(j);
+    j = ember_json_parse("{\"only\":1}");
+    CHECK(j && !ember_json_has_duplicate_keys(j), "single key has nothing to compare");
+    ember_json_free(j);
+
+    ember_buf big = {0};
+    ember_buf_putc(&big, '{');
+    for (int i = 0; i < 40000; ++i)
+        ember_buf_printf(&big, "%s\"k%d\":%d", i ? "," : "", i, i);
+    ember_buf_putc(&big, '}');
+    j = ember_json_parse(big.ptr);
+    clock_t t0 = clock();
+    const bool dup = j && ember_json_has_duplicate_keys(j);
+    const double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    CHECK(j && !dup, "40k unique keys pass");
+    CHECK(secs < 0.5, "40k-key object checked in under half a second");
+    ember_json_free(j);
+    ember_buf_free(&big);
+}
+
 int main(void) {
     printf("ember json tests\n");
+    test_duplicate_keys();
     test_parse_at_reports_position();
     test_chat_request();
     test_edge_cases();
