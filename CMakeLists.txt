@@ -660,6 +660,11 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mirror_gh_issues.py)
   set_tests_properties(mirror_gh_issues PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME perf_textfile
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test/test_perf_textfile.py)
+  set_tests_properties(perf_textfile PROPERTIES TIMEOUT 20)
 
 
   add_test(
