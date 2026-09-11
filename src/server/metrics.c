@@ -611,7 +611,8 @@ void ember_metrics_render(ember_buf *out) {
                    "FIFO was full.", g.shed);
     ember_buf_puts(out,
         "# HELP ember_http_responses_total HTTP responses written, by status "
-        "code. Streaming responses count when their headers are sent.\n"
+        "code. Streaming responses count when their headers are sent; /health "
+        "and /metrics probes are not counted.\n"
         "# TYPE ember_http_responses_total counter\n");
     for (size_t i = 0; i < N_STATUS_CODES; ++i)
         ember_buf_printf(out, "ember_http_responses_total{status=\"%d\"} %llu\n",
@@ -676,13 +677,17 @@ void ember_metrics_render(ember_buf *out) {
         "# TYPE ember_build_info gauge\n"
         "ember_build_info{version=\"%s\",revision=\"%s\"} 1\n",
         EMBER_VERSION_STRING, EMBER_GIT_REVISION);
-    if (g.start_time_s > 0.0)
+    const double start_time_s = g.start_time_s;
+    pthread_mutex_unlock(&g.lock);
+
+    // Outside the lock on purpose: every token callback takes g.lock, and a
+    // scrape must not make decode wait on procfs reads and a directory walk.
+    // The counters above were formatted under the lock; these need none.
+    if (start_time_s > 0.0)
         ember_buf_printf(out,
             "# HELP process_start_time_seconds Unix time the metrics registry "
             "first recorded anything; resets with the counters.\n"
             "# TYPE process_start_time_seconds gauge\n"
-            "process_start_time_seconds %.3f\n", g.start_time_s);
+            "process_start_time_seconds %.3f\n", start_time_s);
     render_process_metrics(out);
-
-    pthread_mutex_unlock(&g.lock);
 }

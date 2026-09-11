@@ -8,6 +8,7 @@
 #include "../common/buf.h"
 #include "../common/json_util.h"
 #include "http.h"
+#include "metrics.h"
 
 static void set_err(char *err, size_t cap, const char *msg) {
     if (err && cap) snprintf(err, cap, "%s", msg);
@@ -839,12 +840,20 @@ static void append_anthropic_message(ember_buf *messages, bool *comma,
             const char *data = ember_json_str(
                 ember_json_get(source, "data"), "");
             if (parts_comma) ember_buf_putc(&parts, ',');
-            ember_buf_puts(&parts,
-                "{\"type\":\"image_url\",\"image_url\":\"data:");
-            ember_buf_puts(&parts, media_type);
-            ember_buf_puts(&parts, ";base64,");
-            ember_buf_puts(&parts, data);
-            ember_buf_puts(&parts, "\"}");
+            // Both strings are client-controlled and this document is
+            // re-parsed as the authoritative request: unescaped, a data
+            // value could close the string and append messages of its own
+            // choosing, system role included (#6). Escaped, a quote in the
+            // payload is just a base64 decode failure later.
+            ember_buf_puts(&parts, "{\"type\":\"image_url\",\"image_url\":");
+            ember_buf url = {0};
+            ember_buf_puts(&url, "data:");
+            ember_buf_puts(&url, media_type);
+            ember_buf_puts(&url, ";base64,");
+            ember_buf_puts(&url, data);
+            ember_json_escape(&parts, url.ptr ? url.ptr : "");
+            ember_buf_free(&url);
+            ember_buf_putc(&parts, '}');
             parts_comma = true;
         } else if (!strcmp(t, "tool_result")) {
             if (parts_comma) {
@@ -1009,6 +1018,22 @@ static bool validate_anthropic_payload(const ember_json *root,
                     set_err(err, err_cap,
                             "Anthropic image blocks require a supported base64 source");
                     return false;
+                }
+                // The payload is checked against the base64 alphabet here,
+                // where the error can say so: the normalized document is
+                // now escaped (#6), so a stray quote can no longer break out
+                // of the image part, but it would surface as an opaque
+                // "invalid normalized" failure two stages later.
+                for (const char *c = ember_json_str(data, ""); *c; ++c) {
+                    const bool b64 = (*c >= 'A' && *c <= 'Z') ||
+                        (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') ||
+                        *c == '+' || *c == '/' || *c == '=' || *c == '\n' ||
+                        *c == '\r';
+                    if (!b64) {
+                        set_err(err, err_cap,
+                                "Anthropic image source data is not base64");
+                        return false;
+                    }
                 }
                 continue;
             }
@@ -1344,6 +1369,9 @@ static bool send_http(int fd, const char *ctype, const char *body, size_t n,
     ember_buf_append(&out, body, n);
     bool ok = ember_send_all(fd, out.ptr, out.len) == 0;
     ember_buf_free(&out);
+    // The buffered Responses, Completions and Anthropic replies leave through
+    // here rather than main.c's respond(), so this is their one status hook.
+    ember_metrics_record_response(200);
     return ok;
 }
 

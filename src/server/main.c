@@ -212,7 +212,8 @@ static void append_tool_loop_json(ember_buf *b, int rounds,
                      identical_results ? "true" : "false");
 }
 
-static bool respond(int fd, int code, const char *ctype, const char *body) {
+static bool respond_impl(int fd, int code, const char *ctype,
+                         const char *body, bool count) {
     ember_buf b = {0};
     const char *reason = code == 200 ? "OK"
                        : code == 204 ? "No Content"
@@ -239,8 +240,19 @@ static bool respond(int fd, int code, const char *ctype, const char *body) {
     ember_buf_free(&b);
     // Counted as written, not as delivered: a dead socket is the client's
     // outcome and is recorded through the generation outcome instead.
-    ember_metrics_record_response(code);
+    if (count) ember_metrics_record_response(code);
     return sent;
+}
+
+static bool respond(int fd, int code, const char *ctype, const char *body) {
+    return respond_impl(fd, code, ctype, body, true);
+}
+
+// Probes are not traffic: a scraper every 15 s and a load balancer's health
+// check would otherwise dominate the 200 count and hide the API's own ratio.
+static bool respond_probe(int fd, int code, const char *ctype,
+                          const char *body) {
+    return respond_impl(fd, code, ctype, body, false);
 }
 
 static void respond_api_error(int fd, ember_api_kind api, int status,
@@ -2236,13 +2248,23 @@ static void log_generation_performance(const ember_gen_result *res,
                                      res->spec_provider_block_s);
     ember_metrics_record_snapshot(greq && greq->snap_slot >= 0,
                                   res->snapshot_saved);
-    // The finish reason says how the model stopped; this says whether the
-    // server got to deliver it. Precedence: a backend failure trumps
-    // everything, then the client's own departure, then a stall.
+}
+
+// The finish reason says how the model stopped; this says whether the server
+// got to deliver it. Recorded once per attempted generation at run_chat's
+// shared exit, AFTER the final write, so a client that vanished during the
+// last send is still seen. Precedence follows the streaming error path
+// (`!res.ok && !g.disconnected` is what reports a backend error there): the
+// client's own departure first, because a rejected callback is how the
+// backend learns of it and it then reports `cancelled` -- and the stub also
+// reports `!ok` -- neither of which is the backend's fault; then a genuine
+// backend failure; then a cancellation the client did not cause; then a stall.
+static void record_generation_outcome(const ember_gen_result *res,
+                                      const gen_ctx *g) {
     ember_metrics_record_outcome(
-        !res->ok ? "backend_error"
+        g->disconnected ? "client_disconnected"
+        : !res->ok ? "backend_error"
         : res->cancelled ? "cancelled"
-        : (g && g->disconnected) ? "client_disconnected"
         : generation_stalled(res) ? "stalled" : "ok");
 }
 
@@ -3070,6 +3092,9 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
         .keepalive_while_collecting = native_stream && req->has_tools,
         .dsml_active = req->has_tools && eff_temp > 0.0,
     };
+    // stream_open_failed jumps to run_done from before `res` exists; the
+    // outcome boundary must not read it then.
+    bool generation_attempted = false;
     if (req->stream) {
         ember_buf hdr = {0};
         ember_sse_headers(&hdr, g_enable_cors);
@@ -3119,6 +3144,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
         greq.fg_ud = &g;
     }
     ember_gen_result res = ember_backend_generate(be, &greq);
+    generation_attempted = true;
     // Commit only an actual backend snapshot, never merely an uncancelled run.
     finish_prompt_snapshot(
         srv, be, snap_slot, ids, snap_cut,
@@ -3726,6 +3752,12 @@ atomic_backend_failed:
         "server_error", res.error_code[0] ? res.error_code : "internal_error");
 
 run_done:
+    // Every path that reached ember_backend_generate() ends here, including
+    // atomic_backend_failed above; the pre-generation returns do not, and
+    // they have no generation to classify. A stream whose header write failed
+    // never generated: the client was gone before the first byte.
+    if (generation_attempted) record_generation_outcome(&res, &g);
+    else ember_metrics_record_outcome("client_disconnected");
     ember_tool_calls_free(&tc);
     free(content_trimmed);
     free(content_stop);
@@ -3976,7 +4008,7 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/health") == 0) {
-        respond(fd, 200, "text/plain", "ok\n");
+        respond_probe(fd, 200, "text/plain", "ok\n");
         return;
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(req->path, "/v1/models") == 0) {
@@ -4069,8 +4101,8 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
         ember_buf m = {0};
         ember_metrics_render(&m);
         // text/plain with the exposition version is what scrapers content-negotiate.
-        respond(fd, 200, "text/plain; version=0.0.4; charset=utf-8",
-                m.ptr ? m.ptr : "");
+        respond_probe(fd, 200, "text/plain; version=0.0.4; charset=utf-8",
+                      m.ptr ? m.ptr : "");
         ember_buf_free(&m);
         return;
     }

@@ -154,6 +154,66 @@ def timing_regressions(server):
             assert series(body, "ember_request_mean_token_gap_seconds_count") == 1, body
 
 
+def outcome_and_status_regressions(server):
+    """codex-2438779's review of ce322c9, R1-R3: statuses that left through
+    the adapters' own writer, backend failures that skipped the outcome hook,
+    and a disconnect classified as a cancellation."""
+    from test_tool_safety_server import dsml_write, tool_request
+
+    def labelled(body, name, **labels):
+        key = name + "{" + ",".join(f'{k}="{v}"' for k, v in labels.items()) + "}"
+        return series(body, key)
+
+    # R1: buffered Responses, Completions and Anthropic replies bypass
+    # respond(); each must still count exactly one 200.
+    with timing_server(server, {"EMBER_STUB_REPLY": "counted"}) as base:
+        for path, payload in (
+            ("/v1/responses", {"model": "stub", "input": "hi", "max_output_tokens": 4}),
+            ("/v1/completions", {"model": "stub", "prompt": "hi", "max_tokens": 4}),
+            ("/v1/messages", {"model": "stub", "max_tokens": 4,
+                              "messages": [{"role": "user", "content": "hi"}]}),
+        ):
+            before = labelled(get(base + "/metrics")[2], "ember_http_responses_total", status="200")
+            status, _ = post_json(base + path, payload)
+            assert status == 200, (path, status)
+            after = labelled(get(base + "/metrics")[2], "ember_http_responses_total", status="200")
+            assert after == before + 1, f"{path}: {before} -> {after}"
+
+    # R2: a provider failure on the hidden replacement returns 500 and MUST
+    # land in the outcome counter -- it never reached the performance log.
+    with timing_server(server, {"EMBER_STUB_REPLY": dsml_write(path=None, content="x"),
+                               "EMBER_STUB_RECOVERY_ERROR": "backend_retry_failed"}) as base:
+        code = post_json_raw(base + "/v1/chat/completions", json.dumps(tool_request()).encode())
+        assert code == 500, code
+        body = get(base + "/metrics")[2]
+        assert labelled(body, "ember_generation_outcomes_total", outcome="backend_error") == 1, body
+        assert labelled(body, "ember_http_responses_total", status="500") == 1, body
+        assert labelled(body, "ember_jobs", state="running") == 0, body
+
+    # R3: a client that leaves mid-stream makes the backend report cancelled
+    # too; the outcome must say who caused it.
+    with timing_server(server, {"EMBER_STUB_REPLY": "a" * 400,
+                               "EMBER_STUB_TOKEN_DELAY_US": "20000"}) as base:
+        port = int(base.rsplit(":", 1)[1])
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        payload = json.dumps({"model": "stub", "stream": True, "max_tokens": 400,
+                              "messages": [{"role": "user", "content": "go"}]}).encode()
+        sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Type: application/json\r\n"
+                     b"Content-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+        sock.recv(4096)          # headers plus the first delta: generation is live
+        sock.close()             # and now the client is gone
+        deadline = time.monotonic() + 10
+        while True:
+            body = get(base + "/metrics")[2]
+            if labelled(body, "ember_jobs", state="running") == 0:
+                break
+            assert time.monotonic() < deadline, "generation never finished after disconnect"
+            time.sleep(0.05)
+        assert labelled(body, "ember_generation_outcomes_total", outcome="client_disconnected") == 1, body
+        assert labelled(body, "ember_generation_outcomes_total", outcome="cancelled") == 0, body
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: test_metrics_server.py EMBER_SERVER")
@@ -271,3 +331,4 @@ def main() -> None:
 if __name__ == "__main__":
     main()
     timing_regressions(sys.argv[1])
+    outcome_and_status_regressions(sys.argv[1])
