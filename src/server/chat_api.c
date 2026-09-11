@@ -177,16 +177,27 @@ static void effort_to_mode(const char *s, ember_think_mode *mode, bool *enabled)
     *enabled = true;
 }
 
-static void stop_push(ember_chat_request *r, const char *s) {
-    if (!s || !s[0]) return;
+// Issue #22: reject (do not silently truncate) once the stop list exceeds
+// EMBER_STOP_MAX_COUNT entries or EMBER_STOP_MAX_TOTAL_BYTES total; the flag
+// lets the HTTP layer answer 400 with code stop_limit_exceeded.
+static bool stop_push(ember_chat_request *r, const char *s) {
+    if (!s || !s[0]) return true;
     if (r->n_stop == INT_MAX ||
         (size_t)(r->n_stop + 1) > SIZE_MAX / sizeof(char *))
         ember_buf_fatal("too many stop strings");
+    size_t len = strlen(s);
+    if (r->n_stop >= EMBER_STOP_MAX_COUNT ||
+        r->stop_total_bytes + len > EMBER_STOP_MAX_TOTAL_BYTES) {
+        r->stop_limit_rejected = true;
+        return false;
+    }
     char **grown = (char **)realloc(
         r->stop, (size_t)(r->n_stop + 1) * sizeof(char *));
     if (!grown) ember_buf_fatal("out of memory parsing stop strings");
     r->stop = grown;
     r->stop[r->n_stop++] = dup_or(s, NULL);
+    r->stop_total_bytes += len;
+    return true;
 }
 
 static void tool_choice_name_push(ember_chat_request *r, const char *name) {
@@ -486,15 +497,16 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
         out->dry_window_set = true;
     }
 
-    // stop: string or array of strings.
+    // stop: string or array of strings. Bounded at parse (issue #22).
     const ember_json *stop = ember_json_get(root, "stop");
     if (stop) {
-        if (stop->type == EMBER_JSON_STRING) stop_push(out, ember_json_str(stop, NULL));
-        else if (stop->type == EMBER_JSON_ARRAY) {
+        if (stop->type == EMBER_JSON_STRING) {
+            if (!stop_push(out, ember_json_str(stop, NULL))) goto invalid;
+        } else if (stop->type == EMBER_JSON_ARRAY) {
             for (int i = 0; i < ember_json_len(stop); i++) {
                 const ember_json *item = ember_json_at(stop, i);
                 if (!item || item->type != EMBER_JSON_STRING) goto invalid;
-                stop_push(out, item->u.str);
+                if (!stop_push(out, item->u.str)) goto invalid;
             }
         } else if (stop->type != EMBER_JSON_NULL) goto invalid;
     }
@@ -638,9 +650,14 @@ bool ember_chat_request_parse(const ember_json *root, ember_chat_request *out) {
     }
     return true;
 
-invalid:
+invalid: {
+    // Preserve the issue-#22 rejection reason across the cleanup memset so
+    // the HTTP layer can answer with code stop_limit_exceeded.
+    bool stop_limit = out->stop_limit_rejected;
     ember_chat_request_free(out);
+    out->stop_limit_rejected = stop_limit;
     return false;
+}
 }
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop

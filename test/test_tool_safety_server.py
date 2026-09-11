@@ -1468,6 +1468,20 @@ def main() -> int:
     assert all(block["type"] != "thinking" for block in body["content"]), body
     assert "private reasoning" not in json.dumps(body), body
 
+    # Issue #22 part 1: an over-limit client stop list is rejected at parse
+    # with a typed 400 (code stop_limit_exceeded), not silently accepted and
+    # not reported as a generic invalid_request.
+    too_many_stops = {
+        "model": "stub",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stop": ["s%d" % i for i in range(17)],
+    }
+    code, body = run_case(server, "unused", "unused", payload=too_many_stops)
+    assert code == 400, body
+    assert body["error"]["type"] == "invalid_request_error", body
+    assert body["error"]["code"] == "stop_limit_exceeded", body
+
     print("tool-safety server integration: PASS")
     return 0
 

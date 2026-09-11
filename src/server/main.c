@@ -4059,7 +4059,9 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
     if (strcmp(req->method, "POST") == 0 &&
         (is_chat || is_responses || is_anthropic || is_completion)) {
         ember_json *root = ember_json_parse_n(req->body, req->body_len);
-        ember_chat_request creq;
+        // {0}: when an adapter rejects before ember_chat_request_parse runs,
+        // the parse-failure detail fields below must read as unset.
+        ember_chat_request creq = {0};
         char parse_err[192] = {0};
         bool parsed = root &&
             (is_responses
@@ -4092,11 +4094,19 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
             ember_api_kind api = is_anthropic ? EMBER_API_ANTHROPIC
                 : is_responses ? EMBER_API_RESPONSES
                 : is_completion ? EMBER_API_COMPLETIONS : EMBER_API_CHAT;
+            // Issue #22: a stop list past EMBER_STOP_MAX_COUNT /
+            // EMBER_STOP_MAX_TOTAL_BYTES is a typed rejection, not a generic
+            // invalid_request, so clients can tell the bound from bad JSON.
             respond_api_error(
                 fd, api, 400,
-                parse_err[0] ? parse_err
+                creq.stop_limit_rejected
+                    ? "stop list exceeds limits (max 16 strings, "
+                      "4096 total bytes)"
+                    : parse_err[0] ? parse_err
                     : "invalid JSON request or missing messages",
-                "invalid_request_error", "invalid_request");
+                "invalid_request_error",
+                creq.stop_limit_rejected ? "stop_limit_exceeded"
+                                         : "invalid_request");
         }
         if (root) ember_json_free(root);
         return;

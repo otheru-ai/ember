@@ -64,6 +64,16 @@ typedef struct {
     int                n_parts;
 } ember_chat_msg;
 
+// Issue #22 bounds on the client-supplied stop list, enforced at parse in
+// ember_chat_request_parse (the single funnel for every API adapter). No ds4
+// or lucebox numeric stop limit exists to preserve parity with -- the upstream
+// citations in this repo cover stop *behaviour* (holdback, truncation), not
+// bounds -- so these are new DoS limits. 16 entries / 4 KiB total is far above
+// legitimate client use (typically 0-4 short strings) while capping the
+// per-token rescan cost the issue measures.
+#define EMBER_STOP_MAX_COUNT 16
+#define EMBER_STOP_MAX_TOTAL_BYTES 4096
+
 typedef struct {
     ember_api_kind  api;
     ember_prompt_profile prompt_profile; // set from loaded GGUF metadata
@@ -105,6 +115,12 @@ typedef struct {
     int             dry_allowed_length; bool dry_allowed_length_set;
     int             dry_window;         bool dry_window_set;
     char          **stop;         int  n_stop;   // stop strings (owned)
+    // Issue #22: the client stop list is bounded at parse so one request
+    // cannot pin the generation worker in an O(n_stops x L^2) per-token
+    // rescan. A violating request is rejected with 400
+    // invalid_request_error / code stop_limit_exceeded.
+    size_t          stop_total_bytes;  // sum of strlen over stop[]
+    bool            stop_limit_rejected; // parse rejection was the stop bound
     // Thinking / reasoning-effort (resolved per ds4 semantics).
     char           *reasoning_effort;  // raw string (owned or NULL; kept for logs)
     // Explicit phase-1 cap. Accepts Ember's reasoning_budget_tokens and the

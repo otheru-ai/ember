@@ -812,6 +812,69 @@ static void test_tool_choice_constraints(void) {
     ember_json_free(v);
 }
 
+static void test_stop_list_bounds(void) {
+    // Issue #22: the client stop list is bounded at parse -- at most
+    // EMBER_STOP_MAX_COUNT entries and EMBER_STOP_MAX_TOTAL_BYTES in total.
+    // These checks fail on 68e69cb, where an unbounded stop list parses.
+    char *body = (char *)malloc(16384);
+    CHECK(body != NULL, "stop bound test buffer");
+    if (!body) return;
+
+    // 17 entries: one past EMBER_STOP_MAX_COUNT -> rejected.
+    size_t off = (size_t)snprintf(body, 16384,
+                                  "{\"messages\":[],\"stop\":[");
+    for (int i = 0; i < 17; i++)
+        off += (size_t)snprintf(body + off, 16384 - off, "%s\"x\"", i ? "," : "");
+    snprintf(body + off, 16384 - off, "]}");
+    ember_json *v = ember_json_parse(body);
+    ember_chat_request req;
+    CHECK(v && !ember_chat_request_parse(v, &req), "17 stop strings rejected");
+    CHECK(req.stop_limit_rejected, "rejection flagged as the stop bound");
+    ember_json_free(v);
+
+    // 16 x 256 bytes = exactly EMBER_STOP_MAX_TOTAL_BYTES -> accepted,
+    // proving the bound is inclusive, not off-by-one.
+    off = (size_t)snprintf(body, 16384, "{\"messages\":[],\"stop\":[");
+    for (int i = 0; i < 16; i++) {
+        off += (size_t)snprintf(body + off, 16384 - off, "%s\"", i ? "," : "");
+        memset(body + off, 'y', 256);
+        off += 256;
+        body[off++] = '"';
+    }
+    snprintf(body + off, 16384 - off, "]}");
+    v = ember_json_parse(body);
+    CHECK(v && ember_chat_request_parse(v, &req), "16 stops of 256 B accepted");
+    CHECK(req.n_stop == 16 && req.stop_total_bytes == 4096,
+          "boundary request keeps every stop");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    // Two entries totalling 6000 bytes -> rejected by the byte bound even
+    // though the entry count is far below the cap.
+    off = (size_t)snprintf(body, 16384, "{\"messages\":[],\"stop\":[");
+    for (int i = 0; i < 2; i++) {
+        off += (size_t)snprintf(body + off, 16384 - off, "%s\"", i ? "," : "");
+        memset(body + off, 'z', 3000);
+        off += 3000;
+        body[off++] = '"';
+    }
+    snprintf(body + off, 16384 - off, "]}");
+    v = ember_json_parse(body);
+    CHECK(v && !ember_chat_request_parse(v, &req),
+          "6000 total stop bytes rejected");
+    CHECK(req.stop_limit_rejected, "byte rejection flagged as the stop bound");
+    ember_json_free(v);
+
+    // Ordinary short stop strings are untouched by the bound.
+    v = ember_json_parse("{\"messages\":[],\"stop\":\"END\"}");
+    CHECK(v && ember_chat_request_parse(v, &req), "single stop string accepted");
+    CHECK(req.n_stop == 1 && req.stop_total_bytes == 3, "single stop recorded");
+    ember_chat_request_free(&req);
+    ember_json_free(v);
+
+    free(body);
+}
+
 int main(void) {
     printf("ember chat_api tests\n");
     test_full_request();
@@ -829,6 +892,7 @@ int main(void) {
     test_reasoning_budget_alias();
     test_reasonix_thinking_object();
     test_tool_choice_constraints();
+    test_stop_list_bounds();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
