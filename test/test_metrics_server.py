@@ -214,6 +214,84 @@ def outcome_and_status_regressions(server):
         assert labelled(body, "ember_generation_outcomes_total", outcome="cancelled") == 0, body
 
 
+def stopped_stream_tail_regressions(server):
+    # #25: terminal error/watchdog paths must release text holdback, without
+    # passing rejected calls to the tool emitter. Real HTTP, deterministic stub.
+    from test_tool_safety_server import run_case, tool_request, dsml_write
+    tail = "visible <ordinary> tail   "
+    for reason in ("repetition_detected", "reasoning_cycle_detected",
+                   "prompt_echo_detected"):
+        for typed_error in ("0", "1"):
+            payload = tool_request(stream=True)
+            payload["stop"] = ["NEVER_MATCH_THIS_STOP"]
+            code, wire = run_case(
+                server, tail, "", stream=True, payload=payload,
+                termination_reason=reason,
+                extra_env={"EMBER_STREAM_WATCHDOG_ERROR": typed_error})
+            chunks = [json.loads(line[6:]) for line in wire.splitlines()
+                      if line.startswith("data: {")]
+            content = "".join(c.get("delta", {}).get("content", "")
+                              for obj in chunks for c in obj.get("choices", []))
+            assert code == 200 and content == tail, (reason, content, wire)
+            assert wire.count("data: [DONE]") == 1, wire
+            assert ("event: error" in wire) == (typed_error == "1"), wire
+            assert '"type":"function"' not in wire, wire
+
+    # Required-tool validation rejects ordinary prose, but must preserve its
+    # held-back visible tail before the error. No executable block is emitted.
+    payload = tool_request(stream=True)
+    payload["tool_choice"] = "required"
+    code, wire = run_case(server, tail, "", stream=True, payload=payload,
+                          extra_env={"EMBER_STREAM_TOOL_ERROR": "1"})
+    chunks = [json.loads(line[6:]) for line in wire.splitlines()
+              if line.startswith("data: {")]
+    content = "".join(c.get("delta", {}).get("content", "")
+                      for obj in chunks for c in obj.get("choices", []))
+    assert code == 200 and content == tail, (content, wire)
+    assert wire.count("event: error") == 1, wire
+    assert '"type":"function"' not in wire, wire
+
+    # Native Responses/Anthropic must release the same tail into deltas.
+    from test_tool_safety_server import responses_tool_request
+    for endpoint, native_payload, kind, field in (
+        ("/v1/responses", responses_tool_request(),
+         "response.output_text.delta", "delta"),
+        ("/v1/messages", {"model": "stub", "stream": True, "max_tokens": 128,
+                          "thinking": {"type": "disabled"},
+                          "messages": [{"role": "user", "content": "hi"}]},
+         "content_block_delta", "text"),
+    ):
+        code, wire = run_case(server, tail, "", stream=True, endpoint=endpoint,
+                              payload=native_payload,
+                              termination_reason="repetition_detected")
+        events = [json.loads(line[6:]) for line in wire.splitlines()
+                  if line.startswith("data: {")]
+        pieces = [obj for obj in events if obj.get("type") == kind]
+        text = "".join(obj[field] if field == "delta" else
+                       obj.get("delta", {}).get(field, "") for obj in pieces)
+        assert code == 200 and text == tail, (endpoint, text, wire)
+
+    # A watchdog during thinking retains a partial </think> prefix until final.
+    payload = tool_request(stream=True)
+    payload["reasoning_effort"] = "high"
+    reasoning = "reasoning </thi"
+    code, wire = run_case(server, reasoning, "", stream=True, payload=payload,
+                          termination_reason="reasoning_cycle_detected")
+    events = [json.loads(line[6:]) for line in wire.splitlines()
+              if line.startswith("data: {")]
+    text = "".join(c.get("delta", {}).get("reasoning_content", "")
+                   for obj in events for c in obj.get("choices", []))
+    assert code == 200 and text == reasoning, (text, wire)
+    assert '"type":"function"' not in wire, wire
+
+    # Negative control: a rejected real block stays hidden on a watchdog stop.
+    secret_call = dsml_write(path="/tmp/DO_NOT_EMIT", content="secret")
+    code, wire = run_case(server, "prefix " + secret_call, "", stream=True,
+                          termination_reason="prompt_echo_detected")
+    assert code == 200 and "DO_NOT_EMIT" not in wire, wire
+    assert '"type":"function"' not in wire, wire
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: test_metrics_server.py EMBER_SERVER")
@@ -332,3 +410,4 @@ if __name__ == "__main__":
     main()
     timing_regressions(sys.argv[1])
     outcome_and_status_regressions(sys.argv[1])
+    stopped_stream_tail_regressions(sys.argv[1])

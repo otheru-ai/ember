@@ -3188,9 +3188,12 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
             parse_executable_tool_calls(
                 req, stream_scan, &stream_probe, &stream_tool_error);
         bool had_tools = false;
-        if (!generation_stalled(&res) && !unclosed_think_tool &&
-            stream_tools_valid) {
+        // #25: release ordinary text/stop holdback even on terminal errors.
+        // update remains silent in TOOL mode; only validated calls may emit.
+        if (!g.disconnected)
             ember_sse_update(&st, g.acc.ptr, g.acc.len, true, &g.scratch);
+        if (!generation_stalled(&res) && !unclosed_think_tool &&
+            stream_tools_valid && !g.disconnected) {
             had_tools =
                 ember_sse_emit_tools(&st, g.acc.ptr, g.acc.len, &g.scratch);
         }
@@ -3345,10 +3348,11 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
             parse_executable_tool_calls(
                 req, content, &tc, &native_tool_error);
         bool had_tools = false;
+        // Same final text flush as Chat; native tool deltas stay validated.
+        if (!g.disconnected)
+            ember_sse_update(&st, g.acc.ptr, g.acc.len, true, &g.scratch);
         if (res.ok && !generation_stalled(&res) && !unclosed_think_tool &&
             native_tools_valid && !g.disconnected) {
-            ember_sse_update(
-                &st, g.acc.ptr, g.acc.len, true, &g.scratch);
             had_tools = ember_sse_emit_tools(
                 &st, g.acc.ptr, g.acc.len, &g.scratch);
         }
