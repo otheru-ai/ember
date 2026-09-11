@@ -422,8 +422,9 @@ ROCm toolchain image
         |
         +-- release target
               Ubuntu base + stripped server + crash shim
-              + exact recursive ROCm runtime dependency closure
+              + exact recursive ROCm runtime dependency closure (incl. rocminfo)
               + gfx1151 rocBLAS data + download utilities
+              + vision behavioural gate (gate.py + policy-v4.json)
 
         +-- dev-xdna / release-xdna targets (opt-in)
               release contents + pinned XRT/XDNA userspace

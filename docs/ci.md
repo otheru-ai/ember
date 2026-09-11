@@ -66,17 +66,6 @@ The source invariant gate checks drift between the two hand-maintained CMake
 lists; container compilation and the CPU-capable engine tests add separate
 coverage. None establishes HIP kernel arithmetic correctness.
 
-The saved-ISA ROCMI4 W4A8 compile-evidence gate is intentionally GitHub-only.
-It builds both packing variants in AMD's pinned ROCm 10.0 development container
-and retains their assembly, object, disassembly, and CMake contract as GitHub
-release evidence. Every change below `engine/ggml/src/ggml-cuda/` or
-`engine/ggml/rocmfpx/` triggers it. Forgejo remains the source and GPU-free CI
-gate, but does not duplicate this multi-gigabyte ROCm artifact job: the mirrored
-commit cannot enter GitHub publication or gfx1151 certification until GitHub's
-compile-evidence workflow passes. This is an intentional artifact-retention and
-publisher boundary, not a claim that the Forgejo CPU suite proves the production
-HIP translation unit.
-
 ## Jobs
 
 Ordered cheapest-first so a break reports in seconds.
@@ -91,7 +80,7 @@ Ordered cheapest-first so a break reports in seconds.
 | `source-gate` | release gate | Strict Release build and full GPU-free suite against the exact commit being published. |
 | `publish-candidate` | release-candidate gate | After every `main` CI job passes, calls the container workflow for that exact SHA. |
 | `release-image` | release gate | Publishes immutable commit candidates automatically; for version tags it verifies the metadata-only child of the certified gfx1151 tree, validates CalVer, pushes version and `latest`, and rejects fixed critical vulnerabilities. |
-| `certify-and-release` | release gate | Calls the dedicated Strix Halo runner after candidate publication; it verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, DSpark, and a live generation request, then promotes the candidate. |
+| `gfx1151-certify.yml` | release gate (manual) | Not called by CI: run the `gfx1151 certification` workflow by hand against a published `sha-*` candidate. It verifies the immutable image and model digests, GEMM batches, exact and resident-session differential paths, DSpark, and a live generation request, then promotes the candidate. |
 
 ## Runner setup
 
@@ -170,18 +159,21 @@ Package settings -> Danger Zone -> Change visibility.
 
 The hardware gate uses the dedicated repository runner
 `ember-gfx1151-prod`, registered on the Halo host with labels `self-hosted`,
-`linux`, `x64`, and `gfx1151`. Only a trusted push to `main` can call it; pull
-request jobs never target this runner. Certification checks IOMMU and device
-access, generates deterministic non-sensitive prompts in the runner temporary
-directory, stops the configured production container for exclusive GPU access,
-and restores it even when a validator fails. Manual dispatch remains available
-only for infrastructure recovery or an explicit CalVer override.
+`linux`, `x64`, and `gfx1151`. Only a manual dispatch by a repository member
+reaches it; pull request jobs never target this runner. Certification checks
+IOMMU and device access, generates deterministic non-sensitive prompts in the
+runner temporary directory, stops the configured production container for
+exclusive GPU access, and restores it even when a validator fails.
 
 The certification sequence is:
 
 1. Push the candidate to Forgejo `main`. The mirror, GitHub CI, immutable
-   candidate-image publication, vulnerability scan, and gfx1151 certification
-   happen automatically.
+   candidate-image publication and vulnerability scan happen automatically;
+   certification does not. Wait for the `sha-<commit>` image, then dispatch
+   `gfx1151 certification` with that commit as `commit_sha`. Do not push to
+   `main` again until promotion has finished: the promote job aborts with
+   "main advanced after certification began" (it did on 2026-09-09, after a
+   14-minute hardware pass) and the outage bought nothing.
 2. The hardware job reads the fixed quant and drafter paths from repository
    variables, verifies both published digests, and uses generated prompts for
    DSpark and the disk round trip. Neither model can be substituted at dispatch

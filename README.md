@@ -348,8 +348,9 @@ validation or benchmarking.
 
 The contributor-facing contract is in [`AGENTS.md`](AGENTS.md). It records the
 source-list invariants, GPU validation protocol, and architectural rules that
-are easy to break while changing the server or vendored engine. Keep it and
-[`CLAUDE.md`](CLAUDE.md) aligned when build or test conventions change.
+are easy to break while changing the server or vendored engine.
+[`CLAUDE.md`](CLAUDE.md) points Claude Code at it and carries no copy, so the
+contract changes in one place.
 
 Ember is licensed under the [MIT License](LICENSE). Model weights are distributed
 separately under the license on their Hugging Face model card.

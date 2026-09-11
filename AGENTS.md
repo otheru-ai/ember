@@ -44,8 +44,8 @@ Primary documentation to consult, in order:
 - `docs/performance.md` — measured TTFT (cold and prefix-cache warm), decode
   throughput against context, and per-kernel roofline position.
 - `docs/quant-quality-reports.md` — quant evaluation workflow and release gates.
-- `CLAUDE.md` — a parallel guidance file with overlapping content; keep both
-  files consistent when you change build/test/convention facts.
+- `CLAUDE.md` — a pointer for Claude Code that defers to this file as the single
+  source of truth and deliberately carries no copy, so add guidance here.
 
 ## Repository layout
 
@@ -117,8 +117,10 @@ scripts/build.sh                                          # -> build-rocm/ember-
 - Tests use a hand-rolled `CHECK(cond, msg)` macro with `g_pass`/`g_fail`
   counters — no framework. **Adding a test file requires a new
   `add_executable` + `target_link_libraries` + `add_test` triple in the root
-  `CMakeLists.txt`**, and the new ctest name must be added to `EMBER_C_TESTS`
-  (which sets the 60s `TIMEOUT`). Link `ember_core`, plus `m` and/or `xgrammar`
+  `CMakeLists.txt`**, and the new ctest name needs a `TIMEOUT` — either as a
+  member of `EMBER_C_TESTS` (which sets 60s) or in its own
+  `set_tests_properties(... PROPERTIES TIMEOUT n)`; `ci/check_invariants.py`
+  fails a test that has none. Link `ember_core`, plus `m` and/or `xgrammar`
   as the test needs them — a bare `ember_core` is the common case. An
   ember-owned target must also join `EMBER_STRICT_TARGETS`; see CI gates below.
 - **Two CMake source lists must stay in sync.** `ember_core` (stub build) and
@@ -134,11 +136,14 @@ scripts/build.sh                                          # -> build-rocm/ember-
   GPU-free coverage: `test_prefill_policy`, `test_dspark_scheduler`,
   `test_progress_cycle_detector`, `test_sampler`, `test_pre_tokenizer`,
   `test_continuous_batch_{scheduler,executor}`, `test_resident_batch_coordinator`,
-  and the `test_xdna_*` set. These are exactly the targets held *out* of
-  `EMBER_STRICT_TARGETS` — upstream keeps its own warning standard, and a
-  directory-scoped strict flag would turn every fork sync into a warning-fixing
-  exercise. `test_thinking_budget` is C and receives strict flags directly; it
-  exercises the first C-compatible engine orchestration component.
+  and the `test_xdna_*` set. The vendored-engine targets among these are held
+  *out* of `EMBER_STRICT_TARGETS` — upstream keeps its own warning standard, and
+  a directory-scoped strict flag would turn every fork sync into a warning-fixing
+  exercise — while Ember's own `providers/xdna2/` tests call `ember_strict()`
+  directly: five of the six `test_xdna_*` targets do, and only
+  `test_xdna_dspark_provider` is unflagged. `test_thinking_budget` is C and
+  receives strict flags directly; it exercises the first C-compatible engine
+  orchestration component.
 
 ## Runtime verification (GPU-dependent — read before running)
 
@@ -159,10 +164,12 @@ round-trip, or (when DSpark is configured) on the speculative path. With
 `--batch-sessions 2` it also verifies two resident sessions against the serial
 baseline.
 
-For releases, GitHub CI performs this validation automatically on the dedicated
-gfx1151 runner after candidate publication. It checks IOMMU and the pinned model
-pair, quiesces the configured production container for exclusive GPU access,
-and restores production even when certification fails.
+Certification is a deliberate act, not an automatic one: CI no longer calls the
+gfx1151 runner on merge, so run the `gfx1151 certification` workflow by hand
+(`workflow_dispatch`, or `workflow_call`) against a published `sha-*` candidate
+for the commit you want to release. It checks IOMMU and the pinned model pair,
+quiesces the configured production container for exclusive GPU access, and
+restores production even when certification fails.
 
 ### Kernel profiling
 
@@ -405,16 +412,19 @@ in `engine/CMakeLists.txt` — do not re-enable until the graph key is stable).
   thinking budget, progress cycle detector, continuous batch
   scheduler/executor, resident batch coordinator).
 - Python tests run through ctest too, and are registered only when CMake finds
-  a Python 3 interpreter. Four spawn the real `ember-server` binary and carry a
-  tighter 20s timeout: `test_continuous_batch_server.py`,
-  `test_tool_safety_server.py`, `test_request_budgets_server.py`,
-  `test_client_compatibility_server.py`. The rest are offline analysis — the
-  quant pipeline (`test_quant_quality_report.py`, `test_quant_behavior_eval.py`,
+  a Python 3 interpreter. Six spawn the real `ember-server` binary:
+  `test_continuous_batch_server.py`, `test_tool_safety_server.py`,
+  `test_metrics_server.py`, `test_request_budgets_server.py` and
+  `test_client_compatibility_server.py` at a 20s timeout, and
+  `test_tool_continuation_server.py` at 60s. The other eighteen do not spawn
+  the server — among them the quant pipeline
+  (`test_quant_quality_report.py`, `test_quant_behavior_eval.py`,
   `test_gguf_tensor_error.py`, `test_quant_manifest_corpus.py`,
   `test_resident_benchmark.py`) and the release tooling
   (`test_release_scripts.py`, `test_release_changelog.py`,
-  `test_mirror_gh_issues.py`). All Python is stdlib-only; there is no
-  `pyproject.toml` and no dependency install step.
+  `test_mirror_gh_issues.py`); `CMakeLists.txt` registers the full set. All
+  Python is stdlib-only; there is no `pyproject.toml` and no dependency install
+  step.
 - GPU-dependent runtime validation requires exclusive access to a target GPU.
   XDNA claims additionally require the pinned host driver/firmware/XRT tuple,
   translated IOMMU domains, `/dev/accel/accel0`, provider validators, and the
@@ -470,7 +480,8 @@ still fail three of these, so run them before pushing anything non-trivial.
    floor for each file individually and only ever moves up. An aggregate
    percentage would let a new untested 500-line module land unnoticed; the
    flip side is that adding uncovered lines to an already well-covered file
-   (`sse.c` is at 94.6) fails CI even though the project total barely moves.
+   (`sse.c`'s floor is 95.3 in `ci/coverage_floors.json`) fails CI even though
+   the project total barely moves.
    Reproduce with a `--coverage -O0 -g` build tree and
    `python3 ci/coverage.py --build build-cov`.
 
@@ -503,9 +514,12 @@ above. `docs/ci.md` is the long-form reference.
   directories. `compose.build.yaml` is the explicit local source-build override.
 - The `dev` target is AMD's stock
   `rocm/dev-ubuntu-24.04:10.0.0-full` plus build tooling, source, and symbols.
-  The Ubuntu-based `release` target contains only the stripped server, its
-  recursive ROCm ELF dependency closure, rocBLAS runtime kernel data, download
-  utilities, and `libsegvtrace.so`. The shim is LD_PRELOAD'd to print a
+  The Ubuntu-based `release` target contains the stripped server, its recursive
+  ROCm ELF dependency closure (including `rocminfo`, which the entrypoint needs
+  to identify the GPU), rocBLAS runtime kernel data, download utilities,
+  `libsegvtrace.so`, and the vision behavioural gate
+  (`/opt/ember/vision-gate/gate.py` with `policy-v4.json`, so a certification
+  can run against the image it certifies). The shim is LD_PRELOAD'd to print a
   symbolized backtrace on fatal signals because a real core dump is impractical
   at ~100 GB RSS.
 - The experimental `release-xdna` target layers an XRT userspace stack, XDNA
