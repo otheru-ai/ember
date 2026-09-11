@@ -100,6 +100,29 @@ endif()
 # vendor/xgrammar/VENDOR.md.
 add_subdirectory(vendor/xgrammar)
 
+# ── build identity for /metrics (ember_build_info) ───────────────────────
+# The release line comes from the VERSION file so a scrape can tie a latency
+# change to a release without a container label lookup; the revision is
+# best-effort (Docker builds exclude .git and simply report none). Applied as a
+# global definition on purpose: both hand-maintained source lists (ember_core
+# and ember-dflash) compile metrics.c and must agree on it.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" EMBER_VERSION_STRING LIMIT_COUNT 1)
+if(NOT EMBER_VERSION_STRING)
+  set(EMBER_VERSION_STRING "dev")
+endif()
+set(EMBER_GIT_REVISION "")
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE EMBER_GIT_REVISION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+endif()
+add_compile_definitions(
+  EMBER_VERSION_STRING="${EMBER_VERSION_STRING}"
+  EMBER_GIT_REVISION="${EMBER_GIT_REVISION}")
+
 # ── server/model layer (pure C, no GPU) ──────────────────────────────────
 add_library(ember_core STATIC
   src/server/sse.c

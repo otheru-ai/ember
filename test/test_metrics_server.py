@@ -32,6 +32,18 @@ def get(url: str):
         return response.status, response.headers, response.read().decode()
 
 
+def post_json_raw(url: str, raw: bytes) -> int:
+    """POST arbitrary bytes and return only the status, 4xx included."""
+    request = urllib.request.Request(
+        url, data=raw, method="POST",
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status
+    except urllib.error.HTTPError as err:
+        return err.code
+
+
 def post_json(url: str, body: dict):
     request = urllib.request.Request(
         url, data=json.dumps(body).encode(),
@@ -209,6 +221,33 @@ def main() -> None:
                        "resident_shadow_capture"):
             assert f'ember_spec_decode_declined_total{{reason="{reason}"}}' in body, \
                 f"decline reason {reason} not exported"
+
+        # The 2026-09-10 review's gaps, each proven wired rather than declared:
+        # a lifecycle gauge family that reads zero once the request is done, an
+        # end-to-end histogram that advanced with it, a per-token gap
+        # distribution (4 tokens -> at least 3 gaps... the stub may coalesce, so
+        # >= 1), the outcome and status counters, protocol/client attribution
+        # from the User-Agent urllib sends, and the process/identity samples.
+        def labelled(name, **labels):
+            key = name + "{" + ",".join(f'{k}="{v}"' for k, v in labels.items()) + "}"
+            return series(body, key)
+        assert labelled("ember_jobs", state="waiting") == 0.0, body
+        assert labelled("ember_jobs", state="running") == 0.0, body
+        assert series(body, "ember_request_seconds_count") >= 1.0, body
+        assert series(body, "ember_token_gap_seconds_count") >= 1.0, body
+        assert labelled("ember_generation_outcomes_total", outcome="ok") >= 1.0, body
+        assert labelled("ember_http_responses_total", status="200") >= 2.0, body
+        assert labelled("ember_requests_total", api="chat", client="python") >= 1.0, body
+        assert series(body, "ember_requests_shed_total") == 0.0, body
+        assert "ember_build_info{version=" in body, body
+        assert series(body, "process_start_time_seconds") > 1.6e9, body
+        assert series(body, "process_resident_memory_bytes") > 0.0, body
+        assert series(body, "process_open_fds") >= 3.0, body
+        # A bad request is a counted response too, on its own status.
+        bad = post_json_raw(base + "/v1/chat/completions", b"{not json")
+        assert bad == 400, bad
+        _, _, body = get(base + "/metrics")
+        assert labelled("ember_http_responses_total", status="400") >= 1.0, body
 
         # /status advertises modalities, llama.cpp /props parity. The stub has
         # no tower, so vision MUST be false here -- a true value would mean the

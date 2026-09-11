@@ -237,6 +237,9 @@ static bool respond(int fd, int code, const char *ctype, const char *body) {
     if (body_len) ember_buf_append(&b, body, body_len);
     bool sent = ember_send_all(fd, b.ptr, b.len) == 0;
     ember_buf_free(&b);
+    // Counted as written, not as delivered: a dead socket is the client's
+    // outcome and is recorded through the generation outcome instead.
+    ember_metrics_record_response(code);
     return sent;
 }
 
@@ -368,6 +371,7 @@ static bool on_token(int32_t tok, void *ud) {
     {
         const double now = monotonic_now();
         if (g->timing->tokens_seen == 0) g->timing->first_token_at = now;
+        else ember_metrics_record_token_gap(now - g->timing->last_token_at);
         g->timing->last_token_at = now;
         g->timing->tokens_seen++;
     }
@@ -2227,6 +2231,19 @@ static void log_generation_performance(const ember_gen_result *res,
     // Only meaningful when speculation did NOT run; the recorder ignores an
     // empty reason rather than making every caller test it.
     ember_metrics_record_spec_decline(res->spec_decline_reason);
+    ember_metrics_record_spec_detail(res->spec_cycles, res->spec_head_s,
+                                     res->spec_verify_s,
+                                     res->spec_provider_block_s);
+    ember_metrics_record_snapshot(greq && greq->snap_slot >= 0,
+                                  res->snapshot_saved);
+    // The finish reason says how the model stopped; this says whether the
+    // server got to deliver it. Precedence: a backend failure trumps
+    // everything, then the client's own departure, then a stall.
+    ember_metrics_record_outcome(
+        !res->ok ? "backend_error"
+        : res->cancelled ? "cancelled"
+        : (g && g->disconnected) ? "client_disconnected"
+        : generation_stalled(res) ? "stalled" : "ok");
 }
 
 static void free_vision_runs(ember_vision_run *runs, int count) {
@@ -3056,6 +3073,7 @@ static void run_chat(ember_server *srv, ember_chat_request *req, int fd,
     if (req->stream) {
         ember_buf hdr = {0};
         ember_sse_headers(&hdr, g_enable_cors);
+        ember_metrics_record_response(200);
         bool header_ok = ember_send_all(fd, hdr.ptr, hdr.len) == 0;
         ember_buf_free(&hdr);
         if (!header_ok) goto stream_open_failed;
@@ -3808,8 +3826,11 @@ static void *gen_worker_main(void *arg) {
         w->queued--;  // #3: dequeued from the bounded FIFO
         w->active_jobs++;
         pthread_mutex_unlock(&w->lock);
+        ember_metrics_job_started();
 
         run_chat(job->srv, job->req, job->fd, job->enqueued_at);
+        // Enqueue to response written: every term a caller waited on.
+        ember_metrics_job_finished(monotonic_now() - job->enqueued_at);
 
         // Graphs are now populated for this request's shape; arm the reclaim.
         pthread_mutex_lock(&w->lock);
@@ -3924,8 +3945,10 @@ static bool gen_worker_submit(gen_worker *w, ember_server *srv,
         pthread_mutex_unlock(&w->lock);
         pthread_mutex_destroy(&job.lock);
         pthread_cond_destroy(&job.cond);
+        ember_metrics_record_shed();
         return false;
     }
+    ember_metrics_job_enqueued();
     if (!req->background)
         ember_background_gate_note_foreground(&w->bg_gate, job.enqueued_at);
     // cppcheck-suppress autoVariables
@@ -4015,6 +4038,11 @@ static void handler(const ember_http_request *req, int fd, void *ud) {
                 : ember_chat_request_parse(root, &creq));
         if (parsed) {
             creq.response_cors = g_enable_cors;
+            ember_metrics_record_request(
+                is_responses ? "responses" : is_anthropic ? "anthropic"
+                : is_completion ? "completions" : "chat",
+                ember_metrics_client_family(
+                    ember_http_header(req, "User-Agent")));
             // Run generation on the persistent worker (keeps the backend's
             // thread_local graph caches warm); block until it completes.
             // #3: a full worker queue sheds load with a 503 instead of blocking.

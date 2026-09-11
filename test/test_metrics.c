@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "../src/server/metrics.h"
 
@@ -175,6 +177,221 @@ static void test_cumulative_buckets_are_monotonic(void) {
     ember_buf_free(&b);
 }
 
+
+// Extract a floating sample; the process metrics are not integers.
+static double fsample(const char *text, const char *name) {
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\n%s ", name);
+    const char *p = strstr(text, needle);
+    if (!p) return -1.0;
+    return atof(p + strlen(needle));
+}
+
+static void test_lifecycle_gauges_and_e2e(void) {
+    ember_buf before = {0};
+    ember_metrics_render(&before);
+    const char *b0 = before.ptr ? before.ptr : "";
+    const long long shed0 = sample(b0, "ember_requests_shed_total");
+    const long long e2e0  = sample(b0, "ember_request_seconds_count");
+
+    ember_metrics_job_enqueued();
+    ember_metrics_job_enqueued();
+    ember_metrics_job_started();
+    ember_buf mid = {0};
+    ember_metrics_render(&mid);
+    const char *tm = mid.ptr ? mid.ptr : "";
+    CHECK(sample(tm, "ember_jobs{state=\"waiting\"}") == 1, "one job still waiting");
+    CHECK(sample(tm, "ember_jobs{state=\"running\"}") == 1, "one job running");
+
+    ember_metrics_job_finished(12.5);
+    ember_metrics_job_started();
+    ember_metrics_job_finished(0.2);
+    // A finish or start with nothing outstanding must clamp at zero rather
+    // than render a negative gauge: the counters bracket real jobs, and a
+    // bookkeeping slip must not read as a phantom.
+    ember_metrics_job_finished(0.1);
+    ember_metrics_job_started();
+    ember_metrics_job_finished(0.1);
+    ember_metrics_record_shed();
+
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    CHECK(sample(t, "ember_jobs{state=\"waiting\"}") == 0, "waiting drained");
+    CHECK(sample(t, "ember_jobs{state=\"running\"}") == 0, "running drained, never negative");
+    CHECK(sample(t, "ember_requests_shed_total") - shed0 == 1, "shed counted");
+    CHECK(sample(t, "ember_request_seconds_count") - e2e0 == 4, "end-to-end observed per finish");
+    CHECK(strstr(t, "ember_request_seconds_bucket{le=\"+Inf\"}") != NULL,
+          "end-to-end histogram terminates at +Inf");
+    ember_buf_free(&before);
+    ember_buf_free(&mid);
+    ember_buf_free(&b);
+}
+
+static void test_responses_outcomes_and_requests(void) {
+    ember_buf before = {0};
+    ember_metrics_render(&before);
+    const char *b0 = before.ptr ? before.ptr : "";
+    const long long ok0    = sample(b0, "ember_http_responses_total{status=\"200\"}");
+    const long long s503_0 = sample(b0, "ember_http_responses_total{status=\"503\"}");
+    const long long oth0   = sample(b0, "ember_http_responses_total{status=\"other\"}");
+    const long long disc0  = sample(b0, "ember_generation_outcomes_total{outcome=\"client_disconnected\"}");
+    const long long ooth0  = sample(b0, "ember_generation_outcomes_total{outcome=\"other\"}");
+
+    ember_metrics_record_response(200);
+    ember_metrics_record_response(200);
+    ember_metrics_record_response(503);
+    ember_metrics_record_response(418);   // not in the closed set
+    ember_metrics_record_outcome("client_disconnected");
+    ember_metrics_record_outcome("not_an_outcome");
+    ember_metrics_record_outcome(NULL);
+
+    ember_metrics_record_request("chat", ember_metrics_client_family("python-requests/2.32"));
+    ember_metrics_record_request("chat", ember_metrics_client_family("OpenAI/Python 1.40 python"));
+    ember_metrics_record_request("anthropic", ember_metrics_client_family(NULL));
+    ember_metrics_record_request("responses", ember_metrics_client_family("Hermes-Agent/0.9"));
+    ember_metrics_record_request("something_new", ember_metrics_client_family("Mozilla/5.0"));
+    ember_metrics_record_request("completions", ember_metrics_client_family("wget/1.21"));
+
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    CHECK(sample(t, "ember_http_responses_total{status=\"200\"}") - ok0 == 2, "200s counted");
+    CHECK(sample(t, "ember_http_responses_total{status=\"503\"}") - s503_0 == 1, "503 counted");
+    CHECK(sample(t, "ember_http_responses_total{status=\"other\"}") - oth0 == 1,
+          "a status outside the closed set folds into other");
+    CHECK(strstr(t, "status=\"418\"") == NULL, "no series minted for a novel status");
+    CHECK(sample(t, "ember_generation_outcomes_total{outcome=\"client_disconnected\"}") - disc0 == 1,
+          "disconnect outcome counted");
+    CHECK(sample(t, "ember_generation_outcomes_total{outcome=\"other\"}") - ooth0 == 2,
+          "unknown and NULL outcomes fold into other");
+
+    // Client family precedence: an SDK UA names its runtime too, and the
+    // product must win; the browser fragment and absence both have labels.
+    CHECK(strcmp(ember_metrics_client_family("OpenAI/Python 1.40 python"), "openai") == 0,
+          "openai before python");
+    CHECK(strcmp(ember_metrics_client_family("anthropic-sdk-python/0.3"), "anthropic") == 0,
+          "anthropic before python");
+    CHECK(strcmp(ember_metrics_client_family("curl/8.5"), "curl") == 0, "curl");
+    CHECK(strcmp(ember_metrics_client_family("node-fetch/3"), "node") == 0, "node");
+    CHECK(strcmp(ember_metrics_client_family(""), "none") == 0, "empty UA is none");
+    CHECK(strstr(t, "ember_requests_total{api=\"chat\",client=\"python\"} 1") != NULL,
+          "chat/python attributed");
+    CHECK(strstr(t, "ember_requests_total{api=\"chat\",client=\"openai\"} 1") != NULL,
+          "chat/openai attributed");
+    CHECK(strstr(t, "ember_requests_total{api=\"anthropic\",client=\"none\"} 1") != NULL,
+          "missing UA attributed as none");
+    CHECK(strstr(t, "ember_requests_total{api=\"responses\",client=\"hermes\"} 1") != NULL,
+          "hermes attributed case-insensitively");
+    CHECK(strstr(t, "ember_requests_total{api=\"other\",client=\"browser\"} 1") != NULL,
+          "unknown api folds into other; browser UA labelled");
+    CHECK(strstr(t, "ember_requests_total{api=\"completions\",client=\"other\"} 1") != NULL,
+          "unknown UA folds into other");
+    CHECK(strstr(t, "api=\"something_new\"") == NULL, "no api series minted");
+    ember_buf_free(&before);
+    ember_buf_free(&b);
+}
+
+static void test_token_gaps_spec_detail_snapshots(void) {
+    ember_buf before = {0};
+    ember_metrics_render(&before);
+    const char *b0 = before.ptr ? before.ptr : "";
+    const long long gap0   = sample(b0, "ember_token_gap_seconds_count");
+    const long long gap20  = sample(b0, "ember_token_gap_seconds_bucket{le=\"0.02\"}");
+    const long long cyc0   = sample(b0, "ember_spec_decode_cycles_total");
+    const double    head0  = fsample(b0, "ember_spec_decode_seconds_total{phase=\"head\"}");
+    const long long sreq0  = sample(b0, "ember_kv_snapshots_requested_total");
+    const long long ssav0  = sample(b0, "ember_kv_snapshots_saved_total");
+
+    ember_metrics_record_token_gap(0.015);
+    ember_metrics_record_token_gap(0.065);
+    ember_metrics_record_token_gap(-1.0);   // clock skew: skipped, not zero
+    ember_metrics_record_spec_detail(3, 0.5, 1.25, 0.0);
+    ember_metrics_record_spec_detail(0, 9.0, 9.0, 9.0);   // no cycles: nothing
+    ember_metrics_record_snapshot(true, true);
+    ember_metrics_record_snapshot(true, false);
+    ember_metrics_record_snapshot(false, true);   // no slot: not a request
+
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    CHECK(sample(t, "ember_token_gap_seconds_count") - gap0 == 2, "two real gaps observed");
+    CHECK(sample(t, "ember_token_gap_seconds_bucket{le=\"0.02\"}") - gap20 == 1,
+          "gap ladder resolves tens of milliseconds");
+    CHECK(sample(t, "ember_spec_decode_cycles_total") - cyc0 == 3, "cycles summed");
+    CHECK(fsample(t, "ember_spec_decode_seconds_total{phase=\"head\"}") - head0 > 0.49,
+          "head seconds summed only for engaged generations");
+    CHECK(sample(t, "ember_kv_snapshots_requested_total") - sreq0 == 2, "snapshot requests");
+    CHECK(sample(t, "ember_kv_snapshots_saved_total") - ssav0 == 1, "snapshot saves");
+    ember_buf_free(&before);
+    ember_buf_free(&b);
+}
+
+static void write_file(const char *path, const char *text) {
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+static void test_identity_and_process_metrics(void) {
+    // Real /proc first: on Linux every series must be present and sane.
+    ember_buf b = {0};
+    ember_metrics_render(&b);
+    const char *t = b.ptr ? b.ptr : "";
+    CHECK(strstr(t, "ember_build_info{version=\"") != NULL, "build info rendered");
+    CHECK(fsample(t, "process_start_time_seconds") > 1.6e9, "start time is wall-clock unix seconds");
+    CHECK(fsample(t, "process_resident_memory_bytes") > 0.0, "rss read from /proc");
+    CHECK(fsample(t, "process_cpu_seconds_total") >= 0.0, "cpu seconds read from /proc");
+    CHECK(fsample(t, "process_open_fds") >= 3.0, "fd count read from /proc");
+    CHECK(fsample(t, "process_threads") >= 1.0, "thread count read from /proc");
+    ember_buf_free(&b);
+
+    // A fixture proc root: values must come from the files, not the process.
+    char root[] = "/tmp/ember-metrics-proc-XXXXXX";
+    CHECK(mkdtemp(root) != NULL, "fixture dir");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/self", root); mkdir(path, 0700);
+    snprintf(path, sizeof(path), "%s/self/fd", root); mkdir(path, 0700);
+    snprintf(path, sizeof(path), "%s/self/fd/7", root); write_file(path, "");
+    snprintf(path, sizeof(path), "%s/self/stat", root);
+    // pid (comm with a space) state ppid pgrp session tty tpgid flags minflt
+    // cminflt majflt cmajflt utime=100 stime=50 cutime cstime prio nice
+    // threads=4 itreal starttime=12345 vsize=999 rss=10 ...
+    write_file(path, "42 (ember server) S 1 1 1 0 -1 4194304 0 0 0 0 "
+                     "100 50 0 0 20 0 4 0 12345 999 10 0 0 0 0 0 0 0 0 0\n");
+    setenv("EMBER_METRICS_PROC_DIR", root, 1);
+    ember_buf f = {0};
+    ember_metrics_render(&f);
+    const char *tf = f.ptr ? f.ptr : "";
+    CHECK(fsample(tf, "process_virtual_memory_bytes") == 999.0, "vsize parsed from fixture");
+    CHECK(fsample(tf, "process_threads") == 4.0, "threads parsed from fixture");
+    CHECK(fsample(tf, "process_open_fds") == 1.0, "fds counted from fixture dir");
+    CHECK(fsample(tf, "process_cpu_seconds_total") > 0.0, "cpu ticks converted");
+    ember_buf_free(&f);
+
+    // An unparseable stat drops its samples; a missing fd dir drops its own.
+    write_file(path, "garbage\n");
+    snprintf(path, sizeof(path), "%s/self/fd/7", root); unlink(path);
+    snprintf(path, sizeof(path), "%s/self/fd", root); rmdir(path);
+    ember_buf u = {0};
+    ember_metrics_render(&u);
+    const char *tu = u.ptr ? u.ptr : "";
+    CHECK(strstr(tu, "process_virtual_memory_bytes") == NULL, "unparseable stat renders nothing");
+    CHECK(strstr(tu, "process_open_fds") == NULL, "missing fd dir renders nothing");
+    CHECK(strstr(tu, "ember_build_info") != NULL, "identity survives a bad proc");
+    ember_buf_free(&u);
+
+    // An absent proc root at all: same rule, and nothing crashes.
+    snprintf(path, sizeof(path), "%s/self/stat", root); unlink(path);
+    snprintf(path, sizeof(path), "%s/self", root); rmdir(path);
+    rmdir(root);
+    ember_buf a = {0};
+    ember_metrics_render(&a);
+    CHECK(strstr(a.ptr ? a.ptr : "", "process_resident_memory_bytes") == NULL,
+          "no proc, no process samples");
+    ember_buf_free(&a);
+    unsetenv("EMBER_METRICS_PROC_DIR");
+}
+
 int main(void) {
     printf("ember metrics tests\n");
     test_shape_and_counters();
@@ -182,6 +399,10 @@ int main(void) {
     test_latency_and_vision_series();
     test_unknown_reason_does_not_grow_cardinality();
     test_cumulative_buckets_are_monotonic();
+    test_lifecycle_gauges_and_e2e();
+    test_responses_outcomes_and_requests();
+    test_token_gaps_spec_detail_snapshots();
+    test_identity_and_process_metrics();
     printf("──────────────────────────────\n");
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

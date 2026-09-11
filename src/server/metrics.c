@@ -1,7 +1,20 @@
+// strcasestr() is a GNU extension. The container build passes -D_GNU_SOURCE;
+// the CMake stub build does not (same note as http.c).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "metrics.h"
 
 #include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <dirent.h>
+#include <sys/time.h>
 
 // Fixed bucket ladders. Prometheus histograms are cumulative: bucket i counts
 // every observation <= bound[i], and +Inf equals the total count.
@@ -11,8 +24,14 @@ static const double kSecondsBounds[] = {
 static const double kTokenBounds[] = {
     64, 256, 1024, 4096, 16384, 65536, 131072
 };
+// Individual token gaps sit at tens of milliseconds; the request ladder's
+// 50 ms first bucket would swallow every one of them.
+static const double kGapBounds[] = {
+    0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5, 5.0
+};
 #define N_SECONDS_BUCKETS (sizeof(kSecondsBounds) / sizeof(kSecondsBounds[0]))
 #define N_TOKEN_BUCKETS   (sizeof(kTokenBounds) / sizeof(kTokenBounds[0]))
+#define N_GAP_BUCKETS     (sizeof(kGapBounds) / sizeof(kGapBounds[0]))
 
 // One histogram type carrying its own ladder. Two near-identical structs with
 // two observe and two render functions differed only by their bounds array,
@@ -54,6 +73,51 @@ static const char *const kFinishReasons[] = {
 };
 #define N_FINISH_REASONS (sizeof(kFinishReasons) / sizeof(kFinishReasons[0]))
 
+// Every status respond() and the SSE header path can emit. A code outside the
+// list lands in "other" -- the same closure rule as the reasons above.
+static const int kStatusCodes[] = {200, 204, 400, 404, 409, 422, 429, 500, 503};
+#define N_STATUS_CODES (sizeof(kStatusCodes) / sizeof(kStatusCodes[0]))
+#define N_STATUS_LABELS (N_STATUS_CODES + 1)   // + "other"
+
+static const char *const kOutcomes[] = {
+    "ok", "client_disconnected", "cancelled", "backend_error", "stalled",
+    "other"
+};
+#define N_OUTCOMES (sizeof(kOutcomes) / sizeof(kOutcomes[0]))
+
+// Protocol names as the adapters spell them. "other" absorbs a new adapter
+// until it is added here deliberately.
+static const char *const kApis[] = {
+    "chat", "responses", "anthropic", "completions", "other"
+};
+#define N_APIS (sizeof(kApis) / sizeof(kApis[0]))
+
+// Client families and the User-Agent fragments that select them. Order is
+// precedence: an SDK's UA usually also names its language runtime, so the
+// product fragments come before "python"/"node".
+static const struct { const char *label; const char *needle; } kClients[] = {
+    {"hermes",    "hermes"},
+    {"openai",    "openai"},
+    {"anthropic", "anthropic"},
+    {"curl",      "curl"},
+    {"python",    "python"},
+    {"node",      "node"},
+    {"browser",   "mozilla"},
+};
+#define N_CLIENT_NEEDLES (sizeof(kClients) / sizeof(kClients[0]))
+static const char *const kClientLabels[] = {
+    "hermes", "openai", "anthropic", "curl", "python", "node", "browser",
+    "none", "other"
+};
+#define N_CLIENTS (sizeof(kClientLabels) / sizeof(kClientLabels[0]))
+
+#ifndef EMBER_VERSION_STRING
+#define EMBER_VERSION_STRING "dev"
+#endif
+#ifndef EMBER_GIT_REVISION
+#define EMBER_GIT_REVISION ""
+#endif
+
 // ponytail: one global lock for every counter. Ceiling: contention once
 // generation stops serialising (batch_sessions > 1). Upgrade path: per-counter
 // atomics, or a per-thread shard summed at render.
@@ -87,6 +151,26 @@ static struct {
     histogram prefill_token_shape;
     histogram prompt_token_shape;
     histogram completion_token_shape;
+    // Lifecycle
+    long long jobs_waiting;
+    long long jobs_running;
+    unsigned long long shed;
+    unsigned long long responses[N_STATUS_LABELS];
+    unsigned long long outcomes[N_OUTCOMES];
+    unsigned long long requests[N_APIS][N_CLIENTS];
+    histogram request_seconds;
+    histogram token_gap_seconds;
+    // Speculative decode detail
+    unsigned long long spec_cycles;
+    double spec_head_s;
+    double spec_verify_s;
+    double spec_provider_block_s;
+    // KV snapshots
+    unsigned long long snapshots_requested;
+    unsigned long long snapshots_saved;
+    // Wall-clock start, captured on first use so /metrics can report it
+    // without main() having to remember to.
+    double start_time_s;
 } g = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
     .prefill_seconds       = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
@@ -99,7 +183,22 @@ static struct {
     .prefill_token_shape   = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .prompt_token_shape    = {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
     .completion_token_shape= {.bounds = kTokenBounds,   .n = N_TOKEN_BUCKETS},
+    .request_seconds       = {.bounds = kSecondsBounds, .n = N_SECONDS_BUCKETS},
+    .token_gap_seconds     = {.bounds = kGapBounds,     .n = N_GAP_BUCKETS},
 };
+
+static double wall_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+}
+
+// Called under g.lock. The start time is the first moment anything touched the
+// registry, which is process start to within the model-load window and, more
+// to the point, resets exactly when the counters do.
+static void note_started(void) {
+    if (g.start_time_s <= 0.0) g.start_time_s = wall_now();
+}
 
 static void observe(histogram *h, double v) {
     if (v < 0.0) return;
@@ -191,6 +290,172 @@ void ember_metrics_record_queue_wait(double seconds) {
     pthread_mutex_lock(&g.lock);
     observe(&g.queue_seconds, seconds);
     pthread_mutex_unlock(&g.lock);
+}
+
+static size_t closed_index(const char *const *labels, size_t n,
+                           const char *value) {
+    if (value)
+        for (size_t i = 0; i + 1 < n; ++i)
+            if (strcmp(value, labels[i]) == 0) return i;
+    return n - 1;  // "other"
+}
+
+void ember_metrics_job_enqueued(void) {
+    pthread_mutex_lock(&g.lock);
+    note_started();
+    g.jobs_waiting++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_job_started(void) {
+    pthread_mutex_lock(&g.lock);
+    if (g.jobs_waiting > 0) g.jobs_waiting--;
+    g.jobs_running++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_job_finished(double end_to_end_s) {
+    pthread_mutex_lock(&g.lock);
+    if (g.jobs_running > 0) g.jobs_running--;
+    observe(&g.request_seconds, end_to_end_s);
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_shed(void) {
+    pthread_mutex_lock(&g.lock);
+    g.shed++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_response(int status) {
+    size_t idx = N_STATUS_CODES;  // "other"
+    for (size_t i = 0; i < N_STATUS_CODES; ++i)
+        if (kStatusCodes[i] == status) { idx = i; break; }
+    pthread_mutex_lock(&g.lock);
+    note_started();
+    g.responses[idx]++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_outcome(const char *outcome) {
+    pthread_mutex_lock(&g.lock);
+    g.outcomes[closed_index(kOutcomes, N_OUTCOMES, outcome)]++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_token_gap(double seconds) {
+    pthread_mutex_lock(&g.lock);
+    observe(&g.token_gap_seconds, seconds);
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_spec_detail(int cycles, double head_s,
+                                      double verify_s, double provider_block_s) {
+    if (cycles <= 0) return;
+    pthread_mutex_lock(&g.lock);
+    g.spec_cycles += (unsigned long long)cycles;
+    if (head_s > 0.0) g.spec_head_s += head_s;
+    if (verify_s > 0.0) g.spec_verify_s += verify_s;
+    if (provider_block_s > 0.0) g.spec_provider_block_s += provider_block_s;
+    pthread_mutex_unlock(&g.lock);
+}
+
+void ember_metrics_record_snapshot(bool requested, bool saved) {
+    if (!requested) return;
+    pthread_mutex_lock(&g.lock);
+    g.snapshots_requested++;
+    if (saved) g.snapshots_saved++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+const char *ember_metrics_client_family(const char *user_agent) {
+    if (!user_agent || !user_agent[0]) return "none";
+    for (size_t i = 0; i < N_CLIENT_NEEDLES; ++i)
+        if (strcasestr(user_agent, kClients[i].needle)) return kClients[i].label;
+    return "other";
+}
+
+void ember_metrics_record_request(const char *api, const char *client) {
+    const size_t a = closed_index(kApis, N_APIS, api);
+    const size_t c = closed_index(kClientLabels, N_CLIENTS, client);
+    pthread_mutex_lock(&g.lock);
+    note_started();
+    g.requests[a][c]++;
+    pthread_mutex_unlock(&g.lock);
+}
+
+// ── process metrics ─────────────────────────────────────────────────────
+// The C server links no client library, so the conventional process_* family
+// is read straight from procfs at scrape time. Every value is optional: an
+// unreadable file drops its samples instead of rendering a zero that would be
+// mistaken for a measurement.
+static const char *proc_dir(void) {
+    const char *d = getenv("EMBER_METRICS_PROC_DIR");
+    return d && d[0] ? d : "/proc";
+}
+
+static void render_process_metrics(ember_buf *b) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/self/stat", proc_dir());
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[4096];
+        if (fgets(line, sizeof(line), f)) {
+            // Field 2 (comm) may contain spaces; everything after its closing
+            // paren is the fixed layout proc(5) documents.
+            const char *p = strrchr(line, ')');
+            unsigned long long utime = 0, stime = 0, vsize = 0;
+            long long rss_pages = 0, starttime = 0;
+            long num_threads = 0;
+            // Fields 3.. after the paren: state ppid pgrp session tty tpgid
+            // flags minflt cminflt majflt cmajflt utime stime cutime cstime
+            // priority nice num_threads itrealvalue starttime vsize rss
+            if (p && sscanf(p + 2,
+                    "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u "
+                    "%llu %llu %*d %*d %*d %*d %ld %*d %lld %llu %lld",
+                    &utime, &stime, &num_threads, &starttime, &vsize,
+                    &rss_pages) == 6) {
+                const double hz = (double)sysconf(_SC_CLK_TCK);
+                const double page = (double)sysconf(_SC_PAGESIZE);
+                ember_buf_printf(b,
+                    "# HELP process_cpu_seconds_total Total user and system "
+                    "CPU time spent in seconds.\n"
+                    "# TYPE process_cpu_seconds_total counter\n"
+                    "process_cpu_seconds_total %.3f\n",
+                    (double)(utime + stime) / hz);
+                ember_buf_printf(b,
+                    "# HELP process_resident_memory_bytes Resident memory "
+                    "size in bytes.\n"
+                    "# TYPE process_resident_memory_bytes gauge\n"
+                    "process_resident_memory_bytes %.0f\n",
+                    (double)rss_pages * page);
+                ember_buf_printf(b,
+                    "# HELP process_virtual_memory_bytes Virtual memory size "
+                    "in bytes.\n"
+                    "# TYPE process_virtual_memory_bytes gauge\n"
+                    "process_virtual_memory_bytes %llu\n", vsize);
+                ember_buf_printf(b,
+                    "# HELP process_threads Number of OS threads in the "
+                    "process.\n# TYPE process_threads gauge\n"
+                    "process_threads %ld\n", num_threads);
+                (void)starttime;  // relative to boot; the wall clock below is
+                                  // what Prometheus convention expects
+            }
+        }
+        fclose(f);
+    }
+    snprintf(path, sizeof(path), "%s/self/fd", proc_dir());
+    DIR *d = opendir(path);
+    if (d) {
+        unsigned long n = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL)
+            if (e->d_name[0] != '.') n++;
+        closedir(d);
+        ember_buf_printf(b,
+            "# HELP process_open_fds Number of open file descriptors.\n"
+            "# TYPE process_open_fds gauge\nprocess_open_fds %lu\n", n);
+    }
 }
 
 static void render_counter(ember_buf *b, const char *name, const char *help,
@@ -333,6 +598,91 @@ void ember_metrics_render(ember_buf *out) {
     render_histogram(out, "ember_request_completion_tokens",
                            "Completion size distribution.",
                            &g.completion_token_shape);
+
+    // ── lifecycle ──
+    ember_buf_printf(out,
+        "# HELP ember_jobs Generation jobs on the worker FIFO right now, by "
+        "state.\n# TYPE ember_jobs gauge\n"
+        "ember_jobs{state=\"waiting\"} %lld\n"
+        "ember_jobs{state=\"running\"} %lld\n",
+        g.jobs_waiting, g.jobs_running);
+    render_counter(out, "ember_requests_shed_total",
+                   "Generation requests refused with 503 because the worker "
+                   "FIFO was full.", g.shed);
+    ember_buf_puts(out,
+        "# HELP ember_http_responses_total HTTP responses written, by status "
+        "code. Streaming responses count when their headers are sent.\n"
+        "# TYPE ember_http_responses_total counter\n");
+    for (size_t i = 0; i < N_STATUS_CODES; ++i)
+        ember_buf_printf(out, "ember_http_responses_total{status=\"%d\"} %llu\n",
+                         kStatusCodes[i], g.responses[i]);
+    ember_buf_printf(out, "ember_http_responses_total{status=\"other\"} %llu\n",
+                     g.responses[N_STATUS_CODES]);
+    ember_buf_puts(out,
+        "# HELP ember_generation_outcomes_total How generations ended as the "
+        "server saw them; a finish reason cannot express a disconnect or a "
+        "backend failure.\n"
+        "# TYPE ember_generation_outcomes_total counter\n");
+    for (size_t i = 0; i < N_OUTCOMES; ++i)
+        ember_buf_printf(out,
+            "ember_generation_outcomes_total{outcome=\"%s\"} %llu\n",
+            kOutcomes[i], g.outcomes[i]);
+    ember_buf_puts(out,
+        "# HELP ember_requests_total Accepted generation requests by protocol "
+        "and client family (User-Agent mapped onto a closed set).\n"
+        "# TYPE ember_requests_total counter\n");
+    for (size_t a = 0; a < N_APIS; ++a)
+        for (size_t c = 0; c < N_CLIENTS; ++c)
+            if (g.requests[a][c])
+                ember_buf_printf(out,
+                    "ember_requests_total{api=\"%s\",client=\"%s\"} %llu\n",
+                    kApis[a], kClientLabels[c], g.requests[a][c]);
+    render_histogram(out, "ember_request_seconds",
+                     "End-to-end seconds from HTTP enqueue to the response "
+                     "being finished: queue wait, prompt preparation, prefill "
+                     "and decode together. The number a caller experiences.",
+                     &g.request_seconds);
+    render_histogram(out, "ember_token_gap_seconds",
+                     "Individual gaps between consecutive generated tokens. "
+                     "A real distribution, so p99 is meaningful here; compare "
+                     "ember_request_mean_token_gap_seconds, which is not.",
+                     &g.token_gap_seconds);
+
+    // ── speculative decode detail ──
+    render_counter(out, "ember_spec_decode_cycles_total",
+                   "Draft/verify cycles run across engaged generations.",
+                   g.spec_cycles);
+    ember_buf_printf(out,
+        "# HELP ember_spec_decode_seconds_total Wall seconds speculation spent "
+        "per phase, summed over engaged generations.\n"
+        "# TYPE ember_spec_decode_seconds_total counter\n"
+        "ember_spec_decode_seconds_total{phase=\"head\"} %.6f\n"
+        "ember_spec_decode_seconds_total{phase=\"verify\"} %.6f\n"
+        "ember_spec_decode_seconds_total{phase=\"provider_block\"} %.6f\n",
+        g.spec_head_s, g.spec_verify_s, g.spec_provider_block_s);
+
+    // ── KV snapshots ──
+    render_counter(out, "ember_kv_snapshots_requested_total",
+                   "Generations that reserved a KV snapshot slot.",
+                   g.snapshots_requested);
+    render_counter(out, "ember_kv_snapshots_saved_total",
+                   "Generations whose backend actually persisted the snapshot. "
+                   "Requested minus saved is the silent prefix-cache miss "
+                   "source.", g.snapshots_saved);
+
+    // ── identity ──
+    ember_buf_printf(out,
+        "# HELP ember_build_info Build identity; the value is always 1.\n"
+        "# TYPE ember_build_info gauge\n"
+        "ember_build_info{version=\"%s\",revision=\"%s\"} 1\n",
+        EMBER_VERSION_STRING, EMBER_GIT_REVISION);
+    if (g.start_time_s > 0.0)
+        ember_buf_printf(out,
+            "# HELP process_start_time_seconds Unix time the metrics registry "
+            "first recorded anything; resets with the counters.\n"
+            "# TYPE process_start_time_seconds gauge\n"
+            "process_start_time_seconds %.3f\n", g.start_time_s);
+    render_process_metrics(out);
 
     pthread_mutex_unlock(&g.lock);
 }
